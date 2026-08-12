@@ -22,6 +22,7 @@ from pal.llm.ir import (
 )
 from pal.llm.shapes.base import (
     EncodedRequest,
+    EncodedMessageSpan,
     ShapeCodecBase,
     ShapeContext,
     ShapeDecodeError,
@@ -43,7 +44,9 @@ class OpenAIResponseCodec(ShapeCodecBase):
 
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
         input_items: list[dict[str, Any]] = []
+        spans: list[EncodedMessageSpan] = []
         for message in request.messages:
+            targets: list[tuple[str | int, ...]] = []
             if (
                 message.role == MessageRole.ASSISTANT
                 and message.replay is not None
@@ -56,11 +59,19 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 output = message.replay.payload.get("output")
                 if isinstance(output, (list, tuple)):
                     input_items.extend(thaw_json(item) for item in output if isinstance(item, Mapping))
+                    spans.append(EncodedMessageSpan(message.message_id))
                     continue
             if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                 if text:
-                    input_items.append({"role": "developer", "content": text})
+                    input_items.append(
+                        {
+                            "role": "developer",
+                            "content": [{"type": "input_text", "text": text}],
+                        }
+                    )
+                    targets.append(("input", len(input_items) - 1, "content", 0))
+                spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
                 continue
             if message.role == MessageRole.TOOL:
                 for result in tool_results(message):
@@ -71,6 +82,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                             "output": result.content,
                         }
                     )
+                spans.append(EncodedMessageSpan(message.message_id))
                 continue
             if message.role == MessageRole.ASSISTANT:
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
@@ -82,6 +94,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                             "content": [{"type": "output_text", "text": text}],
                         }
                     )
+                    targets.append(("input", len(input_items) - 1, "content", 0))
                 for part in message.parts:
                     if isinstance(part, ToolCallIR):
                         input_items.append(
@@ -92,10 +105,14 @@ class OpenAIResponseCodec(ShapeCodecBase):
                                 "arguments": json.dumps(thaw_json(part.arguments), ensure_ascii=False),
                             }
                         )
+                spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
                 continue
             content = _responses_user_content(message.parts)
             if content:
                 input_items.append({"role": "user", "content": content})
+                if isinstance(content[-1], Mapping):
+                    targets.append(("input", len(input_items) - 1, "content", len(content) - 1))
+            spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
         if not input_items:
             input_items.append({"role": "user", "content": "Continue."})
 
@@ -113,7 +130,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
             payload["reasoning"] = {"effort": _responses_effort(policy.thinking_level)}
-        return EncodedRequest(payload)
+        return EncodedRequest(payload, tuple(spans))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
         return OpenAIResponseDecoder(context)
@@ -382,15 +399,13 @@ class OpenAIResponseDecoder:
         self.builder.replay_payload = {"output": output}
 
 
-def _responses_user_content(parts: tuple[Any, ...]) -> str | list[dict[str, Any]]:
+def _responses_user_content(parts: tuple[Any, ...]) -> list[dict[str, Any]]:
     rendered: list[dict[str, Any]] = []
     for part in parts:
         if isinstance(part, TextPartIR) and part.text:
             rendered.append({"type": "input_text", "text": part.text})
         elif isinstance(part, ImagePartIR):
             rendered.append({"type": "input_image", "image_url": part.source})
-    if len(rendered) == 1 and rendered[0].get("type") == "input_text":
-        return str(rendered[0]["text"])
     return rendered
 
 

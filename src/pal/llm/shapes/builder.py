@@ -199,6 +199,10 @@ def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
     if isinstance(details, Mapping):
         cached = max(cached, _first_int(details, "cached_tokens"))
         cache_write = max(cache_write, _first_int(details, "cache_write_tokens"))
+    input_details = source.get("input_tokens_details")
+    if isinstance(input_details, Mapping):
+        cached = max(cached, _first_int(input_details, "cached_tokens"))
+        cache_write = max(cache_write, _first_int(input_details, "cache_write_tokens"))
     anthropic_categories = any(
         key in source
         for key in ("cache_read_input_tokens", "cache_creation_input_tokens")

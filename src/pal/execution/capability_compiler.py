@@ -17,7 +17,6 @@ from pal.execution.tool_facade import (
     PagingMode,
     RetryPolicy,
     ToolExecutionSemantics,
-    ToolGuidance,
     model_validation_schema,
 )
 from pal.shared import (
@@ -114,7 +113,6 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                 name=public_alias,
                 canonical_path=canonical_path,
                 family=action_blueprint.family or action_blueprint.namespace,
-                description=action_blueprint.description or f"{action_blueprint.action_name} {module_id} {node_blueprint.scope}",
                 source=node_blueprint.source,
                 display_name=public_alias,
                 aliases=(public_alias,),
@@ -123,22 +121,8 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                 target_label=module_id,
                 InputModel=input_model,
                 OutputModel=action_blueprint.OutputModel,
-                guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
+                guidance=action_blueprint.guidance,
                 execution=action_blueprint.execution or _default_execution(action_blueprint),
-                search_text=(
-                    str(action_blueprint.search_text or "").strip()
-                    or " ".join(
-                        value
-                        for value in (
-                            public_alias,
-                            getattr(action_blueprint.guidance, "purpose", None),
-                            action_blueprint.description,
-                            action_blueprint.family,
-                            module_id,
-                        )
-                        if str(value or "").strip()
-                    )
-                ),
                 examples=_bound_examples(
                     action_blueprint,
                     representative,
@@ -367,19 +351,6 @@ def _bound_examples(
     if target.target_id != SINGLETON_TARGET:
         example[_target_argument_name(node_blueprint)] = target.target_id
     return (example,)
-
-
-def _default_guidance(action_blueprint: CapabilityActionBlueprint, module_id: str) -> ToolGuidance:
-    purpose = str(
-        action_blueprint.description
-        or f"{action_blueprint.action_name} {module_id} {action_blueprint.scope}"
-    ).strip()
-    return ToolGuidance(
-        purpose=purpose,
-        use_when="Use when this capability is the precise match for the requested action.",
-        do_not_use_when="Do not use when another tool's stated purpose matches the task more precisely.",
-        failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
-    )
 
 
 def _default_execution(action_blueprint: CapabilityActionBlueprint) -> ToolExecutionSemantics:

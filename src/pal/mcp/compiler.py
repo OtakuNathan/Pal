@@ -179,7 +179,6 @@ class McpCompiler:
             name=alias,
             canonical_path=canonical_path,
             family="mcp",
-            description=tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`.",
             source=f"mcp:{snapshot.server_id}",
             display_name=alias,
             aliases=(alias,),
@@ -192,7 +191,6 @@ class McpCompiler:
                 tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`."
             ),
             execution=_mcp_tool_execution(tool.annotations),
-            search_text=f"{alias} {tool.description or tool.name} {snapshot.server_id}",
             mcp_input_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
             mcp_output_schema=output_schema,
             metadata={
@@ -237,7 +235,6 @@ class McpCompiler:
             name=alias,
             canonical_path=canonical_path,
             family="mcp",
-            description=prompt.description or f"Render MCP prompt `{prompt.name}` from `{snapshot.server_id}`.",
             source=f"mcp:{snapshot.server_id}",
             display_name=alias,
             aliases=(alias,),
@@ -256,7 +253,6 @@ class McpCompiler:
                 retry_policy=RetryPolicy.AUTOMATIC,
                 paging=PagingMode.SUPPORTED,
             ),
-            search_text=f"{alias} {prompt.description or prompt.name} {snapshot.server_id}",
             mcp_input_schema=prompt_arguments_schema(prompt),
             mcp_output_schema={"type": "object"},
             metadata={

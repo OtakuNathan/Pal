@@ -15,12 +15,14 @@ from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, End
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
 from pal.foundation import AttachmentSpec, EventEnvelope
-from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
+from pal.shared import ChannelStreamUpdateKind, EventKind, LLMFinishReason, SourceKind
 
 from .interaction_store import TelegramInteractionStore
 
 
 logger = logging.getLogger(__name__)
+
+_TELEGRAM_MAX_MESSAGE_UTF16 = 4096
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,13 @@ class _FallbackBotCommand:
 @dataclass(frozen=True)
 class _FallbackMenuButtonCommands:
     type: str = "commands"
+
+
+@dataclass(frozen=True)
+class _TelegramTextSegment:
+    rendered_text: str
+    fallback_text: str
+    parse_mode: str | None
 
 
 def _proxy_from_env() -> str | None:
@@ -173,27 +182,81 @@ def _segment_text(text: str, *, limit: int) -> list[str]:
     stripped = str(text or "").strip()
     if not stripped:
         return [""]
-    if len(stripped) <= limit:
-        return [stripped]
+    effective_limit = max(int(limit), 1)
 
     parts: list[str] = []
     remaining = stripped
     while remaining:
-        if len(remaining) <= limit:
+        hard_end = _utf16_prefix_end(remaining, limit=effective_limit)
+        if hard_end >= len(remaining):
             parts.append(remaining)
             break
-        split_at = remaining.rfind("\n\n", 0, limit)
+        split_at = remaining.rfind("\n\n", 0, hard_end + 1)
         if split_at <= 0:
-            split_at = remaining.rfind("\n", 0, limit)
+            split_at = remaining.rfind("\n", 0, hard_end + 1)
         if split_at <= 0:
-            split_at = limit
+            split_at = hard_end
         chunk = remaining[:split_at].strip()
         if not chunk:
-            chunk = remaining[:limit].strip()
-            split_at = limit
+            chunk = remaining[:hard_end].strip()
+            split_at = hard_end
         parts.append(chunk)
         remaining = remaining[split_at:].strip()
     return [part for part in parts if part]
+
+
+def _utf16_prefix_end(text: str, *, limit: int) -> int:
+    """Return the largest code-point boundary whose prefix fits the UTF-16 limit."""
+
+    consumed_units = 0
+    for index, character in enumerate(text):
+        character_units = 2 if ord(character) > 0xFFFF else 1
+        if consumed_units + character_units > limit:
+            # A policy limit of one UTF-16 unit cannot contain an astral code
+            # point. Keep it intact rather than corrupting the text.
+            return index or 1
+        consumed_units += character_units
+    return len(text)
+
+
+def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegment]:
+    """Render and split one completed reply into independently sendable messages."""
+
+    normalized = _flatten_gfm_tables_for_telegram(str(text or "")).strip()
+    if not normalized:
+        return []
+    effective_limit = max(min(int(limit), _TELEGRAM_MAX_MESSAGE_UTF16), 1)
+    try:
+        import telegramify_markdown
+
+        plain_text, entities = telegramify_markdown.convert(normalized)
+        chunks = telegramify_markdown.split_entities(
+            plain_text,
+            entities,
+            max_utf16_len=effective_limit,
+        )
+        rendered = [
+            _TelegramTextSegment(
+                rendered_text=telegramify_markdown.entities_to_markdownv2(chunk_text, chunk_entities),
+                fallback_text=chunk_text,
+                parse_mode="MarkdownV2",
+            )
+            for chunk_text, chunk_entities in chunks
+            if str(chunk_text or "").strip()
+        ]
+        if rendered:
+            return rendered
+    except Exception:
+        logger.debug("telegram entity-aware rendering failed; using plain-text segmentation", exc_info=True)
+
+    return [
+        _TelegramTextSegment(
+            rendered_text=part,
+            fallback_text=part,
+            parse_mode=None,
+        )
+        for part in _segment_text(normalized, limit=effective_limit)
+    ]
 
 
 def _safe_int(value: Any) -> int | None:
@@ -253,6 +316,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _last_get_updates_activity_at: float = 0.0
     _get_updates_in_flight_started_at: float = 0.0
     _interaction_store: TelegramInteractionStore | None = field(default=None, init=False, repr=False)
+    _turn_stream_text: dict[tuple[str, str, str, str], str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.binding.chat_id and not self.binding.user_id and self.endpoint.binding_key:
@@ -266,6 +330,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         if self.data_root is not None:
             self._interaction_store = TelegramInteractionStore(self.data_root)
+
+    def supports_stream_delivery(self) -> bool:
+        return True
 
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -317,6 +384,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         for task in list(self._send_chains.values()):
             task.cancel()
         self._send_chains.clear()
+        self._turn_stream_text.clear()
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         if self.application is None:
@@ -354,46 +422,64 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             loop.create_task(self._send_receipt_marker_async(response_handle, payload))
 
     def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
-        session = self._stream_sessions.get(id(response_handle))
-        if (
-            session is not None
-            and str(session.get("finish_reason") or "") == "tool_calls"
-            and not (
-                update.kind == ChannelStreamUpdateKind.DONE
-                and str(update.finish_reason or "") == "tool_calls"
-            )
-        ):
-            # A tool-only round has no MailboxReplyEffect, so prepare_final_reply
-            # is never called for it.  The next stream event is therefore the
-            # mechanical round boundary: retire the silent tool buffer before
-            # accumulating the final answer round.
-            self._reset_buffered_stream_round(session)
-        super().send_stream_update(response_handle, update)
+        key = self._turn_stream_key(response_handle)
+        if update.kind == ChannelStreamUpdateKind.TEXT_DELTA:
+            self._turn_stream_text[key] = f"{self._turn_stream_text.get(key, '')}{update.text}"
+            return
+        if update.kind == ChannelStreamUpdateKind.PROGRESS:
+            text = str(update.text or "").strip()
+            if text:
+                self._schedule_ordered_send(
+                    response_handle,
+                    lambda: self._send_reply_async(response_handle, text),
+                )
+            return
+        if update.kind == ChannelStreamUpdateKind.DONE:
+            buffered = self._turn_stream_text.pop(key, "")
+            if str(update.finish_reason or "") in {
+                LLMFinishReason.TOOL_CALLS.value,
+                LLMFinishReason.COMPACT_REQUIRED.value,
+            }:
+                return
+            text = str(update.text or buffered).strip()
+            if text:
+                self._schedule_ordered_send(
+                    response_handle,
+                    lambda: self._send_reply_async(response_handle, text),
+                )
+            return
+        if update.kind == ChannelStreamUpdateKind.ERROR:
+            self._turn_stream_text.pop(key, None)
+            text = str(update.error_text or update.text or "").strip()
+            if text:
+                self._schedule_ordered_send(
+                    response_handle,
+                    lambda: self._send_reply_async(response_handle, text),
+                )
 
-    def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
-        session = self._stream_sessions.get(id(response_handle))
-        if session is not None:
-            updates = list(session.get("updates") or [])
-            has_tool_call = ChannelStreamUpdateKind.TOOL_CALL in updates
-            if str(session.get("finish_reason") or "") == "tool_calls" or has_tool_call:
-                # Telegram cannot append to a message as provider-neutral IR
-                # arrives.  Keep tool rounds silent and retain only the final
-                # answer round for batched delivery.
-                self._reset_buffered_stream_round(session)
-                return None
-        return super().prepare_final_reply(response_handle, text)
+    def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
+        self._turn_stream_text.pop(self._turn_stream_key(response_handle), None)
+        super().abort_stream(response_handle, reason=reason)
 
     @staticmethod
-    def _reset_buffered_stream_round(session: dict[str, Any]) -> None:
-        session.update(
-            {
-                "text": "",
-                "reasoning": "",
-                "updates": [],
-                "finish_reason": "",
-                "text_delivered": False,
-            }
+    def _turn_stream_key(response_handle: ResponseHandle) -> tuple[str, str, str, str]:
+        target = response_handle.reply_target
+        return (
+            str(response_handle.endpoint_id or ""),
+            str(target.get("chat_id") or ""),
+            str(target.get("message_id") or ""),
+            str(target.get("thread_id") or ""),
         )
+
+    def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
+        # Core marks the assistant text attached to a tool-call round
+        # explicitly. This is the only reply Telegram suppresses. A tool echo
+        # is also non-terminal, but is independent user-visible progress and
+        # must still be delivered. Terminal replies always win regardless of
+        # stream flush timing.
+        if bool(response_handle.reply_target.get("_pal_stream_companion")):
+            return None
+        return text
 
     def apply_auth_material(self, material: dict[str, Any]) -> dict[str, Any]:
         bot_token = str(material.get("bot_token") or "").strip()
@@ -970,22 +1056,24 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
             return
-        max_chars = int(self.endpoint.send_policy.get("max_message_chars") or 4096)
-        for part in _segment_text(text, limit=max_chars):
-            rendered, parse_mode = _telegram_markdown(part)
+        max_chars = int(self.endpoint.send_policy.get("max_message_chars") or _TELEGRAM_MAX_MESSAGE_UTF16)
+        for segment in _telegram_text_segments(text, limit=max_chars):
             kwargs = {
                 "chat_id": chat_id,
-                "text": rendered,
+                "text": segment.rendered_text,
             }
             if thread_id is not None:
                 kwargs["message_thread_id"] = thread_id
-            if parse_mode is not None:
-                kwargs["parse_mode"] = parse_mode
+            if segment.parse_mode is not None:
+                kwargs["parse_mode"] = segment.parse_mode
             try:
                 await self.application.bot.send_message(**kwargs)
-            except Exception:
+            except Exception as exc:
+                if segment.parse_mode is None:
+                    self.last_delivery_error = str(exc)
+                    break
                 kwargs.pop("parse_mode", None)
-                kwargs["text"] = part
+                kwargs["text"] = segment.fallback_text
                 try:
                     await self.application.bot.send_message(**kwargs)
                 except Exception as exc:

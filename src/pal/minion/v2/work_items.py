@@ -120,8 +120,8 @@ ADD_FINDING_EXAMPLES = (
 
 UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
     "alias": "update_checklist",
-    "description": "Replace the current role's complete compact semantic work cursor.",
     "guidance": {
+        "purpose": "Replace the current role's complete compact semantic work cursor.",
         "use_when": (
             "Initialize it after understanding the bounded assignment, then update statuses "
             "and Manager-routed finding repair steps as work advances."
@@ -143,8 +143,8 @@ UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
 
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
     "alias": "add_finding",
-    "description": "Record one actionable defect in the Manager-owned WorkItem ledger.",
     "guidance": {
+        "purpose": "Record one actionable defect in the Manager-owned WorkItem ledger.",
         "use_when": (
             "Use after reproducing or otherwise establishing one concrete correctness, "
             "contract, requirement, architecture, delivery, verification, or performance defect."

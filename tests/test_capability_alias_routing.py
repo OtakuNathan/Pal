@@ -71,7 +71,6 @@ def echo_capability(
             retry_policy=RetryPolicy.AUTOMATIC,
             paging=PagingMode.NEVER,
         ),
-        search_text="echo exact alias routing test",
         handler=echo_handler,
         examples=({"value": "test"},),
     )
@@ -100,6 +99,12 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
                 namespace=OPERATION_NAMESPACE,
                 scope="test",
                 action_name="ping",
+                guidance=ToolGuidance(
+                    purpose="Ping without a declared alias.",
+                    use_when="Testing missing alias validation.",
+                    do_not_use_when="Outside this focused test.",
+                    failure_next_steps="Declare exactly one semantic alias.",
+                ),
                 execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
@@ -118,6 +123,12 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
                 scope="test",
                 action_name="ping",
                 aliases=("ping", "legacy_ping"),
+                guidance=ToolGuidance(
+                    purpose="Ping with multiple declared aliases.",
+                    use_when="Testing multiple alias validation.",
+                    do_not_use_when="Outside this focused test.",
+                    failure_next_steps="Declare exactly one semantic alias.",
+                ),
                 execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:

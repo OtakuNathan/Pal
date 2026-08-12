@@ -101,6 +101,10 @@ class MemoryCompactEffect(EffectRequest):
 class MailboxReplyEffect(EffectRequest):
     text: str = ""
     terminal: bool = True
+    # Text already represented by the current LLM stream. Buffered channels
+    # may suppress this copy while still delivering explicit tool echoes,
+    # which are also non-terminal but are not stream companions.
+    stream_companion: bool = False
     kind: str = EffectKind.MAILBOX_REPLY
 
 
@@ -156,6 +160,9 @@ class TurnContinuation:
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
     echoed_keys: set[str] = field(default_factory=set)
+    channel_stream_active: bool = False
+    channel_stream_terminal_text: str = ""
+    channel_stream_terminal_finish_reason: str = ""
 
 @dataclass(frozen=True)
 class FailureFlowOutcome:
@@ -193,7 +200,11 @@ def channel_turn_program(
             render_final_text=lambda outcome: outcome.text if outcome is not None else "",
             build_commit_payload=build_commit_payload,
             max_output_tokens=max_output_tokens,
-            emit_mid_text=lambda text: MailboxReplyEffect(text=text),
+            emit_mid_text=lambda text: MailboxReplyEffect(
+                text=text,
+                terminal=False,
+                stream_companion=True,
+            ),
             emit_final_text=lambda text: MailboxReplyEffect(text=text),
         )
     )
@@ -318,6 +329,8 @@ def agent_turn_program(
                 retry_count += 1
                 continue
         final_reply = render_final_text(outcome)
+        if not str(final_reply or "").strip():
+            final_reply = "The LLM completed this turn without producing a final answer."
         effect = emit_final_text(final_reply) if emit_final_text is not None else None
         if effect is not None:
             reply_result = yield effect

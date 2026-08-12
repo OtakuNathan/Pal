@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
-
 from pal.shared.tool_protocol import new_tool_call
 
-from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import NextToolHint, ToolGuidance
 from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
@@ -37,7 +35,6 @@ class ExecutionToolSearchMixin:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="tools",
-        description="List registered execution tools with descriptions and input schemas",
         guidance=ToolGuidance(
             purpose="List registered execution tools with descriptions and input schemas.",
             use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
@@ -63,7 +60,6 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="exec",
         action_name="capability_call",
-        description="Invoke one indirect capability by its exact alias.",
         guidance=ToolGuidance(
             purpose="Invoke one indirect capability by its exact alias.",
             use_when="After discovering the alias via search_tools/read_tool. Direct tools must be invoked directly.",
@@ -93,12 +89,17 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="search",
-        description="Search execution capabilities by query text.",
         guidance=ToolGuidance(
             purpose="Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show, namespace='action' for mutate/execute/external.",
             use_when="When you need to find a capability by what it does but don't know its exact alias.",
             do_not_use_when="When you already know the alias (use read_tool or call_tool). When you want to invoke a known capability.",
             failure_next_steps="Try a different namespace, broader query, or set facets=true for narrowing stats.",
+            next_tool_hints=(
+                NextToolHint(
+                    name="read_tool",
+                    use_when="A search hit identifies the capability whose complete contract is needed.",
+                ),
+            ),
         ),
         aliases=("search_tools",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput,
@@ -124,12 +125,17 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="read",
-        description="Read the full capability contract for an execution capability by exact alias.",
         guidance=ToolGuidance(
             purpose="Read the full capability contract for an execution capability by exact alias.",
             use_when="Before invoking an indirect capability via call_tool — inspect its input schema, output schema, and execution semantics.",
             do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use exec_tools).",
             failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
+            next_tool_hints=(
+                NextToolHint(
+                    name="call_tool",
+                    use_when="The inspected capability is indirect and its validated arguments are ready.",
+                ),
+            ),
         ),
         aliases=("read_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
@@ -166,7 +172,6 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="result_page",
-        description="Read a page of a prior large tool result.",
         guidance=ToolGuidance(
             purpose="Read a page of a prior large tool result.",
             use_when="When a prior tool result was truncated or paginated. Use anchor='tail' for log-like output ends.",

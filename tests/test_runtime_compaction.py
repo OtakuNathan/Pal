@@ -350,6 +350,11 @@ class SharedCompactionEngineTests(unittest.TestCase):
         request = llm.generate_requests[0]
         self.assertEqual(request.policy.temperature, 0.0)
         self.assertEqual(request.tools, ())
+        self.assertEqual(request.logical_scope_id, "pal:resident:compaction")
+        self.assertEqual(
+            [message.prompt_region.value for message in request.messages],
+            ["stable_system", "active_dynamic"],
+        )
         self.assertFalse(request.metadata["max_output_recovery_enabled"])
         self.assertEqual(
             request.metadata["compaction_clock_kind"],
@@ -359,6 +364,26 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(
             service.l1_store.items[0][0].kind,
             L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+        )
+
+    def test_compaction_cache_scope_is_isolated_per_minion_run(self) -> None:
+        service = _memory_with_turns()
+        snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.LLM_ROUND,
+            clock_value=3,
+            metadata={"prompt_cache_scope_id": "minion:run-7"},
+        )
+        engine = CompactionEngine(MinionCompactionPolicy())
+
+        request = engine._request(snapshot, "compact this run", attempt=0)
+
+        self.assertEqual(request.logical_scope_id, "minion:run-7:compaction")
+        self.assertEqual(
+            [message.prompt_region.value for message in request.messages],
+            ["stable_system", "active_dynamic"],
         )
 
     def test_endpoint_retry_usage_does_not_inflate_engine_attempts(self) -> None:
@@ -675,7 +700,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.attempts, 3)
         self.assertEqual(len(llm.generate_requests), 3)
 
-    def test_hard_context_impossible_does_not_call_model_or_mutate(self) -> None:
+    def test_retired_failed_result_no_longer_becomes_hard_context(self) -> None:
         service = _memory_with_turns(1)
         def preflight(request):
             source = request.request.messages[-1].text
@@ -731,10 +756,10 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, "uncompactable_hard_context")
-        self.assertEqual(result.attempts, 0)
-        self.assertEqual(llm.generate_requests, [])
-        self.assertEqual(service.l1_store.items, before)
+        self.assertEqual(result.status, "compacted")
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(len(llm.generate_requests), 1)
+        self.assertNotEqual(service.l1_store.items, before)
 
     def test_atomic_l1_unit_keeps_unknown_effect_and_rejects_incomplete_batch(self) -> None:
         service = _memory_with_turns(1)
@@ -829,7 +854,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "protocol_not_closed")
 
-    def test_oversized_tool_body_uses_explicit_head_tail_projection(self) -> None:
+    def test_closed_tool_body_is_retired_before_compaction(self) -> None:
         service = _memory_with_turns(1)
         body = "HEAD-" + ("x" * 20_000) + "-TAIL"
         protocol = [
@@ -863,9 +888,9 @@ class SharedCompactionEngineTests(unittest.TestCase):
             _snapshot(service, protocol_messages=protocol)
         )[-1]
 
-        self.assertIn("head/tail projection only", unit.text)
-        self.assertIn("HEAD-", unit.text)
-        self.assertIn("-TAIL", unit.text)
+        self.assertIn("full result retired", unit.text)
+        self.assertNotIn("HEAD-", unit.text)
+        self.assertNotIn("-TAIL", unit.text)
         self.assertLess(len(unit.text), len(body))
 
     def test_compaction_snapshot_has_no_provider_protocol_projection(self) -> None:
@@ -1140,7 +1165,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
         self.assertEqual(closed.state.value, "aborted")
         self.assertEqual(closed.pending_call_ids, frozenset())
-        self.assertEqual(len(closed.messages), 3)
+        self.assertEqual(len(closed.messages), 4)
+        self.assertEqual(closed.messages[-1].role, MessageRole.ASSISTANT)
         self.assertEqual(closed.metadata["_pal_input_id"], "input-1")
 
     def test_effect_commit_failure_leaves_protocol_and_memory_unchanged(self) -> None:
@@ -1194,7 +1220,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(service.l1_store.items, before_l1)
 
-    def test_semantic_compactor_sees_protocol_before_prompt_projection(self) -> None:
+    def test_semantic_compactor_sees_retired_closed_protocol(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         service = _memory_with_turns(1)
@@ -1217,7 +1243,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
         self.assertTrue(run_result.success)
         compaction_source = llm.generate_requests[0].messages[-1].text
-        self.assertIn(marker, compaction_source)
+        self.assertNotIn(marker, compaction_source)
+        self.assertIn("full result retired", compaction_source)
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
     def test_compaction_reconciles_result_owners_inside_commit_boundary(self) -> None:
@@ -1364,6 +1391,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
                 ],
             ),
         )
+        service.begin_l1_turn("proactive", user_text="timer")
         asyncio.run(
             core._schedule_post_turn_commit_async(
                 proactive_outcome,

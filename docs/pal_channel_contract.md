@@ -456,8 +456,8 @@ Telegram 分流策略至少应考虑：
 
 当前仓库里的 Telegram 适配器实现位于：
 
-- [runtime.py](../src/pal/plugins_builtin/telegram_channel/runtime.py)
-- [telegram_endpoint.py](../src/pal/channel/endpoints/telegram_endpoint.py)
+- [runtime.py](../providers/telegram/runtime.py)
+- [endpoint.py](../providers/telegram/endpoint.py)
 
 当前依赖位于：
 
@@ -466,13 +466,14 @@ Telegram 分流策略至少应考虑：
 当前实现已明确依赖：
 
 - `python-telegram-bot>=20.7,<22`
-- `telegramify-markdown>=0.4,<1`
+- `telegramify-markdown>=1.2,<2`
 
 当前 Markdown 渲染路径是：
 
-1. 先把 LLM 输出交给 `telegramify_markdown.markdownify`
-2. 再以 `MarkdownV2` 作为 `parse_mode` 发送
-3. 如 MarkdownV2 失败，则回退为 plain text
+1. Telegram endpoint 在收到终态完整文本后，将 Markdown 转成 plain text 与 typed entities
+2. 按 Telegram 的 UTF-16 长度限制切分 entities，并为每段独立生成闭合的 MarkdownV2
+3. 通过 endpoint 的 ordered send chain 顺序发送所有分段
+4. 某段 MarkdownV2 发送失败时，仅将该段回退为 plain text
 
 这说明：
 
@@ -501,18 +502,9 @@ Telegram 分流策略至少应考虑：
 
 ## Telegram SDK Helper 结论
 
-当前设计不应假设 `python-telegram-bot` 会替我们自动完成长消息分块。
-
-原因是：
-
-- 当前仓库实现里没有使用任何现成 chunk helper
-- 官方文档明确暴露了消息长度限制常量，但没有形成一条可直接依赖的“自动安全分块发送”主路径
-
-因此，架构结论保持为：
-
-- `python-telegram-bot` 负责 Telegram API 交互
-- MarkdownV2 转换由 `telegramify-markdown` 负责
-- 安全分流、代码块保护、语义边界切分，仍由 `channel` 自己实现
+- `python-telegram-bot` 负责 Telegram API 交互与有序发送。
+- `telegramify-markdown` 负责 Markdown parsing、typed entity projection 与 entity-safe splitting。
+- 何时结算完整回复、分段发送顺序和逐段失败回退仍由 Telegram endpoint 持有。
 
 ## Invariants
 

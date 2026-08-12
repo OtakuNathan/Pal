@@ -22,7 +22,9 @@ from pal.channel.endpoints import SocketChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.channel.capabilities import ChannelIntrospectionProvider
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
+from pal.core.turns import EffectResult, MailboxReplyEffect, channel_turn_program
 from pal.execution import CapabilityCall
+from pal.foundation import EventEnvelope
 from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
 from pal.llm import (
@@ -33,6 +35,7 @@ from pal.llm import (
     InMemorySecretStore,
     LLMEndpointRepository,
     LLMEndpointInvocationError,
+    LLMPreflightAdvice,
     LLMPreflightRequest,
     LLMRuntime,
     LLMCredentialResolver,
@@ -46,7 +49,7 @@ from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, SINGLETON_TARGET
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, RuntimeStatus, SINGLETON_TARGET
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
@@ -56,6 +59,17 @@ from tests.runtime_channel_providers import telegram_endpoint_module
 _telegram_module = telegram_endpoint_module()
 TelegramChannelEndpoint = _telegram_module.TelegramChannelEndpoint
 TelegramChannelEndpointFactory = _telegram_module.TelegramChannelEndpointFactory
+
+
+def _plain_telegram_segments(text: str, *, limit: int):
+    _ = limit
+    return [
+        _telegram_module._TelegramTextSegment(
+            rendered_text=str(text),
+            fallback_text=str(text),
+            parse_mode=None,
+        )
+    ]
 
 
 def _unix_socket_bind_available() -> bool:
@@ -801,13 +815,13 @@ class PalV2BootstrapTests(unittest.TestCase):
                         "from dataclasses import dataclass",
                         "from demo_reload.impl import VALUE",
                         "from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle",
-                        "from pal.execution import CapabilityCall, CapabilityResult",
+                        "from pal.execution import CapabilityCall, CapabilityResult, ToolGuidance",
                         "from pal.execution.tool_semantics import INDIRECT_NONE",
                         "from pal.shared import OPERATION_NAMESPACE, capability_action, capability_node",
                         "",
                         "@capability_node(namespace=OPERATION_NAMESPACE, scope='demo_reload', kind='module', source='test', target_kind='module')",
                         "class DemoProvider:",
-                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload_ping',), execution=INDIRECT_NONE)",
+                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload_ping',), guidance=ToolGuidance(purpose='Return the reload fixture version.', use_when='Testing plugin reload.', do_not_use_when='Outside this reload fixture.', failure_next_steps='Inspect the fixture plugin.'), execution=INDIRECT_NONE)",
                         "    def ping(self, call: CapabilityCall) -> CapabilityResult:",
                         "        _ = call",
                         "        return CapabilityResult(status='ok', text=VALUE, llm_text=VALUE)",
@@ -836,7 +850,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             result = handle.core.context.execution_runtime.execute(
                 CapabilityCall(name="plugin_rescan_and_attach_new_first_party")
             )
-            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.status, "ok", result.structured)
             first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(first.text, "v1")
 
@@ -2527,6 +2541,75 @@ class PalV2BootstrapTests(unittest.TestCase):
 
 
 class PalV2SocketEndpointUnitTests(unittest.TestCase):
+    def test_channel_turn_marks_tool_round_text_as_stream_companion(self) -> None:
+        opening = EventEnvelope(
+            event_kind="user.message",
+            source_kind="channel",
+            payload={"text": "inspect"},
+        )
+        program = channel_turn_program(opening)
+        try:
+            next(program)
+            program.send(
+                EffectResult(
+                    status=RuntimeStatus.OK,
+                    payload=LLMPreflightAdvice(status="ready"),
+                )
+            )
+            effect = program.send(
+                EffectResult(
+                    status=RuntimeStatus.OK,
+                    payload=generation_result_from_values(
+                        text="I will inspect.",
+                        tool_calls=[
+                            new_tool_call(
+                                name="read_file",
+                                args={"file_path": "a"},
+                            )
+                        ],
+                        finish_reason="tool_calls",
+                    ),
+                )
+            )
+        finally:
+            program.close()
+
+        self.assertIsInstance(effect, MailboxReplyEffect)
+        self.assertFalse(effect.terminal)
+        self.assertTrue(effect.stream_companion)
+
+    def test_channel_turn_never_emits_an_empty_terminal_reply(self) -> None:
+        opening = EventEnvelope(
+            event_kind="user.message",
+            source_kind="channel",
+            payload={"text": "hello"},
+        )
+        program = channel_turn_program(opening)
+        try:
+            next(program)
+            program.send(
+                EffectResult(
+                    status=RuntimeStatus.OK,
+                    payload=LLMPreflightAdvice(status="ready"),
+                )
+            )
+            effect = program.send(
+                EffectResult(
+                    status=RuntimeStatus.OK,
+                    payload=generation_result_from_values(
+                        text="",
+                        tool_calls=[],
+                        finish_reason="stop",
+                    ),
+                )
+            )
+        finally:
+            program.close()
+
+        self.assertIsInstance(effect, MailboxReplyEffect)
+        self.assertTrue(effect.terminal)
+        self.assertIn("without producing a final answer", effect.text)
+
     def test_unstarted_socket_endpoint_stop_does_not_unlink_existing_socket_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_socket_owner_test_") as root:
             socket_path = Path(root) / "pal.sock"
@@ -2568,6 +2651,47 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         self.assertEqual(outbound.items, [{"type": "text_delta", "request_id": "req-1", "text": "pong"}])
         self.assertFalse(endpoint.outbox)
         self.assertNotIn(id(response_handle), endpoint._streamed_text_handles)
+
+    def test_socket_terminal_canonical_text_repairs_missing_deltas(self) -> None:
+        endpoint = SocketChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_default",
+                channel_kind="socket",
+                binding_key="pal.sock",
+            )
+        )
+        outbound = _OutboundQueue()
+        endpoint.sessions["session-1"] = type("Session", (), {"outbound": outbound, "closed": False})()
+        handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.PROGRESS,
+                text="Checklist: inspected",
+            ),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text="canonical final",
+                finish_reason="stop",
+            ),
+        )
+
+        self.assertEqual(
+            outbound.items,
+            [
+                {"type": "text_delta", "request_id": "req-1", "text": "Checklist: inspected"},
+                {"type": "text_delta", "request_id": "req-1", "text": "canonical final"},
+                {"type": "llm_done", "request_id": "req-1", "finish_reason": "stop"},
+            ],
+        )
+        self.assertFalse(endpoint._stream_sessions)
 
     def test_streamed_text_final_reply_suppresses_equivalent_response_handle_copy(self) -> None:
         endpoint = SocketChannelEndpoint(
@@ -2673,21 +2797,108 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
             handle,
             ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
         )
-        endpoint.queue_reply("I will inspect.", response_handle=handle)
-
-        self.assertFalse(endpoint.outbox)
+        self.assertFalse(endpoint._turn_stream_text)
 
         endpoint.send_stream_update(
             handle,
             ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Done."),
         )
+        self.assertEqual(next(iter(endpoint._turn_stream_text.values())), "Done.")
         endpoint.send_stream_update(
             handle,
-            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text="Done.",
+                finish_reason="stop",
+            ),
         )
-        endpoint.queue_reply("Done.", response_handle=handle)
 
-        self.assertEqual([item.text for item in endpoint.outbox], ["Done."])
+        self.assertFalse(endpoint._turn_stream_text)
+        self.assertFalse(endpoint.outbox)
+
+    def test_telegram_terminal_reply_wins_when_final_stream_is_still_queued(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "42", "message_id": "100"},
+        )
+
+        # A completed tool round and the final answer share one ordered stream;
+        # no second final-reply queue participates in delivery.
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
+            ),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
+        )
+        endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Done."),
+            response_handle=handle,
+        )
+        endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+            response_handle=handle,
+        )
+
+        endpoint.flush_stream_update_outbox()
+
+        self.assertFalse(endpoint.outbox)
+        self.assertFalse(endpoint._turn_stream_text)
+
+    def test_telegram_nonterminal_tool_echo_remains_user_visible(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        echo_handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={
+                "chat_id": "42",
+                "_pal_turn_continues": True,
+            },
+        )
+
+        endpoint.queue_reply("Checklist: 1/3 complete", response_handle=echo_handle)
+
+        self.assertEqual(
+            [item.text for item in endpoint.outbox],
+            ["Checklist: 1/3 complete"],
+        )
+
+    def test_telegram_interrupt_retires_batched_stream_text(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "42", "message_id": "100"},
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="partial"),
+        )
+
+        endpoint.abort_stream(handle)
+
+        self.assertFalse(endpoint._turn_stream_text)
 
     def test_telegram_tool_only_round_does_not_suppress_later_terminal_answer(self) -> None:
         endpoint = TelegramChannelEndpoint(
@@ -2727,11 +2938,15 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         )
         endpoint.send_stream_update(
             handle,
-            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text="Done.",
+                finish_reason="stop",
+            ),
         )
-        endpoint.queue_reply("Done.", response_handle=handle)
 
-        self.assertEqual([item.text for item in endpoint.outbox], ["Done."])
+        self.assertFalse(endpoint.outbox)
+        self.assertFalse(endpoint._turn_stream_text)
 
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
@@ -2810,7 +3025,7 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
-    async def test_socket_endpoint_suppresses_final_reply_after_text_stream(self) -> None:
+    async def test_socket_endpoint_terminal_stream_needs_no_second_final_reply(self) -> None:
         await self.endpoint.start_async()
         reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
         try:
@@ -2851,8 +3066,10 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second["text"], "ng")
             self.assertEqual(third["type"], "llm_done")
 
-            self.endpoint.queue_reply("pong", response_handle=envelope.response_handle)
-            self.assertEqual(self.endpoint.flush_outbox(), [])
+            self.assertFalse(self.endpoint.outbox)
+            self.assertFalse(self.endpoint._stream_sessions)
+            self.assertFalse(self.endpoint._streamed_text_keys)
+            self.assertFalse(self.endpoint._stream_handle_ids_by_key)
             with self.assertRaises(asyncio.TimeoutError):
                 await asyncio.wait_for(read_socket_message(reader), timeout=0.05)
         finally:
@@ -3128,13 +3345,66 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
         self.assertFalse(any(kind == "typing" for kind, _ in self.fake_bot.actions))
 
+    async def test_telegram_endpoint_delivers_terminal_reply_after_tool_round_queue_race(self) -> None:
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "100", "message_id": "10"},
+        )
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
+            ),
+            response_handle=handle,
+        )
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
+            response_handle=handle,
+        )
+        self.endpoint.flush_stream_update_outbox()
+
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.PROGRESS,
+                text="Checklist: inspected",
+            ),
+            response_handle=handle,
+        )
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Done."),
+            response_handle=handle,
+        )
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text="Done.",
+                finish_reason="stop",
+            ),
+            response_handle=handle,
+        )
+        with patch.object(
+            _telegram_module,
+            "_telegram_text_segments",
+            side_effect=_plain_telegram_segments,
+        ):
+            self.endpoint.flush_stream_update_outbox()
+            pending = next(iter(self.endpoint._send_chains.values()))
+            await asyncio.wait_for(asyncio.shield(pending), timeout=2.0)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(
+            [item["text"] for item in messages],
+            ["Checklist: inspected", "Done."],
+        )
+        self.assertFalse(self.endpoint.outbox)
+
     async def test_telegram_endpoint_serializes_replies_for_same_thread(self) -> None:
         self.fake_bot.message_delays["first"] = 0.05
         handle = self.endpoint.build_response_handle(
             reply_target={"chat_id": "100", "message_id": "10", "thread_id": ""},
         )
 
-        with patch.object(_telegram_module, "_telegram_markdown", side_effect=lambda text: (str(text), None)):
+        with patch.object(_telegram_module, "_telegram_text_segments", side_effect=_plain_telegram_segments):
             self.endpoint.queue_reply("first", response_handle=handle)
             self.endpoint.queue_reply("second", response_handle=handle)
             self.endpoint.flush_outbox()
@@ -3143,6 +3413,161 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         sent_texts = [str(payload.get("text") or "").strip() for kind, payload in self.fake_bot.actions if kind == "message"]
         self.assertEqual(sent_texts[-2:], ["first", "second"])
+
+    async def test_telegram_endpoint_batches_terminal_markdown_blocks_only_after_done(self) -> None:
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "100", "message_id": "10"},
+        )
+        final_text = "\n\n".join(
+            f"Paragraph {index} has **important formatting**."
+            for index in range(8)
+        )
+        midpoint = len(final_text) // 2
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text=final_text[:midpoint]),
+            response_handle=handle,
+        )
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text=final_text[midpoint:]),
+            response_handle=handle,
+        )
+
+        self.endpoint.flush_stream_update_outbox()
+
+        self.assertFalse(any(kind == "message" for kind, _ in self.fake_bot.actions))
+        self.assertFalse(self.endpoint._send_chains)
+
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text=final_text,
+                finish_reason="stop",
+            ),
+            response_handle=handle,
+        )
+        self.endpoint.flush_stream_update_outbox()
+        pending = next(iter(self.endpoint._send_chains.values()))
+        await asyncio.wait_for(asyncio.shield(pending), timeout=2.0)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(item.get("parse_mode") == "MarkdownV2" for item in messages))
+        self.assertFalse(self.endpoint._turn_stream_text)
+
+    async def test_telegram_endpoint_retries_only_failed_markdown_block_as_plain_text(self) -> None:
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "100", "message_id": "10"},
+        )
+        reply = "\n\n".join(
+            (
+                "First **bold** paragraph.",
+                "Second _italic_ paragraph.",
+                "Third `code` paragraph.",
+            )
+        )
+        segments = _telegram_module._telegram_text_segments(reply, limit=32)
+        self.assertGreaterEqual(len(segments), 3)
+        failed_rendered_text = segments[1].rendered_text
+        attempts: list[dict[str, object]] = []
+        original_send_message = self.fake_bot.send_message
+
+        async def fail_markdown_once(**kwargs):
+            attempts.append(dict(kwargs))
+            if (
+                kwargs.get("parse_mode") == "MarkdownV2"
+                and kwargs.get("text") == failed_rendered_text
+            ):
+                raise RuntimeError("invalid markdown")
+            return await original_send_message(**kwargs)
+
+        self.fake_bot.send_message = fail_markdown_once  # type: ignore[method-assign]
+
+        await self.endpoint._send_reply_async(handle, reply)
+
+        self.assertEqual(len(attempts), len(segments) + 1)
+        failed_attempt_index = next(
+            index
+            for index, attempt in enumerate(attempts)
+            if attempt.get("text") == failed_rendered_text
+        )
+        self.assertEqual(attempts[failed_attempt_index].get("parse_mode"), "MarkdownV2")
+        fallback_attempt = attempts[failed_attempt_index + 1]
+        self.assertNotIn("parse_mode", fallback_attempt)
+        self.assertEqual(fallback_attempt["text"], segments[1].fallback_text)
+        self.assertTrue(
+            any(
+                attempt.get("parse_mode") == "MarkdownV2"
+                for attempt in attempts[failed_attempt_index + 2 :]
+            )
+        )
+
+    async def test_telegram_endpoint_preserves_progress_and_terminal_order_under_burst(self) -> None:
+        turn_count = 25
+        for index in range(turn_count):
+            handle = ResponseHandle(
+                endpoint_id="telegram_main",
+                reply_target={"chat_id": "100", "message_id": str(index)},
+            )
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                    text=f"discarded draft {index}",
+                ),
+                response_handle=handle,
+            )
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.DONE,
+                    finish_reason=LLMFinishReason.TOOL_CALLS.value,
+                ),
+                response_handle=handle,
+            )
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.PROGRESS,
+                    text=f"progress {index}",
+                ),
+                response_handle=handle,
+            )
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                    text=f"final {index}",
+                ),
+                response_handle=handle,
+            )
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.DONE,
+                    text=f"final {index}",
+                    finish_reason=LLMFinishReason.STOP.value,
+                ),
+                response_handle=handle,
+            )
+
+        with patch.object(
+            _telegram_module,
+            "_telegram_text_segments",
+            side_effect=_plain_telegram_segments,
+        ):
+            self.endpoint.flush_stream_update_outbox()
+            pending = next(iter(self.endpoint._send_chains.values()))
+            await asyncio.wait_for(asyncio.shield(pending), timeout=5.0)
+
+        sent_texts = [
+            str(payload.get("text") or "")
+            for kind, payload in self.fake_bot.actions
+            if kind == "message"
+        ]
+        expected = [
+            text
+            for index in range(turn_count)
+            for text in (f"progress {index}", f"final {index}")
+        ]
+        self.assertEqual(sent_texts, expected)
+        self.assertFalse(self.endpoint._turn_stream_text)
 
     async def test_telegram_endpoint_downloads_document_without_reading_contents_into_payload(self) -> None:
         self.fake_bot.files["doc-1"] = _FakeTelegramFile(content=b"hello telegram", file_path="docs/file.txt")

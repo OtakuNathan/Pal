@@ -39,11 +39,15 @@ class RuntimeConfig:
     llm_endpoint_retry_attempts: int = 3
     llm_compaction_retry_attempts: int = 3
     llm_max_output_recovery_attempts: int = 3
-    llm_request_timeout_seconds: float = 180.0
+    # SDK/HTTP network inactivity timeout. Streaming keepalive bytes reset it;
+    # this is deliberately not the whole-round deadline.
+    llm_request_timeout_seconds: float = 600.0
     llm_compaction_timeout_seconds: float = 180.0
+    llm_stream_wall_timeout_seconds: float = 1_800.0
+    llm_stream_cleanup_timeout_seconds: float = 2.0
+    llm_wait_status_seconds: tuple[float, ...] = (120.0, 300.0, 600.0, 1_200.0)
 
     # memory
-    keep_recent_tool_messages: int = 5
     embedding_ollama_remote_base_urls: tuple[str, ...] = ()
     embedding_ollama_local_base_url: str = "http://127.0.0.1:11434"
     embedding_ollama_model_name: str = "bge-m3"
@@ -98,9 +102,15 @@ class RuntimeConfig:
             "max_output_recovery_attempts": ("llm_max_output_recovery_attempts", int),
             "request_timeout_seconds": ("llm_request_timeout_seconds", float),
             "compaction_timeout_seconds": ("llm_compaction_timeout_seconds", float),
+            "stream_wall_timeout_seconds": ("llm_stream_wall_timeout_seconds", float),
+            "stream_cleanup_timeout_seconds": ("llm_stream_cleanup_timeout_seconds", float),
         })
+        llm_section = raw.get("llm")
+        if isinstance(llm_section, dict) and "wait_status_seconds" in llm_section:
+            schedule = cls._positive_float_tuple(llm_section.get("wait_status_seconds"))
+            if schedule:
+                kwargs["llm_wait_status_seconds"] = schedule
         cls._apply_section(kwargs, raw, "memory", {
-            "keep_recent_tool_messages": int,
             "embedding_ollama_local_base_url": str,
             "embedding_ollama_model_name": str,
             "embedding_ollama_keep_alive": str,
@@ -157,6 +167,20 @@ class RuntimeConfig:
             seen.add(text)
             normalized.append(text)
         return tuple(normalized)
+
+    @staticmethod
+    def _positive_float_tuple(value: object) -> tuple[float, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        normalized: list[float] = []
+        for item in value:
+            try:
+                number = float(item)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                normalized.append(number)
+        return tuple(sorted(set(normalized)))
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:

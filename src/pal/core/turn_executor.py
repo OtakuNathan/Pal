@@ -47,6 +47,7 @@ from pal.llm.ir import (
     LLMResponseIR,
     MessageRole,
     MessageState,
+    PromptRegionIR,
     TextPartIR,
 )
 from pal.memory.compact import memory_candidates_from_compact_result
@@ -70,6 +71,18 @@ from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.agent_io import ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _format_elapsed_seconds(value: float) -> str:
+    seconds = max(0, int(round(float(value))))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes and seconds:
+        return f"{minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def _artifact_unavailable_summary(refs: list[ArtifactRefPartIR]) -> str:
     lines = ["Attached artifact content is currently unavailable; stable references follow:"]
     for ref in refs:
@@ -298,6 +311,24 @@ class TurnExecutor:
             preferred_model_id = str(getattr(llm_runtime, "last_model_id", "") or "").strip() or None
         continuation.preferred_llm_endpoint_id = preferred_endpoint_id
         continuation.preferred_llm_model_id = preferred_model_id
+        if continuation.finalization_only:
+            if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED:
+                continuation.finalization_attempted = True
+            if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED and (outcome.tool_calls or not outcome.text.strip()):
+                rejected_message_id = outcome.response.message.message_id
+                await self._discard_l1_assistant_async(
+                    continuation,
+                    rejected_message_id,
+                )
+                outcome = self._generation_result_from_text(
+                    self.fallback_final_reply(continuation),
+                    finish_reason=LLMFinishReason.FALLBACK,
+                    response_mode=LLMResponseMode.CHAT,
+                )
+                await self._upsert_l1_assistant_async(
+                    continuation,
+                    outcome.response.message,
+                )
         continuation.last_response_mode = self.infer_response_mode(
             outcome,
             used_tools=bool(continuation.tool_observations),
@@ -308,15 +339,6 @@ class TurnExecutor:
                 tool_call for tool_call in outcome.tool_calls
             ]
             continuation.pending_tool_results = []
-        if continuation.finalization_only:
-            if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED:
-                continuation.finalization_attempted = True
-            if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED and (outcome.tool_calls or not outcome.text.strip()):
-                outcome = self._generation_result_from_text(
-                    self.fallback_final_reply(continuation),
-                    finish_reason=LLMFinishReason.FALLBACK,
-                    response_mode=LLMResponseMode.CHAT,
-                )
         if (
             self._handle_llm_provider_errors
             and effect.assembly_context.turn_kind != "failure"
@@ -488,10 +510,22 @@ class TurnExecutor:
         if getattr(continuation, "delivery_binding", None) is None:
             return
         continuation.echoed_keys.add(dedupe_key)
-        await self.execute_turn_effect_async(
-            continuation,
-            MailboxReplyEffect(text=markdown, terminal=False),
-        )
+        if continuation.channel_stream_active:
+            await self.execute_turn_effect_async(
+                continuation,
+                MailboxReplyStreamUpdateEffect(
+                    update=ChannelStreamUpdate(
+                        kind=ChannelStreamUpdateKind.PROGRESS,
+                        text=markdown,
+                    ),
+                ),
+            )
+            continuation.emitted_reply_texts.append(markdown)
+        else:
+            await self.execute_turn_effect_async(
+                continuation,
+                MailboxReplyEffect(text=markdown, terminal=False),
+            )
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
@@ -544,9 +578,28 @@ class TurnExecutor:
         binding = continuation.delivery_binding
         if binding is None:
             return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
+        if continuation.channel_stream_active and effect.stream_companion:
+            return EffectResult(status=RuntimeStatus.QUEUED, text=effect.text)
+        if continuation.channel_stream_active and effect.terminal:
+            text = str(effect.text or "").strip()
+            if not (
+                continuation.channel_stream_terminal_finish_reason
+                and continuation.channel_stream_terminal_text == text
+            ):
+                await self._emit_synthetic_stream_terminal(
+                    continuation,
+                    text=text,
+                    finish_reason=LLMFinishReason.FALLBACK.value,
+                )
+            if text:
+                continuation.emitted_reply_texts.append(text)
+            self._debug_log_reply(continuation, effect.text)
+            return EffectResult(status=RuntimeStatus.QUEUED, text=effect.text)
         if not effect.terminal:
             reply_target = dict(binding.response_handle.reply_target)
             reply_target["_pal_turn_continues"] = True
+            if effect.stream_companion:
+                reply_target["_pal_stream_companion"] = True
             binding = replace(
                 binding,
                 response_handle=replace(
@@ -582,6 +635,17 @@ class TurnExecutor:
     def _agent_output_port(self):
         return self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
 
+    def _channel_supports_stream_delivery(self, continuation: Any) -> bool:
+        output_port = self._agent_output_port()
+        binding = continuation.delivery_binding
+        supports = getattr(output_port, "supports_stream_delivery", None)
+        if binding is None or not callable(supports):
+            return False
+        try:
+            return bool(supports(binding))
+        except Exception:
+            return False
+
     async def _call_output_port_async(self, output_port, method_name: str, *args, **kwargs):
         method = getattr(output_port, method_name)
         result = method(*args, **kwargs)
@@ -601,9 +665,56 @@ class TurnExecutor:
         stream = getattr(llm_runtime, "astream", None)
         if not callable(stream):
             raise TypeError("LLM runtime does not implement the astream contract")
-        async for update in stream(request):
-            final_response = update.response
-            await self._handle_ir_stream_update(continuation, update)
+        continuation.channel_stream_active = self._channel_supports_stream_delivery(
+            continuation
+        )
+        iterator = stream(request).__aiter__()
+        schedule = self._llm_wait_status_schedule()
+        schedule_index = 0
+        started_at = asyncio.get_running_loop().time()
+        semantic_seen = False
+        pending: asyncio.Task[Any] | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(anext(iterator))
+                if not semantic_seen and schedule_index < len(schedule):
+                    elapsed = asyncio.get_running_loop().time() - started_at
+                    wait_seconds = max(0.0, schedule[schedule_index] - elapsed)
+                    done, _ = await asyncio.wait({pending}, timeout=wait_seconds)
+                    if pending not in done:
+                        await self._queue_llm_waiting_status(
+                            continuation,
+                            elapsed_seconds=schedule[schedule_index],
+                        )
+                        schedule_index += 1
+                        continue
+                try:
+                    update = await pending
+                except StopAsyncIteration:
+                    break
+                finally:
+                    if pending.done():
+                        pending = None
+                final_response = update.response
+                semantic_seen = semantic_seen or (
+                    update.delta_kind != LLMResponseDeltaKind.STATE
+                    and bool(update.response.message.parts)
+                )
+                await self._handle_ir_stream_update(continuation, update)
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                try:
+                    await pending
+                except asyncio.CancelledError:
+                    pass
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except (asyncio.CancelledError, RuntimeError):
+                    pass
         if final_response is None:
             return self._generation_result_from_text(
                 "LLM stream completed without a response.",
@@ -613,6 +724,47 @@ class TurnExecutor:
             response=final_response,
             preferred_endpoint_id=str(getattr(llm_runtime, "last_endpoint_id", "") or "") or None,
             preferred_model_id=str(getattr(llm_runtime, "last_model_id", "") or "") or None,
+        )
+
+    def _llm_wait_status_schedule(self) -> tuple[float, ...]:
+        raw = getattr(
+            self._config,
+            "llm_wait_status_seconds",
+            (120.0, 300.0, 600.0, 1_200.0),
+        )
+        schedule: list[float] = []
+        for item in tuple(raw or ()):
+            try:
+                seconds = float(item)
+            except (TypeError, ValueError):
+                continue
+            if seconds > 0:
+                schedule.append(seconds)
+        return tuple(sorted(set(schedule)))
+
+    async def _queue_llm_waiting_status(
+        self,
+        continuation: Any,
+        *,
+        elapsed_seconds: float,
+    ) -> None:
+        output_port = self._agent_output_port()
+        binding = continuation.delivery_binding
+        if output_port is None or binding is None or continuation.interrupted:
+            return
+        elapsed = _format_elapsed_seconds(elapsed_seconds)
+        await self._call_output_port_async(
+            output_port,
+            "queue_status",
+            binding,
+            "llm_waiting",
+            payload={
+                "elapsed_seconds": float(elapsed_seconds),
+                "text": (
+                    f"LLM is still processing · {elapsed} elapsed. "
+                    "Use /interrupt to stop waiting."
+                ),
+            },
         )
 
     async def _handle_ir_stream_update(self, continuation: Any, update: Any) -> None:
@@ -648,14 +800,30 @@ class TurnExecutor:
                 tool_call=update.tool_call,
             )
         elif update.delta_kind == LLMResponseDeltaKind.STATE:
-            channel_update = ChannelStreamUpdate(
-                kind=(
-                    ChannelStreamUpdateKind.ERROR
-                    if update.response.finish_reason == LLMFinishReason.ERROR
-                    else ChannelStreamUpdateKind.DONE
-                ),
-                finish_reason=update.response.finish_reason.value,
-            )
+            finish_reason = update.response.finish_reason
+            canonical_text = str(update.response.message.text or "").strip()
+            if finish_reason == LLMFinishReason.ERROR:
+                # Provider failure is not yet the user-facing terminal event.
+                # Failure orchestration will produce one canonical fallback
+                # through _handle_mailbox_reply.
+                channel_update = None
+            elif finish_reason in {
+                LLMFinishReason.TOOL_CALLS,
+                LLMFinishReason.COMPACT_REQUIRED,
+            }:
+                channel_update = ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.DONE,
+                    text=canonical_text,
+                    finish_reason=finish_reason.value,
+                )
+            elif canonical_text:
+                continuation.channel_stream_terminal_text = canonical_text
+                continuation.channel_stream_terminal_finish_reason = finish_reason.value
+                channel_update = ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.DONE,
+                    text=canonical_text,
+                    finish_reason=finish_reason.value,
+                )
         if channel_update is not None:
             await self.execute_turn_effect_async(
                 continuation,
@@ -663,6 +831,36 @@ class TurnExecutor:
                     update=channel_update,
                 ),
             )
+
+    async def _emit_synthetic_stream_terminal(
+        self,
+        continuation: Any,
+        *,
+        text: str,
+        finish_reason: str,
+    ) -> None:
+        if text:
+            await self.execute_turn_effect_async(
+                continuation,
+                MailboxReplyStreamUpdateEffect(
+                    update=ChannelStreamUpdate(
+                        kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                        text=text,
+                    ),
+                ),
+            )
+        await self.execute_turn_effect_async(
+            continuation,
+            MailboxReplyStreamUpdateEffect(
+                update=ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.DONE,
+                    text=text,
+                    finish_reason=finish_reason,
+                ),
+            ),
+        )
+        continuation.channel_stream_terminal_text = text
+        continuation.channel_stream_terminal_finish_reason = finish_reason
 
     # ── prompt building ─────────────────────────────────────────────────
 
@@ -687,8 +885,19 @@ class TurnExecutor:
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
-        metadata["artifact_scope_key"] = "pal:resident"
+        logical_scope_id = str(metadata.get("prompt_cache_scope_id") or "").strip()
+        if not logical_scope_id:
+            logical_scope_id = (
+                f"minion:{assembly_context.work_order_id or continuation.turn_id}"
+                if assembly_context.core_mode == "minion"
+                else "pal:resident"
+            )
+        artifact_scope_key = str(
+            metadata.get("artifact_scope_key") or logical_scope_id
+        ).strip()
+        metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         memory_service = self.context.port_registry.get("memory:memory")
         active_turn = None
@@ -725,6 +934,7 @@ class TurnExecutor:
                     )
                 except Exception:
                     pass
+        metadata["typed_l1_projection"] = True
         if continuation.finalization_only:
             metadata["finalization_directive"] = (
                 continuation.finalization_reason
@@ -743,7 +953,34 @@ class TurnExecutor:
             max_output_tokens=max_output_tokens,
             model_hint=continuation.preferred_llm_model_id,
         )
-        base_messages = list(prompt.messages)
+        stable_messages = [
+            replace(message, prompt_region=PromptRegionIR.STABLE_SYSTEM)
+            for message in prompt.messages
+            if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}
+        ]
+        contextual_messages = [
+            replace(message, prompt_region=PromptRegionIR.ACTIVE_DYNAMIC)
+            for message in prompt.messages
+            if message.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER}
+        ]
+        if active_turn is None and contextual_messages:
+            contextual_messages[-1] = replace(
+                contextual_messages[-1],
+                prompt_region=PromptRegionIR.ACTIVE_INPUT,
+            )
+        settled_messages: list[LLMMessageIR] = []
+        memory_pack = metadata.get("memory_pack")
+        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            projected = self._project_active_messages_for_prompt(
+                list(getattr(settled_turn, "messages", ()) or ()),
+                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
+                artifact_scope_key=artifact_scope_key,
+                capabilities=dict(metadata.get("llm_capabilities") or {}),
+            )
+            settled_messages.extend(
+                replace(message, prompt_region=PromptRegionIR.SETTLED_HISTORY)
+                for message in projected
+            )
         active_messages: list[LLMMessageIR] = []
         if active_turn is not None:
             active_messages = list(active_turn.messages)
@@ -751,6 +988,7 @@ class TurnExecutor:
             active_messages = self._project_active_messages_for_prompt(
                 active_messages,
                 turn_id=continuation.turn_id,
+                artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
             self._reconcile_projected_tool_context(
@@ -758,23 +996,63 @@ class TurnExecutor:
                 original_messages=original_active_messages,
                 projected_messages=active_messages,
             )
-        prompt_messages = [*base_messages, *active_messages]
+            active_messages = [
+                replace(
+                    message,
+                    prompt_region=(
+                        PromptRegionIR.ACTIVE_INPUT
+                        if index == 0 and message.role == MessageRole.USER
+                        else PromptRegionIR.ACTIVE_DYNAMIC
+                    ),
+                )
+                for index, message in enumerate(active_messages)
+            ]
+        runtime_reminder = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
+        tail_messages = (
+            [
+                LLMMessageIR(
+                    role=MessageRole.USER,
+                    parts=(TextPartIR(runtime_reminder),),
+                    semantic_kind="runtime_reminder",
+                    prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
+                )
+            ]
+            if runtime_reminder
+            else []
+        )
+        prompt_messages = [
+            *stable_messages,
+            *settled_messages,
+            *contextual_messages,
+            *active_messages,
+            *tail_messages,
+        ]
         metadata = dict(prompt.metadata)
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
-        metadata["artifact_scope_key"] = "pal:resident"
+        # PromptCompiler intentionally emits only provider-facing prompt
+        # metadata.  Logical cache/artifact ownership is executor-owned, so
+        # restore it after compilation instead of allowing Minion requests to
+        # silently fall back to the resident Pal scope.
+        metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
-            base_messages=base_messages,
-            active_messages=active_messages,
+            base_messages=[
+                *stable_messages,
+                *settled_messages,
+                *contextual_messages,
+            ],
+            active_messages=[*active_messages, *tail_messages],
             tools=list(tools or []),
         )
         prompt = replace(
             prompt,
             messages=tuple(prompt_messages),
+            logical_scope_id=logical_scope_id,
             metadata=metadata,
         )
         return prompt
@@ -835,7 +1113,17 @@ class TurnExecutor:
             for message in base_messages
             if message.role != MessageRole.SYSTEM
         )
-        tool_protocol_chars = sum(self._estimate_ir_message_chars(message) for message in active_messages)
+        protocol_messages = list(active_messages)
+        if (
+            primary_input
+            and protocol_messages
+            and protocol_messages[0].role == MessageRole.USER
+        ):
+            protocol_messages = protocol_messages[1:]
+        tool_protocol_chars = sum(
+            self._estimate_ir_message_chars(message)
+            for message in protocol_messages
+        )
         tools_schema_chars = self._estimate_tools_schema_chars(tools)
         conversation_chars = max(base_non_system_chars - current_user_chars, 0)
         estimated_input_chars = system_chars + current_user_chars + conversation_chars + tool_protocol_chars + tools_schema_chars
@@ -910,12 +1198,18 @@ class TurnExecutor:
         messages: list[LLMMessageIR],
         *,
         turn_id: str = "",
+        artifact_scope_key: str = "pal:resident",
         capabilities: dict[str, Any] | None = None,
     ) -> list[LLMMessageIR]:
         """Apply prompt-only size limits without mutating the L1 working set."""
 
         projected = [
-            self._project_artifact_refs(message, turn_id=turn_id, capabilities=capabilities or {})
+            self._project_artifact_refs(
+                message,
+                turn_id=turn_id,
+                scope_key=artifact_scope_key,
+                capabilities=capabilities or {},
+            )
             for message in messages
         ]
         result_indices = [
@@ -973,6 +1267,7 @@ class TurnExecutor:
         message: LLMMessageIR,
         *,
         turn_id: str,
+        scope_key: str,
         capabilities: dict[str, Any],
     ) -> LLMMessageIR:
         refs = [part for part in message.parts if isinstance(part, ArtifactRefPartIR)]
@@ -984,7 +1279,7 @@ class TurnExecutor:
         if callable(select):
             try:
                 exposure = select(
-                    "pal:resident",
+                    str(scope_key or "pal:resident"),
                     str(turn_id),
                     message.text,
                     capabilities,
@@ -1139,8 +1434,6 @@ class TurnExecutor:
         continuation.pending_tool_results = []
 
     def _render_tool_result_content(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
-        if self._is_memory_recall_tool_call(tool_call.name):
-            return self._render_memory_recall_tool_observation(tool_call, result)
         if isinstance(getattr(result, "context_delivery", None), dict):
             return str(result.llm_text or "")
         if str(result.llm_text or "").strip():
@@ -1429,7 +1722,27 @@ class TurnExecutor:
         result = None
         if memory_service is not None:
             try:
-                result = memory_service.settle_l1_turn(outcome.commit_payload.turn_id)
+                turn_id = str(outcome.commit_payload.turn_id)
+                active_turn = getattr(
+                    memory_service,
+                    "active_l1_turn",
+                    lambda _turn_id: None,
+                )(turn_id)
+                result_ids = self._tool_result_ids(active_turn)
+                retire = getattr(
+                    getattr(self.context, "execution_runtime", None),
+                    "retire_tool_results",
+                    None,
+                )
+                after_commit = (
+                    lambda: retire(turn_id=turn_id, result_ids=result_ids)
+                    if callable(retire) and result_ids
+                    else None
+                )
+                result = memory_service.settle_l1_turn(
+                    turn_id,
+                    after_commit=after_commit,
+                )
             except Exception as exc:
                 self.state.diagnostics.append(
                     {
@@ -1439,12 +1752,25 @@ class TurnExecutor:
                         "error": str(exc),
                     }
                 )
+                # Closing L1 and retiring the result-owned authority are one
+                # transaction.  Do not advance any per-turn lifecycle clocks
+                # or hide the transaction failure from the caller.
+                raise
             try:
                 memory_service.l2_store.tick_heat()
             except Exception:
                 pass
         self._tick_behavior_lifecycle()
         return result
+
+    @staticmethod
+    def _tool_result_ids(turn: Any | None) -> tuple[str, ...]:
+        return tuple(
+            part.call_id
+            for message in tuple(getattr(turn, "messages", ()) or ())
+            for part in message.parts
+            if isinstance(part, ToolResultIR) and not part.retired
+        )
 
     def _tick_behavior_lifecycle(self) -> None:
         behavior_service = self.context.port_registry.get("behavior:behavior")
@@ -1484,6 +1810,20 @@ class TurnExecutor:
         metadata = dict(
             getattr(assembly_context, "metadata", {}) or {}
         )
+        logical_scope_id = str(
+            metadata.get("prompt_cache_scope_id") or ""
+        ).strip()
+        if not logical_scope_id:
+            minion_scope_key = (
+                getattr(assembly_context, "work_order_id", "")
+                or getattr(continuation, "turn_id", "")
+            )
+            logical_scope_id = (
+                f"minion:{minion_scope_key}"
+                if getattr(assembly_context, "core_mode", "") == "minion"
+                else "pal:resident"
+            )
+        metadata["prompt_cache_scope_id"] = logical_scope_id
         preferred_endpoint_id = (
             preferred_endpoint_id
             or metadata.get("preferred_endpoint_id")
@@ -1539,6 +1879,7 @@ class TurnExecutor:
                 **metadata,
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "preferred_model_id": preferred_model_id,
+                "prompt_cache_scope_id": logical_scope_id,
             },
         )
         execution_runtime = getattr(self.context, "execution_runtime", None)
@@ -1559,16 +1900,11 @@ class TurnExecutor:
         if continuation is not None or execution_runtime is not None:
             def reconcile_compacted_l1() -> None:
                 retire = getattr(
-                    getattr(execution_runtime, "logical_state", None),
-                    "retire_results",
-                    None,
-                )
-                context_for_turn = getattr(
                     execution_runtime,
-                    "logical_context_for_turn",
+                    "retire_tool_results",
                     None,
                 )
-                if callable(retire) and callable(context_for_turn):
+                if callable(retire):
                     remaining_ids = {
                         part.call_id
                         for turn in list(
@@ -1595,11 +1931,8 @@ class TurnExecutor:
                         )
                         if not removed:
                             continue
-                        logical_context = context_for_turn(turn_id)
                         retire(
-                            execution_lifetime_id=(
-                                logical_context.execution_lifetime_id
-                            ),
+                            turn_id=turn_id,
                             result_ids=removed,
                         )
                 if continuation is None:

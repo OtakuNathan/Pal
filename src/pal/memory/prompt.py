@@ -1,29 +1,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Any
 
 from pal.memory.compact import strip_persistent_system_reminders
 from pal.memory.contracts import MemoryPack
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
-if TYPE_CHECKING:
-    from pal.core.runtime_config import RuntimeConfig
-
-_DEFAULT_KEEP_RECENT_TOOL_MESSAGES = 5
+_LEGACY_KEEP_RECENT_TOOL_MESSAGES = 5
 
 
 @dataclass
 class MemoryPromptFragmentProvider(PromptFragmentProvider):
     provider_id: str = "memory.prompt.default"
     module_id: str = "memory"
-    config: RuntimeConfig | None = None
     include_l1_recent_context: bool = True
-
-    @property
-    def _keep_recent(self) -> int:
-        return getattr(self.config, "keep_recent_tool_messages", _DEFAULT_KEEP_RECENT_TOOL_MESSAGES) if self.config else _DEFAULT_KEEP_RECENT_TOOL_MESSAGES
+    config: Any = field(default=None, repr=False, compare=False)
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
         fragments: list[PromptFragment] = list(_memory_guide_fragments())
@@ -33,16 +26,20 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
 
         summary_text = _current_summary_text(pack)
         summary_context = _render_current_summary_context(pack)
-        messages = (
-            [
+        messages = []
+        if (
+            not bool(context.metadata.get("typed_l1_projection"))
+            and self.include_l1_recent_context
+        ):
+            messages = [
                 message
                 for message in list(pack.l1_recent_context)
                 if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
             ]
-            if self.include_l1_recent_context
-            else []
+        cleared_indices = _build_cleared_tool_indices(
+            messages,
+            keep_recent=_LEGACY_KEEP_RECENT_TOOL_MESSAGES,
         )
-        cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
         block_index = 0
         i = 0

@@ -120,6 +120,9 @@ class StubEndpoint(ChannelEndpointQueueBase):
     def normalize_raw(self, payload: object) -> dict[str, object]:
         return {"normalized": payload}
 
+    def supports_stream_delivery(self) -> bool:
+        return True
+
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         self.sent.append((response_handle.endpoint_id, text))
 
@@ -265,7 +268,6 @@ def register_test_tool(runtime, tool) -> str:
                 retry_policy=RetryPolicy.AUTOMATIC,
                 paging=PagingMode.SUPPORTED,
             ),
-            search_text=f"{alias} {tool.description}",
             handler=invoke,
             examples=({},),
     )
@@ -643,10 +645,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         generation = core.context.execution_runtime.registry_generation
-        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "edit_file", "write_file"):
+        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "write_file"):
             self.assertIn(alias, generation.direct_aliases)
-        self.assertIn("delete_path", generation.indirect_aliases)
-        self.assertIn("file_state", generation.indirect_aliases)
+        for alias in ("delete_path", "edit_file", "file_state"):
+            self.assertIn(alias, generation.indirect_aliases)
 
     def test_shell_exec_builtin_tool_runs_commands(self) -> None:
         core = PalCore()
@@ -745,6 +747,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 family="operation",
                 action_name="ping",
                 aliases=("demo_ping",),
+                guidance=ToolGuidance(
+                    purpose="Ping the demo provider.",
+                    use_when="Testing operation-family alias compilation.",
+                    do_not_use_when="Outside this focused test.",
+                    failure_next_steps="Inspect the returned test failure.",
+                ),
                 execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
@@ -1335,14 +1343,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("read_tool_result", exposed_names)
             self.assertIn("run_shell", exposed_names)
             self.assertIn("read_file", exposed_names)
-            self.assertIn("edit_file", exposed_names)
+            self.assertNotIn("edit_file", exposed_names)
             self.assertIn("write_file", exposed_names)
             self.assertNotIn("delete_path", exposed_names)
             self.assertIn("call_tool", exposed_names)
             self.assertIn("recall_memory", exposed_names)
-            self.assertIn("remember_memory", exposed_names)
-            self.assertIn("update_memory", exposed_names)
-            self.assertIn("forget_memory", exposed_names)
+            self.assertNotIn("remember_memory", exposed_names)
+            self.assertNotIn("update_memory", exposed_names)
+            self.assertNotIn("forget_memory", exposed_names)
             self.assertNotIn("file_state", exposed_names)
             self.assertNotIn("artifact_info", exposed_names)
             self.assertNotIn("list_artifacts", exposed_names)
@@ -1366,7 +1374,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 exec_tool.description,
             )
             self.assertNotIn("op_", exec_tool.description)
-            memory_update = next(item for item in request.tools if item.name == "update_memory")
+            generation = core.context.execution_runtime.registry_generation
+            memory_update = generation.indirect_aliases["update_memory"]
             self.assertIn("mem_ref", memory_update.input_schema["properties"])
             self.assertNotIn("target_id", memory_update.input_schema["properties"])
             memory_recall = next(item for item in request.tools if item.name == "recall_memory")
@@ -1379,8 +1388,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("view", memory_recall_properties)
             self.assertNotIn("level", memory_recall_properties)
             self.assertNotIn("scope", memory_recall_properties)
-            memory_write = next(item for item in request.tools if item.name == "remember_memory")
-            memory_write_description = memory_write.description
+            memory_write = generation.indirect_aliases["remember_memory"]
+            memory_write_description = memory_write.compiled_description
             self.assertIn("recall_memory", memory_write_description)
             self.assertIn("use update_memory instead", memory_write_description)
             self.assertIn("Do not write duplicates", memory_write_description)
@@ -1698,12 +1707,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "prompt_context_policy",
                     "operating_rules",
                     "priority",
+                    "tool_efficiency",
                     "mutation_policy",
                     "memory_guide",
                     "knowledge_storage_boundary",
                 ),
             )
-            self.assertEqual(prompt.metadata["reminder_sections"], ("operating_guidance", "tool_efficiency"))
+            self.assertEqual(prompt.metadata["reminder_sections"], ())
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ("l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"),
@@ -1712,9 +1722,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[0].role.value, "system")
             self.assertEqual(prompt.messages[-1].role.value, "user")
             self.assertIn("Hello from user", prompt.messages[-1].text)
-            self.assertIn("<runtime_reminder", prompt.messages[-1].text)
-            self.assertIn("active system prompt", prompt.messages[-1].text)
-            self.assertIn("behavior-routing guidance", prompt.messages[-1].text)
+            self.assertNotIn("<runtime_reminder", prompt.messages[-1].text)
             self.assertIn("<identity>", prompt.messages[0].text)
             self.assertIn("<system_map>", prompt.messages[0].text)
             self.assertIn("<source_of_truth>", prompt.messages[0].text)
@@ -1724,7 +1732,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("<task_flow>", prompt.messages[0].text)
             self.assertNotIn("minion_task_search", prompt.messages[0].text)
             self.assertNotIn("minion_dispatch_workflow", prompt.messages[0].text)
-            self.assertNotIn("<tool_efficiency>", prompt.messages[0].text)
+            self.assertIn("<tool_efficiency>", prompt.messages[0].text)
             system_text = prompt.messages[0].text
             self.assertIn("<mutation_policy>", system_text)
             self.assertIn("<memory_guide>", system_text)
@@ -1756,7 +1764,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual((prompt.messages[2].role.value, prompt.messages[2].text), ("assistant", "I should use Asia/Shanghai context."))
             final_text = prompt.messages[-1].text
             self.assertNotIn("Recalled memory references are operational metadata.", final_text)
-            self.assertIn("<tool_efficiency>", final_text)
+            self.assertNotIn("<tool_efficiency>", final_text)
             self.assertNotIn("<memory_guidance>", final_text)
             self.assertNotIn("If recalled memories are already present in the prompt", final_text)
             self.assertNotIn("MUST call memory_recall", final_text)
@@ -1914,7 +1922,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
             core.run_until_idle()
 
-            self.assertEqual(endpoint.sent, [("telegram_main", "Daily digest complete.")])
+            self.assertEqual(endpoint.sent, [])
+            self.assertEqual(
+                endpoint.streamed,
+                [
+                    ("telegram_main", "text", "Daily digest complete."),
+                    ("telegram_main", "done", "stop"),
+                ],
+            )
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1987,11 +2002,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
             core.run_until_idle()
 
+            self.assertEqual(endpoint.sent, [])
             self.assertEqual(
-                endpoint.sent,
+                endpoint.streamed,
                 [
-                    ("telegram_main", "Starting digest."),
-                    ("telegram_main", "Daily digest complete."),
+                    ("telegram_main", "text", "Starting digest."),
+                    ("telegram_main", "op_tool_call", "echo"),
+                    ("telegram_main", "done", "tool_calls"),
+                    ("telegram_main", "text", "Daily digest complete."),
+                    ("telegram_main", "done", "stop"),
                 ],
             )
             latest = proactive_repository.latest_run("daily_digest")
@@ -2941,7 +2960,49 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         channel_runtime.sync_endpoints()
         self.assertIn(("stdio", "reasoning", "thinking"), endpoint.streamed)
         self.assertIn(("stdio", "op_tool_call", "echo"), endpoint.streamed)
+        self.assertIn(("stdio", "done", "stop"), endpoint.streamed)
+        self.assertFalse(endpoint.sent)
         self.assertIn("final answer", outcome.final_reply)
+
+    def test_streaming_channel_synthesizes_empty_model_terminal_on_same_stream(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        channel_runtime = ChannelRuntime()
+        endpoint = StubEndpoint(
+            endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin")
+        )
+        channel_runtime.register_endpoint(endpoint)
+        register_channel_with_core(core.context, channel_runtime)
+        memory_service = MemoryService(
+            l3_selector=L3ProviderSelector(
+                resolver=core.context.execution_runtime.l3_plugin_registry.require
+            )
+        )
+        register_memory_with_core(core.context, memory_service)
+        core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
+            [generation_result_from_values(text="", tool_calls=[], finish_reason="stop")]
+        )
+
+        outcome = core.process_channel_turn(
+            ChannelEnvelope(
+                event=EventEnvelope(
+                    event_kind="user.message",
+                    source_kind="channel",
+                    payload={"text": "hello"},
+                ),
+                endpoint=endpoint.endpoint,
+                response_handle=ResponseHandle(endpoint_id="stdio"),
+            )
+        )
+
+        channel_runtime.sync_endpoints()
+        self.assertIn("without producing a final answer", outcome.final_reply)
+        self.assertIn(
+            ("stdio", "text", outcome.final_reply),
+            endpoint.streamed,
+        )
+        self.assertIn(("stdio", "done", "fallback"), endpoint.streamed)
+        self.assertFalse(endpoint.sent)
 
     def test_turn_runtime_uses_response_mode_to_coarsely_tune_temperature(self) -> None:
         core = PalCore()
@@ -3096,19 +3157,20 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for kind, request in scripted_llm.requests
             if kind in {"generate", "astream"}
         ][2]
-        self.assertFalse(
-            any(message.role.value == "tool" for message in second_request.messages)
-        )
-        self.assertFalse(
-            any(message.tool_calls for message in second_request.messages)
-        )
-        closed_history = next(
+        closed_call = next(
             message
             for message in second_request.messages
-            if "<closed_tool_interaction>" in message.text
+            if message.role.value == "assistant" and message.tool_calls
         )
-        self.assertIn("first turn", closed_history.text)
-        self.assertNotIn("ephemeral provider reasoning", closed_history.text)
+        closed_result = next(
+            message
+            for message in second_request.messages
+            if message.role.value == "tool"
+        )
+        self.assertEqual(closed_call.tool_calls[0].args["value"], "first turn")
+        self.assertIn("full result retired", closed_result.text)
+        self.assertNotIn("stable-result", closed_result.text)
+        self.assertNotIn("ephemeral provider reasoning", closed_call.reasoning_text)
         self.assertNotIn(
             "ephemeral provider reasoning",
             json.dumps(
@@ -3303,10 +3365,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
         self.assertEqual(generate_requests[-1].tools, ())
-        self.assertIn("Finalization Directive", generate_requests[-1].messages[0].text)
-        self.assertLess(
-            generate_requests[-1].messages[0].text.index("<operating_rules>"),
-            generate_requests[-1].messages[0].text.index("<runtime_overlay>"),
+        self.assertIn("<operating_rules>", generate_requests[-1].messages[0].text)
+        self.assertIn("Finalization Directive", generate_requests[-1].messages[-1].text)
+        self.assertEqual(
+            generate_requests[-1].messages[-1].prompt_region.value,
+            "active_dynamic",
         )
         self.assertIn("stopped the tool loop", outcome.final_reply.lower())
 
@@ -3809,11 +3872,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         transcript = service.l1_store.items[0]
 
-        self.assertEqual([item.role for item in transcript], ["assistant", "tool"])
+        self.assertEqual([item.role for item in transcript], ["assistant", "tool", "assistant"])
         self.assertEqual(transcript[0].content, "")
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[0].payload, {})
         self.assertEqual(transcript[1].tool_call_id, "call_1")
+        self.assertIn("closed without a further assistant reply", transcript[2].content)
 
     def test_l1_commit_rejects_orphan_tool_result(self) -> None:
         service = MemoryService()
@@ -3956,7 +4020,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(protocol_messages[0].tool_calls)
         self.assertFalse(protocol_messages[0].replay)
         self.assertIn("probe_tool", protocol_messages[0].text)
-        self.assertIn("probe result", protocol_messages[0].text)
+        self.assertNotIn("probe result", protocol_messages[0].text)
+        self.assertIn("full result retired", protocol_messages[0].text)
         self.assertNotIn("inspect the probe", protocol_messages[0].text)
 
     def test_memory_prompt_trusts_orphan_tool_result_history_without_revalidating(self) -> None:
@@ -4088,6 +4153,54 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("Test user profile:", remembered_facts.content)
         self.assertNotIn("origin available", remembered_facts.content)
         self.assertNotIn("The test user built Pal again.", remembered_facts.content)
+
+    def test_typed_l1_projection_keeps_summary_and_recalled_memory(self) -> None:
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+
+        pack = MemoryPack(
+            l1_recent_context=[
+                L1TranscriptMessage(role="user", content="legacy duplicate L1")
+            ],
+            current_summary=L2Entry(
+                entry_id="memory_summary_current",
+                kind="summary",
+                scope="conversation",
+                title="Conversation summary",
+                summary="Prior conversation summary.",
+                rendered="Prior conversation summary.",
+            ),
+            l2_working_memory=[
+                L2Entry(
+                    entry_id="fact:typed",
+                    kind="fact",
+                    scope="system",
+                    title="Typed memory",
+                    summary="Typed projection still needs this memory.",
+                    rendered="Typed projection still needs this memory.",
+                    source_ref="fact:typed",
+                    source_kind="l3_recall",
+                )
+            ],
+        )
+
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(
+            PromptAssemblyContext(
+                metadata={
+                    "memory_pack": pack,
+                    "typed_l1_projection": True,
+                }
+            )
+        )
+
+        block_ids = {
+            str(fragment.metadata.get("block_id") or "")
+            for fragment in fragments
+        }
+        self.assertFalse(
+            any(block_id.startswith("l1_recent_context") for block_id in block_ids)
+        )
+        self.assertIn("memory_current_summary", block_ids)
+        self.assertIn("memory_recalled_context", block_ids)
 
     def test_memory_query_defaults_to_summary_view_enum(self) -> None:
         self.assertEqual(MemoryQuery().view, L3RecallView.SUMMARY)

@@ -308,7 +308,6 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_catalog",
         action_name="read",
-        description="Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed.",
         guidance=ToolGuidance(
             purpose="Read the effective Minion profile/family catalog from the sidecar.",
             use_when="Checking available Minion profiles and families before starting a workflow.",
@@ -340,7 +339,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="set_profile_override",
-        description="Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks.",
         guidance=ToolGuidance(
             purpose="Patch one Minion profile override in the sidecar.",
             use_when="Customizing a profile (e.g. changing model, constraints, or instructions) for future Tasks.",
@@ -371,7 +369,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="reset_profile_override",
-        description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
         guidance=ToolGuidance(
             purpose="Remove one profile override and restore the package builtin.",
             use_when="Reverting a profile customization back to defaults.",
@@ -397,7 +394,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="set_family_override",
-        description="Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Four role bindings and profile availability are validated before the override becomes visible to future Tasks.",
         guidance=ToolGuidance(
             purpose="Patch one Minion family override in the sidecar.",
             use_when="Customizing role bindings or profile availability for a family.",
@@ -423,7 +419,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="reset_family_override",
-        description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
         guidance=ToolGuidance(
             purpose="Remove one family override and restore the package builtin.",
             use_when="Reverting a family customization back to defaults.",
@@ -449,7 +444,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="refresh",
-        description="Ask the attached Minion sidecar to reload package builtins, validate explicit overrides, and return the new effective catalog generation. The Pal process does not read or modify Minion catalog files.",
         guidance=ToolGuidance(
             purpose="Reload Minion package builtins and validate overrides.",
             use_when="After upgrading the Minion package or when catalog changes are not reflected.",
@@ -472,7 +466,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="start_workflow",
-        description=MINION_START_WORKFLOW_PURPOSE,
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
         aliases=("minion_start_workflow",),
         guidance=MINION_START_WORKFLOW_GUIDANCE,
@@ -512,7 +505,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="submit_artifact",
-        description="Publish a durable artifact under a natural-language name.",
         guidance=ToolGuidance(
             purpose="Publish a durable artifact under a natural-language name for the current actor.",
             use_when="When the user has a named architecture or design to reference in later workflow calls.",
@@ -544,7 +536,6 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_task",
         action_name="search",
-        description="Search the durable Minion V2 Task Ledger for the current actor.",
         guidance=ToolGuidance(
             purpose="Search the durable Minion V2 Task Ledger for the current actor.",
             use_when="Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks.",
@@ -599,7 +590,6 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_task",
         action_name="status",
-        description="Read a Task by title and attach its current workflow state.",
         guidance=ToolGuidance(
             purpose="Read a Task by natural-language title, then mechanically attach its single current workflow when one exists.",
             use_when=(
@@ -645,7 +635,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="resume_workflow",
-        description="Resume a paused workflow or normalize orphaned work into triage items.",
         guidance=ToolGuidance(
             purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
             use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
@@ -682,7 +671,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="restart_execution",
-        description="Restart execution from the accepted architecture without rerunning Architect.",
         guidance=ToolGuidance(
             purpose="Discard the current execution attempt and restart from its accepted architecture.",
             use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
@@ -720,7 +708,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="resolve_triage",
-        description="Mark one TRIAGE_REQUIRED workflow item as manually handled.",
         guidance=ToolGuidance(
             purpose="Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it.",
             use_when="After the blocker has actually been addressed. Copy the exact semantic subject from workflow status (e.g. module:ohos_font).",
@@ -759,7 +746,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="submit_human_decision",
-        description="Submit Accept/Edit/Reject for an architecture review.",
         guidance=ToolGuidance(
             purpose="Submit Accept/Edit/Reject for an architecture review.",
             use_when="When an inline review card is unavailable and the user needs to decide manually.",
@@ -803,11 +789,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="rebind_task_delivery",
-        description=(
-            "Change only where future notifications for one Task are delivered. The Manager keeps the Task, workflow, "
-            "workers, graph, and review state unchanged. Use this when the user explicitly asks to receive a running "
-            "Task's questions, review cards, or completion on another enabled channel endpoint."
-        ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRebindTaskDeliveryInput,
         aliases=("minion_rebind_task_delivery",),
         guidance=ToolGuidance(
@@ -849,7 +830,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="answer_question",
-        description="Answer the pending Architect question for a Task with custom free text.",
         guidance=ToolGuidance(
             purpose="Answer the single pending Architect question for the named Task.",
             use_when="When the user's response is not one of the inline options.",
@@ -889,7 +869,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="control_workflow",
-        description="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles.",
         guidance=ToolGuidance(
             purpose="Request asynchronous pause or cancel for a V2 workflow.",
             use_when="The user wants to stop a running workflow.",
@@ -928,7 +907,6 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="archive_workflow",
-        description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
         guidance=ToolGuidance(
             purpose="Archive a terminal V2 workflow.",
             use_when="Cleaning up a completed or cancelled workflow from the active task list.",

@@ -13,7 +13,7 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, ToolResultLifecycle
 from pal.memory.turn_ir import L1TurnProtocolError, L1TurnState, L1TurnStore
 
 
@@ -48,6 +48,46 @@ class L1TurnIRTests(unittest.TestCase):
         self.assertFalse(turn.pending_call_ids)
         with self.assertRaises(L1TurnProtocolError):
             turn.append_tool_result(ToolResultIR("call-1", "read", "late"))
+
+    def test_settlement_retires_full_result_but_keeps_temporary_pager_receipt(self) -> None:
+        turn = L1TurnStore().begin("turn-1", user_text="inspect")
+        turn = turn.append(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (new_tool_call("call-1", "read_file", {"path": "large.txt"}),),
+            )
+        )
+        turn = turn.append_tool_result(
+            ToolResultIR(
+                "call-1",
+                "read_file",
+                "sensitive full result",
+                structured={"full": "payload"},
+                context_delivery={"source": "large.txt"},
+                replay_result_ref="pager-1",
+                visible_source_ranges=((0, 20),),
+            )
+        )
+
+        settled = turn.settle()
+        result = next(
+            part
+            for message in settled.messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        )
+
+        self.assertEqual(result.lifecycle, ToolResultLifecycle.RETIRED)
+        self.assertNotIn("sensitive full result", result.content)
+        self.assertEqual(result.replay_result_ref, "pager-1")
+        self.assertIn("read_tool_result", result.content)
+        self.assertIsNone(result.context_delivery)
+        self.assertEqual(result.visible_source_ranges, ())
+        self.assertEqual(settled.messages[-1].role, MessageRole.ASSISTANT)
+        self.assertEqual(
+            settled.messages[-1].semantic_kind,
+            "runtime_generated_closure",
+        )
 
     def test_interruption_drops_unpaired_call_and_rejects_late_result(self) -> None:
         store = L1TurnStore()

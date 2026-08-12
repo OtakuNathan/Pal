@@ -7,7 +7,7 @@ from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from pal.control import interactions as control_interactions
@@ -195,7 +195,14 @@ class TurnManager:
             close = getattr(memory_service, "interrupt_l1_turn", None)
             if callable(close):
                 try:
-                    close(continuation.turn_id, reason=reason)
+                    close(
+                        continuation.turn_id,
+                        reason=reason,
+                        after_commit=self._l1_result_retirement_callback(
+                            memory_service,
+                            continuation.turn_id,
+                        ),
+                    )
                 except Exception:
                     pass
         self.guard.clear(turn_id)
@@ -228,7 +235,14 @@ class TurnManager:
         if not callable(method):
             return
         try:
-            value = method(continuation.turn_id, reason=reason)
+            value = method(
+                continuation.turn_id,
+                reason=reason,
+                after_commit=self._l1_result_retirement_callback(
+                    memory_service,
+                    continuation.turn_id,
+                ),
+            )
             if inspect.isawaitable(value):
                 await value
         except Exception as exc:
@@ -239,6 +253,24 @@ class TurnManager:
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
+
+    def _l1_result_retirement_callback(
+        self,
+        memory_service: Any,
+        turn_id: str,
+    ) -> Callable[[], None] | None:
+        active = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(
+            turn_id
+        )
+        result_ids = TurnExecutor._tool_result_ids(active)
+        retire = getattr(
+            getattr(self.context, "execution_runtime", None),
+            "retire_tool_results",
+            None,
+        )
+        if not result_ids or not callable(retire):
+            return None
+        return lambda: retire(turn_id=turn_id, result_ids=result_ids)
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -1957,6 +1989,14 @@ class PalCore:
         event: EventEnvelope | None = None,
     ) -> None:
         result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
+        if (
+            self.context.port_registry.get("memory:memory") is not None
+            and str(getattr(result, "state", "")) != "settled"
+        ):
+            raise RuntimeError(
+                "Pal L1 working-set settlement failed; refusing to complete "
+                "the logical turn"
+            )
         if (
             str(getattr(result, "state", "")) == "settled"
             and event is not None

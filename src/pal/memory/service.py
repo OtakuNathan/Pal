@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.tool_protocol import (
+    ToolCallIR,
+    ToolResultIR,
+    ToolResultLifecycle,
+)
 
 from pal.shared.tool_protocol import new_tool_call
 
@@ -392,22 +396,63 @@ class MemoryService(MemoryServicePort):
                 return previous
         raise L1TurnProtocolError(f"unknown L1 turn: {turn_id}")
 
-    def settle_l1_turn(self, turn_id: str) -> L1TurnIR:
-        current = self.l1_store.active(turn_id)
-        updated = current.settle()
-        self.l1_store.replace(updated)
-        return updated
+    def settle_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        after_commit: Callable[[], None] | None = None,
+    ) -> L1TurnIR:
+        return self._close_l1_turn_transactionally(
+            turn_id,
+            close=lambda current: current.settle(),
+            after_commit=after_commit,
+        )
 
-    def interrupt_l1_turn(self, turn_id: str, *, reason: str = "") -> L1TurnIR:
-        current = self.l1_store.active(turn_id)
-        updated = current.interrupt(reason=reason)
-        self.l1_store.replace(updated)
-        return updated
+    def interrupt_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        reason: str = "",
+        after_commit: Callable[[], None] | None = None,
+    ) -> L1TurnIR:
+        return self._close_l1_turn_transactionally(
+            turn_id,
+            close=lambda current: current.interrupt(reason=reason),
+            after_commit=after_commit,
+        )
 
-    def abort_l1_turn(self, turn_id: str, *, reason: str = "") -> L1TurnIR:
+    def abort_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        reason: str = "",
+        after_commit: Callable[[], None] | None = None,
+    ) -> L1TurnIR:
+        return self._close_l1_turn_transactionally(
+            turn_id,
+            close=lambda current: current.abort(reason=reason),
+            after_commit=after_commit,
+        )
+
+    def _close_l1_turn_transactionally(
+        self,
+        turn_id: str,
+        *,
+        close: Callable[[L1TurnIR], L1TurnIR],
+        after_commit: Callable[[], None] | None,
+    ) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
-        updated = current.abort(reason=reason)
+        updated = close(current)
         self.l1_store.replace(updated)
+        try:
+            if after_commit is not None:
+                after_commit()
+        except Exception:
+            for index, item in enumerate(self.l1_store.turns.turns):
+                if item.turn_id == current.turn_id:
+                    self.l1_store.turns.turns[index] = current
+                    break
+            raise
         return updated
 
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
@@ -543,6 +588,16 @@ class MemoryService(MemoryServicePort):
             for turn in self.l1_store.turns.turns
             if turn.state != L1TurnState.ACTIVE
         ]
+        settled_turns = [
+            turn
+            for turn in self.l1_store.turns.turns
+            if turn.state != L1TurnState.ACTIVE
+            and not (
+                active_input_id
+                and str(turn.metadata.get("_pal_input_id") or "").strip()
+                == active_input_id
+            )
+        ]
         l1_recent_context = [
             message
             for message in flatten_l1_context(valid_l1_items)
@@ -559,6 +614,7 @@ class MemoryService(MemoryServicePort):
         ]
         return MemoryPack(
             l1_recent_context=l1_recent_context,
+            l1_turns=settled_turns,
             current_summary=current_summary,
             l2_working_memory=hot_entries,
             metadata={
@@ -840,6 +896,12 @@ def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -
                             or "ok"
                         ),
                         structured=result_state or None,
+                        replay_result_ref=str(
+                            result_state.get("replay_result_ref") or ""
+                        ),
+                        lifecycle=ToolResultLifecycle(
+                            str(result_state.get("lifecycle") or "active")
+                        ),
                     )
                 )
         messages.append(
@@ -886,6 +948,8 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
                 "ok": bool(result.ok),
                 "kind": str(structured.get("kind") or result.status or "ok"),
                 "effect": str(structured.get("effect") or ""),
+                "lifecycle": result.lifecycle.value,
+                "replay_result_ref": result.replay_result_ref,
             }
             transcript.append(
                 L1TranscriptMessage(

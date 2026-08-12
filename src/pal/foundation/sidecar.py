@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import os
 import socket
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -226,6 +227,105 @@ class SidecarRpcClient:
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return run_blocking(self.request(method, params))
 
+    def stream_sync(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> "SidecarSyncStream":
+        return SidecarSyncStream(
+            endpoint=self.endpoint,
+            method=method,
+            params=dict(params or {}),
+            timeout_seconds=self.request_timeout_seconds,
+            unix_only=self.unix_only,
+        )
+
+
+class SidecarSyncStream:
+    """Blocking stream iterator whose socket can be closed from another thread."""
+
+    def __init__(
+        self,
+        *,
+        endpoint: SidecarEndpoint,
+        method: str,
+        params: dict[str, Any],
+        timeout_seconds: float,
+        unix_only: bool = False,
+    ) -> None:
+        self._request_id = str(uuid4())
+        self._method = str(method)
+        self._socket = _open_sidecar_socket_sync(endpoint, unix_only=unix_only)
+        self._socket.settimeout(max(float(timeout_seconds), 0.001))
+        self._stream = self._socket.makefile("rb")
+        self._closed = False
+        self._lock = threading.RLock()
+        self._socket.sendall(
+            pack_sidecar_message(
+                {
+                    "type": "request",
+                    "id": self._request_id,
+                    "method": self._method,
+                    "params": dict(params),
+                    "stream": True,
+                }
+            )
+        )
+
+    def __iter__(self) -> "SidecarSyncStream":
+        return self
+
+    def __next__(self) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise StopIteration
+            stream = self._stream
+        try:
+            response = read_sidecar_message_sync(stream)
+        except (EOFError, OSError, ValueError, socket.timeout) as exc:
+            self.close()
+            raise SidecarRpcError(
+                f"sidecar stream failed while waiting for {self._method}: {exc}",
+                kind="timeout" if isinstance(exc, socket.timeout) else "transport",
+                payload={"method": self._method},
+            ) from exc
+        if str(response.get("id") or "") != self._request_id:
+            self.close()
+            raise SidecarRpcError(
+                "sidecar returned mismatched stream request id",
+                payload=response,
+            )
+        frame_type = str(response.get("type") or "")
+        if frame_type == "stream_item":
+            if not bool(response.get("ok")):
+                self.close()
+                raise _sidecar_error_from_response(response)
+            return dict(response.get("result") or {})
+        if frame_type == "stream_end":
+            self.close()
+            if not bool(response.get("ok")):
+                raise _sidecar_error_from_response(response)
+            raise StopIteration
+        self.close()
+        raise SidecarRpcError(
+            f"sidecar returned unexpected stream frame: {frame_type or '<missing>'}",
+            payload=response,
+        )
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream = self._stream
+            sock = self._socket
+        with contextlib.suppress(Exception):
+            sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(Exception):
+            stream.close()
+        with contextlib.suppress(Exception):
+            sock.close()
+
 
 def _sidecar_error_from_response(response: dict[str, Any]) -> SidecarRpcError:
     error = dict(response.get("error") or {})
@@ -247,6 +347,28 @@ def run_blocking(awaitable):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, awaitable).result()
+
+
+def _open_sidecar_socket_sync(
+    endpoint: SidecarEndpoint,
+    *,
+    unix_only: bool = False,
+) -> socket.socket:
+    if not unix_only and endpoint.port_path.exists():
+        port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
+        return socket.create_connection(("127.0.0.1", int(port_text)))
+    if not hasattr(socket, "AF_UNIX"):
+        raise SidecarRpcError(
+            "Unix sidecar transport is unavailable",
+            kind="transport",
+        )
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(str(endpoint.socket_path))
+    except Exception:
+        sock.close()
+        raise
+    return sock
 
 
 async def open_sidecar_connection(

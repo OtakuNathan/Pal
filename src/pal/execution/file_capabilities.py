@@ -14,13 +14,8 @@ from pal.execution.generated_tool_models import (
     ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
     ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import NextToolHint, ToolGuidance
 
-from pal.execution.file_tool_contracts import (
-    FILE_EDIT_DESCRIPTION,
-    FILE_READ_DESCRIPTION,
-    FILE_WRITE_DESCRIPTION,
-)
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import (
     FileReadTool,
@@ -40,7 +35,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
+from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, capability_action
 
 
 FILE_READ_GUIDANCE = ToolGuidance(
@@ -61,6 +56,16 @@ FILE_READ_GUIDANCE = ToolGuidance(
         "For FILE_NOT_FOUND or NOT_A_FILE, correct the path and use run_shell with rg --files or a bounded listing if "
         "discovery is needed. For INVALID_ARGUMENT, correct offset/limit. For UNSUPPORTED_TEXT_ENCODING, do not retry "
         "as text; use the appropriate artifact or binary workflow."
+    ),
+    next_tool_hints=(
+        NextToolHint(
+            name="edit_file",
+            use_when="The affected lines are visible and a focused exact replacement is required.",
+        ),
+        NextToolHint(
+            name="write_file",
+            use_when="A new text file is needed, or a fully-read existing file must be replaced completely.",
+        ),
     ),
 )
 
@@ -181,7 +186,6 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="read",
-        description=FILE_READ_DESCRIPTION,
         guidance=FILE_READ_GUIDANCE,
         aliases=("read_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
@@ -210,12 +214,11 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="edit",
-        description=FILE_EDIT_DESCRIPTION,
         guidance=FILE_EDIT_GUIDANCE,
         aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
-        execution=DIRECT_LOCAL_WRITE,
+        execution=INDIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -232,7 +235,6 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="write",
-        description=FILE_WRITE_DESCRIPTION,
         guidance=FILE_WRITE_GUIDANCE,
         aliases=("write_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
@@ -254,7 +256,6 @@ class FileCapabilityMixin:
         scope="module",
         family="path",
         action_name="delete",
-        description="Delete a file or directory at the given path.",
         guidance=ToolGuidance(
             purpose="Delete a file or directory at the given path.",
             use_when="Removing unwanted files or directories from the filesystem.",
@@ -275,7 +276,6 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="state",
-        description="Inspect the read-before-edit file cache. Use this to check whether a file has a current cached read snapshot before edit_file.",
         guidance=ToolGuidance(
             purpose="Inspect the read-before-edit file cache.",
             use_when="Checking whether a file has a current cached read snapshot before edit_file, or debugging stale-edit detection.",

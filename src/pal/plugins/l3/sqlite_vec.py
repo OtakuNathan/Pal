@@ -42,7 +42,6 @@ from pal.memory.repository import (
     MemoryDurableRepository,
     cosine_similarity,
     deserialize_vector,
-    normalize_topic,
     parse_iso_timestamp,
     serialize_vector,
 )
@@ -241,7 +240,7 @@ class SQLiteVecL3Plugin:
         )
         return inventory
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show",
         guidance=ToolGuidance(
             purpose="Show sqlite-vec memory provider state.",
             use_when="Diagnosing the sqlite memory backend — record count, index status, embedding model.",
@@ -258,7 +257,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("SQLite vec memory provider", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory",
         guidance=ToolGuidance(
             purpose="Inspect sqlite-vec memory inventory and index status.",
             use_when="Checking memory record counts, embedding coverage, or index health.",
@@ -280,7 +279,6 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="recall",
         action_name="recall",
-        description="Recall durable memory records by searching against the source-of-truth text.",
         guidance=ToolGuidance(
             purpose="Recall durable memory records by searching against the source-of-truth text.",
             use_when="Diagnosing the sqlite provider directly. For errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging, prefer kind='case' with concrete error, symptom, and fix terms.",
@@ -328,7 +326,6 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="commit",
         action_name="write",
-        description="Commit a durable memory record.",
         guidance=ToolGuidance(
             purpose="Commit a durable memory record.",
             use_when="Testing or operating the sqlite provider directly. summary is prompt-ready text; search_text is retrieval source text. For kind=case, provide STAR situation, task, action, and result fields.",
@@ -397,7 +394,6 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="correct",
         action_name="update",
-        description="Update an existing durable memory record. Only provided fields will be updated. search_text: updated source of truth for retrieval indexing.",
         guidance=ToolGuidance(
             purpose="Update a memory record in the sqlite backend.",
             use_when="Correcting or superseding a stored memory record at the provider level.",
@@ -449,7 +445,6 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="delete",
         action_name="delete",
-        description="Delete one durable memory record by exact mem_ref.",
         guidance=ToolGuidance(
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
@@ -477,7 +472,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach the sqlite-vec memory provider.",
             use_when="Reconnecting a detached memory backend.",
@@ -494,7 +489,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach the sqlite-vec memory provider.",
             use_when="Temporarily disconnecting the memory backend.",
@@ -516,7 +511,6 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="maintenance",
         action_name="refresh_indexes",
-        description="Refresh provider indexes and embedding state",
         guidance=ToolGuidance(
             purpose="Refresh sqlite-vec indexes and embedding state.",
             use_when="After bulk data changes or when search results seem stale.",

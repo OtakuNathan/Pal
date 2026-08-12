@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import signal
-from collections.abc import AsyncIterator
+import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,7 +18,17 @@ from pal.execution import CapabilityCall
 from pal.foundation import utc_now
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message
-from pal.llm.runtime import scoped_llm_event_sink
+from pal.llm.credentials import LLMCredentialResolver
+from pal.llm.endpoint_spec import endpoint_spec_fingerprint
+from pal.llm.ir import LLMUsageIR, WireShape
+from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.secret_store import EncryptedFileSecretStore
+from pal.llm.transport import (
+    DirectSDKTransport,
+    EncodedTransportRequest,
+    StreamControl,
+)
+from pal.llm.usage import LLMUsageLedger
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.config import effective_minion_runtime_config
 from pal.minion.event_delivery import MinionEventDelivery
@@ -23,13 +37,6 @@ from pal.minion.ipc import (
     cleanup_role_gateway_endpoint,
     start_manager_server,
     start_role_gateway_server,
-)
-from pal.minion.llm_broker import (
-    llm_outcome_to_payload,
-    llm_request_from_payload,
-    preflight_advice_to_payload,
-    preflight_request_from_payload,
-    stream_update_to_payload,
 )
 from pal.minion.harnesses import MinionHarnessRegistry
 from pal.minion.web_broker import web_result_to_payload
@@ -40,6 +47,7 @@ from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
 from pal.minion.v2.role_gateway import RoleAssignmentGateway
 from pal.shared import MinionApprovalDecision, MinionInvocationPack, RuntimeStatus
+from pal.shared.json_values import thaw_json
 
 
 _DEFAULT_MAX_PARALLEL_NODES = 5
@@ -47,6 +55,135 @@ _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600.0
 _TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "killed", "timeout", "suspended", "interrupted"}
 )
+_LLM_TRANSPORT_REQUEST_TTL_SECONDS = 30.0 * 60.0
+_LLM_TRANSPORT_REQUEST_MAX_ENTRIES = 2048
+_LLM_TRANSPORT_MAX_TIMEOUT_SECONDS = 3900.0
+
+
+class _ManagerTransportError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "manager_transport",
+        provider_started: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.provider_started = bool(provider_started)
+
+
+@dataclass
+class _LLMTransportRequestState:
+    request_id: str
+    run_id: str
+    endpoint_id: str
+    model_id: str
+    provider: str
+    created_at: float = field(default_factory=time.monotonic)
+    provider_started: bool = False
+    transport_terminal: bool = False
+    usage_received: bool = False
+    receipt_fingerprint: str = ""
+
+
+def _next_transport_frame(iterator: Iterator[Any]) -> tuple[bool, Any]:
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None
+
+
+def _close_transport_iterator(iterator: Iterator[Any]) -> None:
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        with contextlib.suppress(Exception):
+            close()
+
+
+def _bounded_transport_timeout(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise _ManagerTransportError("LLM transport timeout must be numeric") from exc
+    if parsed <= 0 or parsed > _LLM_TRANSPORT_MAX_TIMEOUT_SECONDS:
+        raise _ManagerTransportError(
+            "LLM transport timeout must be within "
+            f"(0, {_LLM_TRANSPORT_MAX_TIMEOUT_SECONDS:g}]"
+        )
+    return parsed
+
+
+def _validate_transport_payload_authority(
+    endpoint: Any,
+    payload: Mapping[str, Any],
+    extra_body: Mapping[str, Any],
+) -> None:
+    if str(payload.get("model") or "").strip() != str(endpoint.model_id):
+        raise _ManagerTransportError(
+            "encoded LLM payload changed endpoint model identity"
+        )
+    if "extra_body" in payload:
+        raise _ManagerTransportError(
+            "encoded LLM payload must use the separate extra_body field"
+        )
+    protected = {
+        "model",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "max_tokens",
+        "stream",
+    }
+    overridden = sorted(protected.intersection(extra_body))
+    if overridden:
+        raise _ManagerTransportError(
+            f"encoded LLM extra_body overrides transport authority: {overridden}"
+        )
+    maximum = getattr(endpoint, "max_output_tokens", None)
+    if maximum is None:
+        return
+    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
+        if key not in payload:
+            continue
+        try:
+            requested = int(payload[key])
+        except (TypeError, ValueError) as exc:
+            raise _ManagerTransportError(
+                f"encoded LLM {key} must be an integer"
+            ) from exc
+        if requested <= 0 or requested > int(maximum):
+            raise _ManagerTransportError(
+                f"encoded LLM {key} exceeds endpoint output authority"
+            )
+
+
+def _normalize_usage_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    integer_fields = (
+        "input_tokens",
+        "uncached_input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+    )
+    for key in integer_fields:
+        try:
+            parsed = int(value.get(key, 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"LLM usage receipt {key} must be an integer") from exc
+        if parsed < 0:
+            raise ValueError(f"LLM usage receipt {key} must be non-negative")
+        normalized[key] = parsed
+    try:
+        cost = float(value.get("cost", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LLM usage receipt cost must be numeric") from exc
+    if cost < 0:
+        raise ValueError("LLM usage receipt cost must be non-negative")
+    normalized["cost"] = cost
+    normalized["reported"] = bool(value.get("reported", False))
+    return normalized
 
 
 def _pending_clarification_status(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -132,6 +269,7 @@ class MinionManager:
     runtime_root: Path
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("pal.minion.manager"))
     max_parallel_modules: int | None = None
+    runtime_db_path: Path | None = None
     graceful_shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
     server: asyncio.base_events.Server | None = None
     role_server: asyncio.base_events.Server | None = None
@@ -147,7 +285,22 @@ class MinionManager:
     v2_semantic_orchestrator: SemanticOrchestrator = field(init=False)
     role_gateway: RoleAssignmentGateway = field(init=False)
     harness_registry: MinionHarnessRegistry = field(init=False)
-    _host_broker_bundle: Any | None = field(default=None, init=False, repr=False)
+    _host_tool_bundle: Any | None = field(default=None, init=False, repr=False)
+    _llm_json_transport: DirectSDKTransport | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _llm_transport_requests: OrderedDict[str, _LLMTransportRequestState] = field(
+        default_factory=OrderedDict,
+        init=False,
+        repr=False,
+    )
+    _llm_usage_ledger: LLMUsageLedger = field(
+        default_factory=lambda: LLMUsageLedger(scope="minion_manager_transport"),
+        init=False,
+        repr=False,
+    )
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _v2_wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -160,6 +313,9 @@ class MinionManager:
     prompt_log_enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        self.runtime_root = Path(self.runtime_root)
+        if self.runtime_db_path is not None:
+            self.runtime_db_path = Path(self.runtime_db_path)
         self.catalog = MinionCatalogService(Path(self.runtime_root))
         self.catalog_bootstrap = self.catalog.bootstrap()
         config = effective_minion_runtime_config(Path(self.runtime_root))
@@ -176,6 +332,7 @@ class MinionManager:
             self.v2_service,
             harness_registry=self.harness_registry,
             max_parallel_workers=self.max_parallel_modules,
+            runtime_db_path=self.runtime_db_path,
             publish_human_review=self._publish_v2_human_review,
             publish_worker_event=self._publish_v2_worker_event,
             publish_workflow_event=self._publish_v2_workflow_event,
@@ -265,7 +422,7 @@ class MinionManager:
             from pal.behavior.models import BehaviorSkillModel
 
             self._skill_database = PalV2Database(
-                db_path=Path(self.runtime_root) / "pal.sqlite3",
+                db_path=self.runtime_db_path or Path(self.runtime_root) / "pal.sqlite3",
                 read_only=True,
             )
             self._skill_database.initialize((BehaviorSkillModel,))
@@ -302,7 +459,12 @@ class MinionManager:
                     await self.events.handle_subscription(request, reader, writer, shutdown_event=self._shutdown_event)
                     return
                 if bool(request.get("stream")):
-                    await self._serve_llm_stream_request(request, writer, worker=False)
+                    await self._serve_llm_stream_request(
+                        request,
+                        reader,
+                        writer,
+                        worker=False,
+                    )
                     return
                 writer.write(pack_sidecar_message(await self._dispatch(request)))
                 await writer.drain()
@@ -333,7 +495,12 @@ class MinionManager:
                 except asyncio.IncompleteReadError:
                     return
                 if bool(request.get("stream")):
-                    await self._serve_llm_stream_request(request, writer, worker=True)
+                    await self._serve_llm_stream_request(
+                        request,
+                        reader,
+                        writer,
+                        worker=True,
+                    )
                     return
                 writer.write(
                     pack_sidecar_message(
@@ -359,10 +526,7 @@ class MinionManager:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         broker_handlers = {
-            "llm_preflight": self.llm_broker_preflight,
-            "llm_generate": self.llm_broker_generate,
-            "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
-            "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
+            "llm_usage_receipt": self.llm_usage_receipt,
             "web_search": self.web_broker_search,
             "web_read": self.web_broker_read,
         }
@@ -373,10 +537,7 @@ class MinionManager:
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         handlers = {
-            "llm_preflight": self.llm_broker_preflight,
-            "llm_generate": self.llm_broker_generate,
-            "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
-            "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
+            "llm_usage_receipt": self.llm_usage_receipt,
             "refresh_llm_endpoints": self.refresh_llm_endpoints,
             "send_decision": self.send_decision,
             "send_clarification": self.send_clarification,
@@ -523,26 +684,48 @@ class MinionManager:
     async def _serve_llm_stream_request(
         self,
         request: dict[str, Any],
+        reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         *,
         worker: bool,
     ) -> None:
         request_id = str(request.get("id") or "")
         method = str(request.get("method") or "")
+        disconnect: asyncio.Task[bytes] | None = None
+        stream: AsyncIterator[dict[str, Any]] | None = None
         try:
-            if method != "llm_generate_stream":
+            if method != "llm_transport_stream":
                 raise ValueError(f"sidecar method is not streamable: {method}")
             params = dict(request.get("params") or {})
             if worker:
                 params = await self._authorize_worker_broker_params(params)
-            async for update in self.llm_broker_stream_updates(params):
+            stream = self.llm_transport_stream_frames(params).__aiter__()
+            disconnect = asyncio.create_task(reader.read(1))
+            while True:
+                advance = asyncio.create_task(anext(stream))
+                done, _ = await asyncio.wait(
+                    {advance, disconnect},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect in done:
+                    advance.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                        await advance
+                    return
+                try:
+                    item = advance.result()
+                except StopAsyncIteration:
+                    disconnect.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await disconnect
+                    break
                 writer.write(
                     pack_sidecar_message(
                         {
                             "type": "stream_item",
                             "id": request_id,
                             "ok": True,
-                            "result": {"update": stream_update_to_payload(update)},
+                            "result": dict(item),
                         }
                     )
                 )
@@ -560,10 +743,29 @@ class MinionManager:
                 "id": request_id,
                 "ok": False,
                 "error": {
-                    "kind": "role_gateway" if worker else "manager",
+                    "kind": str(
+                        getattr(
+                            exc,
+                            "kind",
+                            "role_gateway" if worker else "manager",
+                        )
+                    ),
                     "message": f"{exc.__class__.__name__}: {exc}",
+                    "provider_started": bool(
+                        getattr(exc, "provider_started", False)
+                    ),
                 },
             }
+        finally:
+            if disconnect is not None and not disconnect.done():
+                disconnect.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await disconnect
+            if stream is not None:
+                close = getattr(stream, "aclose", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        await close()
         writer.write(pack_sidecar_message(terminal))
         await writer.drain()
 
@@ -1048,87 +1250,269 @@ class MinionManager:
         )
         return result
 
-    async def llm_broker_preflight(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_broker_run(params)
-        advice = await (await self._llm_broker_runtime()).apreflight(
-            preflight_request_from_payload(dict(params.get("request") or {}))
-        )
-        return {"ok": True, "advice": preflight_advice_to_payload(advice)}
-
-    async def llm_broker_generate(self, params: dict[str, Any]) -> dict[str, Any]:
-        state = self._require_broker_run(params)
-        runtime = await self._llm_broker_runtime()
-        with scoped_llm_event_sink(self._llm_progress_sink(state)):
-            outcome = await runtime.agenerate(llm_request_from_payload(dict(params.get("request") or {})))
-        return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
-
-    async def llm_broker_stream_updates(
+    async def llm_transport_stream_frames(
         self,
         params: dict[str, Any],
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncIterator[dict[str, Any]]:
         state = self._require_broker_run(params)
-        runtime = await self._llm_broker_runtime()
-        request = llm_request_from_payload(dict(params.get("request") or {}))
-        stream = getattr(runtime, "astream", None)
-        if not callable(stream):
-            raise TypeError("manager LLM runtime does not implement astream")
-        iterator = stream(request).__aiter__()
-        progress_sink = self._llm_progress_sink(state)
+        endpoint = self._authorize_llm_transport_endpoint(state, params)
+        request_id = str(params.get("request_id") or "").strip()
+        if not request_id:
+            raise _ManagerTransportError("LLM transport request_id is required")
+        self._prune_llm_transport_requests()
+        if request_id in self._llm_transport_requests:
+            raise _ManagerTransportError(
+                f"LLM transport request_id was already used: {request_id}",
+                kind="request_replay",
+            )
+        timeout_seconds = _bounded_transport_timeout(params.get("timeout_seconds"))
+        payload = params.get("payload")
+        extra_body = params.get("extra_body")
+        if not isinstance(payload, Mapping) or not isinstance(extra_body, Mapping):
+            raise _ManagerTransportError("encoded LLM transport payload must be an object")
+        _validate_transport_payload_authority(endpoint, payload, extra_body)
+        record = _LLMTransportRequestState(
+            request_id=request_id,
+            run_id=state.run_id,
+            endpoint_id=str(endpoint.endpoint_id),
+            model_id=str(endpoint.model_id),
+            provider=str(endpoint.provider),
+        )
+        self._llm_transport_requests[request_id] = record
+        control = StreamControl()
+        iterator = self._manager_llm_json_transport().frames(
+            endpoint,
+            EncodedTransportRequest(
+                request_id=request_id,
+                wire_shape=WireShape(str(endpoint.wire_shape)),
+                timeout_seconds=timeout_seconds,
+                payload=dict(payload),
+                extra_body=dict(extra_body),
+                stream=bool(params.get("stream", True)),
+                stream_control=control,
+            ),
+        )
+        provider_announced = False
+        completed = False
+        next_frame: asyncio.Task[tuple[bool, Any]] | None = None
         try:
             while True:
-                try:
-                    # Do not hold a ContextVar token across the public yield.
-                    # A disconnected sidecar may close this generator from a
-                    # different asyncio Context; each source advancement is the
-                    # smallest context-local ownership boundary.
-                    with scoped_llm_event_sink(progress_sink):
-                        update = await anext(iterator)
-                except StopAsyncIteration:
+                next_frame = asyncio.create_task(
+                    asyncio.to_thread(_next_transport_frame, iterator)
+                )
+                while not next_frame.done():
+                    await asyncio.wait({next_frame}, timeout=0.05)
+                    if control.provider_started and not provider_announced:
+                        provider_announced = True
+                        record.provider_started = True
+                        yield {"event": "provider_started"}
+                has_frame, frame = await next_frame
+                if control.provider_started and not provider_announced:
+                    provider_announced = True
+                    record.provider_started = True
+                    yield {"event": "provider_started"}
+                if not has_frame:
+                    completed = True
                     return
-                yield update
+                yield {
+                    "frame": {
+                        "sequence": int(frame.sequence),
+                        "payload": thaw_json(frame.payload),
+                    }
+                }
+                next_frame = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            record.provider_started = bool(
+                record.provider_started or control.provider_started
+            )
+            raise _ManagerTransportError(
+                str(exc),
+                provider_started=record.provider_started,
+            ) from exc
         finally:
-            close = getattr(iterator, "aclose", None)
-            if callable(close):
-                with scoped_llm_event_sink(progress_sink):
-                    await close()
+            if not completed:
+                control.cancel("proxy_consumer_closed")
+            close_later = False
+            if next_frame is not None and not next_frame.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(next_frame),
+                        timeout=1.0,
+                    )
+                except TimeoutError:
+                    close_later = True
+                    next_frame.add_done_callback(
+                        lambda _future: _close_transport_iterator(iterator)
+                    )
+                except Exception:
+                    pass
+            if not close_later:
+                await asyncio.to_thread(_close_transport_iterator, iterator)
+            record.provider_started = bool(
+                record.provider_started or control.provider_started
+            )
+            record.transport_terminal = True
 
-    async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_broker_run(params)
-        runtime = await self._llm_broker_runtime()
-        value = await asyncio.to_thread(
-            runtime.resolve_max_output_tokens,
-            preferred_endpoint_id=str(params.get("preferred_endpoint_id") or "") or None,
-            preferred_endpoint_source=str(params.get("preferred_endpoint_source") or "") or None,
+    async def llm_usage_receipt(self, params: dict[str, Any]) -> dict[str, Any]:
+        state = self._require_broker_run(params)
+        self._prune_llm_transport_requests()
+        request_id = str(params.get("request_id") or "").strip()
+        record = self._llm_transport_requests.get(request_id)
+        if record is None or record.run_id != state.run_id:
+            raise KeyError(f"unknown LLM transport request receipt: {request_id}")
+        if not record.transport_terminal:
+            raise RuntimeError("LLM usage receipt arrived before transport terminal")
+        endpoint_id = str(params.get("endpoint_id") or "").strip()
+        if endpoint_id != record.endpoint_id:
+            raise PermissionError("LLM usage receipt changed endpoint identity")
+        usage_payload = params.get("usage")
+        if not isinstance(usage_payload, Mapping):
+            raise ValueError("LLM usage receipt has no usage object")
+        normalized_usage = _normalize_usage_receipt(usage_payload)
+        try:
+            provider_response_count = int(
+                params.get("provider_response_count") or 0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "LLM usage receipt provider_response_count must be an integer"
+            ) from exc
+        if provider_response_count < 1:
+            raise ValueError(
+                "LLM usage receipt provider_response_count must be positive"
+            )
+        receipt_payload = {
+            "request_id": request_id,
+            "endpoint_id": endpoint_id,
+            "model_id": str(params.get("model_id") or ""),
+            "provider": str(params.get("provider") or ""),
+            "provider_response_count": provider_response_count,
+            "usage": normalized_usage,
+        }
+        receipt_fingerprint = hashlib.sha256(
+            json.dumps(
+                receipt_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if record.usage_received:
+            if record.receipt_fingerprint != receipt_fingerprint:
+                raise ValueError("LLM usage receipt replay changed its payload")
+            return {"ok": True, "duplicate": True}
+        if receipt_payload["model_id"] != record.model_id:
+            raise ValueError("LLM usage receipt changed model identity")
+        if receipt_payload["provider"] != record.provider:
+            raise ValueError("LLM usage receipt changed provider identity")
+        self._llm_usage_ledger.record_success(
+            endpoint_id=record.endpoint_id,
+            model_id=record.model_id,
+            provider=record.provider,
+            usage=LLMUsageIR(**normalized_usage),
+            provider_response_count=receipt_payload["provider_response_count"],
         )
-        return {"ok": True, "max_output_tokens": value}
+        record.usage_received = True
+        record.receipt_fingerprint = receipt_fingerprint
+        return {"ok": True, "duplicate": False}
 
-    async def llm_broker_resolve_endpoint_facts(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_broker_run(params)
-        runtime = await self._llm_broker_runtime()
-        return await asyncio.to_thread(
-            runtime.resolve_endpoint_facts,
-            preferred_endpoint_id=str(params.get("preferred_endpoint_id") or "") or None,
-            preferred_endpoint_source=str(params.get("preferred_endpoint_source") or "") or None,
-        )
+    def _authorize_llm_transport_endpoint(
+        self,
+        state: MinionRunState,
+        params: Mapping[str, Any],
+    ) -> Any:
+        endpoint_id = str(params.get("endpoint_id") or "").strip()
+        if not endpoint_id:
+            raise _ManagerTransportError("LLM transport endpoint_id is required")
+        pack_metadata = dict(state.pack.metadata or {})
+        preferred = str(pack_metadata.get("preferred_endpoint_id") or "").strip()
+        if preferred and endpoint_id != preferred:
+            raise PermissionError(
+                f"role assignment does not allow LLM endpoint {endpoint_id}"
+            )
+        if not preferred:
+            active = str(
+                RuntimeSettingRepository().get_active_llm_endpoint_id() or ""
+            ).strip()
+            if active and endpoint_id != active:
+                raise _ManagerTransportError(
+                    "active LLM endpoint changed before provider start",
+                    kind="endpoint_spec_stale",
+                )
+        endpoint = LLMEndpointRepository().get(endpoint_id)
+        if endpoint is None or not bool(endpoint.enabled):
+            raise _ManagerTransportError(
+                f"LLM endpoint is unavailable: {endpoint_id}",
+                kind="endpoint_spec_stale",
+            )
+        requested_shape = str(params.get("wire_shape") or "").strip()
+        if requested_shape != str(endpoint.wire_shape):
+            raise _ManagerTransportError(
+                "LLM endpoint wire shape changed before provider start",
+                kind="endpoint_spec_stale",
+            )
+        requested_fingerprint = str(
+            params.get("endpoint_spec_fingerprint") or ""
+        ).strip()
+        if requested_fingerprint != endpoint_spec_fingerprint(endpoint):
+            raise _ManagerTransportError(
+                "LLM endpoint specification changed before provider start",
+                kind="endpoint_spec_stale",
+            )
+        return endpoint
+
+    def _manager_llm_json_transport(self) -> DirectSDKTransport:
+        if self._llm_json_transport is None:
+            credentials = LLMCredentialResolver(
+                secret_store=EncryptedFileSecretStore(
+                    secrets_path=str(Path(self.runtime_root) / "secrets.json")
+                )
+            )
+            self._llm_json_transport = DirectSDKTransport(
+                credential_resolver=credentials.resolve_api_key
+            )
+        return self._llm_json_transport
+
+    def _prune_llm_transport_requests(self) -> None:
+        now = time.monotonic()
+        for request_id, record in tuple(self._llm_transport_requests.items()):
+            if (
+                record.transport_terminal
+                and now - record.created_at > _LLM_TRANSPORT_REQUEST_TTL_SECONDS
+            ):
+                self._llm_transport_requests.pop(request_id, None)
+        while (
+            len(self._llm_transport_requests)
+            > _LLM_TRANSPORT_REQUEST_MAX_ENTRIES
+        ):
+            terminal_id = next(
+                (
+                    request_id
+                    for request_id, record in self._llm_transport_requests.items()
+                    if record.transport_terminal
+                ),
+                "",
+            )
+            if not terminal_id:
+                break
+            self._llm_transport_requests.pop(terminal_id, None)
 
     async def refresh_llm_endpoints(
         self,
         _params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Refresh the cached host broker runtime at Core's explicit boundary."""
+        """Retire transport clients; Minions refresh semantic state at safe points."""
 
-        bundle = self._host_broker_bundle
-        if bundle is None:
-            return {"ok": True, "runtime_loaded": False, "refreshed": False}
-        refresh = getattr(bundle.llm_runtime, "refresh_llm_endpoints", None)
-        if not callable(refresh):
-            raise TypeError("manager host LLM runtime does not support endpoint refresh")
-        payload = await asyncio.to_thread(refresh)
+        refreshed = self._llm_json_transport is not None
+        if self._llm_json_transport is not None:
+            await asyncio.to_thread(self._llm_json_transport.close)
+            self._llm_json_transport = None
         return {
             "ok": True,
-            "runtime_loaded": True,
-            "refreshed": True,
-            "runtime": dict(payload or {}),
+            "runtime_loaded": False,
+            "refreshed": refreshed,
         }
 
     def _require_broker_run(self, params: Mapping[str, Any]) -> MinionRunState:
@@ -1140,19 +1524,16 @@ class MinionManager:
             raise RuntimeError(f"minion run is terminal: {run_id}")
         return state
 
-    async def _llm_broker_runtime(self) -> Any:
-        return (await self._host_broker_runtime_bundle()).llm_runtime
-
-    async def _host_broker_runtime_bundle(self) -> Any:
-        if self._host_broker_bundle is None:
+    async def _host_tool_runtime_bundle(self) -> Any:
+        if self._host_tool_bundle is None:
             from pal.minion.runner import build_slim_minion_runtime
 
-            self._host_broker_bundle = await asyncio.to_thread(
+            self._host_tool_bundle = await asyncio.to_thread(
                 build_slim_minion_runtime,
                 self.runtime_root,
-                llm_authority="host",
+                llm_authority="none",
             )
-        return self._host_broker_bundle
+        return self._host_tool_bundle
 
     async def web_broker_search(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._web_broker_call(
@@ -1185,7 +1566,7 @@ class MinionManager:
             raise PermissionError(
                 f"role assignment does not allow {canonical_path}"
             )
-        bundle = await self._host_broker_runtime_bundle()
+        bundle = await self._host_tool_runtime_bundle()
         runtime = bundle.execution_runtime
         record = runtime.registry_generation.direct_aliases.get(alias)
         if record is None or record.canonical_path != canonical_path:
@@ -1205,26 +1586,14 @@ class MinionManager:
         )
         return {"ok": True, "result": web_result_to_payload(result)}
 
-    def _llm_progress_sink(self, state: MinionRunState):
-        loop = asyncio.get_running_loop()
-
-        def sink(event: dict[str, Any]) -> None:
-            loop.call_soon_threadsafe(
-                self.events.queue_event,
-                {
-                    "event_kind": "progress",
-                    "run_id": state.run_id,
-                    "minion_id": state.minion_id,
-                    "invocation_id": state.pack.invocation_id,
-                    "payload": dict(event),
-                    "created_at": utc_now(),
-                },
-            )
-
-        return sink
-
     def health(self) -> dict[str, Any]:
         active = [item for item in self.runs.values() if item.status not in _TERMINAL_RUN_STATUSES]
+        self._prune_llm_transport_requests()
+        usage_unreported = sum(
+            1
+            for item in self._llm_transport_requests.values()
+            if item.transport_terminal and not item.usage_received
+        )
         return {
             "ok": True,
             "health_source": "minion_v2_manager",
@@ -1240,6 +1609,9 @@ class MinionManager:
             "max_parallel_llm_nodes": self.max_parallel_modules,
             "prompt_log_enabled": self.prompt_log_enabled,
             "pending_event_count": len(self.event_queue),
+            "llm_transport_request_count": len(self._llm_transport_requests),
+            "llm_usage_unreported_count": usage_unreported,
+            "llm_usage": self._llm_usage_ledger.snapshot(),
             "event_subscriber_count": len(self.event_subscribers),
             "minion_db_path": str(self.v2_service.repository.db_path),
             "log_sink": current_service_log_sink_description(),
@@ -1372,11 +1744,14 @@ class MinionManager:
                 "manager shutdown retained active worker accounting: "
                 + ", ".join(sorted(active))
             )
-        if self._host_broker_bundle is not None:
-            close = getattr(self._host_broker_bundle, "close", None)
+        if self._host_tool_bundle is not None:
+            close = getattr(self._host_tool_bundle, "close", None)
             if callable(close):
                 await close()
-            self._host_broker_bundle = None
+            self._host_tool_bundle = None
+        if self._llm_json_transport is not None:
+            await asyncio.to_thread(self._llm_json_transport.close)
+            self._llm_json_transport = None
 
     def _install_signal_handlers(self):
         loop = asyncio.get_running_loop()

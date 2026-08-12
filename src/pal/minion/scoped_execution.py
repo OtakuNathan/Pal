@@ -13,7 +13,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,7 +45,6 @@ from pal.shared import ToolExecutionResult
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.tool_guidance import (
     minion_tool_guidance,
-    normalize_tool_guidance_patch,
     normalize_tool_guidance_overrides,
 )
 from pal.minion.tool_admission import (
@@ -135,17 +133,22 @@ class MinionScopedExecutionShellInput(
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_artifact_write": {
         "alias": "artifact_write",
-        "description": "Write the profile-declared structured output artifact. Architect roles edit the Manager-preseeded architect.yaml instead.",
+        "guidance": {
+            "purpose": "Write the profile-declared structured output artifact.",
+            "use_when": "The current role must create or replace its declared structured output artifact.",
+            "do_not_use_when": "Architect roles must edit the Manager-preseeded architect.yaml instead. Do not write undeclared outputs.",
+            "failure_next_steps": "Correct the declared artifact type, relative path, or complete content from the returned validation error.",
+        },
         "InputModel": MinionScopedExecutionOpMinionArtifactWriteInput,
     },
     "op_minion_artifact_edit": {
         "alias": "artifact_edit",
-        "description": (
-            "Append to or replace one existing profile output artifact. Supply relative_path, "
-            "the complete content to write, and operation=append|replace; set "
-            "create_if_missing=false when absence must be rejected. This tool does not accept "
-            "old_string/new_string exact-replacement arguments."
-        ),
+        "guidance": {
+            "purpose": "Append to or replace one existing profile output artifact.",
+            "use_when": "Supply relative_path, complete content, and operation=append|replace for a profile-owned output artifact.",
+            "do_not_use_when": "Do not use old_string/new_string exact replacement arguments or edit product source through this artifact tool.",
+            "failure_next_steps": "Correct the relative path, complete content, or create_if_missing policy from the returned validation error.",
+        },
         "InputModel": MinionScopedExecutionOpMinionArtifactEditInput,
         "examples": (
             {
@@ -225,7 +228,6 @@ def _workflow_capability(
     alias = str(spec.get("alias") or "").strip()
     if not alias:
         raise ValueError(f"workflow tool {name!r} must declare exactly one non-empty alias")
-    purpose = str(spec.get("description") or name).strip()
     effect_kind = _WORKFLOW_EFFECTS[name]
     mutating = effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
     idempotency = Idempotency(
@@ -277,26 +279,10 @@ def _workflow_capability(
         )
 
     raw_spec_guidance = spec.get("guidance")
-    spec_guidance = (
-        normalize_tool_guidance_patch(
-            raw_spec_guidance,
-            context=f"workflow tool {name!r} guidance",
-        )
-        if raw_spec_guidance is not None
-        else {}
-    )
-    base_guidance = ToolGuidance(
-        purpose=spec_guidance.get("purpose", purpose),
-        use_when=spec_guidance.get("use_when", purpose),
-        do_not_use_when=spec_guidance.get(
-            "do_not_use_when",
-            "Do not use outside your current assigned task and role.",
-        ),
-        failure_next_steps=spec_guidance.get(
-            "failure_next_steps",
-            "Correct invalid input; for execution failures inspect the recovery affordance before retrying.",
-        ),
-    )
+    if isinstance(raw_spec_guidance, ToolGuidance):
+        base_guidance = raw_spec_guidance
+    else:
+        base_guidance = ToolGuidance.model_validate(raw_spec_guidance, strict=True)
     guidance = minion_tool_guidance(
         name,
         base_guidance,
@@ -314,7 +300,6 @@ def _workflow_capability(
         name=alias,
         canonical_path=name,
         aliases=(alias,),
-        description=guidance.purpose,
         InputModel=input_model,
         OutputModel=_WorkflowToolOutput,
         guidance=guidance,
@@ -325,13 +310,17 @@ def _workflow_capability(
             retry_policy=retry_policy,
             paging=PagingMode.SUPPORTED,
         ),
-        search_text=f"{alias} {purpose}",
         examples=examples,
         module_id="workflow_scoped",
         family="workflow",
         source="workflow:scoped-worker",
         target_id=SINGLETON_TARGET,
-        metadata={"namespace": "operation", "scope": "workflow"},
+        metadata={
+            "namespace": "operation",
+            "scope": "workflow",
+            "allow_missing_next_tool_hints": True,
+            "scoped_projection": "minion",
+        },
     )
     action = BoundCapabilityAction(
         canonical_path=name,
@@ -607,6 +596,18 @@ class MinionScopedExecutionRuntime:
     def read_tool_result_page(self, **kwargs: Any) -> Any:
         return self.base_runtime.read_tool_result_page(**kwargs)
 
+    def advance_tool_result_clock(self, **kwargs: Any) -> Any:
+        advance = getattr(self._original_runtime, "advance_tool_result_clock", None)
+        return advance(**kwargs) if callable(advance) else None
+
+    def retire_tool_results(self, **kwargs: Any) -> tuple[str, ...]:
+        """Retire result-owned authority in the underlying role lifetime."""
+
+        retire = getattr(self._original_runtime, "retire_tool_results", None)
+        if not callable(retire):
+            return ()
+        return tuple(retire(**kwargs) or ())
+
     def reconcile_tool_context(self, **kwargs: Any) -> Any:
         reconcile = getattr(
             self._original_runtime,
@@ -875,19 +876,24 @@ def _scope_descriptor(
         if canonical == "op_exec_shell"
         else descriptor.InputModel
     )
-    guidance = descriptor.guidance
-    if guidance is not None:
-        guidance = minion_tool_guidance(
-            canonical,
-            guidance,
-            guidance_overrides.get(canonical),
-        )
-    purpose = str(guidance.purpose if guidance is not None else descriptor.description).strip()
+    guidance = minion_tool_guidance(
+        canonical,
+        descriptor.guidance,
+        guidance_overrides.get(canonical),
+    )
+    execution = descriptor.execution
+    if execution is not None:
+        execution = execution.model_copy(update={"invocation_mode": InvocationMode.DIRECT})
     return replace(
         descriptor,
-        description=purpose,
         InputModel=input_model,
         guidance=guidance,
+        execution=execution,
+        metadata={
+            **dict(descriptor.metadata or {}),
+            "allow_missing_next_tool_hints": True,
+            "scoped_projection": "minion",
+        },
     )
 
 
@@ -941,7 +947,7 @@ def _scrub_spec(spec: dict[str, Any]) -> dict[str, Any]:
     canonical = str(value.get("canonical_path") or value.get("name") or "")
     value["canonical_path"] = canonical
     value["name"] = str(value.get("name") or canonical).strip()
-    value["description"] = str(value.get("description") or "").strip()
+    value["guidance"] = dict(value.get("guidance") or {})
     return value
 
 

@@ -109,7 +109,13 @@ def proactive_turn_program(
             render_final_text=lambda outcome: str(outcome.text or "") if outcome is not None else "",
             build_commit_payload=build_commit_payload,
             max_output_tokens=max_output_tokens,
-            emit_mid_text=(lambda text: MailboxReplyEffect(text=text)) if emit_reply else None,
+            emit_mid_text=(
+                lambda text: MailboxReplyEffect(
+                    text=text,
+                    terminal=False,
+                    stream_companion=True,
+                )
+            ) if emit_reply else None,
             emit_final_text=(lambda text: MailboxReplyEffect(text=text)) if emit_reply else None,
         )
     )

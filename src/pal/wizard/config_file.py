@@ -7,6 +7,7 @@ from pathlib import Path
 DEFAULT_MEMORY_EMBEDDING_MODEL = "bge-m3"
 
 _MANAGED_MEMORY_KEYS = {
+    "keep_recent_tool_messages",
     "embedding_ollama_remote_base_url",
     "embedding_ollama_remote_base_urls",
     "embedding_ollama_model_name",

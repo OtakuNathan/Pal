@@ -86,6 +86,7 @@ class ChannelStreamUpdateKind(StrEnum):
     TEXT_DELTA = "text_delta"
     REASONING_DELTA = "reasoning_delta"
     TOOL_CALL = "op_tool_call"
+    PROGRESS = "progress"
     DONE = "done"
     ERROR = "error"
     COMPACT_REQUIRED = "compact_required"

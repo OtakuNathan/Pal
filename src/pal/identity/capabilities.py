@@ -44,7 +44,6 @@ class IdentityIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show identity state for read-only lookup",
         guidance=ToolGuidance(
             purpose="Show identity state — whether persona and preferences are configured.",
             use_when="Diagnosing identity configuration or checking if persona/preferences exist.",

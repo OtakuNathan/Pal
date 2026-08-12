@@ -10,12 +10,13 @@ import sys
 import sysconfig
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.encryption import ensure_runtime_snapshot_key
 from pal.foundation.sidecar import python_subprocess_env
 from pal.minion.ipc import (
+    MINION_RUNTIME_DB_PATH_ENV,
     ROLE_GATEWAY_TOKEN_ENV,
     minion_role_socket_path,
 )
@@ -59,7 +60,7 @@ class MinionSandboxSpec:
             "workspace_path": str(self.workspace_path or ""),
             "scratch_dir": str(self.scratch_dir or ""),
             "network": "isolated",
-            "secret_policy": "host_llm_broker",
+            "secret_policy": "manager_llm_transport",
         }
 
 
@@ -212,7 +213,16 @@ def build_sandboxed_runner_invocation(
             pack=pack,
             scratch_dir=sandbox.get("scratch_dir"),
         )
-        return _build_bwrap_invocation(runtime_root=runtime_root, pack=pack, sandbox=sandbox, argv=argv), final_env
+        return (
+            _build_bwrap_invocation(
+                runtime_root=runtime_root,
+                pack=pack,
+                sandbox=sandbox,
+                argv=argv,
+                env=final_env,
+            ),
+            final_env,
+        )
     if backend == "docker":
         raise RuntimeError("macOS Docker minion sandbox requires PAL_MINION_DOCKER_IMAGE; the Docker launcher is not wired yet")
     raise RuntimeError(f"unsupported minion sandbox backend: {backend or 'unknown'}")
@@ -431,6 +441,7 @@ def _build_bwrap_invocation(
     pack: MinionInvocationPack,
     sandbox: dict[str, Any],
     argv: list[str],
+    env: dict[str, str],
 ) -> list[str]:
     bwrap = shutil.which("bwrap")
     if not bwrap:
@@ -469,7 +480,7 @@ def _build_bwrap_invocation(
             args.extend(["--dir", str(host_path)])
             args.extend(["--ro-bind", str(host_path), str(host_path)])
     _append_dir_scaffold(args, Path(runtime_root))
-    _append_runtime_root_binds(args, Path(runtime_root), pack)
+    _append_runtime_root_binds(args, Path(runtime_root), pack, env=env)
     source_root = _pal_source_root()
     _append_bind_path(args, source_root, read_only=True)
     for python_path in _python_dependency_paths():
@@ -608,15 +619,27 @@ def _append_runtime_root_binds(
     args: list[str],
     runtime_root: Path,
     pack: MinionInvocationPack,
+    *,
+    env: Mapping[str, str],
 ) -> None:
     runtime_root = Path(runtime_root).expanduser()
     _append_dir_scaffold(args, runtime_root)
     snapshot_key = ensure_runtime_snapshot_key(runtime_root)
     _append_bind_path(args, snapshot_key, read_only=True)
-    for file_name in ("pal.sqlite3", "pal.sqlite3-shm", "pal.sqlite3-wal", "config.toml"):
-        path = runtime_root / file_name
+    configured_db_path = str(env.get(MINION_RUNTIME_DB_PATH_ENV) or "").strip()
+    database_path = (
+        Path(configured_db_path).expanduser()
+        if configured_db_path
+        else runtime_root / "pal.sqlite3"
+    )
+    for path in (
+        database_path,
+        Path(f"{database_path}-shm"),
+        Path(f"{database_path}-wal"),
+        runtime_root / "config.toml",
+    ):
         if path.exists():
-            args.extend(["--ro-bind", str(path), str(path)])
+            _append_bind_path(args, path, read_only=True)
     for dir_name in ("data/lsp", "plugins", "SKILL"):
         path = runtime_root / dir_name
         if path.exists():

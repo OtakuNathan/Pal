@@ -118,7 +118,6 @@ class _L3ProviderCapabilityMixin:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="show",
-        description="Show memory provider runtime state",
         guidance=ToolGuidance(
             purpose="Show stub memory provider runtime state.",
             use_when="Diagnosing the stub memory backend.",
@@ -141,7 +140,6 @@ class _L3ProviderCapabilityMixin:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="inventory",
-        description="Inspect memory provider inventory and index status",
         guidance=ToolGuidance(
             purpose="Inspect stub memory inventory.",
             use_when="Checking stub memory record counts.",
@@ -166,7 +164,6 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="recall",
         action_name="recall",
-        description="Recall durable memory records.",
         guidance=ToolGuidance(
             purpose="Recall durable memory records.",
             use_when="Testing provider-level recall behavior with the stub backend, including case queries with concrete error, symptom, and fix terms.",
@@ -213,7 +210,6 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="commit",
         action_name="write",
-        description="Commit durable memory",
         guidance=ToolGuidance(
             purpose="Commit a memory record to the stub backend.",
             use_when="Testing memory write paths with the stub provider.",
@@ -279,7 +275,6 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="correct",
         action_name="update",
-        description="Update durable memory",
         guidance=ToolGuidance(
             purpose="Update a memory record in the stub backend.",
             use_when="Testing memory update paths with the stub provider.",
@@ -331,7 +326,6 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="delete",
         action_name="delete",
-        description="Delete one durable memory record by exact mem_ref.",
         guidance=ToolGuidance(
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
@@ -358,7 +352,7 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach the stub memory provider.",
             use_when="Testing with the stub memory backend.",
@@ -375,7 +369,7 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach the stub memory provider.",
             use_when="Disconnecting the stub memory backend.",
@@ -397,7 +391,6 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="maintenance",
         action_name="refresh_indexes",
-        description="Refresh provider indexes and embedding state",
         guidance=ToolGuidance(
             purpose="Refresh stub provider indexes.",
             use_when="Testing refresh paths with the stub provider.",

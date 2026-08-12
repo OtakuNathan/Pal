@@ -85,7 +85,11 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
-from pal.minion.v2.role_protocol import RoleAssignmentRequest, RoleAssignmentState
+from pal.minion.v2.role_protocol import (
+    RoleAssignmentRequest,
+    RoleAssignmentState,
+    canonical_role_profile_parts,
+)
 from pal.minion.v2.role_protocol import stable_hash
 from pal.minion.v2.skeleton import ArchitectureWorkspace, architecture_revision_scope
 from pal.minion.v2.work_items import UPDATE_CHECKLIST_CAPABILITY
@@ -95,6 +99,7 @@ from pal.minion.v2.submission_drafts import (
 )
 from pal.minion.v2 import ActionEnvelope, AggregateType
 from pal.minion.v2.contracts import (
+    AggregateVersionConflict,
     AggregateSnapshot,
     DeferredEffectError,
     StaleFencingToken,
@@ -138,6 +143,57 @@ class _NoopSemanticEffects:
 
 
 class MinionV2WorkerIdentityTests(unittest.TestCase):
+    def test_general_profile_shorthand_expands_without_requiring_a_dot(self) -> None:
+        self.assertEqual(
+            canonical_role_profile_parts("architect"),
+            ("general", "architect"),
+        )
+        self.assertEqual(
+            canonical_role_profile_parts("software_engineering.v2_architect"),
+            ("software_engineering", "v2_architect"),
+        )
+
+    def test_general_profile_id_is_canonical_role_session_identity(self) -> None:
+        service = MinionV2WorkflowService(
+            Path(tempfile.mkdtemp(prefix="pal-v2-general-session-"))
+        )
+        session = service.repository.ensure_role_session(
+            session_id="inv-general-architect",
+            workflow_id="wf-general",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-general",
+            role="architect",
+            mode="author",
+            role_profile_id="architect",
+            family_binding_sha="a" * 64,
+            scope_kind="architecture_revision",
+            subject_key="arch-general",
+        )
+
+        self.assertEqual(session["role_profile_id"], "architect")
+        request = RoleAssignmentRequest(
+            assignment_key="general-architect-assignment",
+            session_id=session["session_id"],
+            workflow_id="wf-general",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
+            aggregate_id="arch-general",
+            role="architect",
+            mode="author",
+            role_profile_id="architect",
+            family_binding_sha="a" * 64,
+            input_fingerprint="input-general",
+            required_inputs=(),
+            input_refs={},
+            execution_spec={"effect_type": "admit_architect_role"},
+            submission_kind="architecture",
+        )
+        self.assertEqual(request.role_profile_id, "architect")
+
+        for malformed in ("general.architect", " architect", "team//architect"):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(ValueError, "must be canonical"):
+                    canonical_role_profile_parts(malformed)
+
     def test_workspace_holder_check_ignores_only_the_manager_snapshot_lock(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="pal-v2-holder-filter-"))
         self.addCleanup(shutil.rmtree, workspace, True)
@@ -1310,6 +1366,98 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 )
 
         asyncio.run(scenario())
+
+    def test_failure_before_assignment_triages_instead_of_stranding_running_state(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+            effect = {
+                "effect_id": "effect-startup-failure",
+                "effect_key": "effect-key-startup-failure",
+                "effect_type": "admit_architect_role",
+            }
+            settled: list[str] = []
+
+            def settle(value, error):
+                self.assertEqual(value, effect)
+                self.assertEqual(str(error), "profile binding failed")
+                settled.append("triage")
+                return {
+                    "provider_request_id": value["effect_key"],
+                    "status": "triage_required",
+                }
+
+            worker._settle_background_startup_failure = settle  # type: ignore[method-assign]
+
+            async def runner(_effect):
+                raise ValueError("profile binding failed")
+
+            result = await worker._background_worker_loop(effect, runner)
+
+            self.assertEqual(result["status"], "triage_required")
+            self.assertEqual(settled, ["triage"])
+
+        asyncio.run(scenario())
+
+    def test_startup_failure_settlement_records_role_failure_action(self) -> None:
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        snapshot = SimpleNamespace(
+            workflow_id="workflow-startup-failure",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="architecture-startup-failure",
+            state="ARCHITECT_RUNNING",
+            version=3,
+        )
+        actions: list[ActionEnvelope] = []
+        dispatch_attempts = 0
+        triaged: list[str] = []
+        released: list[str] = []
+        worker._effect_snapshot = lambda _effect: snapshot
+        worker.repository.engine.legal_actions = lambda *_args: {"ROLE_FAILED"}
+        worker.service.artifacts.put_json = lambda payload, **_kwargs: SimpleNamespace(
+            to_dict=lambda: {"sha256": "startup-failure-ref", "payload": payload}
+        )
+        worker.repository.transaction = lambda: contextlib.nullcontext("connection")
+        def dispatch(action, **_kwargs):
+            nonlocal dispatch_attempts
+            dispatch_attempts += 1
+            if dispatch_attempts == 1:
+                raise AggregateVersionConflict("concurrent aggregate update")
+            actions.append(action)
+
+        worker.repository.dispatch = dispatch
+        worker._require_cycle_triage = lambda _snapshot, **_kwargs: triaged.append(
+            _snapshot.aggregate_id
+        )
+        worker._release_background_business_lease = lambda effect: released.append(
+            str(effect["effect_key"])
+        )
+        effect = {
+            "effect_id": "effect-startup-failure",
+            "effect_key": "effect-key-startup-failure",
+            "effect_type": "admit_architect_role",
+        }
+
+        result = worker._settle_background_startup_failure(
+            effect,
+            ValueError("profile binding failed"),
+        )
+
+        self.assertEqual(result["status"], "triage_required")
+        self.assertEqual(actions[0].action_type, "ROLE_FAILED")
+        self.assertEqual(
+            actions[0].payload["blocker"],
+            {
+                "kind": "role_startup_failure",
+                "summary": "ValueError: profile binding failed",
+                "role": "architect",
+                "attempt_count": 1,
+            },
+        )
+        self.assertEqual(triaged, [snapshot.aggregate_id])
+        self.assertEqual(released, [effect["effect_key"]])
+        self.assertEqual(dispatch_attempts, 2)
 
     def test_post_settlement_telemetry_failure_does_not_reopen_business_work(self) -> None:
         async def scenario() -> None:
@@ -5070,6 +5218,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 }
             )
 
+        with self.assertRaisesRegex(ValueError, "requires delivery_binding"):
+            service.start_workflow(
+                {
+                    **base,
+                    "task_spec": {"objective": base["goal"]},
+                }
+            )
+
         self.assertEqual(
             service.repository.search_tasks(include_archived=True, limit=10),
             (),
@@ -7541,7 +7697,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "does not own"):
             asyncio.run(
                 manager._call_worker_method(
-                    "llm_resolve_max_output_tokens",
+                    "llm_usage_receipt",
                     {
                         "access_token": "assignment-token",
                         "run_id": "run-other",

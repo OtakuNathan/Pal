@@ -59,7 +59,6 @@ class ControlIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show control module status",
         guidance=ToolGuidance(
             purpose="Show control module status.",
             use_when="Diagnosing whether the control plane is mounted or in degraded mode.",
@@ -78,7 +77,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Re-attach control module — recover from degraded mode.",
             use_when="The control plane was degraded (via control_detach) and needs to resume normal operation.",
@@ -96,7 +95,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Degrade control module — enter degraded mode where the control plane stops active management.",
             use_when="Rarely needed. Only when explicitly instructed to put the control plane into degraded mode.",

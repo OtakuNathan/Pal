@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pal.channel import ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
@@ -21,6 +22,7 @@ from tests.runtime_channel_providers import telegram_endpoint_module
 _telegram_module = telegram_endpoint_module()
 TelegramChannelEndpoint = _telegram_module.TelegramChannelEndpoint
 _telegram_markdown = _telegram_module._telegram_markdown
+_telegram_text_segments = _telegram_module._telegram_text_segments
 
 
 class _AttachmentEndpoint(ChannelEndpointQueueBase):
@@ -224,9 +226,102 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Status:", rendered)
         self.assertIn("Detail:", rendered)
         self.assertIn("Core", rendered)
-        self.assertIn("\n  Status:", rendered)
-        self.assertIn("\n  Detail:", rendered)
+        self.assertIn("\nStatus:", rendered)
+        self.assertIn("\nDetail:", rendered)
         self.assertNotIn("OK; Detail", rendered)
+
+    def test_telegram_segments_split_by_utf16_units_and_preserve_entities(self) -> None:
+        import telegramify_markdown
+
+        text = ("😀" * 20) + "\n\nA **bold** paragraph with [a link](https://example.com)."
+
+        segments = _telegram_text_segments(text, limit=32)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(segment.parse_mode == "MarkdownV2" for segment in segments))
+        self.assertTrue(
+            all(
+                telegramify_markdown.utf16_len(segment.fallback_text) <= 32
+                for segment in segments
+            )
+        )
+        self.assertIn("*bold*", "".join(segment.rendered_text for segment in segments))
+
+    def test_telegram_segments_reopen_oversized_fenced_code_blocks(self) -> None:
+        import telegramify_markdown
+
+        text = "```python\n" + ("print('hello')\n" * 40) + "```"
+
+        segments = _telegram_text_segments(text, limit=64)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(
+            all(
+                telegramify_markdown.utf16_len(segment.fallback_text) <= 64
+                for segment in segments
+            )
+        )
+        code_segments = [segment for segment in segments if "```" in segment.rendered_text]
+        self.assertEqual(len(code_segments), len(segments))
+        self.assertTrue(all(segment.rendered_text.count("```") == 2 for segment in code_segments))
+
+    def test_telegram_segments_plain_fallback_is_utf16_safe(self) -> None:
+        import telegramify_markdown
+
+        text = "😀" * 40
+        with patch.object(telegramify_markdown, "convert", side_effect=RuntimeError("parser failed")):
+            segments = _telegram_text_segments(text, limit=32)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(segment.parse_mode is None for segment in segments))
+        self.assertTrue(
+            all(
+                telegramify_markdown.utf16_len(segment.fallback_text) <= 32
+                for segment in segments
+            )
+        )
+        self.assertEqual("".join(segment.fallback_text for segment in segments), text)
+
+    def test_telegram_segments_clamp_custom_limit_to_platform_maximum(self) -> None:
+        import telegramify_markdown
+
+        segments = _telegram_text_segments("😀" * 3000, limit=10000)
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(
+            all(
+                telegramify_markdown.utf16_len(segment.fallback_text) <= 4096
+                for segment in segments
+            )
+        )
+
+    def test_telegram_segments_preserve_complete_plain_projection_across_edge_cases(self) -> None:
+        import telegramify_markdown
+
+        samples = (
+            "# Heading\n\n" + ("A **bold and _nested_** paragraph.\n\n" * 20),
+            "> A quoted line with `inline code`.\n> " + ("continued text " * 30),
+            "- first item\n  - nested item\n- " + ("long final item " * 30),
+            "[short label](https://example.com/" + ("very-long-path/" * 100) + ")",
+            "Mixed 中文, accents café, and astral 😀🚀 characters. " * 30,
+        )
+        for limit in (16, 31, 64, 257):
+            for sample in samples:
+                normalized = _telegram_module._flatten_gfm_tables_for_telegram(sample).strip()
+                expected_plain, _ = telegramify_markdown.convert(normalized)
+
+                segments = _telegram_text_segments(sample, limit=limit)
+
+                self.assertEqual(
+                    "".join(segment.fallback_text for segment in segments).replace("\n", ""),
+                    expected_plain.replace("\n", ""),
+                )
+                self.assertTrue(
+                    all(
+                        telegramify_markdown.utf16_len(segment.fallback_text) <= limit
+                        for segment in segments
+                    )
+                )
 
     def test_send_attachment_is_indirect_and_discoverable(self) -> None:
         core, _, _ = self._build_core_with_channel()

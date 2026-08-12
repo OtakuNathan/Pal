@@ -434,7 +434,6 @@ class ShellExecCapabilityMixin:
         scope="module",
         family="exec",
         action_name="shell",
-        description=SHELL_EXEC_DESCRIPTION,
         aliases=("run_shell",),
         InputModel=ExecutionShellExecShellExecCapabilityMixinShellInput,
         OutputModel=ExecutionShellExecShellExecCapabilityMixinShellOutput,

@@ -17,6 +17,7 @@ from pal.control import ControlAction
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.minion.ipc import (
+    MINION_RUNTIME_DB_PATH_ENV,
     MinionManagerClient,
     minion_port_path,
     open_manager_connection,
@@ -53,6 +54,7 @@ class MinionManagerProvider:
     runtime_root: Path
     context: MainContext | None = None
     harness_registry: MinionHarnessRegistry | None = None
+    runtime_db_path: Path | None = None
     process: subprocess.Popen[bytes] | None = None
     last_health: dict[str, Any] = field(default_factory=dict)
     last_error: str = ""
@@ -79,6 +81,8 @@ class MinionManagerProvider:
 
     def __post_init__(self) -> None:
         self.runtime_root = Path(self.runtime_root)
+        if self.runtime_db_path is not None:
+            self.runtime_db_path = Path(self.runtime_db_path)
         self.client = MinionManagerClient(self.runtime_root)
         self._lifecycle_client = MinionManagerClient(self.runtime_root, request_timeout_seconds=5.0)
         if self.harness_registry is not None:
@@ -508,9 +512,20 @@ class MinionManagerProvider:
             self._retire_existing_manager(existing_health)
         self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        argv = [
+            sys.executable,
+            "-m",
+            "pal.minion.manager_main",
+            "--runtime-root",
+            str(self.runtime_root),
+        ]
+        child_env = python_subprocess_env()
+        if self.runtime_db_path is not None:
+            argv.extend(("--runtime-db-path", str(self.runtime_db_path)))
+            child_env[MINION_RUNTIME_DB_PATH_ENV] = str(self.runtime_db_path)
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "pal.minion.manager_main", "--runtime-root", str(self.runtime_root)],
-            env=python_subprocess_env(),
+            argv,
+            env=child_env,
             start_new_session=True,
         )
         for _ in range(150):
@@ -776,6 +791,7 @@ def register_with_core(
     service: object | None = None,
     *,
     runtime_root: Path | None = None,
+    runtime_db_path: Path | None = None,
     harness_registry: MinionHarnessRegistry | None = None,
 ) -> ModuleHandle:
     _ = service
@@ -784,6 +800,7 @@ def register_with_core(
         runtime_root=resolved_root,
         context=context,
         harness_registry=harness_registry,
+        runtime_db_path=runtime_db_path,
     )
     public = MinionV2PublicProvider(
         runtime_root=resolved_root,

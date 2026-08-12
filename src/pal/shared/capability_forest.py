@@ -42,15 +42,13 @@ class CapabilityActionBlueprint:
     scope: str
     action_name: str
     handler_name: str
+    guidance: ToolGuidance
     async_handler_name: str | None = None
     family: str = ""
-    description: str = ""
     aliases: tuple[str, ...] = ()
     InputModel: type[BaseModel] = EmptyToolInput
     OutputModel: type[BaseModel] = StructuredToolOutput
-    guidance: ToolGuidance | None = None
     execution: ToolExecutionSemantics | None = None
-    search_text: str = ""
     examples: tuple[dict[str, Any], ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -140,17 +138,18 @@ def capability_action(
     scope: str,
     action_name: str,
     family: str = "",
-    description: str = "",
     aliases: tuple[str, ...] = (),
     InputModel: type[BaseModel] = EmptyToolInput,
     OutputModel: type[BaseModel] = StructuredToolOutput,
-    guidance: ToolGuidance | None = None,
+    guidance: ToolGuidance,
     execution: ToolExecutionSemantics | None = None,
-    search_text: str = "",
     examples: tuple[dict[str, Any], ...] = (),
     async_handler_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ):
+    if not isinstance(guidance, ToolGuidance):
+        raise TypeError("capability_action requires a ToolGuidance instance")
+
     def decorator(fn):
         existing = list(getattr(fn, "__capability_action_blueprints__", ()))
         existing.append(
@@ -161,13 +160,11 @@ def capability_action(
                 handler_name=fn.__name__,
                 async_handler_name=str(async_handler_name or "").strip() or None,
                 family=family,
-                description=description,
                 aliases=tuple(aliases),
                 InputModel=InputModel,
                 OutputModel=OutputModel,
                 guidance=guidance,
                 execution=execution,
-                search_text=str(search_text or ""),
                 examples=tuple(dict(item) for item in examples),
                 metadata=dict(metadata or {}),
             )

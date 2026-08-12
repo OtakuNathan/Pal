@@ -77,7 +77,6 @@ class ArtifactIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show artifact manager state.",
         guidance=ToolGuidance(
             purpose="Show artifact manager state.",
             use_when="Diagnosing artifact lifecycle issues — checking hot TTL, hard cap, or max size limits.",
@@ -105,7 +104,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="list",
-        description="List recent tagged conversation artifacts visible to the current turn.",
         guidance=ToolGuidance(
             purpose="List recent tagged conversation artifacts visible to the current turn.",
             use_when="The user sent a file (PDF, image, audio, document) through a channel and you need to discover what's available.",
@@ -128,7 +126,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="info",
-        description="Inspect metadata and available representations for one artifact id.",
         guidance=ToolGuidance(
             purpose="Inspect metadata and available representations for one artifact id.",
             use_when="You have an artifact_id and need to know what representations exist (text, page_text, transcript, image) before reading.",
@@ -151,7 +148,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="read",
-        description="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
         guidance=ToolGuidance(
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). Supports page/chunk selection and max_chars.",
@@ -174,7 +170,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="search",
-        description="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
         guidance=ToolGuidance(
             purpose="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
             use_when="You know roughly what file the user means (by name, type, or when sent) but lack the exact artifact_id.",
@@ -197,7 +192,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="select",
-        description="Mark an artifact search result as selected and refresh its short-lived hot state.",
         guidance=ToolGuidance(
             purpose="Mark an artifact search result as selected and refresh its short-lived hot state.",
             use_when="You want to keep a specific artifact's hot state alive across multiple tool calls. Use after search_artifacts when you've identified the right artifact.",
@@ -220,7 +214,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="grep",
-        description="Search inside existing text representations of a known artifact.",
         guidance=ToolGuidance(
             purpose="Search inside existing text representations of a known artifact.",
             use_when="For text files, PDF page text/chunks, or existing transcripts.",
@@ -243,7 +236,6 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="transcribe",
-        description="Request transcription for an audio artifact.",
         guidance=ToolGuidance(
             purpose="Request transcription for an audio artifact.",
             use_when="The user sent an audio/voice message and you need the text content.",

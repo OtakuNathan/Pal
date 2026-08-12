@@ -326,6 +326,10 @@ class MinionV2WorkflowService:
         task_id = str(data.get("task_id") or "").strip()
         task_was_selected = bool(task_id)
         if not task_id:
+            if not delivery_binding:
+                raise ValueError(
+                    "one-click start_workflow requires delivery_binding"
+                )
             task_id = self._create_or_reuse_task_for_workflow(data)
         task = self.repository.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":

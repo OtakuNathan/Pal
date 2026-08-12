@@ -8,11 +8,12 @@ import pytest
 from pal.checklist.capabilities import ChecklistIntrospectionProvider
 from pal.checklist.service import ChecklistService
 from pal.core.turn_executor import TurnExecutor
-from pal.core.turns import MailboxReplyEffect, TurnContinuation, channel_turn_program
+from pal.core.turns import MailboxReplyEffect, MailboxReplyStreamUpdateEffect, TurnContinuation, channel_turn_program
 from pal.execution.contracts import CapabilityCall
 from pal.foundation import EventEnvelope
 from pal.shared import (
     ChannelEnvelope,
+    ChannelStreamUpdateKind,
     EndpointConfig,
     EventKind,
     ResponseHandle,
@@ -212,6 +213,25 @@ class TestToolEchoFanOut:
         assert effect.terminal is False
         assert not hasattr(effect, "delivery_binding")
         assert "checklist:check:a" in continuation.echoed_keys
+
+    def test_streaming_echo_uses_ordered_progress_event(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        continuation.channel_stream_active = True
+        result = _tool_result(
+            "checklist_check",
+            structured={"echo": {"markdown": "Checklist progress 1/1", "dedupe_key": "checklist:stream:a"}},
+        )
+
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+
+        assert len(captured) == 1
+        effect = captured[0][1]
+        assert isinstance(effect, MailboxReplyStreamUpdateEffect)
+        assert effect.update.kind == ChannelStreamUpdateKind.PROGRESS
+        assert effect.update.text == "Checklist progress 1/1"
+        assert continuation.emitted_reply_texts == ["Checklist progress 1/1"]
 
     def test_nonterminal_echo_marks_only_the_queued_reply_as_continuing(self):
         captured: list[tuple[TurnDeliveryBinding, str]] = []

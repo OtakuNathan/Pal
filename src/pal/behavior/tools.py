@@ -64,7 +64,7 @@ class BehaviorAdviceTool:
             status=RuntimeStatus.OK,
             text=f"behavior advice returned {len(result.candidates)} candidate(s)",
             structured=structured,
-            llm_text=_render_behavior_tool_payload(self.service, "Behavior advice", llm_payload),
+            llm_text=_render_behavior_advice_tool_payload(self.service, llm_payload),
         )
 
 
@@ -256,6 +256,18 @@ def _render_behavior_tool_payload(service: BehaviorService, title: str, structur
     projector = getattr(runtime, "project_llm_value", None)
     llm_value = projector(structured) if callable(projector) else structured
     return render_titled_structured_for_llm(title, llm_value)
+
+
+def _render_behavior_advice_tool_payload(service: BehaviorService, structured: Any) -> str:
+    rendered = _render_behavior_tool_payload(service, "Behavior advice", structured)
+    return (
+        "<behavior_guidance>\n"
+        "Temporary behavior guidance from advise_behavior. Evaluate relevant route, "
+        "capability, skill, and memory-query hints before the next action; this is routing "
+        "evidence, not policy.\n\n"
+        f"{rendered}\n"
+        "</behavior_guidance>"
+    )
 
 
 def _string_list(value: object) -> list[str]:

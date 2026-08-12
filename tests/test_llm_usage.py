@@ -197,7 +197,9 @@ class LLMUsageLedgerTests(unittest.TestCase):
 
         provider = LLMIntrospectionProvider(runtime=runtime)
         status = provider.handle_status_control_action(None)
-        self.assertIn("Prompt cache hit rate: 80.0%", status["message"])
+        self.assertIn("Prompt cache token ratio: 80.0%", status["message"])
+        self.assertIn("Prompt cache request hit rate: 100.0%", status["message"])
+        self.assertIn("\n\nInput tokens:", status["message"])
         self.assertIn("1 successful", status["message"])
         self.assertEqual(status["usage"]["cached_input_tokens"], 800)
 

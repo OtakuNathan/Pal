@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from pal.foundation import utc_now
 from pal.llm.endpoint_spec import merge_endpoint_spec_payload
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
@@ -139,6 +141,55 @@ class RuntimeSettingRepository:
 
     def ensure_defaults(self) -> None:
         return None
+
+
+@dataclass
+class RuntimeSettingSnapshot:
+    """Read-through snapshot whose mutations remain local to one LLM runtime."""
+
+    source: RuntimeSettingRepository
+    endpoint_ids: tuple[str, ...] = ()
+    _values: dict[str, str | None] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        keys = [
+            ACTIVE_LLM_ENDPOINT_SETTING_KEY,
+            *(_think_level_setting_key(item) for item in self.endpoint_ids),
+        ]
+        self._values = {key: self.source.get(key) for key in keys}
+
+    def get(self, setting_key: str) -> str | None:
+        if setting_key not in self._values:
+            self._values[setting_key] = self.source.get(setting_key)
+        return self._values[setting_key]
+
+    def set(self, setting_key: str, setting_value: str) -> str:
+        self._values[str(setting_key)] = str(setting_value)
+        return str(setting_value)
+
+    def delete(self, setting_key: str) -> bool:
+        existed = self.get(setting_key) is not None
+        self._values[str(setting_key)] = None
+        return existed
+
+    def get_think_level(self, endpoint_id: str) -> str | None:
+        return self.get(_think_level_setting_key(endpoint_id))
+
+    def set_think_level(self, endpoint_id: str, think_level: str) -> str:
+        normalized = str(think_level or "").strip()
+        if not normalized:
+            raise ValueError("think_level must be non-empty")
+        return self.set(_think_level_setting_key(endpoint_id), normalized)
+
+    def get_active_llm_endpoint_id(self) -> str | None:
+        value = str(self.get(ACTIVE_LLM_ENDPOINT_SETTING_KEY) or "").strip()
+        return value or None
+
+    def set_active_llm_endpoint_id(self, endpoint_id: str) -> str:
+        return self.set(ACTIVE_LLM_ENDPOINT_SETTING_KEY, str(endpoint_id).strip())
 
 
 def _think_level_setting_key(endpoint_id: str) -> str:

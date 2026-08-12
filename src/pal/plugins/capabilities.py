@@ -50,7 +50,7 @@ class PluginsIntrospectionProvider:
     host: PluginHost
     module_id: str = "plugins"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show plugin host summary.",
             use_when="Diagnosing plugin system health — how many plugins are loaded, enabled, attached.",
@@ -67,7 +67,7 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin host summary", summary),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list",
         guidance=ToolGuidance(
             purpose="List known first-party and third-party plugins with usable names and enabled/attached status.",
             use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. minion, mcp). The authoritative source for module ownership and lifecycle state.",
@@ -92,7 +92,6 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="attach",
-        description="Attach a plugin to the current runtime.",
         guidance=ToolGuidance(
             purpose="Attach an enabled plugin's runtime instance to the current runtime.",
             use_when="Reconnecting a detached plugin that is already enabled.",
@@ -117,7 +116,6 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="detach",
-        description="Detach a plugin from the current runtime",
         guidance=ToolGuidance(
             purpose="Detach a plugin's runtime instance without disabling it.",
             use_when="Temporarily removing a plugin's capabilities from the runtime (e.g. isolating a misbehaving plugin).",
@@ -142,7 +140,6 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="enable",
-        description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
         guidance=ToolGuidance(
             purpose="Enable and attach a disabled plugin in one step, including disabled first-party plugins such as mcp.",
             use_when="A plugin is disabled and needs to be fully activated. This is the primary way to turn on a plugin.",
@@ -167,7 +164,6 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="disable",
-        description="Disable a plugin",
         guidance=ToolGuidance(
             purpose="Disable a plugin — detach its runtime and mark it as disabled so it won't auto-attach on restart.",
             use_when="Permanently removing a plugin from the runtime until explicitly re-enabled.",
@@ -187,7 +183,7 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin disable result", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
             purpose="Rescan plugin directories to discover newly installed or updated plugins.",
             use_when="New plugins were installed or plugin configuration files changed.",
@@ -213,7 +209,6 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="rescan_and_attach_new_first_party",
-        description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
         guidance=ToolGuidance(
             purpose="Rescan plugin directories and auto-attach newly discovered enabled first-party plugins.",
             use_when="After installing new first-party plugins that should be picked up and attached immediately.",

@@ -17,8 +17,8 @@ from pal.execution.tool_facade import (
 class CapabilityDescriptor:
     name: str
     family: str
-    description: str
     source: str
+    guidance: ToolGuidance
     canonical_path: str = ""
     display_name: str | None = None
     # Exactly one LLM-facing alias is required when the descriptor is compiled.
@@ -29,9 +29,7 @@ class CapabilityDescriptor:
     target_label: str = ""
     InputModel: type[BaseModel] | None = None
     OutputModel: type[BaseModel] | None = None
-    guidance: ToolGuidance | None = None
     execution: ToolExecutionSemantics | None = None
-    search_text: str = ""
     examples: tuple[dict[str, Any], ...] = ()
     mcp_input_schema: dict[str, Any] = field(default_factory=dict)
     mcp_output_schema: dict[str, Any] = field(default_factory=dict)
@@ -41,6 +39,10 @@ class CapabilityDescriptor:
     detachable: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.guidance, ToolGuidance):
+            raise TypeError(
+                f"capability descriptor {self.canonical_path or self.name!r} requires ToolGuidance"
+            )
         declared = tuple(str(value or "").strip() for value in self.aliases)
         if len(declared) != 1 or not declared[0]:
             raise ValueError(

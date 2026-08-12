@@ -3,9 +3,13 @@ from __future__ import annotations
 import tempfile
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import httpx
 
 from pal.core.runtime_config import RuntimeConfig
 from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
@@ -16,7 +20,12 @@ from pal.llm.shapes.base import _JSONFrame as JSONFrame
 from pal.llm.models import LLMEndpointModel
 from pal.llm.runtime import EndpointResolver, LLMRuntime
 from pal.llm.secret_store import InMemorySecretStore
-from pal.llm.transport import SDKJSONTransport, SDKTransportRequest
+from pal.llm.transport import (
+    DefaultSDKClientFactory,
+    SDKJSONTransport,
+    SDKTransportRequest,
+    StreamControl,
+)
 
 
 def _endpoint(endpoint_id: str, *, model_id: str | None = None) -> LLMEndpointModel:
@@ -102,7 +111,13 @@ class _Factory:
         raise AssertionError((api_key, base_url, timeout))
 
 
-def _transport_request(endpoint_id: str = "one", *, api_key: str = "key") -> SDKTransportRequest:
+def _transport_request(
+    endpoint_id: str = "one",
+    *,
+    api_key: str = "key",
+    stream: bool = False,
+    stream_control: StreamControl | None = None,
+) -> SDKTransportRequest:
     return SDKTransportRequest(
         endpoint_id=endpoint_id,
         wire_shape=WireShape.OPENAI_COMPLETION,
@@ -110,11 +125,40 @@ def _transport_request(endpoint_id: str = "one", *, api_key: str = "key") -> SDK
         base_url="https://example.test/v1",
         timeout_seconds=30,
         payload={"model": "demo", "messages": []},
-        stream=False,
+        stream=stream,
+        stream_control=stream_control,
     )
 
 
 class LLMTransportLifecycleTests(unittest.TestCase):
+    def test_default_sdk_clients_disable_nested_retries(self) -> None:
+        factory = DefaultSDKClientFactory()
+        with patch("openai.OpenAI") as openai_client:
+            factory.openai(
+                api_key="key",
+                base_url="https://example.test/v1",
+                timeout=600,
+            )
+        openai_client.assert_called_once_with(
+            api_key="key",
+            base_url="https://example.test/v1",
+            timeout=600,
+            max_retries=0,
+        )
+
+        with patch("anthropic.Anthropic") as anthropic_client:
+            factory.anthropic(
+                api_key="key",
+                base_url="https://example.test/v1",
+                timeout=600,
+            )
+        anthropic_client.assert_called_once_with(
+            api_key="key",
+            base_url="https://example.test/v1",
+            timeout=600,
+            max_retries=0,
+        )
+
     def test_sdk_client_is_reused_until_endpoint_switch(self) -> None:
         factory = _Factory([
             {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
@@ -171,6 +215,95 @@ class LLMTransportLifecycleTests(unittest.TestCase):
         tuple(transport.frames(_transport_request(api_key="key-two")))
 
         self.assertEqual(len(factory.clients), 2)
+
+    def test_concurrent_requests_never_share_a_cancellable_client_lease(self) -> None:
+        factory = _Factory(
+            [
+                [{"chunk": "first"}, {"chunk": "last"}],
+                [{"chunk": "other"}],
+            ]
+        )
+        transport = SDKJSONTransport(client_factory=factory)
+        first = transport.frames(_transport_request(stream=True))
+
+        self.assertEqual(next(first), JSONFrame(0, {"chunk": "first"}))
+        self.assertEqual(
+            list(transport.frames(_transport_request(stream=True))),
+            [JSONFrame(0, {"chunk": "other"})],
+        )
+        self.assertEqual(len(factory.clients), 2)
+        first.close()
+
+    def test_stream_control_closes_the_bound_response_and_client(self) -> None:
+        class _BlockingResponse:
+            def __init__(self) -> None:
+                self.iterating = threading.Event()
+                self.closed = threading.Event()
+                self.close_count = 0
+
+            def __iter__(self):
+                self.iterating.set()
+                self.closed.wait(timeout=2.0)
+                if False:
+                    yield {}
+
+            def close(self) -> None:
+                self.close_count += 1
+                self.closed.set()
+
+        response = _BlockingResponse()
+        factory = _Factory([response])
+        transport = SDKJSONTransport(client_factory=factory)
+        control = StreamControl()
+        errors: list[BaseException] = []
+
+        def consume() -> None:
+            try:
+                list(
+                    transport.frames(
+                        _transport_request(stream=True, stream_control=control)
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - test captures worker failure
+                errors.append(exc)
+
+        thread = threading.Thread(target=consume)
+        thread.start()
+        self.assertTrue(response.iterating.wait(timeout=1.0))
+        self.assertTrue(control.provider_started)
+
+        control.cancel("interrupted")
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertGreaterEqual(response.close_count, 1)
+        self.assertGreaterEqual(factory.clients[0].close_count, 1)
+        self.assertTrue(errors)
+
+    def test_stream_control_observes_raw_keepalive_bytes_hidden_by_the_sdk(self) -> None:
+        class _RawStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b": OPENROUTER PROCESSING\n\n"
+
+        class _SDKStream:
+            def __init__(self) -> None:
+                self.response = httpx.Response(200, stream=_RawStream())
+
+            def close(self) -> None:
+                self.response.close()
+
+        stream = _SDKStream()
+        control = StreamControl()
+        control.bind_response(stream)
+        before = control.last_network_activity_at
+        time.sleep(0.005)
+
+        self.assertEqual(
+            b"".join(stream.response.iter_bytes()),
+            b": OPENROUTER PROCESSING\n\n",
+        )
+
+        self.assertGreater(control.last_network_activity_at, before)
 
 
 class LLMEndpointSpecTests(unittest.TestCase):

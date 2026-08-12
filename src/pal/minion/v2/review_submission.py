@@ -23,8 +23,8 @@ REVIEW_SUBMIT_CAPABILITY = "op_minion_review_submit"
 
 REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "review_submit",
-    "description": "Submit the completed semantic review and let the Manager derive its verdict.",
     "guidance": {
+        "purpose": "Submit the completed semantic review and let the Manager derive its verdict.",
         "use_when": (
             "Use with no arguments after the complete audit is finished, every finding is "
             "recorded with add_finding, and the checklist is complete."

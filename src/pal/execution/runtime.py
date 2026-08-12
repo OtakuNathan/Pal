@@ -62,7 +62,6 @@ from pal.execution.tool_result_pager import (
 )
 from pal.execution.session_state import (
     FileDeliveryManifest,
-    FileDeliverySpan,
     InMemoryLogicalExecutionState,
     LogicalExecutionContext,
     LogicalExecutionStateBackend,
@@ -218,8 +217,52 @@ class ExecutionRuntime(ExecutionRuntimePort):
             execution_lifetime_id=execution_lifetime_id,
         )
 
+    def advance_tool_result_clock(
+        self,
+        *,
+        turn_id: str,
+        clock_id: str,
+        retention_steps: int | None = None,
+    ) -> LogicalExecutionContext:
+        """Advance one host-defined result-retention step in this lifetime.
+
+        Resident Pal advances the same backend with semantic user inputs.
+        Autonomous runtimes such as Minion may instead advance it per tool
+        call without changing L1 or coroutine state.
+        """
+
+        context = self.logical_context_for_turn(turn_id)
+        return self.tool_result_pager.begin_turn(
+            runtime_root=self.runtime_root,
+            turn_id=turn_id,
+            scope_key=context.execution_lifetime_id,
+            retention_user_turns=retention_steps,
+            input_id=clock_id,
+        )
+
     def logical_context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
         return self.tool_result_pager.context_for_turn(turn_id)
+
+    def retire_tool_results(
+        self,
+        *,
+        turn_id: str | None,
+        result_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Retire result-owned authority while leaving pager bytes on their TTL."""
+
+        normalized = tuple(
+            result_id
+            for result_id in (str(item or "").strip() for item in result_ids)
+            if result_id
+        )
+        if not normalized:
+            return ()
+        context = self.logical_context_for_turn(turn_id)
+        return self.logical_state.retire_results(
+            execution_lifetime_id=context.execution_lifetime_id,
+            result_ids=normalized,
+        )
 
     def reconcile_tool_context(
         self,
@@ -355,8 +398,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "name": record.alias,
             "display_name": record.alias,
             "family": record.family or "general",
-            "description": record.description,
-            "search_text": record.search_text,
+            "description": record.compiled_description,
+            "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_schema": dict(record.input_schema),
             "output_schema": dict(record.output_schema),
@@ -1076,7 +1119,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return {
             "alias": record.alias,
             "invocation_mode": record.execution.invocation_mode.value,
-            "description": record.description,
+            "description": record.compiled_description,
             "example": dict(record.example) if record.example is not None else None,
             "input_schema": dict(record.input_schema),
             "output_schema": dict(record.output_schema),
@@ -1257,7 +1300,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 llm_text=f"Tool output failed validation for {record.alias}; effect={outcome.value}.",
                 details={"output_schema": record.output_schema},
             )
-        rendered = llm_text.strip() or json.dumps(output, ensure_ascii=False, sort_keys=True)
+        # File delivery spans are offsets into the exact LLM-visible text.
+        # Trimming a trailing newline here makes an otherwise complete edit
+        # proof one byte shorter than its manifest and silently drops
+        # inherited file authority during L1 projection reconciliation.
+        rendered = (
+            llm_text
+            if isinstance(context_delivery, dict) and llm_text
+            else llm_text.strip()
+            or json.dumps(output, ensure_ascii=False, sort_keys=True)
+        )
         paged, replay_result_ref = self._page_validated_output(
             record,
             call,
@@ -1315,7 +1367,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "alias": record.alias,
                 "arguments": dict(call.args or {}),
                 "invocation_mode": record.execution.invocation_mode.value,
-                "search_text": record.search_text,
+                "search_text": record.search_document,
                 "execution": record.execution.model_dump(mode="json"),
                 "effect": outcome.value,
             },
@@ -1948,7 +2000,7 @@ def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]
         "name": descriptor.name,
         "display_name": display,
         "family": descriptor.family,
-        "description": descriptor.description,
+        "guidance": descriptor.guidance.model_dump(mode="json"),
         "module_id": descriptor.module_id,
         "call_names": call_names,
         "aliases": list(descriptor.aliases),

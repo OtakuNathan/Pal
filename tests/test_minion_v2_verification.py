@@ -1706,10 +1706,9 @@ class MinionV2VerificationTests(unittest.TestCase):
         spec = VERIFICATION_BUILDER_TOOL_SPECS[
             "op_minion_verification_run_lsp_check"
         ]
-        description = str(spec["description"])
         guidance = dict(spec["guidance"])
 
-        self.assertIn("LSP diagnostics for one source file", description)
+        self.assertIn("LSP diagnostics for one source file", guidance["purpose"])
         self.assertIn("Manager-prepared context", guidance["use_when"])
         self.assertIn("language-server executable", guidance["do_not_use_when"])
         self.assertIn("repair LSP setup", guidance["do_not_use_when"])

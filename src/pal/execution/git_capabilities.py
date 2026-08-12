@@ -6,7 +6,7 @@ from pal.execution.generated_tool_models import (
 )
 
 from pal.execution.file_capabilities import _tool_capability_result
-from pal.execution.git_tool import GIT_TOOL_DESCRIPTION, GitTool
+from pal.execution.git_tool import GitTool
 from pal.execution.tool_semantics import DIRECT_UNSAFE_LOCAL_WRITE
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, capability_action
 
@@ -17,7 +17,6 @@ class GitCapabilityMixin:
         scope="module",
         family="git",
         action_name="git",
-        description=GIT_TOOL_DESCRIPTION,
         guidance=ToolGuidance(
             purpose="Run git through Pal's structured git wrapper instead of shell.",
             use_when="Repository status, diffs, history, changed-file evidence, and conservative audited git mutations.",

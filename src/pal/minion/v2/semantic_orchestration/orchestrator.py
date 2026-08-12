@@ -32,7 +32,7 @@ from pal.minion.harnesses import (
     MinionHarnessRegistry,
     MinionHarnessSpec,
 )
-from pal.minion.ipc import python_subprocess_env
+from pal.minion.ipc import MINION_RUNTIME_DB_PATH_ENV, python_subprocess_env
 from pal.minion.sandbox import build_sandboxed_runner_invocation, with_minion_sandbox_metadata
 from pal.minion.tool_guidance import merge_tool_guidance_overrides
 from pal.minion.turns import sanitize_runner_session_pack
@@ -197,6 +197,7 @@ from pal.minion.v2.role_protocol import (
     RoleAttemptState,
     RoleAssignmentRequest,
     RoleAssignmentState,
+    canonical_role_profile_parts,
     stable_hash,
 )
 from pal.shared import MinionInvocationPack
@@ -802,6 +803,7 @@ SEMANTIC_EFFECT_TYPES = frozenset(SEMANTIC_EFFECT_ROUTES)
 class SemanticOrchestrator:
     service: MinionV2WorkflowService
     max_parallel_workers: int = 5
+    runtime_db_path: Path | None = None
     harness_registry: MinionHarnessRegistry = field(
         default_factory=lambda: MinionHarnessRegistry(include_pal=True)
     )
@@ -1302,6 +1304,13 @@ class SemanticOrchestrator:
                 supervisor_failures += 1
                 assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
                 if not assignment_id:
+                    if not isinstance(exc, DeferredEffectError):
+                        startup_failure = self._settle_background_startup_failure(
+                            effect,
+                            exc,
+                        )
+                        if startup_failure is not None:
+                            return startup_failure
                     raise
                 assignment = self.repository.read_role_assignment(assignment_id)
                 if assignment is None:
@@ -1369,6 +1378,91 @@ class SemanticOrchestrator:
                     exc,
                     exhausted=not permanent,
                 )
+
+    def _settle_background_startup_failure(
+        self,
+        effect: Mapping[str, Any],
+        error: Exception,
+    ) -> Mapping[str, Any] | None:
+        """Triage a role that entered running state before assignment durability.
+
+        Retrying the original outbox effect is unsafe after its business state
+        has advanced: the causal guard will correctly supersede the replay, but
+        that would otherwise strand the aggregate in a worker-owned state with
+        no durable executor.  Once ``ROLE_FAILED`` is legal, record the startup
+        failure on the aggregate itself and expose it to ordinary triage.
+        """
+
+        route = SEMANTIC_EFFECT_ROUTES.get(str(effect.get("effect_type") or ""))
+        role = route.role.value if route is not None and route.role is not None else ""
+        error_text = f"{error.__class__.__name__}: {error}"
+        failure_payload = {
+            "kind": "role_startup_failed",
+            "role": role,
+            "attempt_count": 1,
+            "error_kind": "pre_assignment_failure",
+            "error": error_text,
+            "effect_type": str(effect.get("effect_type") or ""),
+        }
+        failure_ref = self.service.artifacts.put_json(
+            failure_payload,
+            artifact_type="RoleAssignmentFailureArtifact",
+        )
+        for _attempt in range(3):
+            snapshot = self._effect_snapshot(effect)
+            if snapshot.state == "TRIAGE_REQUIRED":
+                self._release_background_business_lease(effect)
+                return {
+                    "provider_request_id": str(
+                        effect.get("effect_key") or effect.get("effect_id") or ""
+                    ),
+                    "status": "triage_required",
+                }
+            if "ROLE_FAILED" not in self.repository.engine.legal_actions(
+                snapshot.aggregate_type,
+                snapshot.state,
+            ):
+                return None
+            try:
+                with self.repository.transaction() as connection:
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="ROLE_FAILED",
+                            workflow_id=snapshot.workflow_id,
+                            aggregate_type=snapshot.aggregate_type,
+                            aggregate_id=snapshot.aggregate_id,
+                            actor="minion-v2-worker-supervisor",
+                            expected_version=snapshot.version,
+                            idempotency_key=(
+                                f"worker-startup-failed:"
+                                f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
+                                f"generation-{snapshot.version}"
+                            ),
+                            payload={
+                                "failure_artifact_ref": failure_ref.to_dict(),
+                                "blocker": {
+                                    "kind": "role_startup_failure",
+                                    "summary": error_text,
+                                    "role": role,
+                                    "attempt_count": 1,
+                                },
+                            },
+                        ),
+                        _connection=connection,
+                    )
+                    self._require_cycle_triage(snapshot, _connection=connection)
+                self._release_background_business_lease(effect)
+                return {
+                    "provider_request_id": str(
+                        effect.get("effect_key") or effect.get("effect_id") or ""
+                    ),
+                    "status": "triage_required",
+                }
+            except AggregateVersionConflict:
+                continue
+        raise DeferredEffectError(
+            "role startup failure settlement lost repeated CAS races"
+        )
 
     def _queue_active_assignment_retry(
         self,
@@ -6381,7 +6475,7 @@ class SemanticOrchestrator:
                 }
             )
         workspace["reference_paths"] = references
-        profile_group, profile_name = profile.rsplit(".", 1)
+        profile_group, profile_name = canonical_role_profile_parts(profile)
         if contract_authoring and activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
                 "Write only the declaration-level code skeleton in the bound architecture worktree; never compile, build, test, link, or execute it.",
@@ -7275,6 +7369,8 @@ class SemanticOrchestrator:
         ]
         runner_env = python_subprocess_env()
         runner_env[ROLE_GATEWAY_TOKEN_ENV] = assignment_access_token
+        if self.runtime_db_path is not None:
+            runner_env[MINION_RUNTIME_DB_PATH_ENV] = str(self.runtime_db_path)
         if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
             argv, env = build_sandboxed_runner_invocation(
                 runtime_root=self.service.runtime_root,

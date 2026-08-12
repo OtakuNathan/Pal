@@ -137,6 +137,31 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "operating_guidance":
+                existing_index = next(
+                    (
+                        index
+                        for index, block in enumerate(system_blocks)
+                        if block.block_id == "operating_rules"
+                    ),
+                    None,
+                )
+                if existing_index is None:
+                    system_blocks.append(
+                        PromptIRBlock(
+                            block_id="operating_rules",
+                            title="Operating Rules",
+                            content=rendered_body,
+                        )
+                    )
+                else:
+                    existing = system_blocks[existing_index]
+                    system_blocks[existing_index] = PromptIRBlock(
+                        block_id=existing.block_id,
+                        title=existing.title,
+                        content=f"{existing.content.rstrip()}\n\n{rendered_body}",
+                        metadata=existing.metadata,
+                    )
             elif normalized_section == "priority":
                 system_blocks.append(
                     PromptIRBlock(
@@ -312,7 +337,9 @@ class PromptCompiler:
                     )
                 )
 
-        system_blocks.extend(self._build_runtime_overlay_blocks(assembly_context))
+        runtime_reminder_blocks.extend(
+            self._build_runtime_overlay_blocks(assembly_context)
+        )
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
         ordered_user_blocks = self._order_user_context_blocks(user_context_blocks, turn_kind=assembly_context.turn_kind)
@@ -349,6 +376,9 @@ class PromptCompiler:
                 "user_context_blocks": [block.block_id for block in prompt_ir.user_context_blocks],
                 "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks],
                 "prompt_ir": self._prompt_ir_debug_dict(prompt_ir),
+                "runtime_reminder_text": self._render_final_runtime_reminder(
+                    prompt_ir.runtime_reminder_blocks
+                ),
                 **{
                     key: assembly_context.metadata[key]
                     for key in ("preferred_endpoint_id", "preferred_model_id")
@@ -396,8 +426,8 @@ class PromptCompiler:
         system_blocks = [
             *identity_blocks,
             PromptIRBlock(block_id="operating_rules", title="Operating Rules", content=rules),
-            *self._build_runtime_overlay_blocks(assembly_context),
         ]
+        runtime_blocks = self._build_runtime_overlay_blocks(assembly_context)
         user_context_blocks: list[PromptIRBlock] = []
         recent_summaries = str(assembly_context.metadata.get("failure_recent_summaries") or "").strip()
         if recent_summaries:
@@ -412,7 +442,7 @@ class PromptCompiler:
         return PromptIR(
             system_blocks=tuple(self._order_system_blocks(system_blocks)),
             user_context_blocks=tuple(user_context_blocks),
-            runtime_reminder_blocks=(),
+            runtime_reminder_blocks=tuple(runtime_blocks),
             primary_input=primary_input,
             turn_kind="failure",
         )
@@ -672,15 +702,14 @@ class PromptCompiler:
             final_user_parts.extend(self._render_user_context_parts(block))
         if prompt_ir.primary_input.strip():
             final_user_parts.append({"type": "text", "text": prompt_ir.primary_input.strip()})
-        if final_user_parts or prompt_ir.runtime_reminder_blocks:
-            reminder = self._render_final_runtime_reminder(prompt_ir.runtime_reminder_blocks)
-            if reminder:
-                final_user_parts.append({"type": "text", "text": reminder})
+        if final_user_parts:
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
         return messages
 
     def _render_final_runtime_reminder(self, blocks: tuple[PromptIRBlock, ...] = ()) -> str:
         guidance_sections = self._render_runtime_reminder_guidance(blocks)
+        if not guidance_sections:
+            return ""
         content = (
             "Before answering: apply the active system prompt's hard rules and priority order. "
             "Treat the user's active conversation message as the current request. "

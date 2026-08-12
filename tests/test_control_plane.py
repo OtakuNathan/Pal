@@ -783,7 +783,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("large tool result", transcript[2].content)
+        self.assertIn("full result retired", transcript[2].content)
+        self.assertNotIn("large tool result", transcript[2].content)
         self.assertFalse(any(hasattr(message, "tool_trace") for message in transcript))
 
     async def test_l1_commit_persists_full_tool_protocol_when_prompt_log_enabled(self) -> None:
@@ -792,7 +793,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("large tool result", transcript[2].content)
+        self.assertIn("full result retired", transcript[2].content)
+        self.assertNotIn("large tool result", transcript[2].content)
 
     async def test_set_think_updates_future_turn_snapshot_only(self) -> None:
         await self.core.handle_control_action_async(
@@ -1332,6 +1334,22 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(drained[-1].event.event_kind, EventKind.INTERACTION_RESULT)
         self.assertIsInstance(drained[-1].event.payload, InteractionResult)
 
+    async def test_generic_channel_endpoint_delivers_llm_waiting_status_as_transient_text(self) -> None:
+        self.endpoint.queue_status(
+            "llm_waiting",
+            payload={"text": "LLM is still processing · 2m elapsed."},
+            response_handle=self.endpoint.build_response_handle(
+                reply_target=self.route.reply_target
+            ),
+        )
+
+        self.endpoint.flush_status_outbox()
+
+        self.assertEqual(
+            self.endpoint.sent_replies[-1][0],
+            "LLM is still processing · 2m elapsed.",
+        )
+
     async def test_channel_attach_replays_cached_control_catalog(self) -> None:
         await self.core.publish_control_catalog_async(endpoint_id="socket_main")
         self.endpoint.flush_status_outbox()
@@ -1713,7 +1731,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript[0].content, "hello")
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("shell result before interrupt", transcript[2].content)
+        self.assertIn("full result retired", transcript[2].content)
+        self.assertNotIn("shell result before interrupt", transcript[2].content)
         committed_text = "\n".join(message.content for message in transcript)
         self.assertNotIn("turn_checkpoint", committed_text)
         self.assertNotIn("call_incomplete", json.dumps([message.tool_calls for message in transcript], ensure_ascii=False))

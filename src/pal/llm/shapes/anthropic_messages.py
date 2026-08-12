@@ -21,6 +21,7 @@ from pal.llm.ir import (
 )
 from pal.llm.shapes.base import (
     EncodedRequest,
+    EncodedMessageSpan,
     ShapeCodecBase,
     ShapeContext,
     ShapeDecodeError,
@@ -36,13 +37,22 @@ class AnthropicMessagesCodec(ShapeCodecBase):
     wire_shape: WireShape = WireShape.ANTHROPIC_MESSAGES
 
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
-        system_parts: list[str] = []
+        system_parts: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
+        spans: list[EncodedMessageSpan] = []
         for message in request.messages:
             if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                 if text:
-                    system_parts.append(text)
+                    system_parts.append({"type": "text", "text": text})
+                    spans.append(
+                        EncodedMessageSpan(
+                            message.message_id,
+                            (("system", len(system_parts) - 1),),
+                        )
+                    )
+                else:
+                    spans.append(EncodedMessageSpan(message.message_id))
                 continue
             if message.role == MessageRole.TOOL:
                 blocks = [
@@ -56,6 +66,12 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 ]
                 if blocks:
                     _append_message(messages, "user", blocks)
+                spans.append(
+                    EncodedMessageSpan(
+                        message.message_id,
+                        (_last_message_block_path(messages),) if blocks else (),
+                    )
+                )
                 continue
             if (
                 message.role == MessageRole.ASSISTANT
@@ -69,6 +85,12 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 content = message.replay.payload.get("content")
                 if isinstance(content, (list, tuple)):
                     _append_message(messages, "assistant", [thaw_json(item) for item in content if isinstance(item, Mapping)])
+                    spans.append(
+                        EncodedMessageSpan(
+                            message.message_id,
+                            (_last_message_block_path(messages),),
+                        )
+                    )
                     continue
             if message.role == MessageRole.ASSISTANT:
                 blocks: list[dict[str, Any]] = []
@@ -102,10 +124,22 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                         )
                 if blocks:
                     _append_message(messages, "assistant", blocks)
+                spans.append(
+                    EncodedMessageSpan(
+                        message.message_id,
+                        (_last_message_block_path(messages),) if blocks else (),
+                    )
+                )
                 continue
             blocks = _anthropic_user_content(message.parts)
             if blocks:
                 _append_message(messages, "user", blocks)
+            spans.append(
+                EncodedMessageSpan(
+                    message.message_id,
+                    (_last_message_block_path(messages),) if blocks else (),
+                )
+            )
         if not messages:
             messages.append({"role": "user", "content": "Continue."})
 
@@ -116,7 +150,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
             "max_tokens": policy.max_output_tokens,
         }
         if system_parts:
-            payload["system"] = "\n\n".join(system_parts)
+            payload["system"] = system_parts
         if policy.temperature is not None:
             payload["temperature"] = policy.temperature
         if request.tools:
@@ -133,7 +167,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     }
             else:
                 payload["thinking"] = {"type": "adaptive"}
-        return EncodedRequest(payload)
+        return EncodedRequest(payload, tuple(spans))
 
     def _new_decoder(self, context: ShapeContext) -> "AnthropicMessagesDecoder":
         return AnthropicMessagesDecoder(context)
@@ -407,7 +441,7 @@ def _append_message(messages: list[dict[str, Any]], role: str, content: Any) -> 
     messages.append({"role": role, "content": content})
 
 
-def _anthropic_user_content(parts: tuple[Any, ...]) -> str | list[dict[str, Any]]:
+def _anthropic_user_content(parts: tuple[Any, ...]) -> list[dict[str, Any]]:
     rendered: list[dict[str, Any]] = []
     for part in parts:
         if isinstance(part, TextPartIR) and part.text:
@@ -419,9 +453,15 @@ def _anthropic_user_content(parts: tuple[Any, ...]) -> str | list[dict[str, Any]
                 rendered.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
             else:
                 rendered.append({"type": "image", "source": {"type": "url", "url": part.source}})
-    if len(rendered) == 1 and rendered[0].get("type") == "text":
-        return str(rendered[0]["text"])
     return rendered
+
+
+def _last_message_block_path(messages: list[dict[str, Any]]) -> tuple[str | int, ...]:
+    message_index = len(messages) - 1
+    content = messages[message_index].get("content")
+    if not isinstance(content, (list, tuple)) or not content:
+        return ("messages", message_index)
+    return ("messages", message_index, "content", len(content) - 1)
 
 
 def _block_index(payload: Mapping[str, Any]) -> int:

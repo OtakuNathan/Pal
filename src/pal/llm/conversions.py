@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR, ToolResultIR
+from pal.shared.tool_protocol import (
+    ToolCallIR,
+    ToolDefinitionIR,
+    ToolResultIR,
+    ToolResultLifecycle,
+)
 
 import json
 from typing import Any, Mapping
@@ -13,6 +18,7 @@ from pal.llm.ir import (
     LLMRequestIR,
     MessageRole,
     MessageState,
+    PromptRegionIR,
     ReasoningPartIR,
     ReplayEnvelope,
     TextPartIR,
@@ -129,6 +135,9 @@ def message_ir_from_dict(message: Mapping[str, Any]) -> LLMMessageIR:
                         if isinstance(result.get("structured"), Mapping)
                         else None
                     ),
+                    lifecycle=ToolResultLifecycle(
+                        str(result.get("lifecycle") or "active")
+                    ),
                 )
             )
     metadata = (
@@ -146,6 +155,7 @@ def message_ir_from_dict(message: Mapping[str, Any]) -> LLMMessageIR:
                 "_pal_message_id",
                 "_pal_state",
                 "_pal_semantic_kind",
+                "_pal_prompt_region",
                 "_pal_replay",
                 "_pal_metadata",
                 "_pal_tool_result",
@@ -162,6 +172,9 @@ def message_ir_from_dict(message: Mapping[str, Any]) -> LLMMessageIR:
         parts=tuple(parts),
         state=MessageState(str(message.get("_pal_state") or "complete")),
         semantic_kind=str(message.get("_pal_semantic_kind") or message.get("kind") or ""),
+        prompt_region=PromptRegionIR(
+            str(message.get("_pal_prompt_region") or "unspecified")
+        ),
         replay=replay,
         metadata=metadata,
         **kwargs,
@@ -216,6 +229,7 @@ def message_ir_to_dict(message: LLMMessageIR) -> dict[str, Any]:
         "_pal_message_id": message.message_id,
         "_pal_state": message.state.value,
         "_pal_semantic_kind": message.semantic_kind,
+        "_pal_prompt_region": message.prompt_region.value,
         "_pal_metadata": thaw_json(message.metadata),
     }
     if message.replay is not None:
@@ -251,6 +265,7 @@ def message_ir_to_dict(message: LLMMessageIR) -> dict[str, Any]:
                 "_pal_tool_result": {
                     "ok": result.ok,
                     "status": result.status,
+                    "lifecycle": result.lifecycle.value,
                     "structured": (
                         thaw_json(result.structured)
                         if result.structured is not None

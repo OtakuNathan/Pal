@@ -45,8 +45,8 @@ CANDIDATE_BUILDER_CAPABILITIES = (
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_candidate_submit": {
         "alias": "candidate_submit",
-        "description": "Submit the current module Candidate for independent verification.",
         "guidance": {
+            "purpose": "Submit the current module Candidate for independent verification.",
             "use_when": (
                 "Use after every checklist item is completed, focused checks pass, and the "
                 "implementation is ready for independent verification. Takes no arguments; "
@@ -66,8 +66,8 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_candidate_report_architecture_defect": {
         "alias": "candidate_report_architecture_defect",
-        "description": "Terminally report that the frozen architecture contract cannot satisfy the task.",
         "guidance": {
+            "purpose": "Terminally report that the frozen architecture contract cannot satisfy the task.",
             "use_when": (
                 "Use only when correct implementation requires changing a public boundary, "
                 "contract, ownership, lifecycle/state semantics, ABI, or topology. Explain the "
@@ -89,8 +89,8 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_candidate_request_module_split": {
         "alias": "candidate_request_module_split",
-        "description": "Terminally request an architecture-owned module split.",
         "guidance": {
+            "purpose": "Terminally request an architecture-owned module split.",
             "use_when": (
                 "Use only when the accepted module's responsibility and scale genuinely cannot "
                 "fit one Candidate cycle without an architecture-owned split."

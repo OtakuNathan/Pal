@@ -12,7 +12,7 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.llm.conversions import request_ir_from_prompt
-from pal.llm.ir import LLMRequestIR
+from pal.llm.ir import LLMRequestIR, MessageRole, PromptRegionIR
 from pal.memory.contracts import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -432,7 +432,7 @@ class CompactionEngine:
             for key, value in metadata.items()
             if value is not None
         }
-        return request_ir_from_prompt(
+        request = request_ir_from_prompt(
             messages=[
                 {
                     "role": "system",
@@ -448,6 +448,25 @@ class CompactionEngine:
             temperature=0.0,
             tools=[],
             metadata=metadata,
+        )
+        scope = str(
+            snapshot.metadata.get("prompt_cache_scope_id") or "pal:resident"
+        ).strip()
+        messages = tuple(
+            replace(
+                message,
+                prompt_region=(
+                    PromptRegionIR.STABLE_SYSTEM
+                    if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}
+                    else PromptRegionIR.ACTIVE_DYNAMIC
+                ),
+            )
+            for message in request.messages
+        )
+        return replace(
+            request,
+            messages=messages,
+            logical_scope_id=f"{scope}:compaction",
         )
 
     async def _generate(

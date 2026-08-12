@@ -28,7 +28,7 @@ from pal.llm.ir import (
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError, _JSONFrame as JSONFrame
 from pal.llm.shapes.builder import ResponseIRBuilder
-from pal.llm.serde import part_from_payload, request_to_payload, response_from_payload, response_to_payload
+from pal.llm.serde import part_from_payload, response_from_payload, response_to_payload
 from pal.llm.transport import _iter_json_frames
 from pal.shared import LLMFinishReason
 
@@ -306,8 +306,6 @@ class LLMIRShapeTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             request.tools[0].input_schema["nested"]["new"] = True
 
-        serialized = request_to_payload(request)
-        self.assertEqual(json.loads(json.dumps(serialized)), serialized)
         for shape in WireShape:
             encoded = codec_for_shape(shape).encode(request, _context(shape)).payload
             self.assertEqual(json.loads(json.dumps(encoded)), encoded)

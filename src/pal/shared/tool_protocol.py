@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Annotated, Any, Generic, Literal, Mapping, TypeVar
 from uuid import uuid4
@@ -78,6 +78,11 @@ def new_tool_call(
     )
 
 
+class ToolResultLifecycle(str, Enum):
+    ACTIVE = "active"
+    RETIRED = "retired"
+
+
 @dataclass(frozen=True)
 class ToolResultIR:
     """Conversation/IPC projection of one completed tool call."""
@@ -91,12 +96,14 @@ class ToolResultIR:
     context_delivery: Mapping[str, Any] | None = None
     replay_result_ref: str = ""
     visible_source_ranges: tuple[tuple[int, int], ...] = ()
+    lifecycle: ToolResultLifecycle = ToolResultLifecycle.ACTIVE
 
     def __post_init__(self) -> None:
         if not str(self.call_id or "").strip():
             raise ValueError("tool result call_id must be non-empty")
         if not str(self.name or "").strip():
             raise ValueError("tool result name must be non-empty")
+        object.__setattr__(self, "lifecycle", ToolResultLifecycle(self.lifecycle))
         if self.structured is not None:
             object.__setattr__(self, "structured", freeze_json_mapping(self.structured))
         if self.context_delivery is not None:
@@ -114,6 +121,38 @@ class ToolResultIR:
                 for start, end in self.visible_source_ranges
                 if int(end) > int(start)
             ),
+        )
+
+    @property
+    def retired(self) -> bool:
+        return self.lifecycle == ToolResultLifecycle.RETIRED
+
+    def retire(self) -> "ToolResultIR":
+        """Replace current-turn evidence with a minimal protocol receipt."""
+
+        if self.retired:
+            return self
+        result_ref = str(self.replay_result_ref or "").strip()
+        content = (
+            f"Tool call completed with status={self.status}; full result retired."
+        )
+        if result_ref:
+            content = (
+                f"{content}\nTemporary pager result_ref={result_ref}. "
+                "Use read_tool_result with this result_ref while it remains available; "
+                "if it has expired, reacquire current evidence. Do not repeat a "
+                "side-effecting call solely because its prior result retired."
+            )
+        return replace(
+            self,
+            content=content,
+            structured={
+                "lifecycle": ToolResultLifecycle.RETIRED.value,
+                "full_result_available": bool(result_ref),
+            },
+            context_delivery=None,
+            visible_source_ranges=(),
+            lifecycle=ToolResultLifecycle.RETIRED,
         )
 
 
@@ -251,6 +290,7 @@ __all__ = [
     "ToolExecutionResult",
     "ToolInvocationResult",
     "ToolResultIR",
+    "ToolResultLifecycle",
     "default_tool_result_text",
     "new_tool_call",
 ]

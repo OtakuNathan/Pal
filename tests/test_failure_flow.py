@@ -317,7 +317,6 @@ class FailureFlowTests(unittest.TestCase):
                     failure_next_steps="surface the diagnostic failure",
                 ),
                 execution=DIRECT_NONE,
-                search_text="safe mode deterministic diagnostic probe",
                 handler=safe_probe,
         )
         draft = core.failure_orchestrator.failure_runtime().begin_draft(

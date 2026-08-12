@@ -15,6 +15,7 @@ from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_state import SessionFileStateCache, read_utf8_text_exact
+from pal.execution.tool_result_pager import ToolResultPagerStore
 from pal.execution.session_state import (
     FileDeliveryManifest,
     FileDeliverySpan,
@@ -94,6 +95,102 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
         self.assertNotIn("turn-1", runtime.tool_result_pager._turn_contexts)
         self.assertIn("turn-2", runtime.tool_result_pager._turn_contexts)
+
+    def test_pager_retention_is_isolated_per_execution_lifetime(self) -> None:
+        pager = ToolResultPagerStore()
+        pager.begin_turn(
+            runtime_root=None,
+            turn_id="resident-turn",
+            scope_key="resident",
+            input_id="resident-input",
+            retention_user_turns=9,
+        )
+        pager.begin_turn(
+            runtime_root=None,
+            turn_id="minion-turn",
+            scope_key="minion",
+            input_id="minion-input",
+            retention_user_turns=2,
+        )
+
+        resident = pager.store(
+            runtime_root=None,
+            turn_id="resident-turn",
+            result_ref="resident-result",
+            tool_name="read_file",
+            status="ok",
+            ok=True,
+            rendered="resident",
+            page_size=256,
+        )
+        minion = pager.store(
+            runtime_root=None,
+            turn_id="minion-turn",
+            result_ref="minion-result",
+            tool_name="read_file",
+            status="ok",
+            ok=True,
+            rendered="minion",
+            page_size=256,
+        )
+
+        self.assertEqual(
+            resident.expires_at_user_turn - resident.created_user_turn,
+            9,
+        )
+        self.assertEqual(
+            minion.expires_at_user_turn - minion.created_user_turn,
+            2,
+        )
+
+    def test_failed_result_retirement_rolls_back_l1_and_rejects_completion(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        service = MemoryService()
+        register_memory_with_core(core.context, service)
+        turn_id = "turn-retirement-failure"
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "README.md"},
+            call_id="read-failure",
+        )
+        service.begin_l1_turn(turn_id, user_text="inspect")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="full result",
+            ),
+        )
+
+        def fail_retirement(**_kwargs):
+            raise RuntimeError("authority retirement failed")
+
+        core.context.execution_runtime.retire_tool_results = fail_retirement
+
+        with self.assertRaisesRegex(RuntimeError, "authority retirement failed"):
+            asyncio.run(
+                core._schedule_post_turn_commit_async(
+                    SimpleNamespace(
+                        commit_payload=SimpleNamespace(turn_id=turn_id)
+                    )
+                )
+            )
+
+        active = service.active_l1_turn(turn_id)
+        self.assertIsNotNone(active)
+        self.assertTrue(
+            any(
+                isinstance(part, ToolResultIR) and not part.retired
+                for message in active.messages
+                for part in message.parts
+            )
+        )
 
     def test_frozen_tool_result_preserves_nested_delivery_spans(self) -> None:
         manifest = FileDeliveryManifest(
@@ -237,7 +334,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertFalse(grant.complete)
             self.assertTrue(grant.covered_ranges[0][0] <= 1)
 
-            edit = runtime.execute_tool(
+            edit = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -250,7 +347,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id=turn_id,
             )
 
-            self.assertTrue(edit.ok, edit.llm_text)
+            self.assertEqual(edit.kind, "complete", edit.llm_text)
             self.assertTrue(path.read_text(encoding="utf-8").startswith("omega\n"))
 
     def test_only_delivered_ranges_authorize_and_new_epoch_starts_empty(
@@ -719,7 +816,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-1",
             )
-            before_delivery = runtime.execute_tool(
+            before_delivery = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -731,7 +828,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-1",
             )
-            self.assertFalse(before_delivery.ok)
+            self.assertEqual(before_delivery.kind, "failed")
 
             tool_message = {
                 "role": "tool",
@@ -744,7 +841,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 projected_messages=[tool_message],
                 delivery_records={"read-1": dict(read.context_delivery or {})},
             )
-            after_delivery = runtime.execute_tool(
+            after_delivery = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -757,7 +854,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-1",
             )
 
-            self.assertTrue(after_delivery.ok)
+            self.assertEqual(after_delivery.kind, "complete")
             self.assertEqual(
                 path.read_text(encoding="utf-8"),
                 "omega\nbeta\n",
@@ -800,7 +897,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 },
             )
 
-            unseen = runtime.execute_tool(
+            unseen = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -812,7 +909,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-partial-edit",
             )
-            visible = runtime.execute_tool(
+            visible = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -825,9 +922,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-partial-edit",
             )
 
-            self.assertFalse(unseen.ok)
-            self.assertEqual(unseen.structured["error_code"], "PARTIAL_READ")
-            self.assertTrue(visible.ok, visible.llm_text)
+            self.assertEqual(unseen.kind, "failed")
+            self.assertEqual(unseen.error_code, "PARTIAL_READ")
+            self.assertEqual(visible.kind, "complete", visible.llm_text)
             self.assertEqual(
                 path.read_text(encoding="utf-8"),
                 "alpha\nBETA\ngamma\n",
@@ -911,7 +1008,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertTrue(repeated_read.structured["unchanged"])
 
-            edit = runtime.execute_tool(
+            edit = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -923,7 +1020,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id=turn_id,
             )
-            self.assertTrue(edit.ok, edit.llm_text)
+            self.assertEqual(edit.kind, "complete", edit.llm_text)
             self.assertEqual(path.read_text(encoding="utf-8"), "omega\nbeta\n")
 
     def test_failed_cross_module_delivery_rolls_back_l1_and_retires_pager(self) -> None:
@@ -1047,7 +1144,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 projected_messages=[tool_message],
                 delivery_records=delivery,
             )
-            first = runtime.execute_tool(
+            first = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -1059,7 +1156,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-self-mutation",
             )
-            self.assertTrue(first.ok)
+            self.assertEqual(first.kind, "complete")
 
             # Mutation authority advances only when the edit result itself is
             # retained in L1. The historical read remains as the dependency
@@ -1078,7 +1175,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                     "edit-1": dict(first.context_delivery or {}),
                 },
             )
-            second = runtime.execute_tool(
+            second = runtime.invoke_indirect_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -1091,7 +1188,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-self-mutation",
             )
 
-            self.assertTrue(second.ok, second.llm_text)
+            self.assertEqual(second.kind, "complete", second.llm_text)
             self.assertEqual(path.read_text(encoding="utf-8"), "omega\ngamma\n")
 
     def test_context_compaction_rebuilds_only_exact_retained_file_ranges(

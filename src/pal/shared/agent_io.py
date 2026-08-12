@@ -218,6 +218,9 @@ class ChannelNormalizer(Protocol):
 
 
 class AgentOutputPort(Protocol):
+    def supports_stream_delivery(self, envelope: TurnDeliveryBinding) -> bool:
+        ...
+
     def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> Any:
         ...
 

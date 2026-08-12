@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from enum import Enum
 from functools import lru_cache
 from typing import Any
@@ -14,7 +15,6 @@ from pal.shared.tool_protocol import (
     PagedResult,
     RejectedResult,
     RetryDirective,
-    TOOL_INVOCATION_RESULT_ADAPTER,
     ToolAffordance,
     ToolInvocationResult,
 )
@@ -90,13 +90,44 @@ class PagingMode(str, Enum):
     SUPPORTED = "supported"
 
 
+_TOOL_ALIAS_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+class NextToolHint(StrictToolModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    name: str
+    use_when: str
+
+    @model_validator(mode="after")
+    def validate_hint(self) -> "NextToolHint":
+        if self.name != self.name.strip() or _TOOL_ALIAS_RE.fullmatch(self.name) is None:
+            raise ValueError("next tool name must be an exact 1-64 character semantic alias")
+        if self.name.startswith(("op_", "intro_")):
+            raise ValueError("next tool name must not expose a canonical capability path")
+        if not self.use_when.strip():
+            raise ValueError("next tool use_when must be non-empty")
+        return self
+
+
 class ToolGuidance(StrictToolModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     purpose: str
-    use_when: str = ""
-    do_not_use_when: str = ""
-    failure_next_steps: str = ""
+    use_when: str
+    do_not_use_when: str
+    failure_next_steps: str
+    next_tool_hints: tuple[NextToolHint, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_guidance(self) -> "ToolGuidance":
+        for field_name in ("purpose", "use_when", "do_not_use_when", "failure_next_steps"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"tool guidance {field_name} must be non-empty")
+        names = [hint.name for hint in self.next_tool_hints]
+        if len(names) != len(set(names)):
+            raise ValueError("next tool names must be unique within one guidance contract")
+        return self
 
 
 class ToolExecutionSemantics(StrictToolModel):
@@ -216,14 +247,11 @@ def compile_tool_description(
     input_schema: dict[str, Any],
     output_schema: dict[str, Any],
     example: dict[str, Any] | None,
-    fallback_description: str | None = None,
+    next_tool_lines: tuple[str, ...] = (),
 ) -> str:
     enum_values = _schema_enum_values(input_schema)
-    # Display contract: guidance.purpose is the display source of truth;
-    # the raw description is only the fallback when purpose is absent/empty.
-    purpose = str(guidance.purpose or fallback_description or "").strip()
     sections = [
-        f"Purpose: {purpose}",
+        f"Purpose: {guidance.purpose.strip()}",
         f"Use when: {guidance.use_when}",
         f"Do not use when: {guidance.do_not_use_when}",
         f"Failure next steps: {guidance.failure_next_steps}",
@@ -241,6 +269,8 @@ def compile_tool_description(
         sections.append(f"Valid enum/const values: {rendered}")
     if example is not None:
         sections.append(f"Valid example: {json.dumps(example, ensure_ascii=False, sort_keys=True)}")
+    if next_tool_lines:
+        sections.append("Possible next tools:\n" + "\n".join(f"- {line}" for line in next_tool_lines))
     sections.extend(
         [
             f"Output shape: {json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}",
@@ -300,6 +330,7 @@ __all__ = [
     "Idempotency",
     "InvocationMode",
     "McpToolOutput",
+    "NextToolHint",
     "PagedResult",
     "PagingMode",
     "RejectedResult",

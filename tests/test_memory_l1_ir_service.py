@@ -74,6 +74,21 @@ class MemoryL1IRServiceTests(unittest.TestCase):
                 ToolResultIR(call_id="call-1", name="write", content="late"),
             )
 
+    def test_failed_authority_retirement_rolls_l1_back_to_active(self) -> None:
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="inspect")
+
+        def fail_retirement() -> None:
+            raise RuntimeError("execution authority retirement failed")
+
+        with self.assertRaisesRegex(RuntimeError, "authority retirement"):
+            service.settle_l1_turn("turn-1", after_commit=fail_retirement)
+
+        active = service.active_l1_turn("turn-1")
+        self.assertIsNotNone(active)
+        assert active is not None
+        self.assertEqual(active.state, L1TurnState.ACTIVE)
+
     def test_interjection_append_is_idempotent_by_message_id(self) -> None:
         service = MemoryService()
         service.begin_l1_turn("turn-1", user_text="start")

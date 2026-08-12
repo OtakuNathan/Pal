@@ -349,10 +349,12 @@ Runtime/process methods:
 - `request_logical_slot`, `wait_logical_slot`, `release_logical_slot`
 - `destroy_work_order_run`
 
-LLM broker methods:
+LLM transport methods:
 
-- `llm_preflight`, `llm_generate`, `llm_generate_stream`
-- `llm_resolve_max_output_tokens`, `llm_resolve_endpoint_facts`
+- `llm_transport_stream`: validates run and endpoint authority, injects the
+  Manager-owned credential, and forwards raw provider JSON frames
+- `llm_usage_receipt`: idempotently records Minion-normalized usage after the
+  local shared LLM pipeline reaches terminal
 
 Workflow and DAG methods:
 

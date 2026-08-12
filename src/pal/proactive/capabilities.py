@@ -19,7 +19,7 @@ from pal.execution.generated_tool_models import (
 )
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -132,7 +132,6 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show proactive module status for scheduled, reminder, recurring, or push tasks",
         guidance=ToolGuidance(
             purpose="Show proactive module status.",
             use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
@@ -155,7 +154,6 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications",
         guidance=ToolGuidance(
             purpose="List configured proactive tasks with their names, goals, schedules, next due time, and enabled status.",
             use_when="Checking what scheduled, recurring, reminder, or push tasks exist. The authoritative source for proactive task inventory.",
@@ -196,7 +194,6 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="proactive",
         action_name="show",
-        description="Show a configured proactive task",
         guidance=ToolGuidance(
             purpose="Show one proactive task's full configuration — goal, schedule, output channel, skill refs.",
             use_when="Inspecting a specific task's details before modifying or debugging it.",
@@ -237,7 +234,6 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="proactive",
         action_name="last_run",
-        description="Show the latest run for a proactive task",
         guidance=ToolGuidance(
             purpose="Show the most recent run result for one proactive task.",
             use_when="Checking if a recurring/scheduled task ran successfully or what it produced.",
@@ -284,7 +280,6 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="proactive",
         action_name="list_runs",
-        description="List recent runs for a proactive task",
         guidance=ToolGuidance(
             purpose="List recent run history for one proactive task.",
             use_when="Debugging a task that keeps failing or checking patterns across multiple runs.",
@@ -326,7 +321,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="create",
-        description="Create or replace a proactive task for future work.",
         guidance=ToolGuidance(
             purpose="Create or replace a proactive task for future work.",
             use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications.",
@@ -388,7 +382,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="delete",
-        description="Delete (destroy) a proactive task",
         guidance=ToolGuidance(
             purpose="Permanently delete a proactive task and its definition.",
             use_when="A scheduled/recurring task is no longer needed and should be fully removed.",
@@ -428,7 +421,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="enable",
-        description="Enable a proactive task",
         guidance=ToolGuidance(
             purpose="Enable a proactive task so it resumes firing on schedule.",
             use_when="Re-enabling a previously disabled task.",
@@ -447,7 +439,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="disable",
-        description="Disable a proactive task",
         guidance=ToolGuidance(
             purpose="Disable a proactive task so it stops firing without deleting it.",
             use_when="Temporarily pausing a task (e.g. debugging, vacation, maintenance).",
@@ -466,7 +457,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_output_channel",
-        description="Set or clear the output channel for a proactive task",
         guidance=ToolGuidance(
             purpose="Set or clear which channel endpoint receives a proactive task's output.",
             use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
@@ -514,7 +504,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_output_target",
-        description="Set or clear the output reply target for a proactive task",
         guidance=ToolGuidance(
             purpose="Set or clear the specific reply target (e.g. chat ID, thread) within a channel for a proactive task.",
             use_when="Fine-tuning where within a channel the task output goes (e.g. specific chat thread).",
@@ -559,7 +548,6 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="update_schedule",
-        description="Update the schedule for a proactive task",
         guidance=ToolGuidance(
             purpose="Update the schedule (cron, once, manual) for a proactive task.",
             use_when="Changing when a task fires — switching from manual to cron, updating cron expression, or setting a one-time trigger.",
@@ -605,7 +593,7 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive schedule updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach proactive module — resume scheduled task processing.",
             use_when="Reconnecting a detached proactive module.",
@@ -623,7 +611,7 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach proactive module — stop all scheduled task processing.",
             use_when="Temporarily stopping all proactive tasks (e.g. maintenance). Rarely needed.",

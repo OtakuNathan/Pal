@@ -10,6 +10,7 @@ from pal.plugins.contracts import PluginBuildContext
 class MinionBuiltinBundle:
     runtime_root: object
     harness_registry: object | None = None
+    runtime_db_path: object | None = None
     plugin_id: str = "minion"
     version: str = "0.1.0"
 
@@ -17,6 +18,7 @@ class MinionBuiltinBundle:
         return register_with_core(
             context,
             runtime_root=self.runtime_root,
+            runtime_db_path=self.runtime_db_path,
             harness_registry=self.harness_registry,
         )
 
@@ -25,4 +27,5 @@ def build_plugin(context: PluginBuildContext) -> MinionBuiltinBundle:
     return MinionBuiltinBundle(
         runtime_root=context.runtime_root,
         harness_registry=context.services.get("minion_harness_registry"),
+        runtime_db_path=context.services.get("runtime_db_path"),
     )

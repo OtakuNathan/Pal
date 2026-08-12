@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, fields
 from typing import Any, Mapping
@@ -144,6 +145,19 @@ class LLMEndpointSpec:
 
 
 ENDPOINT_SPEC_FIELDS = frozenset(field.name for field in fields(LLMEndpointSpec))
+
+
+def endpoint_spec_fingerprint(value: Mapping[str, Any] | object) -> str:
+    """Fingerprint the public endpoint contract without resolving its secret."""
+
+    payload = LLMEndpointSpec.from_value(value).to_payload()
+    material = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 def merge_endpoint_spec_payload(

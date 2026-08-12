@@ -140,6 +140,52 @@ class RuntimeStateTests(unittest.TestCase):
             )
         )
 
+    def test_memory_restore_migrates_legacy_closed_turn_projection(self) -> None:
+        service = MemoryService()
+        service.begin_l1_turn("turn-legacy", user_text="inspect")
+        service.upsert_l1_assistant(
+            "turn-legacy",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    ReasoningPartIR("legacy transient reasoning"),
+                    TextPartIR("checking"),
+                    ToolCallIR(call_id="read-1", name="read_file", args={}),
+                ),
+            ),
+        )
+        service.append_l1_tool_result(
+            "turn-legacy",
+            ToolResultIR(
+                call_id="read-1",
+                name="read_file",
+                content="legacy full file result",
+            ),
+        )
+        payload = copy.deepcopy(MemoryRuntimeStatePort(service).snapshot_state())
+        payload["l1_turns"][0]["state"] = "settled"
+        for message in payload["l1_turns"][0]["messages"]:
+            for part in message["parts"]:
+                if part["kind"] == "tool_result":
+                    part.pop("lifecycle")
+
+        restored = MemoryService()
+        port = MemoryRuntimeStatePort(restored)
+        port.install_prepared_state(port.prepare_restore_state(payload))
+
+        turn = restored.l1_store.turns.get("turn-legacy")
+        self.assertEqual(turn.state.value, "settled")
+        self.assertNotIn("legacy transient reasoning", repr(turn.messages))
+        results = [
+            part
+            for message in turn.messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        ]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].retired)
+        self.assertNotIn("legacy full file result", results[0].content)
+
     def test_execution_restore_and_reset_owns_in_memory_pager(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_execution_snapshot_"))
         source = ExecutionRuntime(runtime_root=root)

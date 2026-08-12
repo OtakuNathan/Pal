@@ -118,6 +118,7 @@ def compose_runtime(
         services={
             "memory_service": memory_service,
             "minion_harness_registry": minion_harness_registry,
+            "runtime_db_path": registration.runtime.db_path,
         },
     )
     proactive_repository = ProactiveRepository()
@@ -151,7 +152,7 @@ def compose_runtime(
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
     skill_service.llm_runtime = llm_runtime
-    register_memory_with_core(core.context, memory_service, config=config)
+    register_memory_with_core(core.context, memory_service)
     register_checklist_with_core(core.context, checklist_service)
     register_plugins_with_core(core.context, plugin_host)
     register_proactive_with_core(core.context, proactive_manager, proactive_runner)

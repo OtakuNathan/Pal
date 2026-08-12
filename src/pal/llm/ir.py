@@ -44,6 +44,16 @@ class MessageState(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class PromptRegionIR(StrEnum):
+    """Provider-neutral cache locality carried with prompt messages."""
+
+    UNSPECIFIED = "unspecified"
+    STABLE_SYSTEM = "stable_system"
+    SETTLED_HISTORY = "settled_history"
+    ACTIVE_INPUT = "active_input"
+    ACTIVE_DYNAMIC = "active_dynamic"
+
+
 class LLMResponseDeltaKind(StrEnum):
     TEXT = "text"
     REASONING = "reasoning"
@@ -135,12 +145,14 @@ class LLMMessageIR:
     message_id: str = field(default_factory=lambda: str(uuid4()))
     state: MessageState = MessageState.COMPLETE
     semantic_kind: str = ""
+    prompt_region: PromptRegionIR = PromptRegionIR.UNSPECIFIED
     replay: ReplayEnvelope | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", MessageRole(self.role))
         object.__setattr__(self, "state", MessageState(self.state))
+        object.__setattr__(self, "prompt_region", PromptRegionIR(self.prompt_region))
         if not str(self.message_id or "").strip():
             raise ValueError("message_id must be non-empty")
         object.__setattr__(self, "parts", tuple(self.parts))
@@ -208,11 +220,13 @@ class LLMRequestIR:
     tools: tuple[_ToolDefinitionIR, ...]
     policy: GenerationPolicyIR
     model_hint: str | None = None
+    logical_scope_id: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(self, "logical_scope_id", str(self.logical_scope_id or "").strip())
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
         if any(
             isinstance(part, ArtifactRefPartIR)

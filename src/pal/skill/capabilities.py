@@ -181,7 +181,6 @@ class SkillIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show skill management state",
         guidance=ToolGuidance(
             purpose="Show skill management state.",
             use_when="Diagnosing skill system health — how many skills exist, how many are active, pending candidate count.",
@@ -214,7 +213,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="assimilate",
-        description="Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit.",
         guidance=ToolGuidance(
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
@@ -239,7 +237,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="commit",
-        description="Commit a sanitized skill candidate and its thin affordance.",
         guidance=ToolGuidance(
             purpose="Commit a sanitized skill candidate and register its thin behavior affordance.",
             use_when="After skill_assimilate produced a candidate you've reviewed and want to persist as a normalized skill.",
@@ -259,7 +256,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="update",
-        description="Update a normalized skill and refresh its thin affordance.",
         guidance=ToolGuidance(
             purpose="Update a normalized skill's metadata or manual text and refresh its affordance.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
@@ -279,7 +275,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="disable",
-        description="Disable a normalized skill without deleting history.",
         guidance=ToolGuidance(
             purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
             use_when="A skill is no longer relevant or is producing false-positive activations.",
@@ -299,7 +294,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="search",
-        description="Search normalized Pal skills for the current scenario or explicit skill name. Does not inject manuals.",
         guidance=ToolGuidance(
             purpose="Search normalized skills by scenario or name. Returns metadata only — does not inject manuals into context.",
             use_when="Looking for a reusable procedure or domain manual that may help the current task. Checking if a skill exists before creating one.",
@@ -319,7 +313,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="read",
-        description="Read normalized Pal skill metadata, optionally including manual text.",
         guidance=ToolGuidance(
             purpose="Read one skill's metadata and optionally its full manual text.",
             use_when="Inspecting a specific skill's content, activation terms, or manual before deciding to inject it.",
@@ -339,7 +332,6 @@ class SkillIntrospectionProvider:
         scope="module",
         family="skill",
         action_name="inject",
-        description="Inject a registered active skill manual as a tool observation without executing capabilities.",
         guidance=ToolGuidance(
             purpose="Inject a skill's manual text into the current context as a reference observation.",
             use_when="A skill matches the current task and you need its step-by-step procedure or domain manual to guide execution.",

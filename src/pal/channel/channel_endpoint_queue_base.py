@@ -29,6 +29,7 @@ from pal.shared import EventKind, SourceKind
 
 
 INTERACTIVE_STATUS_KINDS = {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}
+TRANSIENT_TEXT_STATUS_KINDS = {"llm_waiting"}
 
 
 @dataclass
@@ -69,6 +70,9 @@ class ChannelEndpointQueueBase(ABC):
     def inspect_auth_state(self) -> dict[str, Any]:
         ...
 
+    def supports_stream_delivery(self) -> bool:
+        return False
+
     def derive_default_reply_target(self) -> dict[str, Any]:
         return {}
 
@@ -103,6 +107,11 @@ class ChannelEndpointQueueBase(ABC):
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         if kind == "control_catalog":
             self.apply_control_catalog(payload)
+            return
+        if kind in TRANSIENT_TEXT_STATUS_KINDS:
+            text = str(payload.get("text") or "").strip()
+            if text:
+                self.send_reply(response_handle, text)
             return
         if kind not in INTERACTIVE_STATUS_KINDS:
             return

@@ -8,8 +8,12 @@ from pydantic import Field
 from pal.checklist.service import ChecklistService
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.execution.tool_facade import StrictToolModel, ToolGuidance
-from pal.execution.tool_semantics import DIRECT_LOCAL_READ, DIRECT_LOCAL_WRITE
+from pal.execution.tool_facade import NextToolHint, StrictToolModel, ToolGuidance
+from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_WRITE,
+    INDIRECT_LOCAL_READ,
+    INDIRECT_LOCAL_WRITE,
+)
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -72,12 +76,21 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="upsert",
-        description="Open or replace a visible checklist for Pal's multi-step work. The user can see progress as steps complete, while Pal uses it to track unfinished work and avoid omissions.",
         guidance=ToolGuidance(
             purpose="Open or replace a user-visible checklist for multi-step work, keeping concrete progress and unfinished work explicit.",
             use_when="Strongly prefer using this when work has multiple concrete steps, meaningful side effects, or a realistic risk of missing a follow-up. Open it early, keep steps concrete, clearly mark the first side-effecting step, and update it as work evolves. If the task requires a durable architect/coder/verifier workflow, use minion_start_workflow instead.",
             do_not_use_when="Single-step or conversational work. Durable facts or decisions belong in remember_memory, not this checklist. Minion Task ledger work is Manager-owned. Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
+            next_tool_hints=(
+                NextToolHint(
+                    name="checklist_check",
+                    use_when="One concrete checklist step has actually been completed.",
+                ),
+                NextToolHint(
+                    name="checklist_show",
+                    use_when="Exact step text or remaining progress must be recovered.",
+                ),
+            ),
         ),
         InputModel=ChecklistUpsertInput,
         execution=DIRECT_LOCAL_WRITE,
@@ -107,15 +120,24 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="check",
-        description="Mark one checklist step completed and echo the updated checklist to the user's channel.",
         guidance=ToolGuidance(
             purpose="Tick one step of the active checklist as completed.",
             use_when="Pal finished one concrete step of an open checklist and wants the user to see progress (core fans the echo out to the channel). When the last step is checked, remember to call checklist_clear once the work is re-verified.",
             do_not_use_when="No active checklist (upsert first). Inventing completion for work not actually finished — check only what was really done. Using it as evidence or a submission gate.",
             failure_next_steps="If no active checklist, call checklist_upsert first. If the step string does not match an open step exactly, re-check the exact step text from checklist_show.",
+            next_tool_hints=(
+                NextToolHint(
+                    name="checklist_show",
+                    use_when="The exact remaining step text or overall progress must be inspected.",
+                ),
+                NextToolHint(
+                    name="checklist_clear",
+                    use_when="Every step is complete and the work has been re-verified.",
+                ),
+            ),
         ),
         InputModel=ChecklistCheckInput,
-        execution=DIRECT_LOCAL_WRITE,
+        execution=INDIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_check"},
         aliases=("checklist_check",),
     )
@@ -164,14 +186,23 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="show",
-        description="Show the active checklist (steps, statuses, markdown).",
         guidance=ToolGuidance(
             purpose="Inspect Pal's own active checklist.",
             use_when="Pal needs to recall exact step texts, confirm what remains, or re-check progress mid-task.",
             do_not_use_when="Reading the user's durable memory (use recall_memory). Reading Minion Task ledger state (use minion_task_status).",
             failure_next_steps="Read-only. If inactive, no checklist is open.",
+            next_tool_hints=(
+                NextToolHint(
+                    name="checklist_check",
+                    use_when="The snapshot identifies a step that has now been completed.",
+                ),
+                NextToolHint(
+                    name="checklist_clear",
+                    use_when="The snapshot is complete and the work has been re-verified.",
+                ),
+            ),
         ),
-        execution=DIRECT_LOCAL_READ,
+        execution=INDIRECT_LOCAL_READ,
         metadata={"canonical_path": "op_checklist_show"},
         aliases=("checklist_show",),
     )
@@ -198,14 +229,13 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="clear",
-        description="Discard the active checklist.",
         guidance=ToolGuidance(
             purpose="Tear down Pal's own task checklist.",
             use_when="Every step is completed and Pal re-verified the work against the list. Before delivering the result, audit the checklist one more time for anything missed; only then clear it. Also clear when the task changed and the list is stale.",
             do_not_use_when="The task is still in progress. Clearing before the final audit skips the delivery self-check this tool exists to support.",
             failure_next_steps="If no checklist is active, the operation is an idempotent no-op. If the result is uncertain, inspect checklist_show before deciding whether another clear is needed.",
         ),
-        execution=DIRECT_LOCAL_WRITE,
+        execution=INDIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_clear"},
         aliases=("checklist_clear",),
     )
@@ -228,14 +258,13 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="show",
-        description="Show the active checklist state (introspection).",
         guidance=ToolGuidance(
             purpose="Inspect the checklist module's current state.",
             use_when="Diagnosing checklist state or verifying the module is mounted.",
             do_not_use_when="Managing checklist work as Pal (use checklist_show, checklist_upsert, checklist_check, or checklist_clear).",
             failure_next_steps="Read-only. If inactive, no checklist is open.",
         ),
-        execution=DIRECT_LOCAL_READ,
+        execution=INDIRECT_LOCAL_READ,
         aliases=("checklist_inspect",),
     )
     def show_introspection(self, call: IntrospectionCall) -> IntrospectionResult:

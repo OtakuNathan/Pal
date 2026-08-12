@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Iterator
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol, TypeAlias
 
 from pal.llm.ir import (
     LLMRequestIR,
@@ -23,11 +23,25 @@ class ShapeContext:
     wire_shape: WireShape
     endpoint_id: str
     model_id: str
+    provider_id: str = ""
+    base_url: str = ""
+    capabilities: Mapping[str, Any] = field(default_factory=dict)
+
+
+JSONPathPart: TypeAlias = str | int
+
+
+@dataclass(frozen=True)
+class EncodedMessageSpan:
+    message_id: str
+    cache_targets: tuple[tuple[JSONPathPart, ...], ...] = ()
 
 
 @dataclass(frozen=True)
 class EncodedRequest:
     payload: Mapping[str, Any]
+    message_spans: tuple[EncodedMessageSpan, ...] = ()
+    extra_body: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

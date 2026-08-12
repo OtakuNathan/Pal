@@ -18,7 +18,6 @@ from pal.execution.generated_tool_models import (
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
@@ -32,7 +31,6 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.web_fetch.browser_service import BrowserServiceManager
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.service import WebFetchService
@@ -104,7 +102,7 @@ class WebFetchIntrospectionProvider:
     def resolve_provider_label(self, provider: WebFetchProviderModel) -> str:
         return provider.provider_id
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show web fetch module state",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show web fetch module state.",
             use_when="Diagnosing web fetch health — provider count, active provider, mounted status.",
@@ -125,7 +123,6 @@ class WebFetchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list_providers",
-        description="List configured web fetch providers",
         guidance=ToolGuidance(
             purpose="List configured web fetch providers.",
             use_when="Discovering available fetch backends and their enabled status.",
@@ -149,7 +146,6 @@ class WebFetchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show configured and effective active web fetch provider",
         guidance=ToolGuidance(
             purpose="Show the active web fetch provider.",
             use_when="Checking which fetch backend handles read_web requests.",
@@ -175,7 +171,6 @@ class WebFetchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="show",
-        description="Show web fetch provider metadata",
         guidance=ToolGuidance(
             purpose="Show one web fetch provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
@@ -200,7 +195,6 @@ class WebFetchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="auth_state",
-        description="Show web fetch provider authorization state",
         guidance=ToolGuidance(
             purpose="Show one web fetch provider's authorization state.",
             use_when="Diagnosing auth failures or checking if credentials are configured.",
@@ -226,7 +220,6 @@ class WebFetchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="health",
-        description="Show web fetch provider health",
         guidance=ToolGuidance(
             purpose="Show one web fetch provider's health.",
             use_when="Diagnosing fetch failures or browser connectivity issues.",
@@ -253,7 +246,6 @@ class WebFetchIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_active_provider",
-        description="Set the configured active web fetch provider",
         guidance=ToolGuidance(
             purpose="Set the active web fetch provider.",
             use_when="Switching to a different fetch backend.",
@@ -286,7 +278,6 @@ class WebFetchIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="read",
-        description="Fetch a webpage using the configured browser fetch provider and internal fallback",
         guidance=ToolGuidance(
             purpose="Fetch a webpage using the configured browser fetch provider and internal fallback.",
             use_when="Reading a specific webpage's text content, title, and links.",
@@ -353,7 +344,6 @@ class WebFetchIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="screenshot",
-        description="Render a URL in the browser and save a PNG screenshot.",
         guidance=ToolGuidance(
             purpose="Render a URL in the browser and save a PNG screenshot as an artifact.",
             use_when="Only when visual page evidence is needed.",
@@ -380,7 +370,6 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="enable",
-        description="Enable a web fetch provider",
         guidance=ToolGuidance(
             purpose="Enable a web fetch provider.",
             use_when="Re-enabling a disabled fetch provider.",
@@ -398,7 +387,6 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="disable",
-        description="Disable a web fetch provider",
         guidance=ToolGuidance(
             purpose="Disable a web fetch provider.",
             use_when="Temporarily removing a provider from the active pool.",
@@ -416,7 +404,6 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="set_auth_material",
-        description="Update web fetch provider auth material without exposing secrets",
         guidance=ToolGuidance(
             purpose="Apply auth material to a web fetch provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
@@ -452,7 +439,6 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="set_config",
-        description="Merge config into a web fetch provider settings blob",
         guidance=ToolGuidance(
             purpose="Merge config into a web fetch provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. timeout, user agent).",
@@ -481,7 +467,7 @@ class WebFetchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web fetch provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach web fetch module.",
             use_when="Reconnecting a detached web fetch module.",
@@ -495,7 +481,7 @@ class WebFetchIntrospectionProvider:
         payload = {"mounted": True, "degraded": False}
         return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch attached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach web fetch module.",
             use_when="Temporarily stopping all web fetch functionality.",

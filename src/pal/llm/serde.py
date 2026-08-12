@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR, ToolResultIR
-
 from typing import Any, Mapping
 
-from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.ir import (
     ArtifactRefPartIR,
-    GenerationPolicyIR,
     ImagePartIR,
     LLMFinishReason,
     LLMMessageIR,
-    LLMRequestIR,
     LLMResponseDeltaKind,
     LLMResponseItemKind,
     LLMResponseIR,
@@ -19,87 +14,18 @@ from pal.llm.ir import (
     LLMUsageIR,
     MessageRole,
     MessageState,
+    PromptRegionIR,
     ReasoningPartIR,
     ReplayEnvelope,
     TextPartIR,
-    ThinkingLevel,
     WireShape,
 )
 from pal.shared.json_values import thaw_json
-
-
-def request_to_payload(request: LLMRequestIR) -> dict[str, Any]:
-    return {
-        "messages": [message_to_payload(item) for item in request.messages],
-        "tools": [
-            {"name": item.name, "description": item.description, "input_schema": thaw_json(item.input_schema)}
-            for item in request.tools
-        ],
-        "policy": {
-            "max_output_tokens": request.policy.max_output_tokens,
-            "temperature": request.policy.temperature,
-            "thinking_level": request.policy.thinking_level.value if request.policy.thinking_level else None,
-            "thinking_budget_tokens": request.policy.thinking_budget_tokens,
-            "tool_choice": request.policy.tool_choice,
-        },
-        "model_hint": request.model_hint,
-        "metadata": thaw_json(request.metadata),
-    }
-
-
-def request_from_payload(payload: Mapping[str, Any]) -> LLMRequestIR:
-    policy = dict(payload.get("policy") or {})
-    level = policy.get("thinking_level")
-    return LLMRequestIR(
-        messages=tuple(message_from_payload(item) for item in payload.get("messages") or ()),
-        tools=tuple(
-            ToolDefinitionIR(
-                name=str(item.get("name") or ""),
-                description=str(item.get("description") or ""),
-                input_schema=dict(item.get("input_schema") or {}),
-            )
-            for item in payload.get("tools") or ()
-        ),
-        policy=GenerationPolicyIR(
-            max_output_tokens=int(policy.get("max_output_tokens") or 1),
-            temperature=policy.get("temperature"),
-            thinking_level=ThinkingLevel(str(level)) if level else None,
-            thinking_budget_tokens=policy.get("thinking_budget_tokens"),
-            tool_choice=str(policy.get("tool_choice") or "auto"),
-        ),
-        model_hint=str(payload.get("model_hint") or "") or None,
-        metadata=dict(payload.get("metadata") or {}),
-    )
-
-
-def preflight_request_to_payload(request: LLMPreflightRequest) -> dict[str, Any]:
-    return {"request": request_to_payload(request.request)}
-
-
-def preflight_request_from_payload(payload: Mapping[str, Any]) -> LLMPreflightRequest:
-    return LLMPreflightRequest(request=request_from_payload(dict(payload.get("request") or {})))
-
-
-def generation_result_to_payload(result: LLMGenerationResult) -> dict[str, Any]:
-    return {
-        "response": response_to_payload(result.response),
-        "response_mode": result.response_mode,
-        "target_input_budget": result.target_input_budget,
-        "reserved_output_tokens": result.reserved_output_tokens,
-        "preferred_endpoint_id": result.preferred_endpoint_id,
-        "preferred_model_id": result.preferred_model_id,
-    }
-
-
-def generation_result_from_payload(payload: Mapping[str, Any]) -> LLMGenerationResult:
-    return LLMGenerationResult(
-        response=response_from_payload(dict(payload.get("response") or {})),
-        response_mode=str(payload.get("response_mode") or "") or None,
-        target_input_budget=int(payload.get("target_input_budget") or 0),
-        reserved_output_tokens=int(payload.get("reserved_output_tokens") or 0),
-        preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or "") or None,
-        preferred_model_id=str(payload.get("preferred_model_id") or "") or None,
-    )
+from pal.shared.tool_protocol import (
+    ToolCallIR,
+    ToolResultIR,
+    ToolResultLifecycle,
+)
 
 
 def update_to_payload(update: LLMResponseUpdate) -> dict[str, Any]:
@@ -163,6 +89,7 @@ def message_to_payload(message: LLMMessageIR) -> dict[str, Any]:
         "message_id": message.message_id,
         "state": message.state.value,
         "semantic_kind": message.semantic_kind,
+        "prompt_region": message.prompt_region.value,
         "replay": (
             {
                 "wire_shape": message.replay.wire_shape.value,
@@ -193,6 +120,9 @@ def message_from_payload(payload: Mapping[str, Any]) -> LLMMessageIR:
         message_id=str(payload.get("message_id") or ""),
         state=MessageState(str(payload.get("state") or "complete")),
         semantic_kind=str(payload.get("semantic_kind") or ""),
+        prompt_region=PromptRegionIR(
+            str(payload.get("prompt_region") or "unspecified")
+        ),
         replay=replay,
         metadata=dict(payload.get("metadata") or {}),
     )
@@ -221,6 +151,7 @@ def part_to_payload(part: Any) -> dict[str, Any]:
         return {
             "kind": "tool_result", "call_id": part.call_id, "name": part.name,
             "content": part.content, "ok": part.ok, "status": part.status,
+            "lifecycle": part.lifecycle.value,
             "structured": thaw_json(part.structured) if part.structured is not None else None,
             # Runtime-only truth. Provider shape codecs deliberately ignore it.
             "context_delivery": (
@@ -266,6 +197,9 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
             call_id=str(payload.get("call_id") or ""), name=str(payload.get("name") or ""),
             content=str(payload.get("content") or ""), ok=bool(payload.get("ok", True)),
             status=str(payload.get("status") or "ok"),
+            lifecycle=ToolResultLifecycle(
+                str(payload.get("lifecycle") or "active")
+            ),
             structured=dict(payload["structured"]) if isinstance(payload.get("structured"), Mapping) else None,
             context_delivery=(
                 dict(payload["context_delivery"])

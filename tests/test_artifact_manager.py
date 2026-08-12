@@ -166,7 +166,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<runtime_context_update kind="artifact">', text)
         self.assertIn("Available Artifacts", text)
         self.assertIn("看看这个附件", text)
-        self.assertIn("<runtime_reminder", text)
+        self.assertNotIn("<runtime_reminder", text)
+        self.assertEqual(request.metadata["runtime_reminder_text"], "")
 
     def test_legacy_artifact_fragment_is_suppressed_when_active_l1_owns_input(self) -> None:
         self._register_text(name="active.txt", text="only once")
@@ -441,7 +442,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         later_text = later_request.messages[0].text
         self.assertIn("try this artifact again", later_text)
-        self.assertIn("<runtime_reminder", later_text)
+        self.assertNotIn("<runtime_reminder", later_text)
+        self.assertEqual(later_request.metadata["runtime_reminder_text"], "")
 
         no_caption_request = compiler.build_canonical_prompt(
             PromptAssemblyContext(

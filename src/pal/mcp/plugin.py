@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
 from pal.execution.tool_facade import ToolGuidance
@@ -29,12 +28,11 @@ from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import python_subprocess_env
 from pal.mcp.compiler import McpCompiledProjection, McpCompiler
-from pal.mcp.ipc import McpManagerClient, McpManagerRpcError
+from pal.mcp.ipc import McpManagerClient
 from pal.mcp.model import McpDiscoverySnapshot
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
-    BoundCapabilityAction,
     IntrospectionCall,
     IntrospectionResult,
     MountedSubtreeHandle,
@@ -99,7 +97,7 @@ class McpManagerPluginProvider:
     def __post_init__(self) -> None:
         self.client = McpManagerClient(runtime_root=self.runtime_root)
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show MCP manager status",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show MCP manager status.",
             use_when="Diagnosing MCP system health — manager process, projection, server count.",
@@ -116,7 +114,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm("MCP manager status", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list", description="List configured MCP servers",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list",
         guidance=ToolGuidance(
             purpose="List configured MCP servers.",
             use_when="Discovering which MCP servers are configured and their attach status.",
@@ -132,7 +130,6 @@ class McpManagerPluginProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="mcp_server",
         action_name="read",
-        description="Read one MCP server metadata and discovery snapshot",
         guidance=ToolGuidance(
             purpose="Read one MCP server's metadata and tool discovery snapshot.",
             use_when="Inspecting what tools a specific MCP server exposes.",
@@ -146,7 +143,7 @@ class McpManagerPluginProvider:
         result = self._request_or_error("read_server", {"server_id": str(call.args.get("name") or "")})
         return _introspection_from_rpc("MCP server", result)
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach MCP manager — start sidecar and discover servers.",
             use_when="Reconnecting a detached MCP manager or after config changes.",
@@ -176,7 +173,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm(text, payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach MCP manager — stop sidecar and withdraw all MCP capabilities.",
             use_when="Temporarily stopping all MCP server connections.",
@@ -196,7 +193,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm("MCP manager detached", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
@@ -219,7 +216,6 @@ class McpManagerPluginProvider:
         scope="module",
         family="server",
         action_name="attach",
-        description="Attach one configured MCP server inside the manager",
         guidance=ToolGuidance(
             purpose="Attach one configured MCP server inside the manager.",
             use_when="Enabling a specific MCP server's tools without affecting others.",
@@ -245,7 +241,6 @@ class McpManagerPluginProvider:
         scope="module",
         family="server",
         action_name="detach",
-        description="Detach one MCP server inside the manager",
         guidance=ToolGuidance(
             purpose="Detach one MCP server inside the manager.",
             use_when="Temporarily disabling one MCP server's tools.",
@@ -270,7 +265,6 @@ class McpManagerPluginProvider:
         scope="module",
         family="mcp",
         action_name="image_prepare",
-        description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
         guidance=ToolGuidance(
             purpose="Prepare an image artifact/path/url for external MCP tool arguments.",
             use_when="An MCP tool requires image input and you have an artifact, local path, or URL.",

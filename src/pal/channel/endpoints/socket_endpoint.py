@@ -42,11 +42,13 @@ def _stream_payload(response_handle: ResponseHandle, update: ChannelStreamUpdate
         payload_type = "llm_done"
     elif update.kind == ChannelStreamUpdateKind.ERROR:
         payload_type = "llm_error"
+    elif update.kind == ChannelStreamUpdateKind.PROGRESS:
+        payload_type = "text_delta"
     payload: dict[str, Any] = {
         "type": payload_type,
         "request_id": str(response_handle.reply_target.get("request_id") or ""),
     }
-    if update.text:
+    if update.text and update.kind != ChannelStreamUpdateKind.DONE:
         payload["text"] = update.text
     if update.reasoning_text:
         payload["reasoning_text"] = update.reasoning_text
@@ -75,6 +77,9 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def __post_init__(self) -> None:
         if self.socket_path is None:
             self.socket_path = Path(self.endpoint.binding_key)
+
+    def supports_stream_delivery(self) -> bool:
+        return True
 
     async def start_async(self) -> None:
         assert self.socket_path is not None
@@ -372,10 +377,37 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
 
     def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         session = self._require_session(response_handle)
+        if update.kind == ChannelStreamUpdateKind.PROGRESS:
+            session.outbound.put_nowait(_stream_payload(response_handle, update))
+            return
+        stream_session = self._stream_sessions.get(id(response_handle)) or {}
+        prior_text = str(stream_session.get("text") or "")
+        if (
+            update.kind == ChannelStreamUpdateKind.DONE
+            and update.text
+            and update.text.startswith(prior_text)
+        ):
+            missing = update.text[len(prior_text):]
+            if missing:
+                session.outbound.put_nowait(
+                    _stream_payload(
+                        response_handle,
+                        ChannelStreamUpdate(
+                            kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                            text=missing,
+                        ),
+                    )
+                )
         super().send_stream_update(response_handle, update)
         self._mark_stream_update_queued(response_handle, update)
         session.outbound.put_nowait(_stream_payload(response_handle, update))
-        self.mark_stream_text_delivered(response_handle, update)
+        if update.kind == ChannelStreamUpdateKind.TEXT_DELTA:
+            self.mark_stream_text_delivered(response_handle, update)
+        if update.kind in {
+            ChannelStreamUpdateKind.DONE,
+            ChannelStreamUpdateKind.ERROR,
+        }:
+            self._clear_stream_tracking(response_handle)
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         session = self._require_session(response_handle)
@@ -438,7 +470,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def _mark_stream_update_queued(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         stream_key = self._stream_key(response_handle)
         self._stream_handle_ids_by_key[stream_key] = id(response_handle)
-        if update.text:
+        if update.kind == ChannelStreamUpdateKind.TEXT_DELTA and update.text:
             self._streamed_text_handles.add(id(response_handle))
             self._streamed_text_keys.add(stream_key)
 

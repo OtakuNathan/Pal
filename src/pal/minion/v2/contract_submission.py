@@ -23,8 +23,8 @@ CONTRACT_SUBMIT_CAPABILITY = "op_minion_contract_submit"
 
 CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "contract_submit",
-    "description": "Submit the Manager-preseeded architect.yaml for independent semantic review.",
     "guidance": {
+        "purpose": "Submit the Manager-preseeded architect.yaml for independent semantic review.",
         "use_when": (
             "Use with no arguments after the fixed role playbook and checklist are complete "
             "and declarations agree with architect.yaml."

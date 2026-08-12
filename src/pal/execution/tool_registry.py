@@ -11,7 +11,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
-from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.execution.contracts import CapabilityDescriptor
 from pal.execution.tool_facade import (
     EffectKind,
     InvocationMode,
@@ -64,8 +64,8 @@ class CompiledToolRecord:
     namespace: str
     tags: tuple[str, ...]
     source: str
-    search_text: str
-    description: str
+    search_document: str
+    compiled_description: str
     guidance: ToolGuidance
     execution: ToolExecutionSemantics
     input_model: type[BaseModel] | None
@@ -276,29 +276,10 @@ def compile_registry_generation(
         alias_to_canonical[alias] = canonical_path
         target = direct_aliases if record.execution.invocation_mode is InvocationMode.DIRECT else indirect_aliases
         target[alias] = record
-        search_records[alias] = {
-            "alias": alias,
-            "search_text": record.search_text,
-            "invocation_mode": record.execution.invocation_mode.value,
-            "input_shape": record.compact_input_shape(),
-            "namespace": record.namespace,
-            "family": record.family,
-            "module_id": record.module_id,
-            "tags": list(record.tags),
-        }
-        if record.execution.invocation_mode is InvocationMode.DIRECT:
-            provider_specs[alias] = {
-                "type": "function",
-                "function": {
-                    "name": alias,
-                    "description": record.description,
-                    "input_schema": record.input_schema,
-                },
-            }
-
     # Descriptors are compiled before the generation-wide alias table exists.
-    # Once it is complete, remove every canonical path from all LLM-facing
-    # prose and schema descriptions in one deterministic projection pass.
+    # Once it is complete, render next-tool routing against the exact surface,
+    # derive the search document, and remove canonical paths from LLM-facing
+    # prose and schemas in one deterministic projection pass.
     for table in (direct_aliases, indirect_aliases):
         for alias, record in tuple(table.items()):
             translations = _unambiguous_alias_translations(
@@ -306,10 +287,28 @@ def compile_registry_generation(
                 preferred=(record.alias, record.canonical_path),
             )
             unknown = "preserve" if record.is_mcp else "raise"
+            next_tool_lines = _compile_next_tool_lines(
+                record,
+                direct_aliases=direct_aliases,
+                indirect_aliases=indirect_aliases,
+            )
+            compiled_description = compile_tool_description(
+                alias=record.alias,
+                guidance=record.guidance,
+                execution=record.execution,
+                input_schema=record.input_schema,
+                output_schema=record.output_schema,
+                example=record.example,
+                next_tool_lines=next_tool_lines,
+            )
             table[alias] = replace(
                 record,
-                description=_project_llm_text(record.description, translations, unknown=unknown),
-                search_text=_project_llm_text(record.search_text, translations, unknown=unknown),
+                compiled_description=_project_llm_text(compiled_description, translations, unknown=unknown),
+                search_document=_project_llm_text(
+                    _compile_search_document(record),
+                    translations,
+                    unknown=unknown,
+                ),
                 input_schema=_deep_freeze(_project_llm_value(record.input_schema, translations, unknown=unknown)),
                 output_schema=_deep_freeze(_project_llm_value(record.output_schema, translations, unknown=unknown)),
             )
@@ -319,7 +318,7 @@ def compile_registry_generation(
         record = direct_aliases.get(alias) or indirect_aliases[alias]
         search_records[alias] = {
             "alias": alias,
-            "search_text": record.search_text,
+            "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
             "namespace": record.namespace,
@@ -332,7 +331,7 @@ def compile_registry_generation(
                 "type": "function",
                 "function": {
                     "name": alias,
-                    "description": record.description,
+                    "description": record.compiled_description,
                     "input_schema": record.input_schema,
                 },
             }
@@ -345,7 +344,7 @@ def compile_registry_generation(
                 "mode": (direct_aliases.get(alias) or indirect_aliases[alias]).execution.invocation_mode.value,
                 "input": (direct_aliases.get(alias) or indirect_aliases[alias]).input_schema,
                 "output": (direct_aliases.get(alias) or indirect_aliases[alias]).output_schema,
-                "description": (direct_aliases.get(alias) or indirect_aliases[alias]).description,
+                "description": (direct_aliases.get(alias) or indirect_aliases[alias]).compiled_description,
             }
             for alias in sorted(alias_to_canonical)
         ]
@@ -439,11 +438,10 @@ def _compile_record(
         Draft202012Validator.check_schema(input_schema)
         Draft202012Validator.check_schema(output_schema)
         examples = ()
-        if descriptor.guidance is None or descriptor.execution is None:
+        if descriptor.execution is None:
             raise TypeError(f"MCP capability {alias!r} requires guidance and execution semantics")
         guidance = descriptor.guidance
         execution = descriptor.execution
-        search_text = str(descriptor.search_text or "").strip()
     else:
         input_model = descriptor.InputModel
         output_model = descriptor.OutputModel
@@ -457,14 +455,10 @@ def _compile_record(
             raise ValueError(
                 f"non-empty InputModel for {alias!r} requires at least one example"
             )
-        if descriptor.guidance is None or descriptor.execution is None:
+        if descriptor.execution is None:
             raise TypeError(f"internal capability {alias!r} requires guidance and execution semantics")
         guidance = descriptor.guidance
         execution = descriptor.execution
-        search_text = str(descriptor.search_text or "").strip()
-
-    if not search_text:
-        raise ValueError(f"capability {alias!r} requires non-empty search_text")
 
     example = dict(examples[0]) if examples else None
     for candidate in examples:
@@ -472,14 +466,13 @@ def _compile_record(
             input_model.model_validate(candidate, strict=True)
         else:
             Draft202012Validator(input_schema).validate(candidate)
-    description = compile_tool_description(
+    compiled_description = compile_tool_description(
         alias=alias,
         guidance=guidance,
         execution=execution,
         input_schema=input_schema,
         output_schema=output_schema,
         example=example,
-        fallback_description=descriptor.description,
     )
     return CompiledToolRecord(
         alias=alias,
@@ -491,8 +484,8 @@ def _compile_record(
         namespace=str(metadata.get("namespace") or ""),
         tags=tuple(str(item).strip() for item in metadata.get("tags", ()) if str(item).strip()),
         source=descriptor.source,
-        search_text=search_text,
-        description=description,
+        search_document="",
+        compiled_description=compiled_description,
         guidance=guidance,
         execution=execution,
         input_model=input_model,
@@ -503,6 +496,59 @@ def _compile_record(
         binding=binding,
         is_mcp=is_mcp,
         requires_effect_receipt=execution.effect_kind is not EffectKind.NONE,
+    )
+
+
+def _compile_next_tool_lines(
+    record: CompiledToolRecord,
+    *,
+    direct_aliases: Mapping[str, CompiledToolRecord],
+    indirect_aliases: Mapping[str, CompiledToolRecord],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for hint in record.guidance.next_tool_hints:
+        if hint.name == record.alias:
+            raise ValueError(f"tool {record.alias!r} must not point to itself as a next tool")
+        if hint.name in direct_aliases:
+            route = f"Invoke it directly as `{hint.name}`."
+        elif hint.name in indirect_aliases:
+            route = (
+                f"First inspect `{hint.name}` with `read_tool(name={json.dumps(hint.name)})`, "
+                f"then invoke it with `call_tool(name={json.dumps(hint.name)}, args=...)`."
+            )
+        elif (
+            not record.is_mcp
+            and not record.binding.descriptor.detachable
+            and not record.binding.descriptor.metadata.get("allow_missing_next_tool_hints")
+        ):
+            raise ValueError(
+                f"non-detachable tool {record.alias!r} points to unknown next-tool alias {hint.name!r}"
+            )
+        elif "search_tools" in direct_aliases:
+            route = (
+                "It is not available in the current tool surface; use "
+                f"`search_tools(query={json.dumps(hint.name)})` to find the current equivalent."
+            )
+        else:
+            route = "It is not available in the current tool surface; do not attempt to invoke it."
+        lines.append(f"`{hint.name}` — {hint.use_when.strip()} {route}")
+    return tuple(lines)
+
+
+def _compile_search_document(record: CompiledToolRecord) -> str:
+    guidance = record.guidance
+    return " ".join(
+        part
+        for part in (
+            record.alias,
+            guidance.purpose,
+            guidance.use_when,
+            *(value for hint in guidance.next_tool_hints for value in (hint.name, hint.use_when)),
+            record.family,
+            record.module_id,
+            *record.tags,
+        )
+        if str(part or "").strip()
     )
 
 
@@ -521,6 +567,10 @@ def _assert_compatible_target_records(
     if existing.execution != candidate.execution:
         raise ValueError(
             f"tool alias conflict in generation: {existing.alias} -> incompatible execution semantics"
+        )
+    if existing.guidance != candidate.guidance:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.alias} -> incompatible tool guidance"
         )
     if _schema_without_titles(existing.input_schema) != _schema_without_titles(candidate.input_schema):
         raise ValueError(

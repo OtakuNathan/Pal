@@ -61,6 +61,33 @@ ACTIVE_ASSIGNMENT_STATES = frozenset(
 )
 
 
+def canonical_role_profile_parts(profile_id: str) -> tuple[str, str]:
+    """Parse the canonical profile identity used by durable role records.
+
+    Profiles in the built-in ``general`` family intentionally use their short
+    name (for example ``architect``). Other families use
+    ``<family>.<profile>``.
+    """
+
+    value = str(profile_id or "")
+    if (
+        not value
+        or value != value.strip()
+        or "/" in value
+        or value.startswith(".")
+        or value.endswith(".")
+        or ".." in value
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError("role profile id must be canonical")
+    if "." not in value:
+        return "general", value
+    group, name = value.rsplit(".", 1)
+    if group == "general":
+        raise ValueError("role profile id must be canonical")
+    return group, name
+
+
 _SESSION_TRANSITIONS = {
     (RoleSessionState.ACTIVE, RoleSessionAction.ACTIVATE): RoleSessionState.ACTIVE,
     (RoleSessionState.ACTIVE, RoleSessionAction.SUSPEND): RoleSessionState.SUSPENDED,
@@ -177,8 +204,7 @@ class RoleAssignmentRequest:
                 "role assignment request missing fields: " + ", ".join(missing)
             )
         RoleActivation.from_values(self.role, self.mode)
-        if "." not in self.role_profile_id:
-            raise ValueError("role assignment role_profile_id must be canonical")
+        canonical_role_profile_parts(self.role_profile_id)
         names = tuple(str(item).strip() for item in self.required_inputs)
         if any(not item for item in names) or len(set(names)) != len(names):
             raise ValueError("role assignment required inputs must be unique non-empty names")

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
-
-from pal.shared.tool_protocol import new_tool_call
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
 import asyncio
 import contextlib
@@ -53,6 +51,8 @@ from pal.execution import (
 from pal.execution.tool_facade import EffectKind as ToolEffectKind
 from pal.foundation import EventEnvelope, PalV2Database, utc_now
 from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
+from pal.llm.endpoint import ShapeEndpointInvoker
+from pal.llm.repository import RuntimeSettingSnapshot
 from pal.llm.contracts import (
     LLMGenerationResult,
     LLMPreflightAdvice,
@@ -69,6 +69,7 @@ from pal.llm.ir import (
 from pal.llm.output_recovery import has_committed_tool_calls
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
+from pal.minion.ipc import MINION_RUNTIME_DB_PATH_ENV
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -91,7 +92,7 @@ from pal.minion.checkpoint import (
 )
 from pal.minion.v2.role_contracts import role_session_stage_key
 from pal.minion.debug_log import minion_debug_log_enabled
-from pal.minion.llm_broker import MinionBrokerLLMRuntime
+from pal.minion.llm_transport import ManagerProxyTransport
 from pal.minion.web_broker import MinionBrokerWebClient
 from pal.minion.profiles import filter_minion_allowed_capabilities
 from pal.minion.scoped_execution import (
@@ -146,6 +147,9 @@ MINION_OUTPUT_LENGTH_RECOVERY_NOTE = (
 
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
 from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FETCH_PROVIDERS, DEFAULT_WEB_SEARCH_PROVIDERS
+
+
+_MINION_TOOL_RESULT_RETENTION_CALLS = 5
 
 
 EventWriter = Callable[[dict[str, Any]], Awaitable[None]]
@@ -440,7 +444,7 @@ class MinionRunner:
             bundle = self.runtime_bundle or build_slim_minion_runtime(
                 self.runtime_root,
                 run_id=self.run_id,
-                llm_authority="manager_broker",
+                llm_authority="manager_proxy",
             )
             accepted_payload = {
                 "phase": "accepted",
@@ -649,6 +653,10 @@ class MinionRunner:
                         runtime_spec_hash=str(restored["runtime_spec_hash"]),
                     ),
                 )
+                self._retire_closed_l1_result_authority(
+                    bundle.memory_service,
+                    bundle.execution_runtime,
+                )
             except (TypeError, ValueError, RuntimeError) as exc:
                 raise AgentSessionCheckpointError(
                     "manager-selected agent continuation contains invalid runtime module state"
@@ -755,7 +763,12 @@ class MinionRunner:
                 or ""
             )
             metadata = {"retry_note": retry_note}
-            return _minion_prompt_context(self.pack, event=state.channel_envelope.event, metadata=metadata)
+            return _minion_prompt_context(
+                self.pack,
+                run_id=self.run_id,
+                event=state.channel_envelope.event,
+                metadata=metadata,
+            )
 
         active_input_id = str(getattr(state.channel_envelope.event, "event_id", "") or "input")
         turn_id = self._resume_or_reopen_l1_turn(
@@ -764,8 +777,13 @@ class MinionRunner:
             active_input_id=active_input_id,
             user_text=_minion_primary_input(current_channel_envelope),
             fencing_token=int(session_metadata.get("fencing_token") or 0),
+            reuse_active=not semantic_input_is_new,
         )
-        self._abort_stale_l1_turns(state.memory_service, active_turn_id=turn_id)
+        self._abort_stale_l1_turns(
+            state.memory_service,
+            active_turn_id=turn_id,
+            execution_runtime=state.execution_runtime,
+        )
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
@@ -824,6 +842,7 @@ class MinionRunner:
             begin_tool_results(
                 turn_id=turn_id,
                 scope_key=session_id or f"minion:{self.run_id}",
+                retention_user_turns=_MINION_TOOL_RESULT_RETENTION_CALLS,
                 input_id=response_key or turn_id,
             )
         if semantic_input_is_new:
@@ -918,6 +937,7 @@ class MinionRunner:
         active_input_id: str,
         user_text: str,
         fencing_token: int,
+        reuse_active: bool = True,
     ) -> str:
         """Return the resumable turn, reopening a closed retry checkpoint.
 
@@ -933,7 +953,7 @@ class MinionRunner:
             for turn in memory_service.l1_store.turns.turns
             if turn.state == L1TurnState.ACTIVE and turn.turn_id.startswith(prefix)
         ]
-        if active:
+        if active and reuse_active:
             return max(active, key=lambda turn: int(turn.revision)).turn_id
 
         base = f"{run_id}:invocation:{active_input_id}"
@@ -962,6 +982,7 @@ class MinionRunner:
         memory_service: MemoryService,
         *,
         active_turn_id: str,
+        execution_runtime: Any | None = None,
     ) -> None:
         """Close orphaned active turns left by a failed native worker attempt.
 
@@ -976,15 +997,48 @@ class MinionRunner:
             if str(turn.state) != L1TurnState.ACTIVE or turn.turn_id == active_turn_id:
                 continue
             try:
+                result_ids = TurnExecutor._tool_result_ids(turn)
+                retire = getattr(execution_runtime, "retire_tool_results", None)
+                after_commit = (
+                    lambda retire=retire, turn_id=turn.turn_id, result_ids=result_ids: retire(
+                        turn_id=turn_id,
+                        result_ids=result_ids,
+                    )
+                    if callable(retire) and result_ids
+                    else None
+                )
                 memory_service.abort_l1_turn(
                     turn.turn_id,
                     reason="stale active turn recovered before a new Minion attempt",
+                    after_commit=after_commit,
                 )
             except Exception:
                 # The current turn remains authoritative; a malformed stale
                 # record must not prevent the worker from reaching its own
                 # durable protocol boundary.
                 continue
+
+    @staticmethod
+    def _retire_closed_l1_result_authority(
+        memory_service: MemoryService,
+        execution_runtime: Any,
+    ) -> None:
+        """Idempotently reconcile checkpoints created before result RAII."""
+
+        retire = getattr(execution_runtime, "retire_tool_results", None)
+        if not callable(retire):
+            return
+        for turn in tuple(memory_service.l1_store.turns.turns):
+            if turn.state == L1TurnState.ACTIVE:
+                continue
+            result_ids = tuple(
+                part.call_id
+                for message in turn.messages
+                for part in message.parts
+                if isinstance(part, ToolResultIR)
+            )
+            if result_ids:
+                retire(turn_id=turn.turn_id, result_ids=result_ids)
 
     @staticmethod
     def _continuation_is_restart_safe(
@@ -1399,7 +1453,7 @@ class MinionRunner:
     ) -> AgentTurnRuntime:
         llm_runtime = _MinionLLMRuntimeAdapter(self, bundle.llm_runtime, state)
         output_port = _MinionOutputPort(self)
-        prompt_fragment_registry = self._build_minion_prompt_fragment_registry(config=bundle.config)
+        prompt_fragment_registry = self._build_minion_prompt_fragment_registry()
         context = MainContext(
             execution_runtime=state.execution_runtime,
             prompt_fragment_registry=prompt_fragment_registry,
@@ -1452,11 +1506,7 @@ class MinionRunner:
             compaction_clock_provider=lambda: state.llm_round_count,
         )
 
-    def _build_minion_prompt_fragment_registry(
-        self,
-        *,
-        config: RuntimeConfig | None = None,
-    ) -> PromptFragmentRegistry:
+    def _build_minion_prompt_fragment_registry(self) -> PromptFragmentRegistry:
         prompt_fragment_registry = PromptFragmentRegistry()
         prompt_fragment_registry.register(
             MinionPromptFragmentProvider(
@@ -1466,7 +1516,6 @@ class MinionRunner:
         )
         prompt_fragment_registry.register(
             MemoryPromptFragmentProvider(
-                config=config,
                 include_l1_recent_context=True,
             )
         )
@@ -1746,6 +1795,17 @@ class MinionRunner:
                 "args": dict(call.args),
             },
         )
+        advance_result_clock = getattr(
+            state.execution_runtime,
+            "advance_tool_result_clock",
+            None,
+        )
+        if callable(advance_result_clock):
+            advance_result_clock(
+                turn_id=turn_id or continuation.turn_id,
+                clock_id=f"tool:{call.call_id}",
+                retention_steps=_MINION_TOOL_RESULT_RETENTION_CALLS,
+            )
         try:
             result = await self._await_with_progress_heartbeat(
                 self._execute_allowed_tool(
@@ -2604,25 +2664,26 @@ def build_slim_minion_runtime(
     runtime_root: Path,
     *,
     run_id: str = "",
-    llm_authority: Literal["manager_broker", "host"],
+    llm_authority: Literal["manager_proxy", "host", "none"],
 ) -> MinionRuntimeBundle:
     """Build one runtime with an explicit LLM owner.
 
-    Role processes always proxy requests to Manager and open the shared
-    database read-only. Only Manager may construct the host LLM runtime.
+    Role processes own the complete shared LLM pipeline and proxy only encoded
+    provider frames through Manager. Their shared database view is read-only.
     L3 is read-only in both modes; Minion memory candidates use the isolated
     in-memory sink owned by the logical role lifecycle.
     """
 
-    if llm_authority not in {"manager_broker", "host"}:
+    if llm_authority not in {"manager_proxy", "host", "none"}:
         raise ValueError(f"unsupported minion LLM authority: {llm_authority}")
     if llm_authority == "host" and os.environ.get("PAL_MINION_SANDBOXED") == "1":
         raise PermissionError("sandboxed minion roles cannot construct a host LLM runtime")
-    if llm_authority == "manager_broker" and not str(run_id or "").strip():
-        raise ValueError("manager-broker minion runtime requires run_id")
-    read_only_database = llm_authority == "manager_broker"
+    if llm_authority == "manager_proxy" and not str(run_id or "").strip():
+        raise ValueError("manager-proxy minion runtime requires run_id")
+    read_only_database = llm_authority == "manager_proxy"
+    configured_db_path = str(os.environ.get(MINION_RUNTIME_DB_PATH_ENV) or "").strip()
     database = PalV2Database(
-        db_path=Path(runtime_root) / "pal.sqlite3",
+        db_path=Path(configured_db_path) if configured_db_path else Path(runtime_root) / "pal.sqlite3",
         read_only=read_only_database,
     )
     database.initialize(ALL_MODELS)
@@ -2653,9 +2714,26 @@ def build_slim_minion_runtime(
     context.execution_runtime.runtime_root = Path(runtime_root)
     lifecycle = ModuleLifecycle(context, CoreRuntimeState())
     artifact_service = ArtifactManager(runtime_root=Path(runtime_root), repository=ArtifactRepository())
-    if llm_authority == "manager_broker":
-        llm_runtime = MinionBrokerLLMRuntime(runtime_root=Path(runtime_root), run_id=run_id)
-    else:
+    if llm_authority == "manager_proxy":
+        endpoint_resolver = EndpointResolver(repository=llm_repository)
+        local_settings = RuntimeSettingSnapshot(
+            settings,
+            endpoint_ids=tuple(
+                endpoint.endpoint_id for endpoint in endpoint_resolver.endpoints
+            ),
+        )
+        llm_runtime = LLMRuntime(
+            endpoint_resolver=endpoint_resolver,
+            settings_repository=local_settings,  # type: ignore[arg-type]
+            endpoint_invoker=ShapeEndpointInvoker(
+                transport=ManagerProxyTransport(
+                    runtime_root=Path(runtime_root),
+                    run_id=run_id,
+                )
+            ),
+            config=config,
+        )
+    elif llm_authority == "host":
         llm_runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=llm_repository),
             settings_repository=settings,
@@ -2665,6 +2743,8 @@ def build_slim_minion_runtime(
             ),
             config=config,
         )
+    else:
+        llm_runtime = None
     register_execution_with_core(context)
     register_artifact_with_core(context, artifact_service)
     memory_service = MemoryService(
@@ -2673,7 +2753,7 @@ def build_slim_minion_runtime(
             active_provider_id="sqlite_vec_l3",
         ),
     )
-    register_memory_with_core(context, memory_service, config=config)
+    register_memory_with_core(context, memory_service)
     l3_plugin = SQLiteVecL3Plugin(
         service=memory_service,
         embedding_provider=build_ollama_embedding_provider_from_config(config),
@@ -2709,6 +2789,12 @@ def build_slim_minion_runtime(
 
     async def close() -> None:
         failures: list[Exception] = []
+        close_llm = getattr(llm_runtime, "close", None)
+        if callable(close_llm):
+            try:
+                close_llm()
+            except Exception as exc:
+                failures.append(exc)
         for handle in tuple(context.module_registry.modules.values()):
             shutdown_async = getattr(handle, "shutdown_async", None)
             shutdown_sync = getattr(handle, "shutdown_sync", None)
@@ -2737,13 +2823,24 @@ def build_slim_minion_runtime(
     )
 
 
-def _minion_prompt_context(pack: MinionInvocationPack, *, event: EventEnvelope | None = None, metadata: dict[str, Any]) -> PromptAssemblyContext:
+def _minion_prompt_context(
+    pack: MinionInvocationPack,
+    *,
+    run_id: str,
+    event: EventEnvelope | None = None,
+    metadata: dict[str, Any],
+) -> PromptAssemblyContext:
+    logical_scope_id = f"minion:{str(run_id or pack.invocation_id).strip()}"
     return PromptAssemblyContext(
         event=event,
         core_mode="minion",
         turn_kind="minion",
         work_order_id=pack.invocation_id,
-        metadata=dict(metadata),
+        metadata={
+            **dict(metadata),
+            "artifact_scope_key": logical_scope_id,
+            "prompt_cache_scope_id": logical_scope_id,
+        },
     )
 
 

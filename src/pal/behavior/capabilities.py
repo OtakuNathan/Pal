@@ -18,10 +18,6 @@ from typing import TYPE_CHECKING
 
 from pal.behavior.service import BehaviorService
 from pal.behavior.tools import (
-    BEHAVIOR_ADVICE_DESCRIPTION,
-    BEHAVIOR_FORGET_DESCRIPTION,
-    BEHAVIOR_LEARN_DESCRIPTION,
-    BEHAVIOR_UPDATE_DESCRIPTION,
     AffordanceDeleteTool,
     AffordanceSubmitTool,
     AffordanceUpdateTool,
@@ -67,7 +63,6 @@ class BehaviorIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show behavior routing state",
         guidance=ToolGuidance(
             purpose="Show behavior routing state.",
             use_when="Diagnosing behavior routing — checking affordance count, skill count, or resident prompt budget.",
@@ -98,7 +93,6 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="advise",
-        description=BEHAVIOR_ADVICE_DESCRIPTION,
         guidance=ToolGuidance(
             purpose="Ask the behavior router which capabilities, skills, or route guidance may fit the current scenario.",
             use_when="The task route is ambiguous, risky, multi-step, unfamiliar, design/debug/recovery oriented, or the next capability is unclear.",
@@ -119,7 +113,6 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_submit",
-        description=BEHAVIOR_LEARN_DESCRIPTION,
         guidance=ToolGuidance(
             purpose="Learn a future behavior rule: when situation X appears, Pal should consider route/action Y.",
             use_when="The user explicitly asks Pal to learn/adopt/follow a future behavior rule or clearly teaches a durable route preference.",
@@ -140,7 +133,6 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_update",
-        description=BEHAVIOR_UPDATE_DESCRIPTION,
         guidance=ToolGuidance(
             purpose="Update persisted behavior guidance by matching the original behavior text.",
             use_when="Replacing or editing an existing behavior rule's prompt_hint or activation scenario.",
@@ -160,7 +152,6 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_delete",
-        description=BEHAVIOR_FORGET_DESCRIPTION,
         guidance=ToolGuidance(
             purpose="Forget persisted behavior guidance by matching the original behavior text.",
             use_when="The user explicitly asks to remove a specific behavior routing rule.",

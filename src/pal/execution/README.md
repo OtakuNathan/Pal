@@ -29,9 +29,14 @@ Notes:
 - every LLM-facing tool has one generation-wide unique alias; direct tools are
   provider tools, while indirect tools are discovered with `search_tools` and
   `read_tool` and invoked only through `call_tool`
-- Pal-owned tools bind strict Pydantic v2 input/output models, static guidance,
-  machine execution semantics, examples, search text, and the handler in one
-  immutable registry record
+- Pal-owned tools bind strict Pydantic v2 input/output models, `ToolGuidance`,
+  machine execution semantics, examples, and the handler in one immutable
+  registry record. Provider descriptions and search documents are compiled
+  from guidance; capability authors do not maintain parallel prose fields
+- guidance may name likely next tools. Compilation renders the exact direct or
+  `read_tool`/`call_tool` route for the current surface. Unknown first-party
+  aliases fail compilation, while detachable and scoped projections render an
+  unavailable/rediscovery fallback
 - invocation returns a discriminated `complete`, `paged`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
 - complete output is validated before paging, and paged results expose only an

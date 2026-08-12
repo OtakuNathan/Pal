@@ -50,7 +50,6 @@ class CoreIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="observe",
-        description="Observe module-level state for core",
         guidance=ToolGuidance(
             purpose="Observe core runtime state — queued events, active turns, mode, detached modules.",
             use_when="Diagnosing core health: event backlog, stuck turns, or checking which modules are detached.",
@@ -73,7 +72,6 @@ class CoreIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="configure",
-        description="Configure module-level state for core",
         guidance=ToolGuidance(
             purpose="Configure core runtime mode.",
             use_when="Switching core operating mode (e.g. normal, maintenance).",

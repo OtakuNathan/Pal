@@ -154,6 +154,8 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
         if not repaired
         else L1TurnState.INTERRUPTED
     )
+    if state != L1TurnState.ACTIVE:
+        normalized = _migrate_closed_turn_projection(normalized)
     raw_metadata = value.get("metadata") or {}
     if not isinstance(raw_metadata, Mapping):
         raise ValueError("runtime L1 turn metadata must be an object")
@@ -167,6 +169,29 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
         metadata=metadata,
         messages=normalized,
     )
+
+
+def _migrate_closed_turn_projection(
+    messages: tuple[LLMMessageIR, ...],
+) -> tuple[LLMMessageIR, ...]:
+    """Upgrade pre-retirement checkpoints to the current closed-turn IR."""
+
+    migrated: list[LLMMessageIR] = []
+    for message in messages:
+        parts = tuple(
+            part.retire() if isinstance(part, ToolResultIR) else part
+            for part in message.parts
+            if not isinstance(part, ReasoningPartIR)
+        )
+        migrated.append(
+            replace(
+                message,
+                parts=parts,
+                state=MessageState.COMPLETE,
+                replay=None,
+            )
+        )
+    return tuple(migrated)
 
 
 def _normalize_tool_protocol(

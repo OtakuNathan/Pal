@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
-
 import asyncio
 import json
 import random
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -56,30 +52,23 @@ from pal.llm.response_hooks import (
     ProviderResponseHookRegistry,
 )
 from pal.llm.usage import LLMUsageLedger
+from pal.llm.transport import (
+    DirectSDKTransport,
+    LLMEndpointSpecStaleError,
+    LLMProviderStartedError,
+    LLMStreamCancelledError,
+    StreamControl,
+)
 from pal.shared import LLMPreflightStatus
 from pal.shared.json_values import thaw_json
+from pal.shared.tool_protocol import ToolCallIR
 
 
-_DEFAULT_TIMEOUT_SECONDS = 180.0
+_DEFAULT_TIMEOUT_SECONDS = 600.0
 _STRICT_ENDPOINT_PREFERRED_SOURCES = frozenset({"profile"})
 _FALLBACK_DISABLED_POLICIES = frozenset(
     {"disabled", "none", "off", "strict", "strict_preferred", "no_fallback"}
 )
-_SCOPED_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
-    "pal_llm_event_sink",
-    default=None,
-)
-
-
-@contextmanager
-def scoped_llm_event_sink(sink: Callable[[dict[str, Any]], None] | None):
-    token = _SCOPED_EVENT_SINK.set(sink if callable(sink) else None)
-    try:
-        yield
-    finally:
-        _SCOPED_EVENT_SINK.reset(token)
-
-
 class LLMEndpointInvocationError(RuntimeError):
     pass
 
@@ -181,6 +170,7 @@ class LLMEndpointInvokerPort(Protocol):
         request: LLMRequestIR,
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        stream_control: StreamControl | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         ...
 
@@ -194,7 +184,9 @@ def build_default_endpoint_invoker(
     _ = runtime_root
     resolver = credentials or LLMCredentialResolver()
     return ShapeEndpointInvoker(
-        credential_resolver=resolver.resolve_api_key,
+        transport=DirectSDKTransport(
+            credential_resolver=resolver.resolve_api_key,
+        ),
         response_hooks=response_hooks or ProviderResponseHookRegistry.builtin(),
     )
 
@@ -256,6 +248,9 @@ class LLMRuntime(LLMRuntimePort):
     def refresh_llm_endpoints(self) -> dict[str, Any]:
         before = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.endpoint_resolver.refresh()
+        refresh_settings = getattr(self.settings_repository, "refresh", None)
+        if callable(refresh_settings):
+            refresh_settings()
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
         self.model_hooks = ModelHookRegistry.load(runtime_root)
         refresh_credentials = getattr(
@@ -429,6 +424,14 @@ class LLMRuntime(LLMRuntimePort):
         return bool(endpoint and endpoint.supports_streaming)
 
     def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
+        return self._generate(request, allow_stale_refresh=True)
+
+    def _generate(
+        self,
+        request: LLMRequestIR,
+        *,
+        allow_stale_refresh: bool,
+    ) -> LLMGenerationResult:
         self.last_request = request
         endpoints = self._enabled_endpoints(request)
         if not endpoints:
@@ -481,6 +484,26 @@ class LLMRuntime(LLMRuntimePort):
                     if endpoint_index > 0:
                         self._emit("llm_endpoint_fallback_succeeded", endpoint=endpoint)
                     return self._success(endpoint, response)
+                except LLMEndpointSpecStaleError as exc:
+                    if allow_stale_refresh:
+                        self._emit(
+                            "llm_endpoint_spec_refresh",
+                            endpoint=endpoint,
+                            reason="endpoint_spec_stale",
+                        )
+                        self.refresh_llm_endpoints()
+                        return self._generate(
+                            request,
+                            allow_stale_refresh=False,
+                        )
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, attempt)
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    break
                 except Exception as exc:
                     last_error = exc
                     error_kind = self._record_failure(endpoint, exc, attempt)
@@ -502,7 +525,13 @@ class LLMRuntime(LLMRuntimePort):
     async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
         return await asyncio.to_thread(self.generate, request)
 
-    def _iter_stream_updates(self, request: LLMRequestIR) -> Iterator[LLMResponseUpdate]:
+    def _iter_stream_updates(
+        self,
+        request: LLMRequestIR,
+        *,
+        stream_control: StreamControl | None = None,
+        allow_stale_refresh: bool = True,
+    ) -> Iterator[LLMResponseUpdate]:
         self.last_request = request
         endpoints = self._enabled_endpoints(request)
         if not endpoints:
@@ -531,10 +560,15 @@ class LLMRuntime(LLMRuntimePort):
             for attempt in range(self.endpoint_retry_attempts):
                 last_update: LLMResponseUpdate | None = None
                 try:
+                    invoke_kwargs: dict[str, Any] = {
+                        "timeout_seconds": self._timeout_seconds(effective),
+                    }
+                    if isinstance(self._invoker(), ShapeEndpointInvoker):
+                        invoke_kwargs["stream_control"] = stream_control
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,
-                        timeout_seconds=self._timeout_seconds(effective),
+                        **invoke_kwargs,
                     ):
                         last_update = update
                         semantic_seen = semantic_seen or (
@@ -576,11 +610,47 @@ class LLMRuntime(LLMRuntimePort):
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
                     return
+                except LLMEndpointSpecStaleError as exc:
+                    if allow_stale_refresh and not semantic_seen and not bool(
+                        stream_control is not None
+                        and stream_control.provider_started
+                    ):
+                        self._emit(
+                            "llm_endpoint_spec_refresh",
+                            endpoint=endpoint,
+                            reason="endpoint_spec_stale",
+                        )
+                        self.refresh_llm_endpoints()
+                        yield from self._iter_stream_updates(
+                            request,
+                            stream_control=stream_control,
+                            allow_stale_refresh=False,
+                        )
+                        return
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, attempt)
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    break
                 except Exception as exc:
                     last_error = exc
                     error_kind = self._record_failure(endpoint, exc, attempt)
-                    if semantic_seen:
-                        partial = last_update.response if last_update is not None else _text_response(str(exc), LLMFinishReason.ERROR)
+                    provider_started = semantic_seen or bool(
+                        stream_control is not None
+                        and stream_control.provider_started
+                    )
+                    if provider_started:
+                        partial = (
+                            last_update.response
+                            if last_update is not None
+                            else _text_response(
+                                _public_failure_text(exc),
+                                LLMFinishReason.ERROR,
+                            )
+                        )
                         error_response = replace(partial, finish_reason=LLMFinishReason.ERROR)
                         self.usage_ledger.record_failed_request(
                             endpoint_id=endpoint.endpoint_id
@@ -609,10 +679,16 @@ class LLMRuntime(LLMRuntimePort):
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
         done = object()
+        stream_control = StreamControl()
+        wall_timeout = self._stream_wall_timeout_seconds(request)
+        cleanup_timeout = self._stream_cleanup_timeout_seconds()
 
         def worker() -> None:
             try:
-                for update in self._iter_stream_updates(request):
+                for update in self._iter_stream_updates(
+                    request,
+                    stream_control=stream_control,
+                ):
                     loop.call_soon_threadsafe(queue.put_nowait, update)
             except BaseException as exc:  # noqa: BLE001
                 loop.call_soon_threadsafe(queue.put_nowait, exc)
@@ -620,19 +696,57 @@ class LLMRuntime(LLMRuntimePort):
                 loop.call_soon_threadsafe(queue.put_nowait, done)
 
         task = asyncio.create_task(asyncio.to_thread(worker))
+        deadline = loop.time() + wall_timeout
         try:
             while True:
-                item = await queue.get()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    stream_control.cancel("wall_timeout")
+                    response = _failure_result(
+                        f"LLM stream exceeded the {wall_timeout:g}s wall-clock limit"
+                    ).response
+                    yield LLMResponseUpdate(
+                        response,
+                        delta_kind=LLMResponseDeltaKind.STATE,
+                    )
+                    break
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=min(remaining, 1.0),
+                    )
+                except asyncio.TimeoutError:
+                    continue
                 if item is done:
                     break
                 if isinstance(item, BaseException):
                     raise item
                 yield item  # type: ignore[misc]
         finally:
-            await task
+            stream_control.cancel("consumer_closed")
+            if not task.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=cleanup_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    task.cancel()
+                except LLMStreamCancelledError:
+                    pass
+            elif not task.cancelled():
+                try:
+                    task.result()
+                except LLMStreamCancelledError:
+                    pass
 
     def usage_snapshot(self) -> dict[str, Any]:
-        return self.usage_ledger.snapshot()
+        snapshot = self.usage_ledger.snapshot()
+        prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
+        cache_snapshot = getattr(prompt_cache, "snapshot", None)
+        if callable(cache_snapshot):
+            snapshot["prompt_cache_policy"] = cache_snapshot()
+        return snapshot
 
     def _compile_request(
         self,
@@ -969,11 +1083,34 @@ class LLMRuntime(LLMRuntimePort):
         except (TypeError, ValueError):
             return _DEFAULT_TIMEOUT_SECONDS
 
+    def _stream_wall_timeout_seconds(self, request: LLMRequestIR) -> float:
+        value = request.metadata.get("stream_wall_timeout_seconds")
+        if value is None:
+            value = getattr(
+                self.config,
+                "llm_stream_wall_timeout_seconds",
+                1_800.0,
+            )
+        try:
+            return max(1.0, float(value))
+        except (TypeError, ValueError):
+            return 1_800.0
+
+    def _stream_cleanup_timeout_seconds(self) -> float:
+        value = getattr(
+            self.config,
+            "llm_stream_cleanup_timeout_seconds",
+            2.0,
+        )
+        try:
+            return max(0.01, float(value))
+        except (TypeError, ValueError):
+            return 2.0
+
     def _emit(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
         event = {"phase": phase, "endpoint_id": endpoint.endpoint_id, "model_id": endpoint.model_id, **payload}
-        for sink in (self.event_sink, _SCOPED_EVENT_SINK.get()):
-            if callable(sink):
-                sink(dict(event))
+        if callable(self.event_sink):
+            self.event_sink(dict(event))
 
     def _invoker(self) -> LLMEndpointInvokerPort:
         if self.endpoint_invoker is None:
@@ -998,6 +1135,10 @@ def _failure_result(text: str) -> LLMGenerationResult:
 
 
 def _classify_retry_error(exc: Exception) -> str:
+    if isinstance(exc, LLMEndpointSpecStaleError):
+        return "endpoint_spec_stale"
+    if isinstance(exc, LLMProviderStartedError):
+        return "provider_started"
     if isinstance(exc, LLMCredentialUnavailableError):
         return "credential"
     if isinstance(exc, LLMRequestPreparationError):

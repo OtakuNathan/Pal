@@ -604,7 +604,7 @@ workspace_policy: {}
                 assert spec is not None
                 self.assertEqual(spec["name"], public_name)
                 self.assertEqual(scoped.resolve_capability_address(public_name), canonical)
-                self.assertNotIn("minion_", spec["description"])
+                self.assertNotIn("minion_", str(spec["guidance"]))
 
     def test_architect_has_no_external_research_surface(self) -> None:
         architect = self._pack("lifestyle.architect")
@@ -1520,7 +1520,6 @@ workspace_policy: {}
                     failure_next_steps="Correct input or inspect the returned failure.",
                 ),
                 execution=DIRECT_EXTERNAL_READ,
-                search_text="generic web search research",
                 handler=lambda _value: CapabilityResult(status=RuntimeStatus.OK, text="ok", llm_text="ok"),
         )
         scoped = MinionScopedExecutionRuntime(

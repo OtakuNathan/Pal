@@ -247,8 +247,8 @@ def verification_path_scope_matches(
 SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_pass": {
         "alias": "verification_pass",
-        "description": "Submit a successful semantic verification outcome.",
         "guidance": {
+            "purpose": "Submit a successful semantic verification outcome.",
             "use_when": (
                 "Use with no arguments only after every required regression, diff-risk, "
                 "behavioral, consumer, and delivery obligation for the bound scope passes."
@@ -266,8 +266,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_request_module_repair": {
         "alias": "verification_request_module_repair",
-        "description": "Submit reproduced implementation defects for module repair.",
         "guidance": {
+            "purpose": "Submit reproduced implementation defects for module repair.",
             "use_when": (
                 "Use with no arguments after every current implementation defect is reproduced "
                 "and recorded with add_finding."
@@ -284,8 +284,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_request_contract_revision": {
         "alias": "verification_request_contract_revision",
-        "description": "Submit a frozen public-contract defect for contract revision.",
         "guidance": {
+            "purpose": "Submit a frozen public-contract defect for contract revision.",
             "use_when": (
                 "Use after recording a contradictory, incomplete, or impossible public contract "
                 "or lifecycle/state-model defect with add_finding."
@@ -297,8 +297,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_request_architecture_revision": {
         "alias": "verification_request_architecture_revision",
-        "description": "Submit a topology or ownership defect for architecture revision.",
         "guidance": {
+            "purpose": "Submit a topology or ownership defect for architecture revision.",
             "use_when": (
                 "Use after recording a module-boundary, ownership, hidden-coupling, dependency, "
                 "bootstrap, or scenario-topology defect that cannot be repaired locally."
@@ -310,8 +310,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_request_requirements_revision": {
         "alias": "verification_request_requirements_revision",
-        "description": "Submit a contradictory or materially incomplete requirement for user revision.",
         "guidance": {
+            "purpose": "Submit a contradictory or materially incomplete requirement for user revision.",
             "use_when": "Use after recording the exact requirements conflict or omission with add_finding.",
             "do_not_use_when": (
                 "Do not use for an implementation, contract, or architecture defect, and do not "
@@ -323,8 +323,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_unknown": {
         "alias": "verification_unknown",
-        "description": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
         "guidance": {
+            "purpose": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
             "use_when": (
                 "Use only when a required platform or environment genuinely cannot be exercised "
                 "and provide the concrete missing evidence and follow-up plan."

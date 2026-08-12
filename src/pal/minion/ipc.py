@@ -19,6 +19,7 @@ from pal.foundation.sidecar import (
 
 
 ROLE_GATEWAY_TOKEN_ENV = "PAL_MINION_ROLE_ASSIGNMENT_TOKEN"
+MINION_RUNTIME_DB_PATH_ENV = "PAL_MINION_RUNTIME_DB_PATH"
 
 
 def minion_runtime_dir(runtime_root: Path) -> Path:
@@ -83,6 +84,9 @@ class MinionManagerClient:
 
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return run_blocking(self.request(method, params))
+
+    def stream_sync(self, method: str, params: dict[str, Any] | None = None):
+        return self._client.stream_sync(method, params)
 
     def health_sync(self) -> dict[str, Any]:
         return self.request_sync("health")
@@ -237,6 +241,10 @@ class MinionRoleGatewayClient:
 
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return run_blocking(self.request(method, params))
+
+    def stream_sync(self, method: str, params: dict[str, Any] | None = None):
+        payload = {**dict(params or {}), "access_token": str(self.access_token)}
+        return self._client.stream_sync(method, payload)
 
 
 async def open_manager_connection(runtime_root: Path):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import NextToolHint, ToolGuidance
 
 from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
@@ -12,7 +13,7 @@ from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
     MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
 )
-from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ, DIRECT_EXTERNAL_WRITE
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -163,7 +164,7 @@ class MemoryIntrospectionProvider:
         suffix = f"; {skipped} skipped" if skipped else ""
         return f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix})."
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show memory runtime state.",
             use_when="Diagnosing memory system health — provider count, active provider, record counts.",
@@ -184,7 +185,6 @@ class MemoryIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list_providers",
-        description="List registered L3 providers",
         guidance=ToolGuidance(
             purpose="List registered L3 memory providers.",
             use_when="Checking which memory backends are installed and mounted.",
@@ -217,7 +217,6 @@ class MemoryIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory",
         guidance=ToolGuidance(
             purpose="Show the current active memory provider.",
             use_when="Checking which backend handles recall/remember/update/forget operations.",
@@ -253,7 +252,6 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="recall",
         action_name="recall",
-        description="Recall durable memory records from the active memory provider.",
         guidance=ToolGuidance(
             purpose="Recall durable memory records from the active memory provider.",
             use_when=(
@@ -272,6 +270,20 @@ class MemoryIntrospectionProvider:
             failure_next_steps=(
                 "Use targeted queries with limit 3-5. "
                 "mem_ref is opaque; copy exactly including prefixes like fact: or case:."
+            ),
+            next_tool_hints=(
+                NextToolHint(
+                    name="remember_memory",
+                    use_when="No recalled record covers the explicit durable fact, preference, or reusable case.",
+                ),
+                NextToolHint(
+                    name="update_memory",
+                    use_when="A recalled mem_ref should be corrected, merged, or brought up to date.",
+                ),
+                NextToolHint(
+                    name="forget_memory",
+                    use_when="The user explicitly requests deletion of a recalled memory record.",
+                ),
             ),
         ),
         metadata={"omit_family_in_canonical": True},
@@ -307,7 +319,6 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="commit",
         action_name="write",
-        description="Remember a new durable memory record.",
         guidance=ToolGuidance(
             purpose="Remember a new durable memory record.",
             use_when=(
@@ -330,7 +341,7 @@ class MemoryIntrospectionProvider:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
-        execution=DIRECT_EXTERNAL_WRITE,
+        execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("remember_memory",),
     )
     def write(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -396,7 +407,6 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="correct",
         action_name="update",
-        description="Update an existing durable memory record.",
         guidance=ToolGuidance(
             purpose="Update an existing durable memory record.",
             use_when=(
@@ -411,7 +421,7 @@ class MemoryIntrospectionProvider:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
-        execution=DIRECT_EXTERNAL_WRITE,
+        execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("update_memory",),
     )
     def update(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -458,7 +468,6 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="delete",
         action_name="delete",
-        description="Forget an existing durable memory record.",
         guidance=ToolGuidance(
             purpose="Forget an existing durable memory record.",
             use_when=(
@@ -473,7 +482,7 @@ class MemoryIntrospectionProvider:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
-        execution=DIRECT_EXTERNAL_WRITE,
+        execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("forget_memory",),
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -493,7 +502,6 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_active_provider",
-        description="Switch the active L3 provider for memory recall",
         guidance=ToolGuidance(
             purpose="Switch the active L3 memory provider.",
             use_when="Changing which memory backend handles recall/remember/update/forget.",
@@ -538,12 +546,18 @@ def inspect_memory(provider: MemoryIntrospectionProvider) -> MemorySnapshot:
     )
 
 
-def register_with_core(context: MainContext, service: MemoryService, *, config: Any = None) -> ModuleHandle:
+def register_with_core(
+    context: MainContext,
+    service: MemoryService,
+    *,
+    config: Any = None,
+) -> ModuleHandle:
+    _ = config
     from pal.memory.prompt import MemoryPromptFragmentProvider
     from pal.memory.runtime_state import MemoryRuntimeStatePort
 
     provider = MemoryIntrospectionProvider(service=service, context=context)
-    prompt_provider = MemoryPromptFragmentProvider(config=config)
+    prompt_provider = MemoryPromptFragmentProvider()
     handle = ModuleHandle(
         module_id="memory",
         tier=MODULE_TIER_CORE_FOUNDATION,

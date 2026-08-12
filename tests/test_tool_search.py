@@ -47,7 +47,6 @@ def search_fixture_tool(
             retry_policy=RetryPolicy.AUTOMATIC,
             paging=PagingMode.NEVER,
         ),
-        search_text=text,
         handler=lambda _value: {},
         family=family,
         module_id=module_id,
@@ -126,6 +125,23 @@ class ToolSearchTests(unittest.TestCase):
     def test_jieba_terms_find_chinese_search_text(self) -> None:
         payload = self.search(query="记忆召回")
         self.assertEqual(payload["hits"][0]["alias"], "memory_lookup")
+
+    def test_exec_show_counts_current_generation_tools(self) -> None:
+        runtime = self.core.context.execution_runtime
+        generation = runtime.registry_generation
+
+        result = runtime.execute_tool(
+            new_tool_call(name="call_tool", args={"name": "exec_show", "args": {}})
+        )
+
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(
+            result.structured,
+            {
+                "capability_count": len(generation.canonical_bindings.actions),
+                "tool_count": len(generation.direct_aliases) + len(generation.indirect_aliases),
+            },
+        )
 
 
 if __name__ == "__main__":

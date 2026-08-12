@@ -19,6 +19,7 @@ from pal.llm.ir import (
 )
 from pal.llm.shapes.base import (
     EncodedRequest,
+    EncodedMessageSpan,
     ShapeCodecBase,
     ShapeContext,
     ShapeDecodeError,
@@ -48,7 +49,9 @@ class OpenAICompletionCodec(ShapeCodecBase):
 
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
         messages: list[dict[str, Any]] = []
+        spans: list[EncodedMessageSpan] = []
         for message in request.messages:
+            start = len(messages)
             if (
                 message.role == MessageRole.ASSISTANT
                 and message.replay is not None
@@ -61,6 +64,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
                 replay_message = message.replay.payload.get("message")
                 if isinstance(replay_message, Mapping):
                     messages.append(thaw_json(replay_message))
+                    spans.append(EncodedMessageSpan(message.message_id))
                     continue
             if message.role == MessageRole.TOOL:
                 for result in tool_results(message):
@@ -90,6 +94,12 @@ class OpenAICompletionCodec(ShapeCodecBase):
                     for call in calls
                 ]
             messages.append(payload)
+            spans.append(
+                EncodedMessageSpan(
+                    message.message_id,
+                    tuple(("messages", index) for index in range(start, len(messages))),
+                )
+            )
         if not messages:
             messages.append({"role": "user", "content": "Continue."})
 
@@ -107,7 +117,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
             payload["reasoning_effort"] = _openai_reasoning_effort(policy.thinking_level)
-        return EncodedRequest(payload)
+        return EncodedRequest(payload, tuple(spans))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":
         return OpenAICompletionDecoder(context)

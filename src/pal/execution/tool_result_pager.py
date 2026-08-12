@@ -65,15 +65,18 @@ class ToolResultPagerStore:
         retention_user_turns: int | None = None,
         input_id: str = "",
     ) -> LogicalExecutionContext:
-        if retention_user_turns is not None:
-            self.retention_user_turns = max(1, int(retention_user_turns))
+        resolved_retention = (
+            self.retention_user_turns
+            if retention_user_turns is None
+            else max(1, int(retention_user_turns))
+        )
         normalized_turn_id = str(turn_id or "").strip()
         session_id = str(scope_key or "").strip() or "local:default"
         semantic_input = str(input_id or "").strip() or normalized_turn_id or "input:default"
         context = self.state_backend.begin_input(
             execution_lifetime_id=session_id,
             input_id=semantic_input,
-            retention_user_turns=self.retention_user_turns,
+            retention_user_turns=resolved_retention,
         )
         with self._lock:
             self._turn_contexts = {
@@ -83,7 +86,8 @@ class ToolResultPagerStore:
                     candidate.execution_lifetime_id
                     == context.execution_lifetime_id
                     and context.current_user_turn
-                    >= candidate.current_user_turn + self.retention_user_turns
+                    >= candidate.current_user_turn
+                    + candidate.retention_user_turns
                 )
             }
             if normalized_turn_id:
@@ -143,7 +147,9 @@ class ToolResultPagerStore:
             original_size=len(rendered_text),
             page_count=page_count_for(rendered_text, resolved_page_size),
             created_user_turn=context.current_user_turn,
-            expires_at_user_turn=context.current_user_turn + self.retention_user_turns,
+            expires_at_user_turn=(
+                context.current_user_turn + context.retention_user_turns
+            ),
             output_json=str(output_json or ""),
             rendered=rendered_text,
             origin=dict(origin or {}),

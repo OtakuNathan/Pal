@@ -38,6 +38,7 @@ from pal.minion.v2.role_protocol import (
     RoleSessionState,
     RoleSubmissionReceipt,
     attempt_id,
+    canonical_role_profile_parts,
     role_assignment_target,
     role_session_target,
 )
@@ -2027,8 +2028,7 @@ class MinionV2Repository:
         if missing:
             raise ValueError("role session missing fields: " + ", ".join(missing))
         RoleActivation.from_values(values["role"], values["mode"])
-        if "." not in values["role_profile_id"]:
-            raise ValueError("role session role_profile_id must be canonical")
+        canonical_role_profile_parts(values["role_profile_id"])
         self.ensure_schema()
         now = utc_now()
         with self._transaction() as connection:

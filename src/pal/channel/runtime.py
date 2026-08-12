@@ -268,6 +268,13 @@ class ChannelRuntime(ChannelRuntimePort):
     def inbox(self) -> tuple[EventEnvelope, ...]:
         return self.mailbox.peek_all()
 
+    def supports_stream_delivery(self, envelope: TurnDeliveryBinding) -> bool:
+        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
+        if endpoint is None:
+            return False
+        supports = getattr(endpoint, "supports_stream_delivery", None)
+        return bool(supports()) if callable(supports) else False
+
     def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> str:
         # Outbox acceptance is the turn-facing completion point; actual delivery
         # is handled later by flush_outbox and surfaced as channel diagnostics.

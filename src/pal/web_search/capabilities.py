@@ -97,7 +97,7 @@ class WebSearchIntrospectionProvider:
     def resolve_provider_label(self, provider: WebSearchProviderModel) -> str:
         return provider.provider_id
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show web search module state",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show web search module state.",
             use_when="Diagnosing web search health — provider count, active provider, mounted status.",
@@ -118,7 +118,6 @@ class WebSearchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list_providers",
-        description="List configured web search providers",
         guidance=ToolGuidance(
             purpose="List configured web search providers.",
             use_when="Discovering available search backends and their enabled status.",
@@ -142,7 +141,6 @@ class WebSearchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show configured and effective active web search provider",
         guidance=ToolGuidance(
             purpose="Show the active web search provider.",
             use_when="Checking which search backend handles queries.",
@@ -168,7 +166,6 @@ class WebSearchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="show",
-        description="Show web search provider metadata",
         guidance=ToolGuidance(
             purpose="Show one web search provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
@@ -193,7 +190,6 @@ class WebSearchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="auth_state",
-        description="Show web search provider authorization state",
         guidance=ToolGuidance(
             purpose="Show one web search provider's authorization state.",
             use_when="Diagnosing auth failures or checking if API keys are configured.",
@@ -219,7 +215,6 @@ class WebSearchIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="health",
-        description="Show web search provider health",
         guidance=ToolGuidance(
             purpose="Show one web search provider's health.",
             use_when="Diagnosing search failures or connectivity issues.",
@@ -246,7 +241,6 @@ class WebSearchIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_active_provider",
-        description="Set the configured active web search provider",
         guidance=ToolGuidance(
             purpose="Set the active web search provider.",
             use_when="Switching to a different search backend.",
@@ -279,7 +273,6 @@ class WebSearchIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="query",
-        description="Search the web with the configured web search provider and internal fallback",
         guidance=ToolGuidance(
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
@@ -332,7 +325,6 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="enable",
-        description="Enable a web search provider",
         guidance=ToolGuidance(
             purpose="Enable a web search provider.",
             use_when="Re-enabling a disabled search provider.",
@@ -350,7 +342,6 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="disable",
-        description="Disable a web search provider",
         guidance=ToolGuidance(
             purpose="Disable a web search provider.",
             use_when="Temporarily removing a provider from the active pool.",
@@ -368,7 +359,6 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="set_auth_material",
-        description="Update web search provider auth material without exposing secrets",
         guidance=ToolGuidance(
             purpose="Apply auth material to a web search provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
@@ -404,7 +394,6 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         family="management",
         action_name="set_config",
-        description="Merge config into a web search provider settings blob",
         guidance=ToolGuidance(
             purpose="Merge config into a web search provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. result count, safe search defaults).",
@@ -433,7 +422,7 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web search module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach web search module.",
             use_when="Reconnecting a detached web search module.",
@@ -447,7 +436,7 @@ class WebSearchIntrospectionProvider:
         payload = {"mounted": True, "degraded": False}
         return IntrospectionResult(status=RuntimeStatus.OK, text="web search attached", structured=payload, llm_text=render_titled_structured_for_llm("Web search attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web search module",
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
             purpose="Detach web search module.",
             use_when="Temporarily stopping all web search functionality.",

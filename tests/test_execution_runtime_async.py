@@ -47,7 +47,6 @@ def mount_slow_sync_tool(runtime: ExecutionRuntime) -> None:
             retry_policy=RetryPolicy.AUTOMATIC,
             paging=PagingMode.NEVER,
         ),
-        search_text="slow sync",
         handler=invoke,
     )
 

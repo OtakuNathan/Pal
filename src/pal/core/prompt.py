@@ -88,7 +88,6 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Use tools only when needed to act, search, recall, inspect, verify, or mutate state."
                 ),
                 priority=90,
-                metadata={"prompt_target": "runtime_reminder", "source_priority": 90},
             ),
             PromptFragment(
                 section="priority",
@@ -117,7 +116,6 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- If tool output grows quickly, stop and reassess; use the simplest viable path."
                 ),
                 priority=92,
-                metadata={"prompt_target": "runtime_reminder", "source_priority": 92},
             ),
             PromptFragment(
                 section="mutation_policy",

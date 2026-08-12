@@ -113,7 +113,6 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List enabled LLM endpoints and their usable names, ordered by priority.",
         guidance=ToolGuidance(
             purpose="List enabled LLM endpoints ordered by priority.",
             use_when="Discovering available model endpoints, their provider, wire shape, and priority.",
@@ -149,7 +148,6 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active",
-        description="Show the current active llm model metadata",
         guidance=ToolGuidance(
             purpose="Show the current active LLM model metadata.",
             use_when="Checking which model endpoint is currently selected for requests.",
@@ -172,7 +170,6 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show public metadata for one enabled LLM endpoint by name",
         guidance=ToolGuidance(
             purpose="Show public metadata for one enabled LLM endpoint by name.",
             use_when="Inspecting one endpoint's context window, max output, thinking levels, capabilities.",
@@ -210,7 +207,6 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="think_level",
-        description="Show the active endpoint's provider-declared thinking choices and current selection",
         guidance=ToolGuidance(
             purpose="Show the active endpoint's thinking level choices and current selection.",
             use_when="Checking or deciding which reasoning level (e.g. low/medium/high) the active model uses.",
@@ -249,7 +245,6 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="usage",
-        description="Show resident-process LLM request, token, prompt-cache, reasoning-token, and provider-reported cost statistics.",
         guidance=ToolGuidance(
             purpose="Show resident-process LLM usage statistics — requests, tokens, cache hit rate, cost.",
             use_when="Monitoring token consumption, cache performance, or cost across the current process lifetime.",
@@ -282,7 +277,6 @@ class LLMIntrospectionProvider:
         scope="module",
         family="management",
         action_name="set_active_endpoint",
-        description="Switch the active llm endpoint used for future requests",
         guidance=ToolGuidance(
             purpose="Switch the active LLM endpoint for future requests.",
             use_when="The user asks to switch models (e.g. to a different provider, a faster/cheaper model, or one with vision).",
@@ -423,12 +417,16 @@ def render_llm_status(payload: dict[str, Any]) -> str:
     usage = dict(payload.get("usage") or {})
     endpoint_id = str(active.get("endpoint_id") or active.get("active_endpoint_id") or "-")
     model_id = str(active.get("model_id") or "-")
-    cache_hit_rate = max(0.0, float(usage.get("cache_hit_rate") or 0.0))
+    token_cache_ratio = max(0.0, float(usage.get("token_cache_ratio") or usage.get("cache_hit_rate") or 0.0))
+    request_hit_rate = max(0.0, float(usage.get("request_cache_hit_rate") or 0.0))
+    cache_write_ratio = max(0.0, float(usage.get("cache_write_ratio") or 0.0))
+    cache_policy = dict(usage.get("prompt_cache_policy") or {})
     reporting_rate = max(0.0, float(usage.get("usage_reporting_rate") or 0.0))
     lines = [
         "LLM status",
         f"Active: {endpoint_id} ({model_id})",
         f"Statistics scope: resident process since {usage.get('started_at') or '-'}",
+        "",
         (
             "Logical requests: "
             f"{int(usage.get('successful_request_count') or 0)} successful, "
@@ -440,6 +438,7 @@ def render_llm_status(payload: dict[str, Any]) -> str:
             f"{int(usage.get('provider_response_count') or 0)} completed, "
             f"{int(usage.get('failed_attempt_count') or 0)} failed"
         ),
+        "",
         (
             "Input tokens: "
             f"{int(usage.get('input_tokens') or 0)} total; "
@@ -447,7 +446,16 @@ def render_llm_status(payload: dict[str, Any]) -> str:
             f"{int(usage.get('cached_input_tokens') or 0)} cache reads, "
             f"{int(usage.get('cache_write_input_tokens') or 0)} cache writes"
         ),
-        f"Prompt cache hit rate: {cache_hit_rate:.1%}",
+        f"Prompt cache token ratio: {token_cache_ratio:.1%}",
+        f"Prompt cache request hit rate: {request_hit_rate:.1%}",
+        f"Prompt cache write ratio: {cache_write_ratio:.1%}",
+        (
+            "Prompt cache policy: "
+            f"{cache_policy.get('dialect') or 'none'}; "
+            f"decision={cache_policy.get('decision') or 'not_planned'}; "
+            f"breakpoints={','.join(cache_policy.get('breakpoints') or []) or '-'}"
+        ),
+        "",
         (
             "Output tokens: "
             f"{int(usage.get('output_tokens') or 0)} total; "
@@ -462,6 +470,7 @@ def render_llm_status(payload: dict[str, Any]) -> str:
         if isinstance(item, dict)
     ]
     if endpoint_rows:
+        lines.append("")
         lines.append("By endpoint:")
         for item in endpoint_rows:
             endpoint_cache_rate = max(

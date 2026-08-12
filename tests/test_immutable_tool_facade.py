@@ -103,7 +103,6 @@ def _echo_kwargs(
             retry=retry,
             paging=paging,
         ),
-        "search_text": "echo deterministic output",
         "handler": handler or (lambda value: {"echo": value.value}),
         "examples": ({"value": "hello", "mode": "plain"},),
     }
@@ -122,13 +121,13 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(record.binding.descriptor.aliases, ("echo",))
         self.assertEqual(record.canonical_path, "op_test_echo")
-        self.assertIn("Use when:", record.description)
-        self.assertIn("Do not use when:", record.description)
-        self.assertIn("invocation_mode=indirect", record.description)
-        self.assertIn('["plain", "upper"]', record.description)
-        self.assertIn("Valid example:", record.description)
-        self.assertIn("Output shape:", record.description)
-        self.assertNotIn("Input schema:", record.description)
+        self.assertIn("Use when:", record.compiled_description)
+        self.assertIn("Do not use when:", record.compiled_description)
+        self.assertIn("invocation_mode=indirect", record.compiled_description)
+        self.assertIn('["plain", "upper"]', record.compiled_description)
+        self.assertIn("Valid example:", record.compiled_description)
+        self.assertIn("Output shape:", record.compiled_description)
+        self.assertNotIn("Input schema:", record.compiled_description)
         self.assertEqual(
             self.runtime.registry_generation.capability_index.aliases["echo"],
             "op_test_echo",
@@ -221,7 +220,6 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             OutputModel=EchoOutput,
             guidance=_guidance(),
             execution=_execution(),
-            search_text="nullable echo merge patch",
             handler=handler,
             examples=({"value": "hello", "optional": None},),
         )

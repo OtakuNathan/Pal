@@ -28,7 +28,7 @@ class FailureIntrospectionProvider:
     runtime: FailureRuntime
     module_id: str = "failure"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary",
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show failure runtime summary.",
             use_when="Diagnosing reply delivery failures or checking failure tracking health.",
@@ -49,7 +49,6 @@ class FailureIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="recent_reports",
-        description="List recent structured failure reports",
         guidance=ToolGuidance(
             purpose="List recent structured failure reports.",
             use_when="Investigating why replies or deliveries failed recently.",

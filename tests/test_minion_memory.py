@@ -11,10 +11,14 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core import CompactionClockKind, CompactionSnapshot
+from pal.core import CompactionClockKind, CompactionSnapshot, MainContext
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.runtime_state import RuntimeSnapshotCoordinator, RuntimeSnapshotIdentity
+from pal.core.turn_executor import TurnExecutor
+from pal.execution.runtime import ExecutionRuntime
 from pal.llm import (
+    GenerationPolicyIR,
+    LLMRequestIR,
     generation_result_from_values,
 )
 from pal.llm.ir import LLMMessageIR, MessageRole, ReasoningPartIR, TextPartIR
@@ -42,7 +46,9 @@ from pal.minion.runner import (
     MinionLLMRetryableError,
     MinionRunner,
     _minion_llm_request_metadata,
+    _minion_prompt_context,
 )
+from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import (
     LLMFinishReason,
@@ -108,7 +114,299 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["timeout_seconds"], 3000.0)
         self.assertFalse(metadata["max_output_recovery_enabled"])
 
-    def test_minion_renders_closed_tool_protocol_from_l1_once(self) -> None:
+    @staticmethod
+    def _turn_executor(context: MainContext, *, canonical_prompt) -> TurnExecutor:
+        return TurnExecutor(
+            context,
+            SimpleNamespace(diagnostics=[]),
+            SimpleNamespace(),
+            call_port_async=lambda *args, **kwargs: None,
+            build_canonical_prompt=canonical_prompt,
+            debug_log_prompt=lambda *args, **kwargs: None,
+            debug_log_outcome=lambda *args, **kwargs: None,
+            debug_log_reply=lambda *args, **kwargs: None,
+            build_llm_tool_contracts=lambda: [],
+            handle_failure_async=lambda *args, **kwargs: None,
+            render_failure_feedback_text=lambda value: str(value),
+            should_enter_failure_flow_for_tool_result=lambda value: False,
+        )
+
+    def test_minion_prompt_uses_run_scoped_cache_and_artifact_identity(self) -> None:
+        service, _provider = self._memory_service()
+        turn_id = "memory-run:invocation:input"
+        service.commit_l1(
+            MemoryCommitRequest(
+                turn_id="memory-run:invocation:prior",
+                transcript=[
+                    L1TranscriptMessage(role="user", content="prior assignment step"),
+                    L1TranscriptMessage(role="assistant", content="prior step completed"),
+                ],
+            )
+        )
+        service.begin_l1_turn(turn_id, user_text="inspect the assigned module")
+        context = MainContext(
+            execution_runtime=ExecutionRuntime(),
+            port_registry={"memory:memory": service},
+        )
+        executor = self._turn_executor(
+            context,
+            canonical_prompt=lambda *_args, **_kwargs: LLMRequestIR(
+                messages=(
+                    LLMMessageIR(
+                        role=MessageRole.SYSTEM,
+                        parts=(TextPartIR("stable minion contract"),),
+                    ),
+                    LLMMessageIR(
+                        role=MessageRole.USER,
+                        parts=(TextPartIR("dynamic role working state"),),
+                    ),
+                ),
+                tools=(),
+                policy=GenerationPolicyIR(max_output_tokens=256),
+                metadata={"compiler_only": True},
+            ),
+        )
+        assembly = _minion_prompt_context(
+            self._runner().pack,
+            run_id="memory-run",
+            metadata={},
+        )
+        continuation = SimpleNamespace(
+            turn_id=turn_id,
+            preferred_llm_endpoint_id=None,
+            preferred_llm_model_id=None,
+            turn_settings_snapshot={},
+            tool_observations=[],
+            finalization_only=False,
+        )
+
+        request = executor.build_turn_prompt(
+            continuation,
+            assembly,
+            max_output_tokens=256,
+        )
+
+        self.assertEqual(request.logical_scope_id, "minion:memory-run")
+        self.assertEqual(request.metadata["prompt_cache_scope_id"], "minion:memory-run")
+        self.assertEqual(request.metadata["artifact_scope_key"], "minion:memory-run")
+        self.assertEqual(
+            [message.prompt_region.value for message in request.messages],
+            [
+                "stable_system",
+                "settled_history",
+                "settled_history",
+                "active_dynamic",
+                "active_input",
+            ],
+        )
+        self.assertEqual(
+            [message.text for message in request.messages],
+            [
+                "stable minion contract",
+                "prior assignment step",
+                "prior step completed",
+                "dynamic role working state",
+                "inspect the assigned module",
+            ],
+        )
+
+    def test_minion_settlement_retires_result_owned_authority(self) -> None:
+        base_runtime = ExecutionRuntime()
+        retired: list[dict[str, object]] = []
+
+        def record_retirement(**kwargs):
+            retired.append(dict(kwargs))
+            return tuple(kwargs.get("result_ids") or ())
+
+        base_runtime.retire_tool_results = record_retirement
+        scoped_runtime = MinionScopedExecutionRuntime(
+            base_runtime,
+            [],
+            workspace={"run_id": "memory-run"},
+        )
+        service, _provider = self._memory_service()
+        turn_id = "memory-run:invocation:input"
+        call = new_tool_call(name="read_file", args={"file_path": "README.md"}, call_id="read-1")
+        service.begin_l1_turn(turn_id, user_text="read the file")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(call,),
+            ),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="file contents",
+            ),
+        )
+        context = MainContext(
+            execution_runtime=scoped_runtime,
+            port_registry={"memory:memory": service},
+        )
+        executor = self._turn_executor(
+            context,
+            canonical_prompt=lambda *_args, **_kwargs: None,
+        )
+
+        asyncio.run(
+            executor.schedule_post_turn_commit_async(
+                SimpleNamespace(commit_payload=SimpleNamespace(turn_id=turn_id))
+            )
+        )
+
+        self.assertEqual(
+            retired,
+            [{"turn_id": turn_id, "result_ids": ("read-1",)}],
+        )
+        settled = service.l1_store.turns.get(turn_id)
+        self.assertEqual(str(settled.state), "settled")
+        results = [
+            part
+            for message in settled.messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        ]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].retired)
+
+    def test_minion_recovery_aborts_stale_turn_and_retires_its_authority(self) -> None:
+        base_runtime = ExecutionRuntime()
+        retired: list[dict[str, object]] = []
+
+        def record_retirement(**kwargs):
+            retired.append(dict(kwargs))
+            return tuple(kwargs.get("result_ids") or ())
+
+        base_runtime.retire_tool_results = record_retirement
+        scoped_runtime = MinionScopedExecutionRuntime(
+            base_runtime,
+            [],
+            workspace={"run_id": "memory-run"},
+        )
+        service, _provider = self._memory_service()
+        active_turn_id = "memory-run:invocation:new"
+        stale_turn_id = "memory-run:invocation:stale"
+        service.begin_l1_turn(active_turn_id, user_text="new input")
+        service.begin_l1_turn(stale_turn_id, user_text="stale input")
+        call = new_tool_call(name="read_file", args={"file_path": "README.md"}, call_id="stale-read")
+        service.upsert_l1_assistant(
+            stale_turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            stale_turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="stale contents",
+            ),
+        )
+
+        MinionRunner._abort_stale_l1_turns(
+            service,
+            active_turn_id=active_turn_id,
+            execution_runtime=scoped_runtime,
+        )
+
+        self.assertEqual(
+            retired,
+            [{"turn_id": stale_turn_id, "result_ids": ("stale-read",)}],
+        )
+        self.assertEqual(str(service.l1_store.turns.get(stale_turn_id).state), "aborted")
+        self.assertIsNotNone(service.active_l1_turn(active_turn_id))
+
+    def test_minion_checkpoint_reconciles_legacy_closed_result_authority(self) -> None:
+        service, _provider = self._memory_service()
+        turn_id = "memory-run:invocation:closed"
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "README.md"},
+            call_id="closed-read",
+        )
+        service.begin_l1_turn(turn_id, user_text="read the file")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="legacy restored contents",
+            ),
+        )
+        service.settle_l1_turn(turn_id)
+        retired: list[dict[str, object]] = []
+        runtime = SimpleNamespace(
+            retire_tool_results=lambda **kwargs: retired.append(dict(kwargs))
+        )
+
+        MinionRunner._retire_closed_l1_result_authority(service, runtime)
+
+        self.assertEqual(
+            retired,
+            [{"turn_id": turn_id, "result_ids": ("closed-read",)}],
+        )
+
+    def test_minion_pager_retention_advances_by_tool_call(self) -> None:
+        base_runtime = ExecutionRuntime()
+        scoped_runtime = MinionScopedExecutionRuntime(
+            base_runtime,
+            [],
+            workspace={"run_id": "memory-run"},
+        )
+        turn_id = "memory-run:invocation:input"
+        scoped_runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key="minion:memory-run",
+            retention_user_turns=5,
+            input_id="input",
+        )
+        manifest = base_runtime.tool_result_pager.store(
+            runtime_root=None,
+            turn_id=turn_id,
+            result_ref="minion-pager-result",
+            tool_name="read_file",
+            status="ok",
+            ok=True,
+            rendered="full paged output",
+            page_size=256,
+        )
+
+        for index in range(1, 5):
+            scoped_runtime.advance_tool_result_clock(
+                turn_id=turn_id,
+                clock_id=f"tool:{index}",
+                retention_steps=5,
+            )
+        self.assertEqual(
+            scoped_runtime.read_tool_result_page(
+                result_ref=manifest.result_ref,
+                turn_id=turn_id,
+            ).state,
+            "ok",
+        )
+
+        scoped_runtime.advance_tool_result_clock(
+            turn_id=turn_id,
+            clock_id="tool:5",
+            retention_steps=5,
+        )
+
+        self.assertEqual(
+            scoped_runtime.read_tool_result_page(
+                result_ref=manifest.result_ref,
+                turn_id=turn_id,
+            ).state,
+            "expired_handle",
+        )
+
+    def test_minion_renders_closed_tool_protocol_without_retired_result_body(self) -> None:
         service, _provider = self._memory_service()
         service.commit_l1(
             MemoryCommitRequest(
@@ -155,7 +453,8 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered.count("calling read_file"), 1)
-        self.assertEqual(rendered.count("README contents"), 1)
+        self.assertNotIn("README contents", rendered)
+        self.assertEqual(rendered.count("full result retired"), 1)
 
     def test_active_input_is_filtered_from_l1_prompt_projection_only(self) -> None:
         service, _provider = self._memory_service()
@@ -579,6 +878,31 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(recovered, "run:invocation:input:recovery:2")
         self.assertIsNotNone(service.active_l1_turn(recovered))
         self.assertIsNotNone(service.l1_store.turns.get("run:invocation:input"))
+
+    def test_new_assignment_does_not_resume_prior_active_l1_turn(self) -> None:
+        runner = self._runner()
+        service, _provider = self._memory_service()
+        stale_id = "run:invocation:assignment-old"
+        service.begin_l1_turn(stale_id, user_text="workspace=/attempts/fence-1")
+
+        selected = runner._resume_or_reopen_l1_turn(
+            service,
+            run_id="run",
+            active_input_id="assignment-new",
+            user_text="workspace=/attempts/fence-4",
+            fencing_token=4,
+            reuse_active=False,
+        )
+        runner._abort_stale_l1_turns(
+            service,
+            active_turn_id=selected,
+        )
+
+        self.assertEqual(selected, "run:invocation:assignment-new")
+        self.assertEqual(
+            str(service.l1_store.turns.get(stale_id).state),
+            "aborted",
+        )
 
     def test_checkpoint_atomically_restores_complete_l1(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_minion_compact_checkpoint_"))

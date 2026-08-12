@@ -208,8 +208,8 @@ _DEFECT_PRECEDENCE = {
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_scratch_write": {
         "alias": "verification_scratch_write",
-        "description": "Create or replace one complete verifier-owned probe file in bound scratch storage.",
         "guidance": {
+            "purpose": "Create or replace one complete verifier-owned probe file in bound scratch storage.",
             "use_when": (
                 "Use for a temporary executable test or probe needed by a verification case; "
                 "reuse the returned scratch_path when running it."
@@ -228,8 +228,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     **{
         name: {
             "alias": name.removeprefix("op_minion_"),
-            "description": f"Run and durably register one {tag.replace('_', ' ')} verification case.",
             "guidance": {
+                "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case.",
                 "use_when": " ".join(
                     [
                         str(_VERIFICATION_ACTION_TEMPLATES[tag]["when"]),
@@ -254,8 +254,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_run_lsp_check": {
         "alias": "verification_run_lsp_check",
-        "description": "Run and durably register LSP diagnostics for one source file.",
         "guidance": {
+            "purpose": "Run and durably register LSP diagnostics for one source file.",
             "use_when": (
                 "Use the Manager-prepared context when diagnostics are an applicable supporting "
                 "check for a changed source or public symbol."
@@ -273,8 +273,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_check_unavailable": {
         "alias": "verification_check_unavailable",
-        "description": "Record one required verification obligation as unavailable in the bound environment.",
         "guidance": {
+            "purpose": "Record one required verification obligation as unavailable in the bound environment.",
             "use_when": "Use only for an applicable required obligation that genuinely cannot be exercised.",
             "do_not_use_when": (
                 "Do not use for a failed check, a non-applicable obligation, or to manufacture "
@@ -286,8 +286,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_set_summary": {
         "alias": "verification_set_summary",
-        "description": "Replace the concise verifier summary for the current verification draft.",
         "guidance": {
+            "purpose": "Replace the concise verifier summary for the current verification draft.",
             "use_when": "Use after the material verification cases and findings are known.",
             "do_not_use_when": "Do not use the summary as evidence or a substitute for structured findings.",
             "failure_next_steps": "Correct the summary shape from the returned validation error.",
@@ -296,8 +296,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_draft_status": {
         "alias": "verification_draft_status",
-        "description": "Read compact current verification cases, findings, obligations, and next actions.",
         "guidance": {
+            "purpose": "Read compact current verification cases, findings, obligations, and next actions.",
             "use_when": "Use to resume an assignment or select the next unfinished risk-directed action.",
             "do_not_use_when": "Do not poll it repeatedly when no case, finding, or assignment state has changed.",
             "failure_next_steps": "Continue from the bound checklist and recorded cases if status cannot be read.",
@@ -306,8 +306,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_remove_case": {
         "alias": "verification_remove_case",
-        "description": "Withdraw one recorded verification case and its attached findings by semantic name.",
         "guidance": {
+            "purpose": "Withdraw one recorded verification case and its attached findings by semantic name.",
             "use_when": "Use only when a recorded case itself is invalid, duplicate, or no longer applicable.",
             "do_not_use_when": "Do not hide a legitimate failure; rerun that case after a real fix instead.",
             "failure_next_steps": "Correct the exact semantic case name and audit reason before retrying.",
@@ -316,8 +316,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_submit": {
         "alias": "verification_submit",
-        "description": "Submit the current immutable verification evidence and findings for Manager-derived routing.",
         "guidance": {
+            "purpose": "Submit the current immutable verification evidence and findings for Manager-derived routing.",
             "use_when": "Use with no arguments after every required obligation and checklist item is closed.",
             "do_not_use_when": "Do not use with missing evidence, incomplete findings, or unfinished checklist work.",
             "failure_next_steps": "Resolve every returned draft consistency error before retrying.",

@@ -17,6 +17,7 @@ class LogicalExecutionContext:
     input_id: str
     current_user_turn: int
     context_epoch: int
+    retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -24,6 +25,7 @@ class LogicalExecutionContext:
             "input_id": self.input_id,
             "current_user_turn": self.current_user_turn,
             "context_epoch": self.context_epoch,
+            "retention_user_turns": self.retention_user_turns,
         }
 
     @classmethod
@@ -33,6 +35,13 @@ class LogicalExecutionContext:
             input_id=str(value.get("input_id") or ""),
             current_user_turn=max(0, int(value.get("current_user_turn") or 0)),
             context_epoch=max(1, int(value.get("context_epoch") or 1)),
+            retention_user_turns=max(
+                1,
+                int(
+                    value.get("retention_user_turns")
+                    or DEFAULT_RESULT_RETENTION_USER_TURNS
+                ),
+            ),
         )
 
 
@@ -1152,6 +1161,7 @@ class InMemoryLogicalExecutionState:
             input_id=input_id,
             current_user_turn=state.current_user_turn,
             context_epoch=state.context_epoch,
+            retention_user_turns=state.retention_user_turns,
         )
 
     @staticmethod

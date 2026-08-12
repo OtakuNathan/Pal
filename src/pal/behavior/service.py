@@ -648,7 +648,8 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
         name = str(getattr(descriptor, "name", "") or canonical).strip()
         if not name:
             continue
-        description = str(getattr(descriptor, "description", "") or "").strip()
+        guidance = getattr(descriptor, "guidance", None)
+        description = str(getattr(guidance, "purpose", "") or "").strip()
         display = str(getattr(descriptor, "display_name", "") or canonical or name).strip()
         family = str(getattr(descriptor, "family", "") or "capability").strip()
         namespace = str((getattr(descriptor, "metadata", {}) or {}).get("namespace") or family).strip()

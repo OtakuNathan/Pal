@@ -18,12 +18,14 @@ class _UsageBucket:
     provider_response_count: int = 0
     failed_attempt_count: int = 0
     usage_reported_request_count: int = 0
+    cache_hit_request_count: int = 0
     usage: LLMUsageIR = field(default_factory=LLMUsageIR)
 
     def record_success(self, usage: LLMUsageIR, *, provider_response_count: int) -> None:
         self.successful_request_count += 1
         self.provider_response_count += max(1, int(provider_response_count or 0))
         self.usage_reported_request_count += int(usage.reported)
+        self.cache_hit_request_count += int(usage.cached_input_tokens > 0)
         self.usage = _add_usage(self.usage, usage)
 
     def record_failed_attempt(self) -> None:
@@ -48,6 +50,12 @@ class _UsageBucket:
             "failed_attempt_count": self.failed_attempt_count,
             "usage_reported_request_count": self.usage_reported_request_count,
             "usage_reporting_rate": usage_reporting_rate,
+            "cache_hit_request_count": self.cache_hit_request_count,
+            "request_cache_hit_rate": (
+                self.cache_hit_request_count / self.successful_request_count
+                if self.successful_request_count > 0
+                else 0.0
+            ),
             **_usage_to_dict(self.usage),
         }
 
@@ -55,7 +63,8 @@ class _UsageBucket:
 class LLMUsageLedger:
     """Thread-safe, process-lifetime aggregate for the resident LLM runtime."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, scope: str = "resident_process") -> None:
+        self.scope = str(scope or "resident_process")
         self.started_at = datetime.now(timezone.utc).isoformat()
         self._total = _UsageBucket()
         self._by_endpoint: dict[str, _UsageBucket] = {}
@@ -97,7 +106,7 @@ class LLMUsageLedger:
         with self._lock:
             total = self._total.to_dict()
             return {
-                "scope": "resident_process",
+                "scope": self.scope,
                 "started_at": self.started_at,
                 **total,
                 "by_endpoint": [
@@ -150,6 +159,16 @@ def _usage_to_dict(usage: LLMUsageIR) -> dict[str, Any]:
         "reported": bool(usage.reported),
         "cache_hit_rate": (
             max(0, int(usage.cached_input_tokens)) / input_tokens
+            if input_tokens > 0
+            else 0.0
+        ),
+        "token_cache_ratio": (
+            max(0, int(usage.cached_input_tokens)) / input_tokens
+            if input_tokens > 0
+            else 0.0
+        ),
+        "cache_write_ratio": (
+            max(0, int(usage.cache_write_input_tokens)) / input_tokens
             if input_tokens > 0
             else 0.0
         ),

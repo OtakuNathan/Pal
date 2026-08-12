@@ -163,6 +163,7 @@ class MemoryPackRequest:
 @dataclass(frozen=True)
 class MemoryPack:
     l1_recent_context: list[L1TranscriptMessage] = field(default_factory=list)
+    l1_turns: list["L1TurnIR"] = field(default_factory=list)
     current_summary: L2Entry | None = None
     l2_working_memory: list[L2Entry] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -277,13 +278,30 @@ class MemoryServicePort(Protocol):
     ) -> "L1TurnIR":
         ...
 
-    def settle_l1_turn(self, turn_id: str) -> "L1TurnIR":
+    def settle_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        after_commit: Callable[[], None] | None = None,
+    ) -> "L1TurnIR":
         ...
 
-    def interrupt_l1_turn(self, turn_id: str, *, reason: str = "") -> "L1TurnIR":
+    def interrupt_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        reason: str = "",
+        after_commit: Callable[[], None] | None = None,
+    ) -> "L1TurnIR":
         ...
 
-    def abort_l1_turn(self, turn_id: str, *, reason: str = "") -> "L1TurnIR":
+    def abort_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        reason: str = "",
+        after_commit: Callable[[], None] | None = None,
+    ) -> "L1TurnIR":
         ...
 
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:

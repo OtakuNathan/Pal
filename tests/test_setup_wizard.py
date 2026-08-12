@@ -223,7 +223,7 @@ class TestSeedFromWizard(unittest.TestCase):
         config_text = (self.runtime_root / "config.toml").read_text(encoding="utf-8")
         cfg = RuntimeConfig.load(self.runtime_root)
         self.assertEqual(cfg.max_lines_to_read, 123)
-        self.assertEqual(cfg.keep_recent_tool_messages, 9)
+        self.assertNotIn("keep_recent_tool_messages", config_text)
         self.assertEqual(cfg.embedding_ollama_remote_base_urls, ())
         self.assertNotIn("http://old:11434", config_text)
 

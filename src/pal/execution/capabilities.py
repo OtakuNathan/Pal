@@ -73,7 +73,6 @@ class ExecutionIntrospectionProvider(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show execution runtime state",
         guidance=ToolGuidance(
             purpose="Show execution runtime state — capability count and tool count.",
             use_when="Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred.",
@@ -95,9 +94,10 @@ class ExecutionIntrospectionProvider(
 
 def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnapshot:
     runtime = provider.runtime
+    generation = runtime.registry_generation
     return ExecutionSnapshot(
         capability_count=len(runtime.bound_action_index.actions),
-        tool_count=len(runtime.tools),
+        tool_count=len(generation.direct_aliases) + len(generation.indirect_aliases),
     )
 
 

@@ -15,8 +15,8 @@ ASK_QUESTION_CAPABILITY = "op_minion_ask_question"
 
 ASK_QUESTION_TOOL_SPEC: dict[str, Any] = {
     "alias": "ask_question",
-    "description": "Suspend the current role invocation and ask the user one decisive question.",
     "guidance": {
+        "purpose": "Suspend the current role invocation and ask the user one decisive question.",
         "use_when": (
             "Use when a contradiction, material ambiguity, infeasible requirement, "
             "missing preference, or scope-changing decision prevents a correct design."

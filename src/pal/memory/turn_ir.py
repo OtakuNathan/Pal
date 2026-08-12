@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, ToolResultLifecycle
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 
 from dataclasses import dataclass, field, replace
@@ -50,6 +50,14 @@ class L1TurnIR:
                     raise L1TurnProtocolError("settled L1 turn contains an in-progress message")
                 if message.reasoning_text or message.replay is not None:
                     raise L1TurnProtocolError("settled L1 turn retains transient reasoning replay")
+                if any(
+                    isinstance(part, ToolResultIR)
+                    and part.lifecycle != ToolResultLifecycle.RETIRED
+                    for part in message.parts
+                ):
+                    raise L1TurnProtocolError(
+                        "settled L1 turn retains a full tool result"
+                    )
 
     @classmethod
     def begin(
@@ -189,7 +197,9 @@ class L1TurnIR:
         self._require_active()
         if self.pending_call_ids:
             raise L1TurnProtocolError("cannot settle L1 turn with unresolved tool calls")
-        messages = tuple(_retire_message(message) for message in self.messages)
+        messages = _ensure_assistant_closure(
+            tuple(_retire_message(message) for message in self.messages)
+        )
         return replace(
             self,
             messages=messages,
@@ -231,7 +241,7 @@ class L1TurnIR:
             metadata["settlement_reason"] = str(reason)
         return replace(
             self,
-            messages=tuple(closed),
+            messages=_ensure_assistant_closure(tuple(closed)),
             state=state,
             revision=self.revision + 1,
             metadata=metadata,
@@ -295,7 +305,38 @@ class L1TurnStore:
 def _retire_message(message: LLMMessageIR) -> LLMMessageIR:
     if message.role == MessageRole.ASSISTANT:
         return message.retire_reasoning()
-    return replace(message, state=MessageState.COMPLETE, replay=None)
+    parts = tuple(
+        part.retire() if isinstance(part, ToolResultIR) else part
+        for part in message.parts
+    )
+    return replace(
+        message,
+        parts=parts,
+        state=MessageState.COMPLETE,
+        replay=None,
+    )
+
+
+def _ensure_assistant_closure(
+    messages: tuple[LLMMessageIR, ...],
+) -> tuple[LLMMessageIR, ...]:
+    """Keep closed tool protocol legal for providers requiring role alternation."""
+
+    if not messages or messages[-1].role != MessageRole.TOOL:
+        return messages
+    return (
+        *messages,
+        LLMMessageIR(
+            role=MessageRole.ASSISTANT,
+            parts=(
+                TextPartIR(
+                    "Tool interaction closed without a further assistant reply."
+                ),
+            ),
+            semantic_kind="runtime_generated_closure",
+            metadata={"pal_authored": True},
+        ),
+    )
 
 
 def _protocol_ids(messages: tuple[LLMMessageIR, ...]) -> tuple[set[str], set[str]]:

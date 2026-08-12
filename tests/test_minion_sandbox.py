@@ -20,24 +20,16 @@ import msgpack
 from pal.core.module_registry import ModuleRegistry
 from pal.core.runtime_state import RuntimeSnapshotCoordinator
 from pal.execution.git_tool import classify_git_command
-from pal.llm import EndpointResolver, LLMRuntime
 from pal.lsp.ipc import LspManagerClient
-from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt, LLMPreflightAdvice, LLMPreflightRequest
 from pal.shared import ToolExecutionResult
 from pal.memory import MemoryService
-from pal.minion.manager import MinionManager, MinionRunState
-from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
-from pal.minion.llm_broker import (
-    MinionBrokerLLMRuntime,
-    llm_outcome_from_payload,
-    llm_outcome_to_payload,
-    llm_request_from_payload,
-    llm_request_to_payload,
-    preflight_advice_from_payload,
-    preflight_advice_to_payload,
-    preflight_request_from_payload,
-    preflight_request_to_payload,
+from pal.minion.manager import MinionManager
+from pal.minion.ipc import (
+    MINION_RUNTIME_DB_PATH_ENV,
+    ROLE_GATEWAY_TOKEN_ENV,
+    MinionRoleGatewayClient,
 )
+from pal.minion.llm_transport import ManagerProxyTransport
 from pal.minion.runner import (
     MinionRunner,
     MinionRuntimeBundle,
@@ -85,10 +77,10 @@ class MinionSandboxTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "cannot construct a host LLM runtime"):
                 build_slim_minion_runtime(Path(tmp), run_id="role-1", llm_authority="host")
 
-    def test_manager_broker_authority_requires_run_identity(self) -> None:
+    def test_manager_proxy_authority_requires_run_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_llm_run_id_") as tmp:
             with self.assertRaisesRegex(ValueError, "requires run_id"):
-                build_slim_minion_runtime(Path(tmp), llm_authority="manager_broker")
+                build_slim_minion_runtime(Path(tmp), llm_authority="manager_proxy")
 
     def test_question_waits_for_matching_user_response(self) -> None:
         async def scenario() -> None:
@@ -175,7 +167,7 @@ class MinionSandboxTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_sandboxed_broker_requires_assignment_gateway_token(self) -> None:
-        runtime = MinionBrokerLLMRuntime(
+        runtime = ManagerProxyTransport(
             Path("/tmp/pal-minion-broker-token"),
             run_id="run-token",
         )
@@ -190,7 +182,7 @@ class MinionSandboxTests(unittest.TestCase):
                 _ = runtime._client
 
     def test_sandboxed_broker_uses_assignment_role_gateway_token(self) -> None:
-        runtime = MinionBrokerLLMRuntime(
+        runtime = ManagerProxyTransport(
             Path("/tmp/pal-minion-broker-token"),
             run_id="run-token",
         )
@@ -359,7 +351,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertTrue(sandbox["enabled"])
             self.assertEqual(sandbox["backend"], "bwrap")
             self.assertEqual(sandbox["workspace_path"], str(repo))
-            self.assertEqual(sandbox["secret_policy"], "host_llm_broker")
+            self.assertEqual(sandbox["secret_policy"], "manager_llm_transport")
             self.assertEqual(sandbox["scratch_dir"], str(root / "tmp_scratch" / "run_1"))
             self.assertEqual(sandbox["network"], "isolated")
             self.assertNotIn("blacklist_commands", sandbox)
@@ -1183,6 +1175,49 @@ class MinionSandboxTests(unittest.TestCase):
             )
             self.assertNotIn(str(minion_db), argv)
 
+    def test_worker_binds_configured_pal_database_read_only(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_custom_db_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            run_dir = root / "data" / "minion" / "runtime" / "invocations" / "attempt-1"
+            run_dir.mkdir(parents=True)
+            custom_db = root / "pal-custom.sqlite3"
+            custom_db.write_text("database", encoding="utf-8")
+            role_socket = root / "data" / "minion-role" / "role.sock"
+            role_socket.parent.mkdir(parents=True)
+            role_socket.write_text("endpoint", encoding="utf-8")
+            pack = MinionInvocationPack(
+                invocation_id="attempt-1",
+                goal="work",
+                workspace={"repo_path": str(repo), "run_dir": str(run_dir)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "runtime-scope",
+                    }
+                },
+            )
+
+            argv, final_env = build_sandboxed_runner_invocation(
+                runtime_root=root,
+                pack=pack,
+                argv=["python", "-c", "pass"],
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    ROLE_GATEWAY_TOKEN_ENV: "token",
+                    MINION_RUNTIME_DB_PATH_ENV: str(custom_db),
+                },
+            )
+
+            self.assertEqual(final_env[MINION_RUNTIME_DB_PATH_ENV], str(custom_db))
+            triples = [argv[index : index + 3] for index in range(max(0, len(argv) - 2))]
+            self.assertIn(["--ro-bind", str(custom_db), str(custom_db)], triples)
+            self.assertNotIn(str(root / "pal.sqlite3"), argv)
+
     def test_semantic_write_scopes_do_not_fragment_the_role_worktree_mount(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
@@ -1518,8 +1553,8 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
             script = (
                 "from pathlib import Path; "
-                "from pal.minion.llm_broker import MinionBrokerLLMRuntime; "
-                "client = MinionBrokerLLMRuntime(Path.cwd(), 'run-role-token')._client; "
+                "from pal.minion.llm_transport import ManagerProxyTransport; "
+                "client = ManagerProxyTransport(Path.cwd(), 'run-role-token')._client; "
                 "print(client.access_token)"
             )
 
@@ -1710,259 +1745,11 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
         self.assertNotIn("lsp_setup", nested_args)
 
 
-class MinionLLMBrokerSerializationTests(unittest.TestCase):
-    def test_llm_request_round_trips(self) -> None:
-        request = request_ir_from_prompt(
-            messages=[{"role": "user", "content": "hi"}],
-            max_output_tokens=123,
-            thinking_budget_tokens=97,
-            model_hint="model",
-            temperature=0.2,
-            tools=[{"type": "function", "function": {"name": "tool"}}],
-            metadata={"run_id": "r"},
-        )
+class MinionLLMTransportBoundaryTests(unittest.TestCase):
 
-        restored = llm_request_from_payload(llm_request_to_payload(request))
-
-        self.assertEqual(restored.messages, request.messages)
-        self.assertEqual(restored.policy.max_output_tokens, 123)
-        self.assertEqual(restored.policy.thinking_budget_tokens, 97)
-        self.assertEqual(restored.model_hint, "model")
-        self.assertEqual(restored.policy.temperature, 0.2)
-        self.assertEqual(restored.tools, request.tools)
-        self.assertEqual(restored.metadata, request.metadata)
-
-    def test_llm_outcome_round_trips_tool_calls_and_reasoning_ir(self) -> None:
-        outcome = generation_result_from_values(
-            text="ok",
-            reasoning_text="hidden",
-            tool_calls=[new_tool_call(name="op_exec_shell", args={"cmd": "pwd"}, call_id="call_1")],
-            finish_reason="tool_calls",
-            input_tokens=41,
-            uncached_input_tokens=11,
-            cached_input_tokens=25,
-            cache_write_input_tokens=5,
-            output_tokens=13,
-            reasoning_tokens=8,
-            cost=0.21,
-            usage_reported=True,
-            provider_response_count=2,
-        )
-
-        restored = llm_outcome_from_payload(llm_outcome_to_payload(outcome))
-
-        self.assertEqual(restored.text, "ok")
-        self.assertEqual(restored.reasoning_text, "hidden")
-        self.assertEqual(restored.finish_reason, "tool_calls")
-        self.assertEqual(restored.input_tokens, 41)
-        self.assertEqual(restored.uncached_input_tokens, 11)
-        self.assertEqual(restored.cached_input_tokens, 25)
-        self.assertEqual(restored.cache_write_input_tokens, 5)
-        self.assertEqual(restored.output_tokens, 13)
-        self.assertEqual(restored.reasoning_tokens, 8)
-        self.assertEqual(restored.cost, 0.21)
-        self.assertTrue(restored.usage_reported)
-        self.assertEqual(restored.provider_response_count, 2)
-        self.assertEqual(restored.tool_calls[0].name, "op_exec_shell")
-        self.assertEqual(restored.tool_calls[0].args, {"cmd": "pwd"})
-
-    def test_preflight_round_trips(self) -> None:
-        request = LLMPreflightRequest(
-            request=request_ir_from_prompt(
-                messages=[{"role": "user", "content": "hi"}],
-                max_output_tokens=50,
-                model_hint="m",
-                tools=[{"name": "tool"}],
-                metadata={"preferred_endpoint_id": "e"},
-            ),
-        )
-        advice = LLMPreflightAdvice(
-            status="ready",
-            active_model="m",
-            fallback_chain=["f"],
-            target_input_budget=10,
-            reserved_output_tokens=5,
-            breakdown={"ok": True},
-        )
-
-        restored_request = preflight_request_from_payload(preflight_request_to_payload(request))
-        restored_advice = preflight_advice_from_payload(preflight_advice_to_payload(advice))
-
-        self.assertEqual(restored_request.request.messages, request.request.messages)
-        self.assertEqual(restored_request.request.tools, request.request.tools)
-        self.assertEqual(restored_advice.status, "ready")
-        self.assertEqual(restored_advice.active_model, "m")
-        self.assertEqual(restored_advice.fallback_chain, ["f"])
-
-    def test_manager_llm_broker_calls_host_runtime(self) -> None:
-        async def scenario() -> None:
-            with tempfile.TemporaryDirectory(prefix="pal_minion_broker_manager_") as tmp:
-                manager = MinionManager(runtime_root=Path(tmp))
-                pack = MinionInvocationPack(invocation_id="wo_broker", goal="g")
-                manager.runs["run_broker"] = MinionRunState(minion_id="m", run_id="run_broker", pack=pack, status="running")
-
-                class FakeRuntime:
-                    async def apreflight(self, request):
-                        self.preflight_request = request
-                        return LLMPreflightAdvice(status="ready", active_model="fake")
-
-                    async def agenerate(self, request):
-                        self.generate_request = request
-                        return generation_result_from_values(text="pong", finish_reason="stop")
-
-                    def resolve_max_output_tokens(self, **kwargs):
-                        self.max_kwargs = kwargs
-                        return 123
-
-                    def resolve_endpoint_facts(self, **kwargs):
-                        self.facts_kwargs = kwargs
-                        return {"endpoint_id": kwargs.get("preferred_endpoint_id"), "model_id": "fake"}
-
-                fake = FakeRuntime()
-
-                async def fake_runtime():
-                    return fake
-
-                manager._llm_broker_runtime = fake_runtime  # type: ignore[method-assign]
-                preflight = await manager.llm_broker_preflight(
-                    {
-                        "run_id": "run_broker",
-                        "request": preflight_request_to_payload(
-                            LLMPreflightRequest(
-                                request=request_ir_from_prompt(
-                                    messages=[{"role": "user", "content": "ping"}],
-                                    max_output_tokens=10,
-                                )
-                            )
-                        ),
-                    }
-                )
-                generated = await manager.llm_broker_generate(
-                    {
-                        "run_id": "run_broker",
-                        "request": llm_request_to_payload(
-                            request_ir_from_prompt(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
-                        ),
-                    }
-                )
-                max_tokens = await manager.llm_broker_resolve_max_output_tokens(
-                    {"run_id": "run_broker", "preferred_endpoint_id": "endpoint_a"}
-                )
-                facts = await manager.llm_broker_resolve_endpoint_facts({"run_id": "run_broker", "preferred_endpoint_id": "endpoint_a"})
-
-                self.assertEqual(preflight["advice"]["active_model"], "fake")
-                self.assertEqual(llm_outcome_from_payload(generated["outcome"]).text, "pong")
-                self.assertEqual(max_tokens["max_output_tokens"], 123)
-                self.assertEqual(facts["endpoint_id"], "endpoint_a")
-
-        asyncio.run(scenario())
-
-    def test_manager_llm_broker_records_endpoint_progress_from_host_runtime(self) -> None:
-        async def scenario() -> None:
-            with tempfile.TemporaryDirectory(prefix="pal_minion_broker_events_") as tmp:
-                manager = MinionManager(runtime_root=Path(tmp))
-                pack = MinionInvocationPack(invocation_id="wo_broker_events", goal="g")
-                state = MinionRunState(minion_id="m", run_id="run_broker_events", pack=pack, status="running")
-                manager.runs[state.run_id] = state
-                recorded: list[dict[str, object]] = []
-                manager.events.queue_event = lambda event: recorded.append(dict(event))  # type: ignore[method-assign]
-
-                class Settings:
-                    def get_think_level(self, endpoint_id):
-                        _ = endpoint_id
-                        return "medium"
-
-                    def set_think_level(self, endpoint_id, think_level):
-                        _ = endpoint_id, think_level
-
-                    def get_active_llm_endpoint_id(self):
-                        return None
-
-                    def set_active_llm_endpoint_id(self, endpoint_id):
-                        self.active_endpoint_id = endpoint_id
-
-                class Invoker:
-                    def invoke(self, endpoint, request, **kwargs):
-                        _ = request, kwargs
-                        if endpoint.endpoint_id == "broken":
-                            raise RuntimeError("broken endpoint")
-                        return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
-
-                    def invoke_stream(self, endpoint, request):
-                        raise NotImplementedError
-
-                broken = SimpleNamespace(
-                    endpoint_id="broken",
-                    model_id="broken-model",
-                    provider="test",
-                    wire_shape="openai_completion",
-                    base_url="https://broken.invalid/v1",
-                    auth_kind="local_provider_auth",
-                    credential_ref="",
-                    thinking_levels_blob=["medium"],
-                    default_thinking_level="medium",
-                    capabilities_blob={},
-                    supports_tools=True,
-                    supports_streaming=False,
-                    supports_vision=False,
-                    max_output_tokens=1024,
-                    context_window=8192,
-                    input_modalities_blob=[],
-                    output_modalities_blob=[],
-                )
-                working = SimpleNamespace(
-                    endpoint_id="working",
-                    model_id="working-model",
-                    provider="test",
-                    wire_shape="openai_completion",
-                    base_url="https://working.invalid/v1",
-                    auth_kind="local_provider_auth",
-                    credential_ref="",
-                    thinking_levels_blob=["medium"],
-                    default_thinking_level="medium",
-                    capabilities_blob={},
-                    supports_tools=True,
-                    supports_streaming=False,
-                    supports_vision=False,
-                    max_output_tokens=1024,
-                    context_window=8192,
-                    input_modalities_blob=[],
-                    output_modalities_blob=[],
-                )
-                runtime = LLMRuntime(
-                    endpoint_resolver=EndpointResolver(endpoints=(broken, working)),
-                    settings_repository=Settings(),
-                    endpoint_invoker=Invoker(),
-                    endpoint_retry_attempts=1,
-                )
-
-                async def fake_runtime():
-                    return runtime
-
-                manager._llm_broker_runtime = fake_runtime  # type: ignore[method-assign]
-                generated = await manager.llm_broker_generate(
-                    {
-                        "run_id": state.run_id,
-                        "request": llm_request_to_payload(
-                            request_ir_from_prompt(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
-                        ),
-                    }
-                )
-                await asyncio.sleep(0)
-
-                self.assertEqual(llm_outcome_from_payload(generated["outcome"]).text, "ok:working")
-                endpoint_events = [
-                    event
-                    for event in recorded
-                    if event.get("event_kind") == "progress"
-                    and str(event["payload"].get("phase") or "").startswith("llm_endpoint_")
-                ]
-                phases = [event["payload"]["phase"] for event in endpoint_events]
-                self.assertIn("llm_endpoint_attempt_failed", phases)
-                self.assertIn("llm_endpoint_exhausted", phases)
-                self.assertIn("llm_endpoint_fallback_succeeded", phases)
-
-        asyncio.run(scenario())
+    def test_semantic_llm_broker_surface_is_retired(self) -> None:
+        self.assertFalse(hasattr(MinionManager, "llm_broker_preflight"))
+        self.assertFalse(hasattr(MinionManager, "llm_broker_generate"))
 
 
 if __name__ == "__main__":

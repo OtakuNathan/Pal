@@ -192,7 +192,6 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List configured channel endpoints",
         guidance=ToolGuidance(
             purpose="List configured channel endpoints and their usable names.",
             use_when="Need to discover available endpoint names, their channel kind, enabled/attached/paired status.",
@@ -227,7 +226,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="channel",
         action_name="send_attachment",
-        description="Send a local file attachment back to the channel that started the current turn.",
         guidance=ToolGuidance(
             purpose="Send a local file attachment back to the channel that started the current turn.",
             use_when="The user asked for a generated file (image, document, code) to be sent back through the channel.",
@@ -256,7 +254,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="channel",
         action_name="send_message",
-        description="Send an ordinary text message through one configured channel endpoint.",
         aliases=("channel_send_message",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
         OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput,
@@ -278,10 +275,7 @@ class ChannelIntrospectionProvider:
             ),
         ),
         execution=INDIRECT_EXTERNAL_WRITE,
-        search_text=(
-            "channel send message active proactive ordinary text configured endpoint "
-            "telegram websocket peer"
-        ),
+        metadata={"tags": ("active", "proactive", "telegram", "websocket", "peer")},
         examples=(
             {
                 "name": "telegram-main",
@@ -386,7 +380,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="enable",
-        description="Enable a channel endpoint",
         guidance=ToolGuidance(
             purpose="Enable a channel endpoint so it accepts incoming messages.",
             use_when="An endpoint was disabled and needs to resume receiving messages.",
@@ -405,7 +398,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="disable",
-        description="Disable a channel endpoint",
         guidance=ToolGuidance(
             purpose="Disable a channel endpoint so it stops accepting incoming messages.",
             use_when="Temporarily stopping an endpoint without removing its configuration.",
@@ -424,7 +416,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="attach",
-        description="Attach a channel endpoint",
         guidance=ToolGuidance(
             purpose="Attach a channel endpoint — connect its runtime instance so it can send and receive.",
             use_when="Reconnecting a detached endpoint's runtime. After channel_provider_rescan discovered a new endpoint.",
@@ -443,7 +434,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="detach",
-        description="Detach a channel endpoint",
         guidance=ToolGuidance(
             purpose="Detach a channel endpoint — disconnect its runtime instance without removing configuration.",
             use_when="Temporarily disconnecting an endpoint's runtime (e.g. maintenance, restart).",
@@ -462,7 +452,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="provider",
         action_name="rescan",
-        description="Rescan channel providers and update the channel provider registry.",
         guidance=ToolGuidance(
             purpose="Rescan channel providers and update the channel provider registry.",
             use_when="New channel providers were installed or provider configuration changed. Discovering newly available endpoints.",
@@ -491,7 +480,6 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="reload_provider",
-        description="Restart one channel endpoint runtime instance through its provider. Use channel provider rescan to discover newly available providers.",
         guidance=ToolGuidance(
             purpose="Restart one channel endpoint runtime instance through its provider.",
             use_when="An endpoint runtime is stuck, misbehaving, or needs a fresh connection.",
@@ -509,7 +497,6 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="endpoint",
         action_name="inspect",
-        description="Inspect channel endpoint state",
         guidance=ToolGuidance(
             purpose="Inspect full state of one channel endpoint.",
             use_when="Need detailed status of a specific endpoint (enabled, attached, paired, provider info).",
@@ -532,7 +519,6 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="endpoint",
         action_name="auth_state",
-        description="Inspect endpoint authorization state",
         guidance=ToolGuidance(
             purpose="Inspect whether an endpoint is authenticated and authorized.",
             use_when="Diagnosing auth failures or checking if credentials are still valid.",
@@ -556,7 +542,6 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         family="endpoint",
         action_name="set_auth_material",
-        description="Apply endpoint authorization material without exposing secrets",
         guidance=ToolGuidance(
             purpose="Apply endpoint authorization material (tokens, credentials) without exposing secrets in output.",
             use_when="An endpoint needs credentials to authenticate (e.g. Telegram bot token, API key).",
@@ -588,7 +573,6 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="endpoint",
         action_name="backlog",
-        description="Inspect endpoint backlog state",
         guidance=ToolGuidance(
             purpose="Inspect undelivered message backlog for one endpoint.",
             use_when="Checking if messages are queued but not yet delivered (endpoint was detached or slow).",
@@ -611,7 +595,6 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="endpoint",
         action_name="health",
-        description="Inspect endpoint network and delivery health",
         guidance=ToolGuidance(
             purpose="Inspect network connectivity and delivery health for one endpoint.",
             use_when="Diagnosing message delivery failures or connection issues.",
