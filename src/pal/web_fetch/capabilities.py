@@ -8,6 +8,8 @@ from pal.execution.tool_semantics import (
 from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
+    WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput,
     WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
     WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
     WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
@@ -31,7 +33,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest
+from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest, WebLayoutInspectionRequest
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.service import WebFetchService
 from pal.web_fetch.tools import WebScreenshotTool
@@ -288,7 +290,7 @@ class WebFetchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Fetch a webpage using the configured browser fetch provider and internal fallback.",
             use_when="Reading a specific webpage's text content, title, and links.",
-            do_not_use_when="Searching the web (use search_web). Reading local files (use read_file). API calls (use run_shell curl).",
+            do_not_use_when="Searching the web (use search_web). Diagnosing rendered CSS/layout (use inspect_web_layout because normalized text and HTML do not preserve computed layout). Reading local files (use read_file). API calls (use run_shell curl).",
             failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
@@ -350,11 +352,76 @@ class WebFetchIntrospectionProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
+        action_name="inspect_layout",
+        guidance=ToolGuidance(
+            purpose="Render a page and inspect selected elements' computed CSS, geometry, parent bounds, and sibling gaps as bounded text evidence.",
+            use_when="Diagnosing or verifying UI/CSS/layout behavior, especially when normalized page output omits styles or the active model cannot inspect screenshots. Inspect representative selectors before diagnosing and after changing layout code.",
+            do_not_use_when="Reading page content (use read_web). Capturing pixels for a vision-capable reviewer (use screenshot_web). Inspecting local source code (use read_file).",
+            failure_next_steps="If no elements match, verify the final URL and selector with read_web or source inspection, then retry with a narrower valid CSS selector. If the browser is unavailable, inspect web_fetch provider health.",
+        ),
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput,
+        OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput,
+        execution=DIRECT_EXTERNAL_READ,
+        metadata={"canonical_path": "op_web_inspect_layout", "omit_family_in_canonical": True},
+        aliases=("inspect_web_layout",),
+    )
+    def inspect_layout(self, call: IntrospectionCall) -> IntrospectionResult:
+        url = str(call.args.get("url") or "").strip()
+        selector = str(call.args.get("selector") or "").strip()
+        if not url:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="url is required", llm_text="url is required")
+        if not selector:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="selector is required", llm_text="selector is required")
+        try:
+            result = self.service.inspect_layout(
+                WebLayoutInspectionRequest(
+                    url=url,
+                    selector=selector,
+                    timeout_ms=min(120000, max(1000, int(call.args.get("timeout_ms") or 15000))),
+                    viewport_width=min(4096, max(320, int(call.args.get("viewport_width") or 1280))),
+                    viewport_height=min(4096, max(320, int(call.args.get("viewport_height") or 900))),
+                    max_elements=min(20, max(1, int(call.args.get("max_elements") or 20))),
+                    user_agent=str(call.args.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
+                )
+            )
+        except Exception as exc:
+            return IntrospectionResult(
+                status=RuntimeStatus.ERROR,
+                text="web layout inspection failed",
+                structured={"url": url, "selector": selector, "error": str(exc)},
+                llm_text=f"web layout inspection failed: {exc}",
+            )
+        payload = {
+            "requested_url": result.requested_url,
+            "final_url": result.final_url,
+            "title": result.title,
+            "status_code": result.status_code,
+            "configured_provider_id": result.configured_provider_id,
+            "effective_provider_id": result.effective_provider_id,
+            "fallback_used": result.fallback_used,
+            "selector": result.selector,
+            "matched_count": result.matched_count,
+            "returned_count": len(result.elements),
+            "truncated": result.truncated,
+            "viewport_width": result.viewport_width,
+            "viewport_height": result.viewport_height,
+            "elements": [dict(item) for item in result.elements],
+        }
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="web layout inspection result",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Web layout inspection", payload),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
         action_name="screenshot",
         guidance=ToolGuidance(
             purpose="Render a URL in the browser and save a PNG screenshot as an ordinary local file.",
-            use_when="Only when visual page evidence is needed.",
-            do_not_use_when="Not for text extraction (use read_web). Not for API calls.",
+            use_when="Only when pixel-level visual page evidence is needed and the active model or reviewer can inspect the resulting image.",
+            do_not_use_when="Not for computed CSS or geometry with a text-only model (use inspect_web_layout). Not for text extraction (use read_web). Not for API calls.",
             failure_next_steps="Check error_type, URL validity, and browser availability, then correct the cause and retry. Failed calls do not return a reusable local_cached_path.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,

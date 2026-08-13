@@ -1339,6 +1339,39 @@ WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput = _strict_model(
     },
 )
 
+WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput = _strict_model(
+    'WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput',
+    {
+        'url': (str, Field(..., description='Absolute page URL to render in a browser.', min_length=1, max_length=8192)),
+        'selector': (str, Field(..., description='CSS selector for the elements whose computed layout should be inspected.', min_length=1, max_length=500)),
+        'timeout_ms': (int, Field(None, description='Navigation timeout in milliseconds.', ge=1000, le=120000)),
+        'viewport_width': (int, Field(None, description='Browser viewport width in pixels.', ge=320, le=4096)),
+        'viewport_height': (int, Field(None, description='Browser viewport height in pixels.', ge=320, le=4096)),
+        'max_elements': (int, Field(None, description='Maximum matching elements to return. Narrow the selector instead of raising this unnecessarily.', ge=1, le=20)),
+        'user_agent': (str, Field(None, description='Optional browser user agent override.', max_length=512)),
+    },
+)
+
+WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput = _strict_model(
+    'WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput',
+    {
+        'requested_url': (str, Field(...)),
+        'final_url': (str, Field(...)),
+        'title': (str, Field(...)),
+        'status_code': (int | None, Field(...)),
+        'configured_provider_id': (str | None, Field(...)),
+        'effective_provider_id': (str | None, Field(...)),
+        'fallback_used': (bool, Field(...)),
+        'selector': (str, Field(...)),
+        'matched_count': (int, Field(...)),
+        'returned_count': (int, Field(...)),
+        'truncated': (bool, Field(...)),
+        'viewport_width': (int, Field(...)),
+        'viewport_height': (int, Field(...)),
+        'elements': (list[dict[str, Any]], Field(...)),
+    },
+)
+
 WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput = _strict_model(
     'WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput',
     {

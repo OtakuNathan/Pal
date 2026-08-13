@@ -13,6 +13,8 @@ from pal.web_fetch.contracts import (
     WebFetchProviderPort,
     WebFetchRequest,
     WebFetchResult,
+    WebLayoutInspectionRequest,
+    WebLayoutInspectionResult,
     WebScreenshotRequest,
     WebScreenshotResult,
 )
@@ -43,6 +45,18 @@ class PlaywrightFetchProvider(WebFetchProviderPort):
             full_page=request.full_page,
             viewport_width=request.viewport_width,
             viewport_height=request.viewport_height,
+            user_agent=request.user_agent,
+            settings=dict(record.settings_blob or {}),
+        )
+
+    def inspect_layout(self, record: WebFetchProviderModel, request: WebLayoutInspectionRequest) -> dict[str, object]:
+        return self.browser_manager.inspect_layout(
+            request.url,
+            selector=request.selector,
+            timeout_ms=request.timeout_ms,
+            viewport_width=request.viewport_width,
+            viewport_height=request.viewport_height,
+            max_elements=request.max_elements,
             user_agent=request.user_agent,
             settings=dict(record.settings_blob or {}),
         )
@@ -241,6 +255,42 @@ class WebFetchService:
             )
         raise RuntimeError(last_error)
 
+    def inspect_layout(self, request: WebLayoutInspectionRequest) -> WebLayoutInspectionResult:
+        configured_provider_id = self.configured_active_provider_id()
+        candidates = self._provider_candidates(configured_provider_id)
+        if not candidates:
+            raise RuntimeError("no enabled web fetch provider available")
+        last_error = "web layout inspection failed"
+        for index, record in enumerate(candidates):
+            provider = self.providers.get(record.provider_kind)
+            inspect_layout = getattr(provider, "inspect_layout", None)
+            if not callable(inspect_layout):
+                continue
+            try:
+                result = self._coerce_layout_inspection(inspect_layout(record, request), request=request)
+            except Exception as exc:
+                self.last_errors[record.provider_id] = str(exc)
+                last_error = str(exc)
+                continue
+            self.last_errors[record.provider_id] = ""
+            return WebLayoutInspectionResult(
+                requested_url=result.requested_url or request.url,
+                final_url=result.final_url or request.url,
+                title=result.title,
+                configured_provider_id=configured_provider_id,
+                effective_provider_id=record.provider_id,
+                fallback_used=index > 0,
+                status_code=result.status_code,
+                selector=result.selector or request.selector,
+                matched_count=result.matched_count,
+                truncated=result.truncated,
+                elements=result.elements,
+                viewport_width=result.viewport_width,
+                viewport_height=result.viewport_height,
+                user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
+            )
+        raise RuntimeError(last_error)
+
     async def shutdown_async(self) -> None:
         await self.browser_manager.shutdown_async()
 
@@ -288,5 +338,30 @@ class WebFetchService:
             full_page=bool(result.get("full_page", request.full_page)),
             viewport_width=int(result.get("viewport_width") or request.viewport_width),
             viewport_height=int(result.get("viewport_height") or request.viewport_height),
+            user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
+        )
+
+    def _coerce_layout_inspection(
+        self,
+        result: WebLayoutInspectionResult | dict[str, Any],
+        *,
+        request: WebLayoutInspectionRequest,
+    ) -> WebLayoutInspectionResult:
+        if isinstance(result, WebLayoutInspectionResult):
+            return result
+        if not isinstance(result, dict):
+            raise RuntimeError("web layout inspection provider returned invalid payload")
+        elements = tuple(item for item in list(result.get("elements") or []) if isinstance(item, dict))
+        return WebLayoutInspectionResult(
+            requested_url=str(result.get("requested_url") or request.url),
+            final_url=str(result.get("final_url") or request.url),
+            title=str(result.get("title") or ""),
+            status_code=int(result["status_code"]) if result.get("status_code") is not None else None,
+            selector=str(result.get("selector") or request.selector),
+            matched_count=max(0, int(result.get("matched_count") or len(elements))),
+            truncated=bool(result.get("truncated")),
+            elements=elements,
+            viewport_width=max(320, int(result.get("viewport_width") or request.viewport_width)),
+            viewport_height=max(320, int(result.get("viewport_height") or request.viewport_height)),
             user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
         )

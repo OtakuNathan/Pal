@@ -6,6 +6,8 @@ from pal.web_fetch.contracts import (
     WebFetchLink,
     WebFetchRequest,
     WebFetchResult,
+    WebLayoutInspectionRequest,
+    WebLayoutInspectionResult,
     WebScreenshotRequest,
     WebScreenshotResult,
 )
@@ -27,6 +29,8 @@ __all__ = [
     "WebFetchProviderRepository",
     "WebFetchRequest",
     "WebFetchResult",
+    "WebLayoutInspectionRequest",
+    "WebLayoutInspectionResult",
     "WebFetchService",
     "WebScreenshotRequest",
     "WebScreenshotResult",

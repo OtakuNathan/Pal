@@ -102,6 +102,35 @@ class WebFetchRequest:
 
 
 @dataclass(frozen=True)
+class WebLayoutInspectionRequest:
+    url: str
+    selector: str
+    timeout_ms: int = 15000
+    viewport_width: int = 1280
+    viewport_height: int = 900
+    max_elements: int = 20
+    user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT
+
+
+@dataclass(frozen=True)
+class WebLayoutInspectionResult:
+    requested_url: str
+    final_url: str
+    selector: str
+    matched_count: int
+    elements: tuple[dict[str, Any], ...]
+    title: str = ""
+    configured_provider_id: str | None = None
+    effective_provider_id: str | None = None
+    fallback_used: bool = False
+    status_code: int | None = None
+    truncated: bool = False
+    viewport_width: int = 1280
+    viewport_height: int = 900
+    user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT
+
+
+@dataclass(frozen=True)
 class WebScreenshotRequest:
     url: str
     timeout_ms: int = 15000

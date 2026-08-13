@@ -18,7 +18,13 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
     "mutation based on it, rerun the original read/status/list/reconcile tool or use a "
     "version, ETag, or conditional mutation. Local file tools already enforce digest-based "
     "read-before-edit and compare-and-swap checks, so do not reread unchanged files merely "
-    "because another conversational turn began."
+    "because another conversational turn began.\n"
+    "- For UI, CSS, or layout work, normalized page text/HTML and source inspection are not "
+    "rendered-layout verification. Before diagnosing and after changing layout, inspect "
+    "representative selectors with computed styles, bounding geometry, and actual element "
+    "gaps using an available rendered-layout inspection capability. Cover ordinary, nested, "
+    "and edge-case content. Use screenshots only when the active model or a reviewer can "
+    "inspect pixels."
 )
 
 

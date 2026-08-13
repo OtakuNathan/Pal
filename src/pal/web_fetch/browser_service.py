@@ -21,6 +21,46 @@ from urllib.request import Request, urlopen
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchDocument, WebFetchLink
 
 
+_LAYOUT_STYLE_PROPERTIES = (
+    "display",
+    "position",
+    "box-sizing",
+    "width",
+    "height",
+    "min-width",
+    "min-height",
+    "max-width",
+    "max-height",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "gap",
+    "row-gap",
+    "column-gap",
+    "white-space",
+    "line-height",
+    "font-size",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "align-items",
+    "justify-content",
+    "flex-direction",
+    "grid-template-columns",
+    "grid-template-rows",
+    "list-style-position",
+    "list-style-type",
+    "visibility",
+    "opacity",
+    "transform",
+)
+
+
 def playwright_python_available() -> bool:
     return importlib.util.find_spec("playwright") is not None
 
@@ -247,6 +287,36 @@ class _BrowserFetchWorker:
                     self.in_flight = max(0, self.in_flight - 1)
                     self.last_activity_at = time.monotonic()
 
+    def inspect_layout(
+        self,
+        url: str,
+        *,
+        selector: str,
+        timeout_ms: int,
+        viewport_width: int,
+        viewport_height: int,
+        max_elements: int,
+        user_agent: str,
+    ) -> dict[str, Any]:
+        with self.semaphore:
+            with self._lock:
+                self.in_flight += 1
+                self.last_activity_at = time.monotonic()
+            try:
+                return self._inspect_layout_playwright(
+                    url,
+                    selector=selector,
+                    timeout_ms=timeout_ms,
+                    viewport_width=viewport_width,
+                    viewport_height=viewport_height,
+                    max_elements=max_elements,
+                    user_agent=user_agent,
+                )
+            finally:
+                with self._lock:
+                    self.in_flight = max(0, self.in_flight - 1)
+                    self.last_activity_at = time.monotonic()
+
     def _fetch_playwright(
         self,
         url: str,
@@ -403,6 +473,120 @@ class _BrowserFetchWorker:
                 context.close()
                 browser.close()
 
+    def _inspect_layout_playwright(
+        self,
+        url: str,
+        *,
+        selector: str,
+        timeout_ms: int,
+        viewport_width: int,
+        viewport_height: int,
+        max_elements: int,
+        user_agent: str,
+    ) -> dict[str, Any]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # pragma: no cover - env dependent
+            raise RuntimeError(f"playwright unavailable: {exc}") from exc
+
+        width = min(4096, max(320, int(viewport_width)))
+        height = min(4096, max(320, int(viewport_height)))
+        limit = min(20, max(1, int(max_elements)))
+        with sync_playwright() as playwright:
+            launch_opts: dict[str, Any] = {"headless": True}
+            proxy_url = os.environ.get("https_proxy") or os.environ.get("http_proxy") or ""
+            if proxy_url:
+                launch_opts["proxy"] = {"server": proxy_url}
+            browser = playwright.chromium.launch(**launch_opts)
+            context = browser.new_context(
+                user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
+                viewport={"width": width, "height": height},
+            )
+            page = context.new_page()
+            try:
+                response = page.goto(str(url), wait_until="domcontentloaded", timeout=max(1000, int(timeout_ms)))
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(max(1000, int(timeout_ms)), 5000))
+                except Exception:
+                    pass
+                inspected = page.evaluate(
+                    """
+                    (args) => {
+                      const round = (value) => Math.round(Number(value) * 1000) / 1000;
+                      const rectPayload = (rect) => ({
+                        x: round(rect.x),
+                        y: round(rect.y),
+                        top: round(rect.top),
+                        right: round(rect.right),
+                        bottom: round(rect.bottom),
+                        left: round(rect.left),
+                        width: round(rect.width),
+                        height: round(rect.height)
+                      });
+                      const all = document.querySelectorAll(args.selector);
+                      const selected = [];
+                      for (let index = 0; index < Math.min(all.length, args.limit); index += 1) {
+                        selected.push(all[index]);
+                      }
+                      const elements = selected.map((node, index) => {
+                        const rect = node.getBoundingClientRect();
+                        const computed = window.getComputedStyle(node);
+                        const styles = {};
+                        for (const property of args.properties) {
+                          styles[property] = String(computed.getPropertyValue(property) || '').slice(0, 240);
+                        }
+                        const previous = node.previousElementSibling;
+                        const next = node.nextElementSibling;
+                        const parent = node.parentElement;
+                        const previousRect = previous ? previous.getBoundingClientRect() : null;
+                        const nextRect = next ? next.getBoundingClientRect() : null;
+                        const parentRect = parent ? parent.getBoundingClientRect() : null;
+                        return {
+                          index,
+                          tag: String(node.tagName || '').toLowerCase(),
+                          id: String(node.id || '').slice(0, 160),
+                          classes: String(node.getAttribute('class') || '').split(/\\s+/).filter(Boolean).slice(0, 20).map((value) => value.slice(0, 80)),
+                          role: String(node.getAttribute('role') || '').slice(0, 80),
+                          text: String(node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 240),
+                          geometry: rectPayload(rect),
+                          parent_geometry: parentRect ? rectPayload(parentRect) : null,
+                          previous_sibling_vertical_gap_px: previousRect ? round(rect.top - previousRect.bottom) : null,
+                          next_sibling_vertical_gap_px: nextRect ? round(nextRect.top - rect.bottom) : null,
+                          computed_styles: styles
+                        };
+                      });
+                      return {
+                        selector: args.selector,
+                        matched_count: all.length,
+                        truncated: all.length > args.limit,
+                        elements
+                      };
+                    }
+                    """,
+                    {
+                        "selector": str(selector),
+                        "limit": limit,
+                        "properties": list(_LAYOUT_STYLE_PROPERTIES),
+                    },
+                )
+                if not isinstance(inspected, dict):
+                    inspected = {}
+                return {
+                    "requested_url": str(url),
+                    "final_url": str(page.url or url),
+                    "title": str(page.title() or "").strip()[:500],
+                    "status_code": int(response.status) if response is not None else None,
+                    "selector": str(selector),
+                    "matched_count": int(inspected.get("matched_count") or 0),
+                    "truncated": bool(inspected.get("truncated")),
+                    "elements": [item for item in list(inspected.get("elements") or []) if isinstance(item, dict)],
+                    "viewport_width": width,
+                    "viewport_height": height,
+                }
+            finally:
+                context.close()
+                browser.close()
+
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -470,7 +654,7 @@ def run_browser_service_cli(
                 _json_response(self, 200, {"ok": True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
-            if self.path not in {"/fetch", "/screenshot"}:
+            if self.path not in {"/fetch", "/inspect", "/screenshot"}:
                 _json_response(self, 404, {"ok": False, "error": "not_found"})
                 return
             url = str(payload.get("url") or "").strip()
@@ -485,6 +669,29 @@ def run_browser_service_cli(
                         full_page=bool(payload.get("full_page", False)),
                         viewport_width=max(320, int(payload.get("viewport_width") or 1280)),
                         viewport_height=max(320, int(payload.get("viewport_height") or 900)),
+                        user_agent=str(payload.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
+                    )
+                except Exception as exc:
+                    _json_response(self, 500, {"ok": False, "error": str(exc)})
+                    return
+                _json_response(self, 200, {"ok": True, "result": result})
+                return
+            if self.path == "/inspect":
+                selector = str(payload.get("selector") or "").strip()
+                if not selector:
+                    _json_response(self, 400, {"ok": False, "error": "selector is required"})
+                    return
+                if len(selector) > 500:
+                    _json_response(self, 400, {"ok": False, "error": "selector exceeds 500 characters"})
+                    return
+                try:
+                    result = worker.inspect_layout(
+                        url,
+                        selector=selector,
+                        timeout_ms=min(120000, max(1000, int(payload.get("timeout_ms") or 15000))),
+                        viewport_width=min(4096, max(320, int(payload.get("viewport_width") or 1280))),
+                        viewport_height=min(4096, max(320, int(payload.get("viewport_height") or 900))),
+                        max_elements=min(20, max(1, int(payload.get("max_elements") or 20))),
                         user_agent=str(payload.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
                     )
                 except Exception as exc:
@@ -596,6 +803,41 @@ class BrowserServiceManager:
         result = payload.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("browser screenshot returned invalid payload")
+        self.last_error = ""
+        return result
+
+    def inspect_layout(
+        self,
+        url: str,
+        *,
+        selector: str,
+        timeout_ms: int,
+        viewport_width: int,
+        viewport_height: int,
+        max_elements: int,
+        user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_started(settings=settings)
+        payload = self._request_json(
+            "POST",
+            "/inspect",
+            {
+                "url": url,
+                "selector": str(selector),
+                "timeout_ms": min(120000, max(1000, int(timeout_ms))),
+                "viewport_width": min(4096, max(320, int(viewport_width))),
+                "viewport_height": min(4096, max(320, int(viewport_height))),
+                "max_elements": min(20, max(1, int(max_elements))),
+                "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
+            },
+            timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
+        )
+        if not bool(payload.get("ok")):
+            raise RuntimeError(str(payload.get("error") or "browser layout inspection failed"))
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("browser layout inspection returned invalid payload")
         self.last_error = ""
         return result
 
