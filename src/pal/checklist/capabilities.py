@@ -52,6 +52,33 @@ def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def _checklist_echo(action: str, snapshot: Any | None) -> dict[str, Any]:
+    if snapshot is None:
+        payload = {
+            "action": str(action),
+            "active": False,
+            "plan": [],
+            "done": 0,
+            "total": 0,
+        }
+        markdown = "Checklist cleared."
+    else:
+        snapshot_payload = _snapshot_payload(snapshot)
+        payload = {
+            "action": str(action),
+            "active": bool(snapshot_payload["active"]),
+            "plan": list(snapshot_payload["plan"]),
+            "done": int(snapshot_payload["done"]),
+            "total": int(snapshot_payload["total"]),
+        }
+        markdown = str(snapshot_payload["markdown"])
+    return {
+        "markdown": markdown,
+        "tag": "checklist",
+        "payload": payload,
+    }
+
+
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="module",
@@ -98,6 +125,7 @@ class ChecklistIntrospectionProvider:
         aliases=("checklist_upsert",),
     )
     def upsert(self, call: CapabilityCall) -> CapabilityResult:
+        previous = self.service.show()
         try:
             snapshot = self.service.upsert(list(call.args.get("plan") or []))
         except ValueError as exc:
@@ -108,6 +136,10 @@ class ChecklistIntrospectionProvider:
                 llm_text=f"Checklist upsert rejected: {exc}",
             )
         payload = _snapshot_payload(snapshot)
+        changed = previous is None or previous.plan != snapshot.plan
+        payload["changed"] = changed
+        if changed:
+            payload["echo"] = _checklist_echo("upsert", snapshot)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="checklist upserted",
@@ -167,10 +199,7 @@ class ChecklistIntrospectionProvider:
             **_snapshot_payload(outcome.snapshot),
         }
         if outcome.changed:
-            payload["echo"] = {
-                "markdown": str(outcome.snapshot.markdown),
-                "dedupe_key": f"checklist:check:{step}",
-            }
+            payload["echo"] = _checklist_echo("check", outcome.snapshot)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="checklist step checked" if outcome.changed else "checklist step already completed",
@@ -243,6 +272,8 @@ class ChecklistIntrospectionProvider:
         _ = call
         cleared = self.service.clear()
         payload = {"cleared": cleared}
+        if cleared:
+            payload["echo"] = _checklist_echo("clear", None)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="checklist cleared" if cleared else "no active checklist",

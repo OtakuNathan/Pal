@@ -353,9 +353,10 @@ class _MinionOutputPort:
     def __init__(self, runner: "MinionRunner") -> None:
         self._runner = runner
 
-    async def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> str:
+    async def queue_reply(self, envelope: TurnDeliveryBinding, text: Any) -> str:
         _ = envelope
-        await self._runner._emit("progress", {"phase": "reply", "summary": _preview_text(text, limit=500)})
+        rendered = str(getattr(text, "text", text) or "")
+        await self._runner._emit("progress", {"phase": "reply", "summary": _preview_text(rendered, limit=500)})
         return f"minion_reply_{uuid4().hex[:12]}"
 
     async def queue_stream_update(self, envelope: TurnDeliveryBinding, event: Any) -> str:

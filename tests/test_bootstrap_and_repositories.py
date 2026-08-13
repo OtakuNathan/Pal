@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 from pal.bootstrap import compose_runtime
 from pal.channel import ChannelEndpointRepository, ChannelProviderContext, ChannelRuntime, FactoryChannelProvider
-from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.channel.contracts import ChannelMessage, EndpointConfig, ResponseHandle
 from pal.channel.endpoints import SocketChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.channel.capabilities import ChannelIntrospectionProvider
@@ -582,6 +582,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         canonical_paths = {descriptor.canonical_path for descriptor in descriptors.values()}
         self.assertIn("op_web_search", canonical_paths)
         self.assertIn("op_web_read", canonical_paths)
+        self.assertIn("op_web_inspect_layout", canonical_paths)
         self.assertIn("op_web_screenshot", canonical_paths)
         self.assertIn("mcp_image_prepare", handle.core.context.capability_registry.descriptors)
         self.assertIn("web_search_show", handle.core.context.capability_registry.descriptors)
@@ -595,6 +596,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertIn("search_web", tool_names)
         self.assertIn("read_web", tool_names)
+        self.assertIn("inspect_web_layout", tool_names)
         self.assertNotIn("screenshot_web", tool_names)
 
     def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
@@ -2066,7 +2068,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         old_endpoint = runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(old_endpoint)
         pending_reply_id = old_endpoint.queue_reply(
-            "reply queued before provider rescan",
+            ChannelMessage(
+                text="reply queued before provider rescan",
+                tag="checklist",
+                payload={"action": "upsert", "active": True, "total": 1},
+            ),
             response_handle=old_endpoint.build_response_handle(
                 reply_target={"chat_id": "123"}
             ),
@@ -2082,6 +2088,8 @@ class PalV2BootstrapTests(unittest.TestCase):
             [item.reply_id for item in endpoint.outbox],
             [pending_reply_id],
         )
+        self.assertEqual(endpoint.outbox[0].tag, "checklist")
+        self.assertEqual(endpoint.outbox[0].payload["action"], "upsert")
         self.assertFalse(old_endpoint.outbox)
 
     def test_compose_runtime_loads_runtime_root_channel_provider(self) -> None:
@@ -3273,6 +3281,9 @@ class _FakeTelegramBot:
     async def edit_message_text(self, **kwargs):
         self.actions.append(("edit_message_text", dict(kwargs)))
 
+    async def delete_message(self, **kwargs):
+        self.actions.append(("delete_message", dict(kwargs)))
+
     async def get_file(self, file_id: str):
         return self.files[file_id]
 
@@ -3417,6 +3428,54 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         except Exception:
             pass
         shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    async def test_checklist_tag_sends_edits_and_clears_one_native_message(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "42", "thread_id": "7"},
+        )
+        created = ChannelMessage(
+            text="Checklist progress 0/2\n⬜ inspect\n⬜ change",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 2},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["message_thread_id"], 7)
+        target = self.endpoint._tagged_message_targets[("42", "7", "checklist")]
+
+        checked = ChannelMessage(
+            text="Checklist progress 1/2\n✅ inspect\n⬜ change",
+            tag="checklist",
+            payload={"action": "check", "active": True, "done": 1, "total": 2},
+        )
+        await self.endpoint._send_channel_message_async(handle, checked)
+
+        edits = [payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text"]
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0]["message_id"], target["message_id"])
+        self.assertEqual(len([1 for kind, _ in self.fake_bot.actions if kind == "message"]), 1)
+
+        cleared = ChannelMessage(
+            text="Checklist cleared.",
+            tag="checklist",
+            payload={"action": "clear", "active": False},
+        )
+        await self.endpoint._send_channel_message_async(handle, cleared)
+
+        deletes = [payload for kind, payload in self.fake_bot.actions if kind == "delete_message"]
+        self.assertEqual(deletes, [{"chat_id": 42, "message_id": target["message_id"]}])
+        self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+
+    async def test_unknown_message_tag_falls_back_to_ordinary_text(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        await self.endpoint._send_channel_message_async(
+            handle,
+            ChannelMessage(text="plain fallback", tag="future_widget", payload={"x": 1}),
+        )
+        sent = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual([item["text"] for item in sent], ["plain fallback"])
 
     async def test_telegram_endpoint_filters_non_matching_binding_user(self) -> None:
         update = _FakeTelegramUpdate(
@@ -3563,7 +3622,14 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.fake_bot.send_message = fail_send  # type: ignore[method-assign]
         handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
-        self.endpoint.queue_reply("retry me", response_handle=handle)
+        self.endpoint.queue_reply(
+            ChannelMessage(
+                text="retry me",
+                tag="checklist",
+                payload={"action": "check", "done": 1, "total": 2},
+            ),
+            response_handle=handle,
+        )
         self.assertEqual(self.endpoint.flush_outbox(), [])
         pending = next(iter(self.endpoint._pending_reply_deliveries.values()))[1]
         await asyncio.gather(pending, return_exceptions=True)
@@ -3573,6 +3639,8 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event.event_kind for event in failed], ["reply.failed"])
         self.assertEqual(len(self.endpoint.outbox), 1)
         self.assertEqual(self.endpoint.outbox[0].text, "retry me")
+        self.assertEqual(self.endpoint.outbox[0].tag, "checklist")
+        self.assertEqual(self.endpoint.outbox[0].payload["done"], 1)
 
     async def test_telegram_send_chain_does_not_overtake_failed_reply(self) -> None:
         original_send = self.fake_bot.send_message

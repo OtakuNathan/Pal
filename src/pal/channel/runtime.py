@@ -12,6 +12,7 @@ from pal.channel.contracts import (
     ChannelAdapter,
     ChannelDeliveryError,
     ChannelEnvelope,
+    ChannelMessage,
     ChannelMessageReceipt,
     ChannelRuntimePort,
     ChannelStreamUpdate,
@@ -306,19 +307,22 @@ class ChannelRuntime(ChannelRuntimePort):
         supports = getattr(endpoint, "supports_stream_delivery", None)
         return bool(supports()) if callable(supports) else False
 
-    def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> str:
+    def queue_reply(self, envelope: TurnDeliveryBinding, message: ChannelMessage | str) -> str:
         # Outbox acceptance is the turn-facing completion point; actual delivery
         # is handled later by flush_outbox and surfaced as channel diagnostics.
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
         if endpoint is not None:
-            return endpoint.queue_reply(text, response_handle=envelope.response_handle)
+            return endpoint.queue_reply(message, response_handle=envelope.response_handle)
+        normalized = message if isinstance(message, ChannelMessage) else ChannelMessage(text=str(message or ""))
         reply_id = str(uuid4())
         self.outbox.append(
             QueuedReply(
                 reply_id=reply_id,
                 response_handle=envelope.response_handle,
                 endpoint=envelope.endpoint,
-                text=text,
+                text=normalized.text,
+                tag=normalized.tag,
+                payload=dict(normalized.payload),
             )
         )
         self._notify_ready()
@@ -464,7 +468,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 # available again.  The legacy adapter registry cannot deliver
                 # provider-owned endpoints.
                 endpoint.queue_reply(
-                    item.text,
+                    item.message,
                     response_handle=item.response_handle,
                     reply_id=item.reply_id,
                 )
@@ -479,6 +483,8 @@ class ChannelRuntime(ChannelRuntimePort):
                         response_handle=item.response_handle,
                         endpoint=item.endpoint,
                         text=item.text,
+                        tag=item.tag,
+                        payload=dict(item.payload),
                         attempts=item.attempts + 1,
                     )
                 )
@@ -498,6 +504,8 @@ class ChannelRuntime(ChannelRuntimePort):
                             response_handle=item.response_handle,
                             endpoint=item.endpoint,
                             text=item.text,
+                            tag=item.tag,
+                            payload=dict(item.payload),
                             attempts=item.attempts + 1,
                         )
                     )
@@ -592,6 +600,7 @@ def _transfer_endpoint_runtime_state(
         "_reported_reply_failures",
         "_stream_sessions",
         "_interactive_messages",
+        "_tagged_message_targets",
         "_session_replacements",
         "_stream_handle_ids_by_key",
     ):

@@ -28,6 +28,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ChannelAdapter": ("pal.shared.agent_io", "ChannelAdapter"),
     "ChannelDeliveryError": ("pal.shared.agent_io", "ChannelDeliveryError"),
     "ChannelEnvelope": ("pal.shared.agent_io", "ChannelEnvelope"),
+    "ChannelMessage": ("pal.shared.agent_io", "ChannelMessage"),
     "ChannelMessageReceipt": ("pal.shared.agent_io", "ChannelMessageReceipt"),
     "ChannelNormalizer": ("pal.shared.agent_io", "ChannelNormalizer"),
     "ChannelRuntimePort": ("pal.shared.agent_io", "ChannelRuntimePort"),

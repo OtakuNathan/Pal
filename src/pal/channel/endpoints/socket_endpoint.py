@@ -53,8 +53,14 @@ def _stream_payload(response_handle: ResponseHandle, update: ChannelStreamUpdate
         "type": payload_type,
         "request_id": str(response_handle.reply_target.get("request_id") or ""),
     }
-    if update.text and update.kind != ChannelStreamUpdateKind.DONE:
-        payload["text"] = update.text
+    if update.text:
+        if update.kind == ChannelStreamUpdateKind.DONE:
+            # A full terminal projection lets reconnecting presentation
+            # clients repair a missing transport delta without replaying or
+            # persisting the endpoint's session lifecycle.
+            payload["final_text"] = update.text
+        else:
+            payload["text"] = update.text
     if update.reasoning_text:
         payload["reasoning_text"] = update.reasoning_text
     if update.tool_call is not None:
@@ -386,8 +392,12 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             if isinstance(reply_target, dict)
             else ""
         )
+        current_owner_session_id = self._session_replacements.get(
+            owner_session_id,
+            owner_session_id,
+        )
         result = None
-        if owner_session_id == session.session_id:
+        if current_owner_session_id == session.session_id:
             result = self.interaction_result_from_token(
                 interaction_id,
                 button_token,
@@ -435,6 +445,20 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session = self._require_session(response_handle)
         if update.kind == ChannelStreamUpdateKind.PROGRESS:
             session.outbound.put_nowait(_stream_payload(response_handle, update))
+            return
+        if update.kind == ChannelStreamUpdateKind.MESSAGE:
+            # Generic socket clients receive the required text fallback. A
+            # specialized socket-backed endpoint may override this method and
+            # project the tagged message into its own wire protocol.
+            session.outbound.put_nowait(
+                _stream_payload(
+                    response_handle,
+                    ChannelStreamUpdate(
+                        kind=ChannelStreamUpdateKind.PROGRESS,
+                        text=(update.message.text if update.message is not None else update.text),
+                    ),
+                )
+            )
             return
         stream_session = self._stream_sessions.get(id(response_handle)) or {}
         prior_text = str(stream_session.get("text") or "")

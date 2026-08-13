@@ -19,7 +19,7 @@ from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAs
 from pal.foundation import EventEnvelope
 from pal.shared.payloads import extract_text_from_payload
 from pal.memory import L1MessageKind, L1TranscriptMessage
-from pal.shared.agent_io import ChannelStreamUpdate
+from pal.shared.agent_io import ChannelMessage, ChannelStreamUpdate
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ class MemoryCompactEffect(EffectRequest):
 @dataclass(frozen=True)
 class MailboxReplyEffect(EffectRequest):
     text: str = ""
+    message: ChannelMessage | None = None
     terminal: bool = True
     # Text already represented by the current LLM stream. Buffered channels
     # may suppress this copy while still delivering explicit tool echoes,

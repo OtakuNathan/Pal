@@ -20,6 +20,7 @@ from pal.execution.contracts import CapabilityCall
 from pal.foundation import EventEnvelope
 from pal.shared import (
     ChannelEnvelope,
+    ChannelMessage,
     ChannelStreamUpdateKind,
     EndpointConfig,
     EventKind,
@@ -162,7 +163,17 @@ class TestChecklistCapabilities:
         assert result.structured is not None
         assert result.structured["active"] is True
         assert result.structured["total"] == 2
+        assert result.structured["echo"]["tag"] == "checklist"
+        assert result.structured["echo"]["payload"]["action"] == "upsert"
         assert result.llm_text.strip()
+
+    def test_identical_upsert_is_a_noop_without_broadcast(self):
+        call = CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]})
+        self.provider.upsert(call)
+        repeated = self.provider.upsert(call)
+        assert repeated.structured is not None
+        assert repeated.structured["changed"] is False
+        assert "echo" not in repeated.structured
 
     def test_check_emits_echo_declaration(self):
         self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}, {"step": "b"}]}))
@@ -171,7 +182,9 @@ class TestChecklistCapabilities:
         assert result.structured is not None
         assert result.structured["changed"] is True
         echo = result.structured["echo"]
-        assert echo["dedupe_key"] == "checklist:check:a"
+        assert echo["tag"] == "checklist"
+        assert echo["payload"]["action"] == "check"
+        assert echo["payload"]["done"] == 1
         assert "✅ a" in echo["markdown"]
 
     def test_check_without_active_returns_error(self):
@@ -194,7 +207,21 @@ class TestChecklistCapabilities:
 
         cleared = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
         assert cleared.status == RuntimeStatus.OK
-        assert cleared.structured == {"cleared": True}
+        assert cleared.structured is not None
+        assert cleared.structured["cleared"] is True
+        assert cleared.structured["echo"] == {
+            "markdown": "Checklist cleared.",
+            "tag": "checklist",
+            "payload": {
+                "action": "clear",
+                "active": False,
+                "plan": [],
+                "done": 0,
+                "total": 0,
+            },
+        }
+        repeated = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
+        assert repeated.structured == {"cleared": False}
 
 
 class TestChecklistPrompt:
@@ -297,14 +324,21 @@ class TestToolEchoFanOut:
         assert not hasattr(effect, "delivery_binding")
         assert "checklist:check:a" in continuation.echoed_keys
 
-    def test_streaming_echo_uses_ordered_progress_event(self):
+    def test_streaming_tagged_echo_uses_ordered_message_event(self):
         captured: list = []
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
         continuation.channel_stream_active = True
         result = _tool_result(
             "checklist_check",
-            structured={"echo": {"markdown": "Checklist progress 1/1", "dedupe_key": "checklist:stream:a"}},
+            structured={
+                "echo": {
+                    "markdown": "Checklist progress 1/1",
+                    "dedupe_key": "checklist:stream:a",
+                    "tag": "checklist",
+                    "payload": {"action": "check", "done": 1, "total": 1},
+                }
+            },
         )
 
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
@@ -312,16 +346,21 @@ class TestToolEchoFanOut:
         assert len(captured) == 1
         effect = captured[0][1]
         assert isinstance(effect, MailboxReplyStreamUpdateEffect)
-        assert effect.update.kind == ChannelStreamUpdateKind.PROGRESS
+        assert effect.update.kind == ChannelStreamUpdateKind.MESSAGE
         assert effect.update.text == "Checklist progress 1/1"
+        assert effect.update.message == ChannelMessage(
+            text="Checklist progress 1/1",
+            tag="checklist",
+            payload={"action": "check", "done": 1, "total": 1},
+        )
         assert continuation.emitted_reply_texts == ["Checklist progress 1/1"]
 
     def test_nonterminal_echo_marks_only_the_queued_reply_as_continuing(self):
-        captured: list[tuple[TurnDeliveryBinding, str]] = []
+        captured: list[tuple[TurnDeliveryBinding, ChannelMessage]] = []
 
         class _OutputPort:
-            def queue_reply(self, binding: TurnDeliveryBinding, text: str) -> str:
-                captured.append((binding, text))
+            def queue_reply(self, binding: TurnDeliveryBinding, message: ChannelMessage) -> str:
+                captured.append((binding, message))
                 return "reply-1"
 
         executor = object.__new__(TurnExecutor)
@@ -339,6 +378,7 @@ class TestToolEchoFanOut:
         )
 
         assert captured[0][0].response_handle.reply_target["_pal_turn_continues"] is True
+        assert captured[0][1].text == "Checklist progress 1/3"
         assert "_pal_turn_continues" not in continuation.delivery_binding.response_handle.reply_target
         assert continuation.emitted_reply_texts == ["Checklist progress 1/3"]
 

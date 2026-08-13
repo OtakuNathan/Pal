@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.channel.contracts import ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
-from pal.shared import EventKind
+from pal.shared import ChannelStreamUpdateKind, EventKind
 
 
 class _OutboundQueue:
@@ -108,6 +108,21 @@ class SocketInteractionProjectionTests(unittest.TestCase):
             ],
         )
 
+    def test_terminal_stream_frame_carries_full_text_for_projection_repair(self) -> None:
+        self.endpoint.send_stream_update(
+            self.response_handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                text="complete streamed reply",
+                finish_reason="stop",
+            ),
+        )
+
+        terminal = self.session.outbound.items[-1]
+        self.assertEqual(terminal["type"], "llm_done")
+        self.assertEqual(terminal["final_text"], "complete streamed reply")
+        self.assertNotIn("text", terminal)
+
     def test_selected_token_restores_server_owned_action(self) -> None:
         self.endpoint.send_status(
             self.response_handle,
@@ -159,6 +174,34 @@ class SocketInteractionProjectionTests(unittest.TestCase):
         self.assertEqual(
             other.outbound.items[0]["request_id"],
             "request-other",
+        )
+
+    def test_rebound_replacement_session_can_answer_owned_interaction(self) -> None:
+        self.endpoint.send_status(
+            self.response_handle,
+            "interactive_open",
+            {"spec": self.spec},
+        )
+        replacement = _Session("session-2")
+        self.endpoint._session_replacements[self.session.session_id] = replacement.session_id
+
+        self.endpoint._accept_interaction_result(
+            replacement,
+            {
+                "type": "interaction_result",
+                "request_id": "request-rebound",
+                "interaction_id": "choose-model",
+                "button_token": "b0",
+            },
+        )
+
+        envelopes = self.endpoint.poll()
+        self.assertEqual(len(envelopes), 1)
+        self.assertEqual(envelopes[0].event.event_kind, EventKind.INTERACTION_RESULT)
+        self.assertEqual(envelopes[0].event.payload.action_args, {"model_id": "fast"})
+        self.assertEqual(
+            envelopes[0].response_handle.reply_target["request_id"],
+            "request-rebound",
         )
 
 

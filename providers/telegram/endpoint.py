@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import (
     ChannelDeliveryError,
+    ChannelMessage,
     ChannelStreamUpdate,
     EndpointConfig,
     QueuedAttachment,
@@ -227,6 +228,19 @@ def _utf16_prefix_end(text: str, *, limit: int) -> int:
     return len(text)
 
 
+def _truncate_telegram_text(text: str, *, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return "Checklist updated."
+    end = _utf16_prefix_end(normalized, limit=max(int(limit), 1))
+    if end >= len(normalized):
+        return normalized
+    suffix = "\n…"
+    suffix_units = len(suffix.encode("utf-16-le")) // 2
+    prefix_end = _utf16_prefix_end(normalized, limit=max(int(limit) - suffix_units, 1))
+    return f"{normalized[:prefix_end].rstrip()}{suffix}"
+
+
 def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegment]:
     """Render and split one completed reply into independently sendable messages."""
 
@@ -285,6 +299,7 @@ def _telegram_interaction_target_is_stale(error: Exception | str) -> bool:
     normalized = " ".join(str(error or "").lower().replace("_", " ").split())
     stale_markers = (
         "message to edit not found",
+        "message to delete not found",
         "message can't be edited",
         "message can not be edited",
         "message cannot be edited",
@@ -342,6 +357,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _get_updates_in_flight_started_at: float = 0.0
     _interaction_store: TelegramInteractionStore | None = field(default=None, init=False, repr=False)
     _turn_stream_text: dict[tuple[str, str, str, str], str] = field(default_factory=dict, init=False, repr=False)
+    _tagged_message_targets: dict[tuple[str, str, str], dict[str, int]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.binding.chat_id and not self.binding.user_id and self.endpoint.binding_key:
@@ -439,6 +459,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                         response_handle=item.response_handle,
                         endpoint=item.endpoint,
                         text=item.text,
+                        tag=item.tag,
+                        payload=dict(item.payload),
                         attempts=item.attempts + 1,
                     )
                 )
@@ -468,6 +490,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             raise ChannelDeliveryError("telegram application not running", permanent=False)
         self._schedule_ordered_send(response_handle, lambda: self._send_reply_async(response_handle, text))
 
+    def send_channel_message(self, response_handle: ResponseHandle, message: ChannelMessage) -> None:
+        self._schedule_ordered_send(
+            response_handle,
+            lambda: self._send_channel_message_async(response_handle, message),
+        )
+
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         self._schedule_ordered_send(response_handle, lambda: self._send_attachment_async(response_handle, attachment))
 
@@ -486,6 +514,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                         response_handle=item.response_handle,
                         endpoint=item.endpoint,
                         text=item.text,
+                        tag=item.tag,
+                        payload=dict(item.payload),
                         attempts=item.attempts + 1,
                     )
                 )
@@ -495,7 +525,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 continue
             task = self._schedule_ordered_send(
                 item.response_handle,
-                lambda item=item: self._send_reply_async(item.response_handle, item.text),
+                lambda item=item: self._send_channel_message_async(item.response_handle, item.message),
             )
             if task is None:
                 self.outbox.append(item)
@@ -603,6 +633,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                             response_handle=item.response_handle,
                             endpoint=item.endpoint,
                             text=item.text,
+                            tag=item.tag,
+                            payload=dict(item.payload),
                             attempts=item.attempts + 1,
                         )
                     )
@@ -739,6 +771,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     lambda: self._send_reply_async(response_handle, text),
                 )
             return None
+        if update.kind == ChannelStreamUpdateKind.MESSAGE:
+            message = update.message or ChannelMessage(text=update.text)
+            return self._schedule_ordered_send(
+                response_handle,
+                lambda: self._send_channel_message_async(response_handle, message),
+            )
         if update.kind == ChannelStreamUpdateKind.DONE:
             buffered = self._turn_stream_text.pop(key, "")
             if str(update.finish_reason or "") in {
@@ -1438,6 +1476,113 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                         permanent=False,
                         reason="telegram_send_failed",
                     ) from exc
+        self.last_delivery_error = ""
+
+    async def _send_channel_message_async(
+        self,
+        response_handle: ResponseHandle,
+        message: ChannelMessage,
+    ) -> None:
+        if message.tag != "checklist":
+            await self._send_reply_async(response_handle, message.text)
+            return
+        await self._send_checklist_message_async(response_handle, message)
+
+    async def _send_checklist_message_async(
+        self,
+        response_handle: ResponseHandle,
+        message: ChannelMessage,
+    ) -> None:
+        if self.application is None:
+            raise ChannelDeliveryError(
+                "telegram application not running",
+                permanent=False,
+                reason="telegram_not_running",
+            )
+        chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
+        thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
+        if chat_id is None:
+            raise ChannelDeliveryError(
+                "telegram reply target is missing chat_id",
+                permanent=True,
+                reason="telegram_target_invalid",
+            )
+        key = (str(chat_id), str(thread_id or ""), "checklist")
+        action = str(message.payload.get("action") or "update").strip().lower()
+        target = self._tagged_message_targets.get(key)
+
+        if action == "clear":
+            if target is None:
+                await self._send_reply_async(response_handle, message.text)
+                return
+            try:
+                await self.application.bot.delete_message(
+                    chat_id=int(target["chat_id"]),
+                    message_id=int(target["message_id"]),
+                )
+            except Exception as exc:
+                if _telegram_interaction_target_is_stale(exc):
+                    self._tagged_message_targets.pop(key, None)
+                    self.last_delivery_error = ""
+                    return
+                self.last_delivery_error = str(exc)
+                raise ChannelDeliveryError(
+                    str(exc) or "telegram checklist delete failed",
+                    permanent=False,
+                    reason="telegram_delete_failed",
+                ) from exc
+            self._tagged_message_targets.pop(key, None)
+            self.last_delivery_error = ""
+            return
+
+        max_chars = max(
+            1,
+            min(
+                int(self.endpoint.send_policy.get("max_message_chars") or _TELEGRAM_MAX_MESSAGE_UTF16),
+                _TELEGRAM_MAX_MESSAGE_UTF16,
+            ),
+        )
+        text = _truncate_telegram_text(message.text, limit=max_chars)
+        if target is not None:
+            try:
+                await self.application.bot.edit_message_text(
+                    chat_id=int(target["chat_id"]),
+                    message_id=int(target["message_id"]),
+                    text=text,
+                )
+                self.last_delivery_error = ""
+                return
+            except Exception as exc:
+                if _telegram_message_is_not_modified(exc):
+                    self.last_delivery_error = ""
+                    return
+                if not _telegram_interaction_target_is_stale(exc):
+                    self.last_delivery_error = str(exc)
+                    raise ChannelDeliveryError(
+                        str(exc) or "telegram checklist edit failed",
+                        permanent=False,
+                        reason="telegram_edit_failed",
+                    ) from exc
+                self._tagged_message_targets.pop(key, None)
+
+        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        try:
+            sent = await self.application.bot.send_message(**kwargs)
+        except Exception as exc:
+            self.last_delivery_error = str(exc)
+            raise ChannelDeliveryError(
+                str(exc) or "telegram checklist delivery failed",
+                permanent=False,
+                reason="telegram_send_failed",
+            ) from exc
+        message_id = _safe_int(getattr(sent, "message_id", None))
+        if message_id is not None:
+            self._tagged_message_targets[key] = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+            }
         self.last_delivery_error = ""
 
     async def _send_attachment_async(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:

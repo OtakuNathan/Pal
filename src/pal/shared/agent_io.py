@@ -73,6 +73,26 @@ def _freeze_json(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class ChannelMessage:
+    """Provider-neutral user-visible message with optional presentation hints.
+
+    ``text`` is always the complete fallback.  Providers may use ``tag`` and
+    ``payload`` to realize a richer native presentation, but an unknown tag is
+    still an ordinary text message.
+    """
+
+    text: str = ""
+    tag: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        normalized_tag = str(self.tag or "").strip() or None
+        object.__setattr__(self, "text", str(self.text or ""))
+        object.__setattr__(self, "tag", normalized_tag)
+        object.__setattr__(self, "payload", _FrozenJsonDict(self.payload or {}))
+
+
+@dataclass(frozen=True)
 class ChannelStreamUpdate:
     """Provider-neutral partial reply projected from LLM IR to a channel."""
 
@@ -82,6 +102,7 @@ class ChannelStreamUpdate:
     tool_call: ToolCallIR | None = None
     finish_reason: str | None = None
     error_text: str = ""
+    message: ChannelMessage | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", ChannelStreamUpdateKind(self.kind))
@@ -161,7 +182,18 @@ class QueuedReply:
     response_handle: ResponseHandle
     endpoint: EndpointConfig
     text: str
+    tag: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     attempts: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "text", str(self.text or ""))
+        object.__setattr__(self, "tag", str(self.tag or "").strip() or None)
+        object.__setattr__(self, "payload", _FrozenJsonDict(self.payload or {}))
+
+    @property
+    def message(self) -> ChannelMessage:
+        return ChannelMessage(text=self.text, tag=self.tag, payload=dict(self.payload))
 
 
 @dataclass(frozen=True)
@@ -221,7 +253,7 @@ class AgentOutputPort(Protocol):
     def supports_stream_delivery(self, envelope: TurnDeliveryBinding) -> bool:
         ...
 
-    def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> Any:
+    def queue_reply(self, envelope: TurnDeliveryBinding, message: ChannelMessage | str) -> Any:
         ...
 
     def queue_stream_update(self, envelope: TurnDeliveryBinding, update: ChannelStreamUpdate) -> Any:

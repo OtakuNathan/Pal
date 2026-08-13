@@ -13,6 +13,7 @@ from uuid import uuid4
 from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelEnvelope,
+    ChannelMessage,
     ChannelMessageReceipt,
     ChannelStreamUpdate,
     EndpointConfig,
@@ -67,6 +68,11 @@ class ChannelEndpointQueueBase(ABC):
     @abstractmethod
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         ...
+
+    def send_channel_message(self, response_handle: ResponseHandle, message: ChannelMessage) -> None:
+        """Realize a tagged message, falling back to its ordinary text."""
+
+        self.send_reply(response_handle, message.text)
 
     @abstractmethod
     def inspect_health(self) -> dict[str, Any]:
@@ -447,14 +453,15 @@ class ChannelEndpointQueueBase(ABC):
 
     def queue_reply(
         self,
-        text: str,
+        message: ChannelMessage | str,
         *,
         response_handle: ResponseHandle | None = None,
         reply_id: str | None = None,
     ) -> str:
         handle = response_handle or self.build_response_handle()
         resolved_reply_id = str(reply_id or uuid4())
-        prepared = self.prepare_final_reply(handle, text)
+        normalized = message if isinstance(message, ChannelMessage) else ChannelMessage(text=str(message or ""))
+        prepared = self.prepare_final_reply(handle, normalized.text)
         if prepared is None:
             return resolved_reply_id
         self.outbox.append(
@@ -463,6 +470,8 @@ class ChannelEndpointQueueBase(ABC):
                 response_handle=handle,
                 endpoint=self.endpoint,
                 text=prepared,
+                tag=normalized.tag,
+                payload=dict(normalized.payload),
             )
         )
         self._notify_ready()
@@ -562,6 +571,8 @@ class ChannelEndpointQueueBase(ABC):
                         response_handle=item.response_handle,
                         endpoint=item.endpoint,
                         text=item.text,
+                        tag=item.tag,
+                        payload=dict(item.payload),
                         attempts=item.attempts + 1,
                     )
                 )
@@ -570,7 +581,7 @@ class ChannelEndpointQueueBase(ABC):
                     emitted.append(failure)
                 continue
             try:
-                self.send_reply(item.response_handle, item.text)
+                self.send_channel_message(item.response_handle, item.message)
             except Exception as exc:
                 self.last_delivery_error = str(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
@@ -581,6 +592,8 @@ class ChannelEndpointQueueBase(ABC):
                             response_handle=item.response_handle,
                             endpoint=item.endpoint,
                             text=item.text,
+                            tag=item.tag,
+                            payload=dict(item.payload),
                             attempts=item.attempts + 1,
                         )
                     )

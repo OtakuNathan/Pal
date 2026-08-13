@@ -314,6 +314,15 @@ Channel provider 负责将这些 intent 变成自己的平台 realization。
 - manager 不应该硬编码任何 interaction UI
 - channel provider 必须提供自己的 interaction rendering、status update 和 result normalization
 
+## Tagged Message Contract
+
+正常的用户可见消息可以携带可选的语义标签和结构化 payload。`text` 始终是完整兜底；
+provider 可以增强自己认识的标签，未知标签必须按普通文本消息投递。标签不属于 status、
+control interaction 或 LLM delta，也不允许 Core 根据 `channel_kind` 选择平台行为。
+
+Checklist 使用 `tag=checklist` 投递完整快照。Telegram 可原位编辑一条消息，桌面客户端可投影为
+独立面板，其他端点继续发送同一条 fallback text。
+
 ## 主路径
 
 ```mermaid

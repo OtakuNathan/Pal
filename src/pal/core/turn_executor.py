@@ -67,7 +67,7 @@ from pal.shared import (
     default_tool_result_text,
 )
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.agent_io import ChannelStreamUpdate
+from pal.shared.agent_io import ChannelMessage, ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
 
@@ -522,6 +522,10 @@ class TurnExecutor:
         markdown = str(echo.get("markdown") or "").strip()
         if not markdown or len(markdown) > self._ECHO_MARKDOWN_MAX_CHARS:
             return
+        tag = str(echo.get("tag") or "").strip() or None
+        raw_payload = echo.get("payload")
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+        message = ChannelMessage(text=markdown, tag=tag, payload=payload)
         dedupe_key = (
             str(echo.get("dedupe_key") or "").strip()
             or f"{getattr(tool_call, 'name', '')}:{getattr(tool_call, 'call_id', None) or ''}"
@@ -538,8 +542,13 @@ class TurnExecutor:
                 continuation,
                 MailboxReplyStreamUpdateEffect(
                     update=ChannelStreamUpdate(
-                        kind=ChannelStreamUpdateKind.PROGRESS,
-                        text=markdown,
+                        kind=(
+                            ChannelStreamUpdateKind.MESSAGE
+                            if message.tag
+                            else ChannelStreamUpdateKind.PROGRESS
+                        ),
+                        text=message.text,
+                        message=message if message.tag else None,
                     ),
                 ),
             )
@@ -547,7 +556,7 @@ class TurnExecutor:
         else:
             await self.execute_turn_effect_async(
                 continuation,
-                MailboxReplyEffect(text=markdown, terminal=False),
+                MailboxReplyEffect(text=message.text, message=message, terminal=False),
             )
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
@@ -601,6 +610,7 @@ class TurnExecutor:
         binding = continuation.delivery_binding
         if binding is None:
             return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
+        message = effect.message or ChannelMessage(text=effect.text)
         if continuation.channel_stream_active and effect.stream_companion:
             return EffectResult(status=RuntimeStatus.QUEUED, text=effect.text)
         if continuation.channel_stream_active and effect.terminal:
@@ -630,8 +640,8 @@ class TurnExecutor:
                     reply_target=reply_target,
                 ),
             )
-        reply_id = await self._call_output_port_async(output_port, "queue_reply", binding, effect.text)
-        text = str(effect.text or "").strip()
+        reply_id = await self._call_output_port_async(output_port, "queue_reply", binding, message)
+        text = str(message.text or "").strip()
         if text:
             continuation.emitted_reply_texts.append(text)
         self._debug_log_reply(continuation, effect.text)

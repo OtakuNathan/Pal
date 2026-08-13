@@ -20,6 +20,7 @@ Exposes:
 - `EndpointConfig`
 - `ResponseHandle`
 - `ChannelMessageReceipt`
+- `ChannelMessage` (`text` fallback plus optional provider presentation tag/payload)
 - `ChannelEnvelope`
 - `ChannelEndpointBase`
 - `ChannelEndpointQueueBase`
@@ -38,6 +39,8 @@ Interaction rule:
   recovery socket may render deltas immediately; Telegram accumulates them,
   keeps tool rounds silent, and sends only the terminal answer
 - reply completion for a turn means "accepted by channel outbox"
+- tagged messages remain ordinary user-visible replies: providers may enhance
+  known tags, while unknown tags must deliver the complete fallback text
 - actual delivery success/failure is emitted later as channel-side diagnostics
 - concrete endpoint implementations inherit `ChannelEndpointQueueBase` and fill in:
   - `normalize_raw(...)`
