@@ -1442,6 +1442,28 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
 
+    async def test_channel_replace_rejects_soft_unhealthy_candidate(self) -> None:
+        class SoftUnhealthyEndpoint(_StubEndpoint):
+            def validate_replacement_startup(self) -> None:
+                raise RuntimeError("candidate unhealthy")
+
+        handle = self.endpoint.build_response_handle(reply_target=self.route.reply_target)
+        reply_id = self.endpoint.queue_reply("preserve me", response_handle=handle)
+        await self.channel_runtime.start_async()
+        replacement = SoftUnhealthyEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key="runtime.sock",
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "candidate unhealthy"):
+            await self.channel_runtime.replace_endpoint_async(replacement)
+
+        self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
+        self.assertEqual([item.reply_id for item in self.endpoint.outbox], [reply_id])
+
     async def test_channel_remove_stop_failure_preserves_endpoint(self) -> None:
         class FailingStopEndpoint(_StubEndpoint):
             async def stop_async(self) -> None:

@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from pal.channel.contracts import EndpointConfig
+from pal.channel.contracts import ChannelDeliveryError, EndpointConfig
 from pal.channel.provider_manager import ChannelProviderContext
 from pal.channel.runtime import ChannelRuntime
 from pal.shared import RuntimeStatus
@@ -430,6 +430,8 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health["process_running"])
         # No manager socket -> listener not bound -> not healthy (correctly reported).
         self.assertFalse(health["healthy"])
+        with self.assertRaises(ChannelDeliveryError):
+            endpoint.validate_replacement_startup()
 
         await endpoint.stop_async()
         self.assertIsNone(endpoint._process)
@@ -459,6 +461,7 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         await endpoint.start_async()
         self.assertEqual(endpoint._startup_error, "")
+        endpoint.validate_replacement_startup()
         health = endpoint.inspect_health()
         self.assertTrue(health["process_running"])
         self.assertTrue(health["listener_bound"])

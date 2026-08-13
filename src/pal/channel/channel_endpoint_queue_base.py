@@ -606,12 +606,27 @@ class ChannelEndpointQueueBase(ABC):
         *,
         permanent: bool,
     ) -> EventEnvelope | None:
+        return self._delivery_failure_event_once(
+            delivery_id=item.reply_id,
+            attempts=item.attempts + 1,
+            reason=reason,
+            permanent=permanent,
+        )
+
+    def _delivery_failure_event_once(
+        self,
+        *,
+        delivery_id: str,
+        attempts: int,
+        reason: str,
+        permanent: bool,
+    ) -> EventEnvelope | None:
         normalized_reason = str(reason or "delivery_failed")
         if permanent:
-            self._reported_reply_failures.pop(item.reply_id, None)
+            self._reported_reply_failures.pop(delivery_id, None)
         else:
             now = time.monotonic()
-            previous = self._reported_reply_failures.get(item.reply_id)
+            previous = self._reported_reply_failures.get(delivery_id)
             if (
                 previous is not None
                 and previous[0] == normalized_reason
@@ -619,7 +634,7 @@ class ChannelEndpointQueueBase(ABC):
                 < TRANSIENT_REPLY_FAILURE_REPORT_INTERVAL_SECONDS
             ):
                 return None
-            self._reported_reply_failures[item.reply_id] = (
+            self._reported_reply_failures[delivery_id] = (
                 normalized_reason,
                 now,
             )
@@ -627,11 +642,12 @@ class ChannelEndpointQueueBase(ABC):
             event_kind=EventKind.REPLY_FAILED,
             source_kind=SourceKind.CHANNEL,
             payload={
-                "reply_id": item.reply_id,
+                "reply_id": delivery_id,
                 "endpoint_id": self.endpoint.endpoint_id,
+                "channel_kind": self.endpoint.channel_kind,
                 "reason": normalized_reason,
                 "permanent": permanent,
-                "attempts": item.attempts + 1,
+                "attempts": attempts,
             },
         )
 
@@ -664,6 +680,7 @@ class ChannelEndpointQueueBase(ABC):
                         payload={
                             "reply_id": item.update_id,
                             "endpoint_id": self.endpoint.endpoint_id,
+                            "channel_kind": self.endpoint.channel_kind,
                             "reason": str(exc),
                             "permanent": permanent,
                             "attempts": item.attempts + 1,
@@ -709,6 +726,7 @@ class ChannelEndpointQueueBase(ABC):
                         payload={
                             "reply_id": item.attachment_id,
                             "endpoint_id": self.endpoint.endpoint_id,
+                            "channel_kind": self.endpoint.channel_kind,
                             "reason": "endpoint_unavailable",
                         },
                     )
@@ -736,6 +754,7 @@ class ChannelEndpointQueueBase(ABC):
                         payload={
                             "reply_id": item.attachment_id,
                             "endpoint_id": self.endpoint.endpoint_id,
+                            "channel_kind": self.endpoint.channel_kind,
                             "reason": str(exc),
                             "permanent": permanent,
                             "attempts": item.attempts + 1,

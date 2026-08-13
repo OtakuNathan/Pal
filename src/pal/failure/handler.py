@@ -71,7 +71,9 @@ class FailureEventHandler(EventHandler):
 
 def _is_ephemeral_delivery_failure(payload: dict) -> bool:
     endpoint_id = str(payload.get("endpoint_id") or "").strip().lower()
+    channel_kind = str(payload.get("channel_kind") or "").strip().lower()
     reason = str(payload.get("reason") or "").strip().lower()
-    if not endpoint_id.startswith("sock"):
+    socket_channel = channel_kind in {"socket", "websocket_bridge"} or endpoint_id.startswith("sock")
+    if not socket_channel:
         return False
     return "socket session is closed" in reason or "session is closed" in reason

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections import deque
 from collections.abc import Callable
@@ -111,6 +112,11 @@ class ChannelRuntime(ChannelRuntimePort):
                 self._queue_cached_control_catalog(endpoint)
             return
         endpoint.on_ready = self._notify_ready
+        preparer = getattr(endpoint, "prepare_replacement", None)
+        if old_endpoint is not None and callable(preparer):
+            preparation = preparer(old_endpoint)
+            if inspect.isawaitable(preparation):
+                await preparation
         if not self._started:
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.endpoint_registry.register(endpoint)
@@ -123,6 +129,11 @@ class ChannelRuntime(ChannelRuntimePort):
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
                 await starter()
+            validator = getattr(endpoint, "validate_replacement_startup", None)
+            if callable(validator):
+                validation = validator()
+                if inspect.isawaitable(validation):
+                    await validation
         except Exception:
             failed_stopper = getattr(endpoint, "stop_async", None)
             if callable(failed_stopper):
@@ -157,6 +168,13 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         if not self._started:
             old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+            preparer = getattr(endpoint, "prepare_replacement", None)
+            if old_endpoint is not None and callable(preparer):
+                preparation = preparer(old_endpoint)
+                if inspect.isawaitable(preparation):
+                    raise RuntimeError(
+                        "async endpoint replacement preparation requires replace_endpoint_async"
+                    )
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.register_endpoint(endpoint)
             return
@@ -429,6 +447,7 @@ class ChannelRuntime(ChannelRuntimePort):
                         payload={
                             "reply_id": item.attachment_id,
                             "endpoint_id": item.endpoint.endpoint_id,
+                            "channel_kind": item.endpoint.channel_kind,
                             "reason": "endpoint_unavailable",
                         },
                     )
@@ -528,6 +547,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 payload={
                     "reply_id": item.reply_id,
                     "endpoint_id": item.endpoint.endpoint_id,
+                    "channel_kind": item.endpoint.channel_kind,
                     "reason": normalized_reason,
                     "permanent": permanent,
                     "attempts": item.attempts + 1,
@@ -572,6 +592,8 @@ def _transfer_endpoint_runtime_state(
         "_reported_reply_failures",
         "_stream_sessions",
         "_interactive_messages",
+        "_session_replacements",
+        "_stream_handle_ids_by_key",
     ):
         old_values = getattr(old_endpoint, attribute, None)
         new_values = getattr(new_endpoint, attribute, None)
@@ -580,6 +602,21 @@ def _transfer_endpoint_runtime_state(
         for key, value in old_values.items():
             new_values.setdefault(key, value)
         old_values.clear()
+
+    for attribute in (
+        "_retired_session_ids",
+        "_streamed_text_handles",
+        "_streamed_text_keys",
+    ):
+        old_values = getattr(old_endpoint, attribute, None)
+        new_values = getattr(new_endpoint, attribute, None)
+        if not isinstance(old_values, set) or not isinstance(new_values, set):
+            continue
+        new_values.update(old_values)
+        old_values.clear()
+
+    if bool(getattr(old_endpoint, "_allow_single_session_rebind", False)):
+        setattr(new_endpoint, "_allow_single_session_rebind", True)
 
     old_commands = list(
         getattr(old_endpoint, "_control_commands_manifest", ()) or ()

@@ -152,6 +152,29 @@ class FailureFlowTests(unittest.TestCase):
 
         self.assertEqual(core.calls, [])
 
+    def test_socket_session_failure_uses_channel_kind_not_endpoint_name(self) -> None:
+        core = _RecordingFailureCore()
+        handler = FailureEventHandler(core=core)
+
+        asyncio.run(
+            handler.handle(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_FAILED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={
+                        "reply_id": "reply-1",
+                        "endpoint_id": "desktop_avatar",
+                        "channel_kind": "websocket_bridge",
+                        "reason": "socket session is closed",
+                        "permanent": False,
+                    },
+                ),
+                context=None,
+            )
+        )
+
+        self.assertEqual(core.calls, [])
+
     def test_non_socket_reply_failure_still_enters_failure_flow(self) -> None:
         core = _RecordingFailureCore()
         handler = FailureEventHandler(core=core)

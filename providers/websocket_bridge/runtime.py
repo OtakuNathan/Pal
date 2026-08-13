@@ -231,6 +231,22 @@ class WebSocketBridgeEndpoint(SocketChannelEndpoint):
         health["healthy"] = bool(health["listener_bound"] and health["channel_socket_bound"])
         return health
 
+    def validate_replacement_startup(self) -> None:
+        process = self._process
+        if (
+            self.server is not None
+            and process is not None
+            and process.poll() is None
+            and self._manager_endpoint().socket_path.exists()
+            and not self._startup_error
+        ):
+            return
+        raise ChannelDeliveryError(
+            self._startup_error or "websocket bridge did not start",
+            permanent=False,
+            reason="websocket_startup_failed",
+        )
+
     def inspect_auth_state(self) -> dict[str, Any]:
         """Report trusted-LAN peer pairing/authorization state without secrets."""
         metadata = dict(self.binding_metadata or {})

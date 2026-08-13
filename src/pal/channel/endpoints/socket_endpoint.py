@@ -24,8 +24,13 @@ logger = logging.getLogger(__name__)
 
 
 class SocketSessionClosed(ChannelDeliveryError):
-    def __init__(self, message: str = "socket session is closed") -> None:
-        super().__init__(message, permanent=True)
+    def __init__(
+        self,
+        message: str = "socket session is closed",
+        *,
+        permanent: bool = True,
+    ) -> None:
+        super().__init__(message, permanent=permanent)
 
 
 @dataclass
@@ -72,6 +77,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     _streamed_text_handles: set[int] = field(default_factory=set)
     _streamed_text_keys: set[tuple[str, str, str]] = field(default_factory=set)
     _stream_handle_ids_by_key: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    _client_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _retired_session_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _session_replacements: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _allow_single_session_rebind: bool = field(default=False, init=False, repr=False)
     _owns_socket_path: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -91,21 +100,48 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     async def stop_async(self) -> None:
         owns_socket_path = self._owns_socket_path
         self._owns_socket_path = False
-        if self.server is not None:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
+        server = self.server
+        self.server = None
+        if server is not None:
+            server.close()
+            close_clients = getattr(server, "close_clients", None)
+            if callable(close_clients):
+                close_clients()
         sessions = list(self.sessions.values())
+        if len(sessions) == 1:
+            retired_id = sessions[0].session_id
+            self._retired_session_ids.add(retired_id)
+            self._allow_single_session_rebind = True
         self.sessions.clear()
         for session in sessions:
             session.closed = True
             if session.writer_task is not None:
                 session.writer_task.cancel()
             session.writer.close()
+        client_tasks = [
+            task
+            for task in self._client_tasks
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        for task in client_tasks:
+            task.cancel()
+        if client_tasks:
+            done, pending = await asyncio.wait(client_tasks, timeout=1.0)
+            self._client_tasks.difference_update(done)
+            for task in pending:
+                task.cancel()
+        if sessions:
+            await asyncio.gather(
+                *(self._close_writer_async(session.writer) for session in sessions),
+                return_exceptions=True,
+            )
+        if server is not None:
             try:
-                await session.writer.wait_closed()
-            except Exception:
-                pass
+                await asyncio.wait_for(asyncio.shield(server.wait_closed()), timeout=0.5)
+            except TimeoutError:
+                abort_clients = getattr(server, "abort_clients", None)
+                if callable(abort_clients):
+                    abort_clients()
         if owns_socket_path and self.socket_path is not None and self.socket_path.exists():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.socket_path)
@@ -131,10 +167,14 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         return True
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        client_task = asyncio.current_task()
+        if client_task is not None:
+            self._client_tasks.add(client_task)
         session_id = str(uuid4())
         session = _SocketSession(session_id=session_id, writer=writer)
         session.writer_task = asyncio.create_task(self._writer_loop(session))
         self.sessions[session_id] = session
+        self._adopt_single_replacement_session(session_id)
         if self.on_ready is not None:
             self.on_ready()
         logger.info("socket session %s connected (%d active)", session_id, len(self.sessions))
@@ -172,9 +212,25 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self.sessions.pop(session_id, None)
             if session.writer_task is not None:
                 session.writer_task.cancel()
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            await self._close_writer_async(writer)
+            if client_task is not None:
+                self._client_tasks.discard(client_task)
+
+    async def _close_writer_async(self, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=0.25)
+        except (TimeoutError, ConnectionError, OSError):
+            transport = getattr(writer, "transport", None)
+            if transport is not None:
+                transport.abort()
+
+    def _adopt_single_replacement_session(self, session_id: str) -> None:
+        if not self._allow_single_session_rebind or len(self.sessions) != 1:
+            return
+        for retired_id in self._retired_session_ids:
+            self._session_replacements[retired_id] = session_id
+        self._allow_single_session_rebind = False
 
     async def _writer_loop(self, session: _SocketSession) -> None:
         try:
@@ -492,6 +548,16 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session_id = str(response_handle.reply_target.get("session_id") or "")
         session = self.sessions.get(session_id)
         if session is None or session.closed:
-            logger.warning("socket session %s not found or closed (active: %s)", session_id, list(self.sessions.keys()))
-            raise SocketSessionClosed()
+            if self._allow_single_session_rebind and len(self.sessions) == 1:
+                self._adopt_single_replacement_session(next(iter(self.sessions)))
+            replacement_id = self._session_replacements.get(session_id)
+            session = self.sessions.get(replacement_id or "")
+        if session is None or session.closed:
+            logger.debug("socket session %s not found or closed (active: %s)", session_id, list(self.sessions.keys()))
+            raise SocketSessionClosed(
+                permanent=not (
+                    self._allow_single_session_rebind
+                    and session_id in self._retired_session_ids
+                )
+            )
         return session

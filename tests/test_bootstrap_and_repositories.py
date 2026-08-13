@@ -2244,6 +2244,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(getattr(new_endpoint, "bot_token", ""), "runtime-only-token")
         self.assertTrue(getattr(new_endpoint, "_authorized", False))
         self.assertTrue(new_endpoint.paired)
+        self.assertFalse(getattr(new_endpoint, "drop_pending_updates_on_start", True))
 
     def test_channel_attach_factory_failure_preserves_detached_repository_state(self) -> None:
         repository = ChannelEndpointRepository()
@@ -3177,6 +3178,60 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(emitted[0].payload.get("attempts"), 1)
         self.assertFalse(self.endpoint.outbox)
 
+    async def test_socket_endpoint_stop_is_bounded_with_connected_client(self) -> None:
+        await self.endpoint.start_async()
+        _reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not self.endpoint.sessions and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(self.endpoint.stop_async(), timeout=2.0)
+
+        self.assertIsNone(self.endpoint.server)
+        self.assertFalse(self.endpoint.sessions)
+        writer.close()
+
+    async def test_socket_endpoint_rebinds_single_client_reply_after_generation_swap(self) -> None:
+        runtime = ChannelRuntime()
+        runtime.register_endpoint(self.endpoint)
+        await runtime.start_async()
+        _reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        writer.write(
+            pack_socket_message(
+                {"type": "user_message", "request_id": "req-reload", "text": "rescan"}
+            )
+        )
+        await writer.drain()
+        envelopes = await self._poll_until_envelopes()
+        handle = envelopes[0].response_handle
+        replacement = SocketChannelEndpoint(
+            endpoint=self.endpoint.endpoint,
+            socket_path=self.socket_path,
+        )
+
+        try:
+            await asyncio.wait_for(runtime.replace_endpoint_async(replacement), timeout=2.0)
+            replacement.queue_reply("rescan complete", response_handle=handle)
+            failed = replacement.flush_outbox()
+            self.assertFalse(failed[0].payload.get("permanent"))
+            self.assertEqual(len(replacement.outbox), 1)
+
+            reader2, writer2 = await asyncio.open_unix_connection(str(self.socket_path))
+            try:
+                deadline = asyncio.get_running_loop().time() + 1.0
+                while not replacement.sessions and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                delivered = replacement.flush_outbox()
+                self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
+                self.assertEqual((await read_socket_message(reader2))["type"], "text_delta")
+                self.assertEqual((await read_socket_message(reader2))["type"], "done")
+            finally:
+                writer2.close()
+                await writer2.wait_closed()
+        finally:
+            writer.close()
+            await runtime.stop_async()
+
 
 class _FakeTelegramFile:
     def __init__(self, *, content: bytes, file_path: str = "telegram/file.bin") -> None:
@@ -3484,6 +3539,116 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         sent_texts = [str(payload.get("text") or "").strip() for kind, payload in self.fake_bot.actions if kind == "message"]
         self.assertEqual(sent_texts[-2:], ["first", "second"])
+
+    async def test_telegram_reply_is_acknowledged_only_after_network_send_finishes(self) -> None:
+        self.fake_bot.message_delays["slow"] = 0.05
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
+        self.endpoint.queue_reply("slow", response_handle=handle)
+
+        first = self.endpoint.flush_outbox()
+
+        self.assertEqual(first, [])
+        self.assertEqual(len(self.endpoint._pending_reply_deliveries), 1)
+        pending = next(iter(self.endpoint._pending_reply_deliveries.values()))[1]
+        await asyncio.wait_for(asyncio.shield(pending), timeout=2.0)
+
+        delivered = self.endpoint.flush_outbox()
+
+        self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
+        self.assertFalse(self.endpoint._pending_reply_deliveries)
+
+    async def test_telegram_network_failure_requeues_reply_instead_of_false_delivery(self) -> None:
+        async def fail_send(**_kwargs):
+            raise RuntimeError("telegram network down")
+
+        self.fake_bot.send_message = fail_send  # type: ignore[method-assign]
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
+        self.endpoint.queue_reply("retry me", response_handle=handle)
+        self.assertEqual(self.endpoint.flush_outbox(), [])
+        pending = next(iter(self.endpoint._pending_reply_deliveries.values()))[1]
+        await asyncio.gather(pending, return_exceptions=True)
+
+        failed = self.endpoint.flush_outbox()
+
+        self.assertEqual([event.event_kind for event in failed], ["reply.failed"])
+        self.assertEqual(len(self.endpoint.outbox), 1)
+        self.assertEqual(self.endpoint.outbox[0].text, "retry me")
+
+    async def test_telegram_send_chain_does_not_overtake_failed_reply(self) -> None:
+        original_send = self.fake_bot.send_message
+
+        async def fail_first(**kwargs):
+            if str(kwargs.get("text") or "").strip() == "first":
+                raise RuntimeError("first reply failed")
+            return await original_send(**kwargs)
+
+        self.fake_bot.send_message = fail_first  # type: ignore[method-assign]
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
+        self.endpoint.queue_reply("first", response_handle=handle)
+        self.endpoint.queue_reply("second", response_handle=handle)
+        self.endpoint.flush_outbox()
+        tasks = [task for _, task in self.endpoint._pending_reply_deliveries.values()]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        failed = self.endpoint.flush_outbox()
+
+        self.assertEqual(len(failed), 2)
+        self.assertEqual([item.text for item in self.endpoint.outbox], ["first", "second"])
+        self.assertFalse(self.endpoint._send_chains)
+        sent_texts = [
+            str(payload.get("text") or "").strip()
+            for kind, payload in self.fake_bot.actions
+            if kind == "message"
+        ]
+        self.assertNotIn("second", sent_texts)
+
+        self.fake_bot.send_message = original_send  # type: ignore[method-assign]
+        self.endpoint.flush_outbox()
+        retry_tasks = [task for _, task in self.endpoint._pending_reply_deliveries.values()]
+        await asyncio.gather(*retry_tasks)
+        delivered = self.endpoint.flush_outbox()
+
+        self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"] * 2)
+        sent_texts = [
+            str(payload.get("text") or "").strip()
+            for kind, payload in self.fake_bot.actions
+            if kind == "message"
+        ]
+        self.assertEqual(sent_texts[-2:], ["first", "second"])
+
+    async def test_telegram_stop_recovers_in_flight_reply_for_replacement(self) -> None:
+        self.fake_bot.message_delays["unfinished"] = 10.0
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
+        self.endpoint.queue_reply("unfinished", response_handle=handle)
+        self.endpoint.flush_outbox()
+        await asyncio.sleep(0)
+
+        await self.endpoint.stop_async()
+
+        self.assertFalse(self.endpoint._pending_reply_deliveries)
+        self.assertEqual([item.text for item in self.endpoint.outbox], ["unfinished"])
+
+    async def test_telegram_progress_failure_requeues_stream_update(self) -> None:
+        async def fail_send(**_kwargs):
+            raise RuntimeError("telegram progress network down")
+
+        self.fake_bot.send_message = fail_send  # type: ignore[method-assign]
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "100"})
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.PROGRESS,
+                text="Checklist: still working",
+            ),
+            response_handle=handle,
+        )
+        self.assertEqual(self.endpoint.flush_stream_update_outbox(), [])
+        pending = next(iter(self.endpoint._pending_stream_deliveries.values()))[1]
+        await asyncio.gather(pending, return_exceptions=True)
+
+        failed = self.endpoint.flush_stream_update_outbox()
+
+        self.assertEqual([event.event_kind for event in failed], ["reply.failed"])
+        self.assertEqual(len(self.endpoint.stream_update_outbox), 1)
 
     async def test_telegram_endpoint_batches_terminal_markdown_blocks_only_after_done(self) -> None:
         handle = ResponseHandle(

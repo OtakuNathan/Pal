@@ -11,7 +11,15 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
-from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
+from pal.channel.contracts import (
+    ChannelDeliveryError,
+    ChannelStreamUpdate,
+    EndpointConfig,
+    QueuedAttachment,
+    QueuedReply,
+    QueuedStreamUpdate,
+    ResponseHandle,
+)
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.foundation import AttachmentSpec, EventEnvelope
@@ -302,6 +310,23 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _send_chains: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _pending_reply_deliveries: dict[str, tuple[QueuedReply, asyncio.Task[None]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _pending_attachment_deliveries: dict[str, tuple[QueuedAttachment, asyncio.Task[None]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _pending_stream_deliveries: dict[str, tuple[QueuedStreamUpdate, asyncio.Task[None]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _tracked_delivery_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    drop_pending_updates_on_start: bool = True
     _polling_running: bool = False
     _authorized: bool = False
     _last_poll_error: str = ""
@@ -333,6 +358,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     def supports_stream_delivery(self) -> bool:
         return True
+
+    def prepare_replacement(self, old_endpoint: ChannelEndpointQueueBase) -> None:
+        _ = old_endpoint
+        # A hot generation swap must consume updates that arrived while the old
+        # poller was stopping.  Only a genuinely fresh installation may discard
+        # Telegram's pre-existing update backlog.
+        self.drop_pending_updates_on_start = False
 
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -371,6 +403,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     async def stop_async(self) -> None:
         if self._stop_event is not None:
             self._stop_event.set()
+        await self._recover_pending_deliveries_async()
         if self.polling_task is not None:
             self.polling_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -386,6 +419,50 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._send_chains.clear()
         self._turn_stream_text.clear()
 
+    async def _recover_pending_deliveries_async(self) -> None:
+        deliveries = [
+            *self._pending_reply_deliveries.values(),
+            *self._pending_attachment_deliveries.values(),
+            *self._pending_stream_deliveries.values(),
+        ]
+        tasks = list(dict.fromkeys(task for _, task in deliveries))
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for item, task in self._pending_reply_deliveries.values():
+            if task.cancelled() or task.exception() is not None:
+                self.outbox.append(
+                    QueuedReply(
+                        reply_id=item.reply_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        text=item.text,
+                        attempts=item.attempts + 1,
+                    )
+                )
+        for item, task in self._pending_attachment_deliveries.values():
+            if task.cancelled() or task.exception() is not None:
+                self.attachment_outbox.append(
+                    QueuedAttachment(
+                        attachment_id=item.attachment_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        attachment=item.attachment,
+                        attempts=item.attempts + 1,
+                    )
+                )
+        for item, task in self._pending_stream_deliveries.values():
+            if task.cancelled() or task.exception() is not None:
+                self.stream_update_outbox.append(
+                    replace(item, attempts=item.attempts + 1)
+                )
+        self._pending_reply_deliveries.clear()
+        self._pending_attachment_deliveries.clear()
+        self._pending_stream_deliveries.clear()
+        self._tracked_delivery_tasks.clear()
+
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         if self.application is None:
             raise ChannelDeliveryError("telegram application not running", permanent=False)
@@ -393,6 +470,230 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         self._schedule_ordered_send(response_handle, lambda: self._send_attachment_async(response_handle, attachment))
+
+    def flush_outbox(self) -> list[EventEnvelope]:
+        pending = list(self.outbox)
+        self.outbox.clear()
+        emitted = self._collect_reply_delivery_results()
+        if not pending:
+            return emitted
+        for item in pending:
+            unavailable_reason = self._delivery_unavailable_reason()
+            if unavailable_reason:
+                self.outbox.append(
+                    QueuedReply(
+                        reply_id=item.reply_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        text=item.text,
+                        attempts=item.attempts + 1,
+                    )
+                )
+                failure = self._reply_failure_event_once(item, unavailable_reason, permanent=False)
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            task = self._schedule_ordered_send(
+                item.response_handle,
+                lambda item=item: self._send_reply_async(item.response_handle, item.text),
+            )
+            if task is None:
+                self.outbox.append(item)
+                failure = self._reply_failure_event_once(item, "telegram event loop not running", permanent=False)
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            self._tracked_delivery_tasks.add(task)
+            self._pending_reply_deliveries[item.reply_id] = (item, task)
+        return emitted
+
+    def flush_attachment_outbox(self) -> list[EventEnvelope]:
+        pending = list(self.attachment_outbox)
+        self.attachment_outbox.clear()
+        emitted = self._collect_attachment_delivery_results()
+        if not pending:
+            return emitted
+        for item in pending:
+            unavailable_reason = self._delivery_unavailable_reason()
+            if unavailable_reason:
+                self.attachment_outbox.append(
+                    QueuedAttachment(
+                        attachment_id=item.attachment_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        attachment=item.attachment,
+                        attempts=item.attempts + 1,
+                    )
+                )
+                failure = self._delivery_failure_event_once(
+                    delivery_id=item.attachment_id,
+                    attempts=item.attempts + 1,
+                    reason=unavailable_reason,
+                    permanent=False,
+                )
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            task = self._schedule_ordered_send(
+                item.response_handle,
+                lambda item=item: self._send_attachment_async(item.response_handle, item.attachment),
+            )
+            if task is None:
+                self.attachment_outbox.append(item)
+                continue
+            self._tracked_delivery_tasks.add(task)
+            self._pending_attachment_deliveries[item.attachment_id] = (item, task)
+        return emitted
+
+    def flush_stream_update_outbox(self) -> list[EventEnvelope]:
+        pending = list(self.stream_update_outbox)
+        self.stream_update_outbox.clear()
+        emitted = self._collect_stream_delivery_results()
+        for item in pending:
+            update = item.update
+            if update.kind == ChannelStreamUpdateKind.DONE and not update.text:
+                buffered = self._turn_stream_text.get(
+                    self._turn_stream_key(item.response_handle),
+                    "",
+                )
+                if buffered:
+                    update = replace(update, text=buffered)
+                    item = replace(item, update=update)
+            task = self.send_stream_update(item.response_handle, update)
+            if task is None:
+                continue
+            self._tracked_delivery_tasks.add(task)
+            self._pending_stream_deliveries[item.update_id] = (item, task)
+        return emitted
+
+    def _delivery_unavailable_reason(self) -> str:
+        if not self.attached or not self.enabled:
+            return "endpoint_unavailable"
+        if self.application is None:
+            return "telegram application not running"
+        return ""
+
+    def has_queued_replies(self) -> bool:
+        return bool(self.outbox or self._pending_reply_deliveries)
+
+    def has_queued_stream_updates(self) -> bool:
+        return bool(self.stream_update_outbox or self._pending_stream_deliveries)
+
+    def has_queued_attachments(self) -> bool:
+        return bool(self.attachment_outbox or self._pending_attachment_deliveries)
+
+    def _collect_reply_delivery_results(self) -> list[EventEnvelope]:
+        emitted: list[EventEnvelope] = []
+        for reply_id, (item, task) in list(self._pending_reply_deliveries.items()):
+            if not task.done():
+                continue
+            self._pending_reply_deliveries.pop(reply_id, None)
+            self._tracked_delivery_tasks.discard(task)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                self.outbox.append(item)
+                continue
+            except Exception as exc:
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(exc.permanent)
+                if not permanent:
+                    self.outbox.append(
+                        QueuedReply(
+                            reply_id=item.reply_id,
+                            response_handle=item.response_handle,
+                            endpoint=item.endpoint,
+                            text=item.text,
+                            attempts=item.attempts + 1,
+                        )
+                    )
+                failure = self._reply_failure_event_once(item, str(exc), permanent=permanent)
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            self.last_delivery_error = ""
+            self._reported_reply_failures.pop(reply_id, None)
+            emitted.append(self._delivery_event(reply_id))
+        return emitted
+
+    def _collect_attachment_delivery_results(self) -> list[EventEnvelope]:
+        emitted: list[EventEnvelope] = []
+        for attachment_id, (item, task) in list(self._pending_attachment_deliveries.items()):
+            if not task.done():
+                continue
+            self._pending_attachment_deliveries.pop(attachment_id, None)
+            self._tracked_delivery_tasks.discard(task)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                self.attachment_outbox.append(item)
+                continue
+            except Exception as exc:
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(exc.permanent)
+                if not permanent:
+                    self.attachment_outbox.append(
+                        QueuedAttachment(
+                            attachment_id=item.attachment_id,
+                            response_handle=item.response_handle,
+                            endpoint=item.endpoint,
+                            attachment=item.attachment,
+                            attempts=item.attempts + 1,
+                        )
+                    )
+                failure = self._delivery_failure_event_once(
+                    delivery_id=item.attachment_id,
+                    attempts=item.attempts + 1,
+                    reason=str(exc),
+                    permanent=permanent,
+                )
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            self.last_delivery_error = ""
+            self._reported_reply_failures.pop(attachment_id, None)
+            emitted.append(self._delivery_event(attachment_id))
+        return emitted
+
+    def _collect_stream_delivery_results(self) -> list[EventEnvelope]:
+        emitted: list[EventEnvelope] = []
+        for update_id, (item, task) in list(self._pending_stream_deliveries.items()):
+            if not task.done():
+                continue
+            self._pending_stream_deliveries.pop(update_id, None)
+            self._tracked_delivery_tasks.discard(task)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                self.stream_update_outbox.append(item)
+                continue
+            except Exception as exc:
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(exc.permanent)
+                if not permanent:
+                    self.stream_update_outbox.append(
+                        replace(item, attempts=item.attempts + 1)
+                    )
+                failure = self._delivery_failure_event_once(
+                    delivery_id=item.update_id,
+                    attempts=item.attempts + 1,
+                    reason=str(exc),
+                    permanent=permanent,
+                )
+                if failure is not None:
+                    emitted.append(failure)
+                continue
+            self.last_delivery_error = ""
+            self._reported_reply_failures.pop(update_id, None)
+        return emitted
+
+    def _delivery_event(self, delivery_id: str) -> EventEnvelope:
+        return EventEnvelope(
+            event_kind=EventKind.REPLY_DELIVERED,
+            source_kind=SourceKind.CHANNEL,
+            payload={
+                "reply_id": delivery_id,
+                "endpoint_id": self.endpoint.endpoint_id,
+                "channel_kind": self.endpoint.channel_kind,
+            },
+        )
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
@@ -421,41 +722,46 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if kind == "receipt_marker":
             loop.create_task(self._send_receipt_marker_async(response_handle, payload))
 
-    def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
+    def send_stream_update(
+        self,
+        response_handle: ResponseHandle,
+        update: ChannelStreamUpdate,
+    ) -> asyncio.Task[None] | None:
         key = self._turn_stream_key(response_handle)
         if update.kind == ChannelStreamUpdateKind.TEXT_DELTA:
             self._turn_stream_text[key] = f"{self._turn_stream_text.get(key, '')}{update.text}"
-            return
+            return None
         if update.kind == ChannelStreamUpdateKind.PROGRESS:
             text = str(update.text or "").strip()
             if text:
-                self._schedule_ordered_send(
+                return self._schedule_ordered_send(
                     response_handle,
                     lambda: self._send_reply_async(response_handle, text),
                 )
-            return
+            return None
         if update.kind == ChannelStreamUpdateKind.DONE:
             buffered = self._turn_stream_text.pop(key, "")
             if str(update.finish_reason or "") in {
                 LLMFinishReason.TOOL_CALLS.value,
                 LLMFinishReason.COMPACT_REQUIRED.value,
             }:
-                return
+                return None
             text = str(update.text or buffered).strip()
             if text:
-                self._schedule_ordered_send(
+                return self._schedule_ordered_send(
                     response_handle,
                     lambda: self._send_reply_async(response_handle, text),
                 )
-            return
+            return None
         if update.kind == ChannelStreamUpdateKind.ERROR:
             self._turn_stream_text.pop(key, None)
             text = str(update.error_text or update.text or "").strip()
             if text:
-                self._schedule_ordered_send(
+                return self._schedule_ordered_send(
                     response_handle,
                     lambda: self._send_reply_async(response_handle, text),
                 )
+        return None
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         self._turn_stream_text.pop(self._turn_stream_key(response_handle), None)
@@ -564,9 +870,21 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "token_present": bool(self.bot_token),
         }
 
+    def validate_replacement_startup(self) -> None:
+        if not self._can_start() or self._polling_running:
+            return
+        raise ChannelDeliveryError(
+            self._last_poll_error or "telegram polling did not start",
+            permanent=False,
+            reason="telegram_startup_failed",
+        )
+
     def inspect_backlog(self) -> dict[str, Any]:
         payload = super().inspect_backlog()
         payload["typing_sessions"] = sum(1 for task in self._typing_tasks.values() if not task.done())
+        payload["reply_deliveries_in_flight"] = len(self._pending_reply_deliveries)
+        payload["attachment_deliveries_in_flight"] = len(self._pending_attachment_deliveries)
+        payload["stream_deliveries_in_flight"] = len(self._pending_stream_deliveries)
         return payload
 
     async def _polling_main(self) -> None:
@@ -582,7 +900,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     await app.start()
                     await app.updater.start_polling(
                         timeout=self.poll_timeout_seconds,
-                        drop_pending_updates=first_attempt,
+                        drop_pending_updates=bool(
+                            first_attempt and self.drop_pending_updates_on_start
+                        ),
                         allowed_updates=list(self.allowed_updates),
                         error_callback=self._on_polling_error,
                     )
@@ -594,10 +914,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._get_updates_in_flight_started_at = 0.0
                     self._reconnect_attempts = 0
                     self._reconnecting = False
+                    self.drop_pending_updates_on_start = False
                     logger.info("telegram polling started successfully")
                     if self._control_commands_manifest:
                         await self._apply_control_catalog_async({"commands": list(self._control_commands_manifest)})
                 except Exception as exc:
+                    self.drop_pending_updates_on_start = False
                     self._last_poll_error = str(exc)
                     self._authorized = False
                     self._polling_running = False
@@ -1022,31 +1344,47 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self,
         response_handle: ResponseHandle,
         operation: Callable[[], Awaitable[None]],
-    ) -> None:
+    ) -> asyncio.Task[None] | None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return
+            return None
         key = self._typing_key(response_handle)
         previous = self._send_chains.get(key)
 
         async def run_after_previous(previous_task: asyncio.Task[None] | None) -> None:
-            if previous_task is not None:
-                try:
-                    await previous_task
-                except asyncio.CancelledError:
-                    if not previous_task.cancelled():
-                        raise
-                except Exception:
-                    pass
             try:
+                if previous_task is not None:
+                    try:
+                        await previous_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        raise ChannelDeliveryError(
+                            "previous telegram delivery in this conversation failed",
+                            permanent=False,
+                            reason="telegram_send_chain_failed",
+                        ) from exc
                 await operation()
             finally:
                 if self._send_chains.get(key) is task:
                     self._send_chains.pop(key, None)
 
         task = loop.create_task(run_after_previous(previous))
+        task.add_done_callback(self._on_send_task_done)
         self._send_chains[key] = task
+        return task
+
+    def _on_send_task_done(self, task: asyncio.Task[None]) -> None:
+        self._notify_ready()
+        if task in self._tracked_delivery_tasks:
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self.last_delivery_error = str(exc)
 
     def _stop_typing(self, response_handle: ResponseHandle) -> None:
         key = self._typing_key(response_handle)
@@ -1056,11 +1394,19 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     async def _send_reply_async(self, response_handle: ResponseHandle, text: str) -> None:
         if self.application is None:
-            return
+            raise ChannelDeliveryError(
+                "telegram application not running",
+                permanent=False,
+                reason="telegram_not_running",
+            )
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
-            return
+            raise ChannelDeliveryError(
+                "telegram reply target is missing chat_id",
+                permanent=True,
+                reason="telegram_target_invalid",
+            )
         max_chars = int(self.endpoint.send_policy.get("max_message_chars") or _TELEGRAM_MAX_MESSAGE_UTF16)
         for segment in _telegram_text_segments(text, limit=max_chars):
             kwargs = {
@@ -1076,26 +1422,47 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             except Exception as exc:
                 if segment.parse_mode is None:
                     self.last_delivery_error = str(exc)
-                    break
+                    raise ChannelDeliveryError(
+                        str(exc) or "telegram message delivery failed",
+                        permanent=False,
+                        reason="telegram_send_failed",
+                    ) from exc
                 kwargs.pop("parse_mode", None)
                 kwargs["text"] = segment.fallback_text
                 try:
                     await self.application.bot.send_message(**kwargs)
                 except Exception as exc:
                     self.last_delivery_error = str(exc)
-                    break
+                    raise ChannelDeliveryError(
+                        str(exc) or "telegram message delivery failed",
+                        permanent=False,
+                        reason="telegram_send_failed",
+                    ) from exc
+        self.last_delivery_error = ""
 
     async def _send_attachment_async(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         if self.application is None:
-            return
+            raise ChannelDeliveryError(
+                "telegram application not running",
+                permanent=False,
+                reason="telegram_not_running",
+            )
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
-            return
+            raise ChannelDeliveryError(
+                "telegram reply target is missing chat_id",
+                permanent=True,
+                reason="telegram_target_invalid",
+            )
         path = Path(attachment.path).expanduser()
         if not path.is_file():
             self.last_delivery_error = f"attachment file not found: {path}"
-            return
+            raise ChannelDeliveryError(
+                self.last_delivery_error,
+                permanent=True,
+                reason="attachment_not_found",
+            )
         kwargs: dict[str, Any] = {
             "chat_id": chat_id,
             "filename": attachment.file_name or path.name,
@@ -1110,6 +1477,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             self.last_delivery_error = ""
         except Exception as exc:
             self.last_delivery_error = str(exc)
+            raise ChannelDeliveryError(
+                str(exc) or "telegram attachment delivery failed",
+                permanent=False,
+                reason="telegram_send_failed",
+            ) from exc
 
     async def _apply_interactive_status_async(
         self,
