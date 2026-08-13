@@ -50,6 +50,14 @@ class MemoryL1IRServiceTests(unittest.TestCase):
         self.assertEqual(settled.state, L1TurnState.SETTLED)
         self.assertFalse(any(message.reasoning_text for message in settled.messages))
         self.assertFalse(any(message.replay for message in settled.messages))
+        result = next(
+            part
+            for message in settled.messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        )
+        self.assertEqual(result.content, "ok")
+        self.assertFalse(result.retired)
         self.assertTrue(service.build_pack(MemoryPackRequest()).l1_recent_context)
 
     def test_late_result_after_interrupt_is_rejected(self) -> None:

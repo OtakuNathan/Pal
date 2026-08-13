@@ -140,7 +140,7 @@ class RuntimeStateTests(unittest.TestCase):
             )
         )
 
-    def test_memory_restore_migrates_legacy_closed_turn_projection(self) -> None:
+    def test_memory_restore_preserves_legacy_closed_turn_result(self) -> None:
         service = MemoryService()
         service.begin_l1_turn("turn-legacy", user_text="inspect")
         service.upsert_l1_assistant(
@@ -183,8 +183,8 @@ class RuntimeStateTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         ]
         self.assertEqual(len(results), 1)
-        self.assertTrue(results[0].retired)
-        self.assertNotIn("legacy full file result", results[0].content)
+        self.assertFalse(results[0].retired)
+        self.assertEqual(results[0].content, "legacy full file result")
 
     def test_execution_restore_and_reset_owns_in_memory_pager(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_execution_snapshot_"))

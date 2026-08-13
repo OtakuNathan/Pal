@@ -7,7 +7,7 @@ from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from pal.control import interactions as control_interactions
@@ -198,10 +198,6 @@ class TurnManager:
                     close(
                         continuation.turn_id,
                         reason=reason,
-                        after_commit=self._l1_result_retirement_callback(
-                            memory_service,
-                            continuation.turn_id,
-                        ),
                     )
                 except Exception:
                     pass
@@ -238,10 +234,6 @@ class TurnManager:
             value = method(
                 continuation.turn_id,
                 reason=reason,
-                after_commit=self._l1_result_retirement_callback(
-                    memory_service,
-                    continuation.turn_id,
-                ),
             )
             if inspect.isawaitable(value):
                 await value
@@ -253,24 +245,6 @@ class TurnManager:
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
-
-    def _l1_result_retirement_callback(
-        self,
-        memory_service: Any,
-        turn_id: str,
-    ) -> Callable[[], None] | None:
-        active = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(
-            turn_id
-        )
-        result_ids = TurnExecutor._tool_result_ids(active)
-        retire = getattr(
-            getattr(self.context, "execution_runtime", None),
-            "retire_tool_results",
-            None,
-        )
-        if not result_ids or not callable(retire):
-            return None
-        return lambda: retire(turn_id=turn_id, result_ids=result_ids)
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")

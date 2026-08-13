@@ -250,6 +250,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         turn_id: str | None,
         result_ids: tuple[str, ...],
+        execution_lifetime_id: str = "",
     ) -> tuple[str, ...]:
         """Retire result-owned authority while leaving pager bytes on their TTL."""
 
@@ -260,7 +261,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
         if not normalized:
             return ()
-        context = self.logical_context_for_turn(turn_id)
+        lifetime = str(execution_lifetime_id or "").strip()
+        context = (
+            self.logical_state.context(lifetime)
+            if lifetime
+            else self.logical_context_for_turn(turn_id)
+        )
         return self.logical_state.retire_results(
             execution_lifetime_id=context.execution_lifetime_id,
             result_ids=normalized,

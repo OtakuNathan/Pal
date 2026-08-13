@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, ToolResultLifecycle
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 
 from dataclasses import dataclass, field, replace
@@ -50,14 +50,6 @@ class L1TurnIR:
                     raise L1TurnProtocolError("settled L1 turn contains an in-progress message")
                 if message.reasoning_text or message.replay is not None:
                     raise L1TurnProtocolError("settled L1 turn retains transient reasoning replay")
-                if any(
-                    isinstance(part, ToolResultIR)
-                    and part.lifecycle != ToolResultLifecycle.RETIRED
-                    for part in message.parts
-                ):
-                    raise L1TurnProtocolError(
-                        "settled L1 turn retains a full tool result"
-                    )
 
     @classmethod
     def begin(
@@ -198,7 +190,7 @@ class L1TurnIR:
         if self.pending_call_ids:
             raise L1TurnProtocolError("cannot settle L1 turn with unresolved tool calls")
         messages = _ensure_assistant_closure(
-            tuple(_retire_message(message) for message in self.messages)
+            tuple(_close_message(message) for message in self.messages)
         )
         return replace(
             self,
@@ -235,7 +227,7 @@ class L1TurnIR:
                         else message.semantic_kind
                     ),
                 )
-            closed.append(_retire_message(message))
+            closed.append(_close_message(message))
         metadata = thaw_json(self.metadata)
         if reason:
             metadata["settlement_reason"] = str(reason)
@@ -302,16 +294,11 @@ class L1TurnStore:
         self.turns.clear()
 
 
-def _retire_message(message: LLMMessageIR) -> LLMMessageIR:
+def _close_message(message: LLMMessageIR) -> LLMMessageIR:
     if message.role == MessageRole.ASSISTANT:
         return message.retire_reasoning()
-    parts = tuple(
-        part.retire() if isinstance(part, ToolResultIR) else part
-        for part in message.parts
-    )
     return replace(
         message,
-        parts=parts,
         state=MessageState.COMPLETE,
         replay=None,
     )

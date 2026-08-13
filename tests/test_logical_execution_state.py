@@ -143,7 +143,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             2,
         )
 
-    def test_failed_result_retirement_rolls_back_l1_and_rejects_completion(self) -> None:
+    def test_turn_settlement_does_not_invoke_result_retirement(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
         service = MemoryService()
@@ -173,21 +173,20 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
         core.context.execution_runtime.retire_tool_results = fail_retirement
 
-        with self.assertRaisesRegex(RuntimeError, "authority retirement failed"):
-            asyncio.run(
-                core._schedule_post_turn_commit_async(
-                    SimpleNamespace(
-                        commit_payload=SimpleNamespace(turn_id=turn_id)
-                    )
+        asyncio.run(
+            core._schedule_post_turn_commit_async(
+                SimpleNamespace(
+                    commit_payload=SimpleNamespace(turn_id=turn_id)
                 )
             )
+        )
 
-        active = service.active_l1_turn(turn_id)
-        self.assertIsNotNone(active)
+        settled = service.l1_store.turns.get(turn_id)
+        self.assertEqual(str(settled.state), "settled")
         self.assertTrue(
             any(
                 isinstance(part, ToolResultIR) and not part.retired
-                for message in active.messages
+                for message in settled.messages
                 for part in message.parts
             )
         )
@@ -260,6 +259,48 @@ class LogicalExecutionStateTests(unittest.TestCase):
             anchor="head",
         )
         self.assertEqual(expired.state, "expired_handle")
+
+    def test_result_owned_file_grant_survives_pager_ttl_until_projection_removal(
+        self,
+    ) -> None:
+        delivery = FileDeliveryManifest(
+            file_key="/workspace/input.txt",
+            digest="digest-a",
+            total_lines=1,
+            spans=(FileDeliverySpan(0, 8, 1, 1, 0, 8, 8),),
+            complete_file=True,
+        ).to_dict()
+        delivery["result_id"] = "read-owner"
+        self.backend.record_delivery(
+            execution_lifetime_id="session-a",
+            delivery=delivery,
+        )
+
+        for turn in range(2, 9):
+            self.backend.begin_input(
+                execution_lifetime_id="session-a",
+                input_id=f"assignment-{turn}",
+            )
+
+        self.assertIsNotNone(
+            self.backend.file_grant(
+                execution_lifetime_id="session-a",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
+        )
+        self.backend.reconcile_projection(
+            execution_lifetime_id="session-a",
+            projection=(),
+            deliveries=(),
+        )
+        self.assertIsNone(
+            self.backend.file_grant(
+                execution_lifetime_id="session-a",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
+        )
 
     def test_handles_are_session_scoped_and_retire_with_session(self) -> None:
         self._store_file_result()

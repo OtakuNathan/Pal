@@ -653,10 +653,6 @@ class MinionRunner:
                         runtime_spec_hash=str(restored["runtime_spec_hash"]),
                     ),
                 )
-                self._retire_closed_l1_result_authority(
-                    bundle.memory_service,
-                    bundle.execution_runtime,
-                )
             except (TypeError, ValueError, RuntimeError) as exc:
                 raise AgentSessionCheckpointError(
                     "manager-selected agent continuation contains invalid runtime module state"
@@ -997,48 +993,15 @@ class MinionRunner:
             if str(turn.state) != L1TurnState.ACTIVE or turn.turn_id == active_turn_id:
                 continue
             try:
-                result_ids = TurnExecutor._tool_result_ids(turn)
-                retire = getattr(execution_runtime, "retire_tool_results", None)
-                after_commit = (
-                    lambda retire=retire, turn_id=turn.turn_id, result_ids=result_ids: retire(
-                        turn_id=turn_id,
-                        result_ids=result_ids,
-                    )
-                    if callable(retire) and result_ids
-                    else None
-                )
                 memory_service.abort_l1_turn(
                     turn.turn_id,
                     reason="stale active turn recovered before a new Minion attempt",
-                    after_commit=after_commit,
                 )
             except Exception:
                 # The current turn remains authoritative; a malformed stale
                 # record must not prevent the worker from reaching its own
                 # durable protocol boundary.
                 continue
-
-    @staticmethod
-    def _retire_closed_l1_result_authority(
-        memory_service: MemoryService,
-        execution_runtime: Any,
-    ) -> None:
-        """Idempotently reconcile checkpoints created before result RAII."""
-
-        retire = getattr(execution_runtime, "retire_tool_results", None)
-        if not callable(retire):
-            return
-        for turn in tuple(memory_service.l1_store.turns.turns):
-            if turn.state == L1TurnState.ACTIVE:
-                continue
-            result_ids = tuple(
-                part.call_id
-                for message in turn.messages
-                for part in message.parts
-                if isinstance(part, ToolResultIR)
-            )
-            if result_ids:
-                retire(turn_id=turn.turn_id, result_ids=result_ids)
 
     @staticmethod
     def _continuation_is_restart_safe(

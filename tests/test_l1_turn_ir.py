@@ -49,7 +49,7 @@ class L1TurnIRTests(unittest.TestCase):
         with self.assertRaises(L1TurnProtocolError):
             turn.append_tool_result(ToolResultIR("call-1", "read", "late"))
 
-    def test_settlement_retires_full_result_but_keeps_temporary_pager_receipt(self) -> None:
+    def test_settlement_preserves_full_result_until_context_compaction(self) -> None:
         turn = L1TurnStore().begin("turn-1", user_text="inspect")
         turn = turn.append(
             LLMMessageIR(
@@ -77,12 +77,12 @@ class L1TurnIRTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         )
 
-        self.assertEqual(result.lifecycle, ToolResultLifecycle.RETIRED)
-        self.assertNotIn("sensitive full result", result.content)
+        self.assertEqual(result.lifecycle, ToolResultLifecycle.ACTIVE)
+        self.assertEqual(result.content, "sensitive full result")
+        self.assertEqual(dict(result.structured or {}), {"full": "payload"})
         self.assertEqual(result.replay_result_ref, "pager-1")
-        self.assertIn("read_tool_result", result.content)
-        self.assertIsNone(result.context_delivery)
-        self.assertEqual(result.visible_source_ranges, ())
+        self.assertEqual(dict(result.context_delivery or {}), {"source": "large.txt"})
+        self.assertEqual(result.visible_source_ranges, ((0, 20),))
         self.assertEqual(settled.messages[-1].role, MessageRole.ASSISTANT)
         self.assertEqual(
             settled.messages[-1].semantic_kind,

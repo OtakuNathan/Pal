@@ -969,14 +969,19 @@ class TurnExecutor:
                 prompt_region=PromptRegionIR.ACTIVE_INPUT,
             )
         settled_messages: list[LLMMessageIR] = []
+        original_tool_context_messages: list[LLMMessageIR] = []
+        projected_tool_context_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
         for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            original = list(getattr(settled_turn, "messages", ()) or ())
             projected = self._project_active_messages_for_prompt(
-                list(getattr(settled_turn, "messages", ()) or ()),
+                original,
                 turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
                 artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
+            original_tool_context_messages.extend(original)
+            projected_tool_context_messages.extend(projected)
             settled_messages.extend(
                 replace(message, prompt_region=PromptRegionIR.SETTLED_HISTORY)
                 for message in projected
@@ -991,11 +996,8 @@ class TurnExecutor:
                 artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
-            self._reconcile_projected_tool_context(
-                continuation,
-                original_messages=original_active_messages,
-                projected_messages=active_messages,
-            )
+            original_tool_context_messages.extend(original_active_messages)
+            projected_tool_context_messages.extend(active_messages)
             active_messages = [
                 replace(
                     message,
@@ -1007,6 +1009,11 @@ class TurnExecutor:
                 )
                 for index, message in enumerate(active_messages)
             ]
+        self._reconcile_projected_tool_context(
+            continuation,
+            original_messages=original_tool_context_messages,
+            projected_messages=projected_tool_context_messages,
+        )
         runtime_reminder = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
         tail_messages = (
             [
@@ -1723,26 +1730,7 @@ class TurnExecutor:
         if memory_service is not None:
             try:
                 turn_id = str(outcome.commit_payload.turn_id)
-                active_turn = getattr(
-                    memory_service,
-                    "active_l1_turn",
-                    lambda _turn_id: None,
-                )(turn_id)
-                result_ids = self._tool_result_ids(active_turn)
-                retire = getattr(
-                    getattr(self.context, "execution_runtime", None),
-                    "retire_tool_results",
-                    None,
-                )
-                after_commit = (
-                    lambda: retire(turn_id=turn_id, result_ids=result_ids)
-                    if callable(retire) and result_ids
-                    else None
-                )
-                result = memory_service.settle_l1_turn(
-                    turn_id,
-                    after_commit=after_commit,
-                )
+                result = memory_service.settle_l1_turn(turn_id)
             except Exception as exc:
                 self.state.diagnostics.append(
                     {
@@ -1752,9 +1740,8 @@ class TurnExecutor:
                         "error": str(exc),
                     }
                 )
-                # Closing L1 and retiring the result-owned authority are one
-                # transaction.  Do not advance any per-turn lifecycle clocks
-                # or hide the transaction failure from the caller.
+                # Do not advance lifecycle clocks or hide a failed L1 commit
+                # from the caller.
                 raise
             try:
                 memory_service.l2_store.tick_heat()
@@ -1779,15 +1766,6 @@ class TurnExecutor:
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
-
-    @staticmethod
-    def _tool_result_ids(turn: Any | None) -> tuple[str, ...]:
-        return tuple(
-            part.call_id
-            for message in tuple(getattr(turn, "messages", ()) or ())
-            for part in message.parts
-            if isinstance(part, ToolResultIR) and not part.retired
-        )
 
     def _tick_behavior_lifecycle(self) -> None:
         behavior_service = self.context.port_registry.get("behavior:behavior")
@@ -1951,6 +1929,7 @@ class TurnExecutor:
                         retire(
                             turn_id=turn_id,
                             result_ids=removed,
+                            execution_lifetime_id=logical_scope_id,
                         )
                 if continuation is None:
                     return

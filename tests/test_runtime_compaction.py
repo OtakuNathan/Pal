@@ -29,6 +29,7 @@ from pal.core.turns import (
     agent_turn_program,
 )
 from pal.foundation import EventEnvelope
+from pal.execution.session_state import FileDeliveryManifest, FileDeliverySpan
 from pal.llm import (
     generation_result_from_values,
     LLMPreflightAdvice,
@@ -700,7 +701,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.attempts, 3)
         self.assertEqual(len(llm.generate_requests), 3)
 
-    def test_retired_failed_result_no_longer_becomes_hard_context(self) -> None:
+    def test_unreconciled_failed_mutation_remains_hard_context(self) -> None:
         service = _memory_with_turns(1)
         def preflight(request):
             source = request.request.messages[-1].text
@@ -756,10 +757,10 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, "compacted")
-        self.assertEqual(result.attempts, 1)
-        self.assertEqual(len(llm.generate_requests), 1)
-        self.assertNotEqual(service.l1_store.items, before)
+        self.assertEqual(result.status, "uncompactable_hard_context")
+        self.assertEqual(result.attempts, 0)
+        self.assertEqual(len(llm.generate_requests), 0)
+        self.assertEqual(service.l1_store.items, before)
 
     def test_atomic_l1_unit_keeps_unknown_effect_and_rejects_incomplete_batch(self) -> None:
         service = _memory_with_turns(1)
@@ -854,7 +855,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "protocol_not_closed")
 
-    def test_closed_tool_body_is_retired_before_compaction(self) -> None:
+    def test_closed_tool_body_is_bounded_but_visible_to_compaction(self) -> None:
         service = _memory_with_turns(1)
         body = "HEAD-" + ("x" * 20_000) + "-TAIL"
         protocol = [
@@ -888,9 +889,10 @@ class SharedCompactionEngineTests(unittest.TestCase):
             _snapshot(service, protocol_messages=protocol)
         )[-1]
 
-        self.assertIn("full result retired", unit.text)
-        self.assertNotIn("HEAD-", unit.text)
-        self.assertNotIn("-TAIL", unit.text)
+        self.assertNotIn("full result retired", unit.text)
+        self.assertIn("HEAD-", unit.text)
+        self.assertIn("-TAIL", unit.text)
+        self.assertIn("head/tail projection only", unit.text)
         self.assertLess(len(unit.text), len(body))
 
     def test_compaction_snapshot_has_no_provider_protocol_projection(self) -> None:
@@ -1220,7 +1222,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(service.l1_store.items, before_l1)
 
-    def test_semantic_compactor_sees_retired_closed_protocol(self) -> None:
+    def test_semantic_compactor_sees_closed_tool_evidence(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         service = _memory_with_turns(1)
@@ -1243,8 +1245,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
         self.assertTrue(run_result.success)
         compaction_source = llm.generate_requests[0].messages[-1].text
-        self.assertNotIn(marker, compaction_source)
-        self.assertIn("full result retired", compaction_source)
+        self.assertIn(marker, compaction_source)
+        self.assertNotIn("full result retired", compaction_source)
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
     def test_compaction_reconciles_result_owners_inside_commit_boundary(self) -> None:
@@ -1290,6 +1292,79 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(
             reconciliations[0]["original_messages"],
             reconciliations[0]["projected_messages"],
+        )
+
+    def test_manual_compact_retires_removed_result_authority_by_lifetime(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = _memory_with_turns(1)
+        register_memory_with_core(core.context, service)
+        core.context.port_registry["llm:llm"] = _ScriptedLLM(
+            [generation_result_from_values(text=_valid_pal_payload())]
+        )
+        runtime = core.context.execution_runtime
+        turn_id = "old-result-owner"
+        runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key="pal:resident",
+            input_id="old-input",
+        )
+        delivery = FileDeliveryManifest(
+            file_key="/workspace/input.txt",
+            digest="digest-a",
+            total_lines=1,
+            spans=(FileDeliverySpan(0, 8, 1, 1, 0, 8, 8),),
+            complete_file=True,
+        ).to_dict()
+        runtime.commit_tool_delivery(
+            turn_id=turn_id,
+            context_delivery=delivery,
+            result_id="read-compact",
+        )
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "/workspace/input.txt"},
+            call_id="read-compact",
+        )
+        service.begin_l1_turn(turn_id, user_text="read the file")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="1: alpha",
+                context_delivery=delivery,
+            ),
+        )
+        service.settle_l1_turn(turn_id)
+        runtime.tool_result_pager._turn_contexts.pop(turn_id, None)
+        self.assertIsNotNone(
+            runtime.logical_state.file_grant(
+                execution_lifetime_id="pal:resident",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
+        )
+
+        result = asyncio.run(
+            core.turn_executor.compact_memory_async(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertIsNone(
+            runtime.logical_state.file_grant(
+                execution_lifetime_id="pal:resident",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
         )
 
     def test_manual_compact_uses_same_engine_and_opens_candidate_approval(self) -> None:

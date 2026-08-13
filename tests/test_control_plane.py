@@ -783,8 +783,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("full result retired", transcript[2].content)
-        self.assertNotIn("large tool result", transcript[2].content)
+        self.assertEqual(transcript[2].content, "large tool result that remains durable")
         self.assertFalse(any(hasattr(message, "tool_trace") for message in transcript))
 
     async def test_l1_commit_persists_full_tool_protocol_when_prompt_log_enabled(self) -> None:
@@ -793,8 +792,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("full result retired", transcript[2].content)
-        self.assertNotIn("large tool result", transcript[2].content)
+        self.assertEqual(transcript[2].content, "large tool result that remains durable")
 
     async def test_set_think_updates_future_turn_snapshot_only(self) -> None:
         await self.core.handle_control_action_async(
@@ -1731,8 +1729,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript[0].content, "hello")
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
-        self.assertIn("full result retired", transcript[2].content)
-        self.assertNotIn("shell result before interrupt", transcript[2].content)
+        self.assertEqual(transcript[2].content, "shell result before interrupt")
         committed_text = "\n".join(message.content for message in transcript)
         self.assertNotIn("turn_checkpoint", committed_text)
         self.assertNotIn("call_incomplete", json.dumps([message.tool_calls for message in transcript], ensure_ascii=False))

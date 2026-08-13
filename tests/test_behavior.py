@@ -1389,14 +1389,14 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("lexical score", followup_text)
         settled = memory_service.build_pack(MemoryPackRequest()).l1_turns
         self.assertEqual(len(settled), 1)
-        retired_results = [
+        retained_results = [
             part
             for message in settled[0].messages
             for part in message.parts
             if isinstance(part, ToolResultIR)
         ]
-        self.assertTrue(retired_results)
-        self.assertTrue(all(result.retired for result in retired_results))
+        self.assertTrue(retained_results)
+        self.assertTrue(all(not result.retired for result in retained_results))
 
     def test_behavior_guidance_renders_from_behavior_not_working_memory(self) -> None:
         self.repository.upsert_affordance(

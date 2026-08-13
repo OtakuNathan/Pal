@@ -381,7 +381,11 @@ class FileSnapshot:
 
 @dataclass(frozen=True)
 class FileResultLease:
-    """One tool result's RAII contribution to file mutation authority."""
+    """One projected tool result's RAII contribution to file authority.
+
+    ``expires_at_user_turn`` remains in the snapshot shape for compatibility;
+    projection/removal, not that legacy clock, owns lease retirement.
+    """
 
     result_id: str
     file_key: str
@@ -589,7 +593,6 @@ class InMemoryLogicalExecutionState:
                 state.current_user_turn += 1
                 state.input_ids[semantic_input] = state.current_user_turn
             self._expire_handles(state)
-            self._expire_file_results(state)
             return self._context(session_id, semantic_input, state)
 
     def context(self, execution_lifetime_id: str) -> LogicalExecutionContext:
@@ -611,7 +614,6 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.setdefault(session_id, _SessionState())
             if state.retired:
                 raise RuntimeError("logical execution session is retired")
-            self._expire_file_results(state)
             previous = state.projection
             if normalized_projection != previous:
                 state.context_epoch += 1
@@ -677,7 +679,6 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.setdefault(session_id, _SessionState())
             if state.retired:
                 raise RuntimeError("logical execution session is retired")
-            self._expire_file_results(state)
             self._apply_delivery(state, dict(delivery), replace_existing=False)
             return self._context(session_id, "", state)
 
@@ -783,7 +784,6 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.get(execution_lifetime_id)
             if state is None or state.retired:
                 return None
-            self._expire_file_results(state)
             active = {
                 result_id: lease
                 for result_id, lease in state.file_results.items()
@@ -1072,7 +1072,6 @@ class InMemoryLogicalExecutionState:
             restored[normalized_session_id] = state
         for state in restored.values():
             self._expire_handles(state)
-            self._expire_file_results(state)
         return restored
 
     def install_prepared_state(self, prepared: dict[str, _SessionState]) -> None:
@@ -1197,14 +1196,6 @@ class InMemoryLogicalExecutionState:
                 state.current_user_turn < snapshot.expires_at_user_turn
                 and snapshot.replay_result_ref not in expired
             )
-        }
-
-    @staticmethod
-    def _expire_file_results(state: _SessionState) -> None:
-        state.file_results = {
-            result_id: lease
-            for result_id, lease in state.file_results.items()
-            if state.current_user_turn < lease.expires_at_user_turn
         }
 
     @staticmethod

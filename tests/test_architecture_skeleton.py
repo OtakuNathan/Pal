@@ -3254,8 +3254,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             if message.role.value == "tool"
         )
         self.assertEqual(closed_call.tool_calls[0].args["value"], "first turn")
-        self.assertIn("full result retired", closed_result.text)
-        self.assertNotIn("stable-result", closed_result.text)
+        self.assertIn("stable-result", closed_result.text)
+        self.assertNotIn("full result retired", closed_result.text)
         self.assertNotIn("ephemeral provider reasoning", closed_call.reasoning_text)
         self.assertNotIn(
             "ephemeral provider reasoning",
@@ -3920,59 +3920,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(preflight_requests[-1].request.model_hint, "fallback-small-model")
         self.assertTrue(memory_service.l1_store.items)
 
-    def test_memory_prompt_clears_old_tool_protocol_by_complete_turns(self) -> None:
-        from pal.memory.prompt import _build_cleared_tool_indices
-
-        messages = [
-            L1TranscriptMessage(role="user", content="turn 1"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
-            L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
-            L1TranscriptMessage(role="tool", content="tool-2", tool_call_id="call_2"),
-            L1TranscriptMessage(role="user", content="turn 2"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_3"}]),
-            L1TranscriptMessage(role="tool", content="tool-3", tool_call_id="call_3"),
-        ]
-
-        cleared = _build_cleared_tool_indices(messages, keep_recent=1)
-
-        self.assertEqual(cleared, {1, 2, 3, 4})
-
-    def test_memory_prompt_retention_counts_tool_turns_not_tool_batches(self) -> None:
-        from pal.memory.prompt import _build_cleared_tool_indices
-
-        messages = [
-            L1TranscriptMessage(role="user", content="turn 1"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
-            L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
-            L1TranscriptMessage(role="tool", content="tool-2", tool_call_id="call_2"),
-            L1TranscriptMessage(role="user", content="turn 2"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_3"}]),
-            L1TranscriptMessage(role="tool", content="tool-3", tool_call_id="call_3"),
-        ]
-
-        cleared = _build_cleared_tool_indices(messages, keep_recent=2)
-
-        self.assertEqual(cleared, set())
-
-    def test_memory_prompt_does_not_partially_clear_single_tool_heavy_turn(self) -> None:
-        from pal.memory.prompt import _build_cleared_tool_indices
-
-        messages = [
-            L1TranscriptMessage(role="user", content="single turn"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
-            L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
-            L1TranscriptMessage(role="tool", content="tool-2", tool_call_id="call_2"),
-            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_3"}]),
-            L1TranscriptMessage(role="tool", content="tool-3", tool_call_id="call_3"),
-        ]
-
-        cleared = _build_cleared_tool_indices(messages, keep_recent=1)
-
-        self.assertEqual(cleared, set())
-
     def test_l1_transcript_preserves_empty_assistant_tool_call_headers(self) -> None:
         service = MemoryService()
 
@@ -4138,8 +4085,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(protocol_messages[0].tool_calls)
         self.assertFalse(protocol_messages[0].replay)
         self.assertIn("probe_tool", protocol_messages[0].text)
-        self.assertNotIn("probe result", protocol_messages[0].text)
-        self.assertIn("full result retired", protocol_messages[0].text)
+        self.assertIn("probe result", protocol_messages[0].text)
+        self.assertNotIn("full result retired", protocol_messages[0].text)
         self.assertNotIn("inspect the probe", protocol_messages[0].text)
 
     def test_memory_prompt_trusts_orphan_tool_result_history_without_revalidating(self) -> None:
@@ -4391,6 +4338,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("result-specific recovery affordances", tool_routing.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
         self.assertIn("never blindly retry a mutation", tool_routing.content)
+        self.assertIn("point-in-time observations", tool_routing.content)
+        self.assertIn("Replaying a stored result does not refresh", tool_routing.content)
+        self.assertIn("digest-based read-before-edit", tool_routing.content)
         self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)

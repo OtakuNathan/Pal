@@ -118,6 +118,8 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("result-specific recovery affordances", routing.content)
         self.assertIn("suggested next tool only when", routing.content)
         self.assertIn("never blindly retry a mutation", routing.content)
+        self.assertIn("point-in-time observations", routing.content)
+        self.assertIn("Replaying a stored result does not refresh", routing.content)
 
     def test_minion_role_timeout_is_forwarded_to_the_host_llm_request(self) -> None:
         pack = MinionInvocationPack(
@@ -227,7 +229,89 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             ],
         )
 
-    def test_minion_settlement_retires_result_owned_authority(self) -> None:
+    def test_minion_prompt_reconciles_settled_and_active_tool_results_together(
+        self,
+    ) -> None:
+        service, _provider = self._memory_service()
+        prior_turn_id = "memory-run:invocation:prior"
+        current_turn_id = "memory-run:invocation:current"
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "README.md"},
+            call_id="prior-read",
+        )
+        service.begin_l1_turn(prior_turn_id, user_text="read the file")
+        service.upsert_l1_assistant(
+            prior_turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            prior_turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="settled file evidence",
+            ),
+        )
+        service.settle_l1_turn(prior_turn_id)
+        service.begin_l1_turn(current_turn_id, user_text="continue")
+        context = MainContext(
+            execution_runtime=ExecutionRuntime(),
+            port_registry={"memory:memory": service},
+        )
+        executor = self._turn_executor(
+            context,
+            canonical_prompt=lambda *_args, **_kwargs: LLMRequestIR(
+                messages=(
+                    LLMMessageIR(
+                        role=MessageRole.SYSTEM,
+                        parts=(TextPartIR("stable minion contract"),),
+                    ),
+                ),
+                tools=(),
+                policy=GenerationPolicyIR(max_output_tokens=256),
+            ),
+        )
+        reconciliations: list[dict[str, object]] = []
+        executor._reconcile_projected_tool_context = (
+            lambda _continuation, **kwargs: reconciliations.append(kwargs)
+        )
+        continuation = SimpleNamespace(
+            turn_id=current_turn_id,
+            preferred_llm_endpoint_id=None,
+            preferred_llm_model_id=None,
+            turn_settings_snapshot={},
+            tool_observations=[],
+            finalization_only=False,
+        )
+
+        executor.build_turn_prompt(
+            continuation,
+            _minion_prompt_context(
+                self._runner().pack,
+                run_id="memory-run",
+                metadata={},
+            ),
+            max_output_tokens=256,
+        )
+
+        self.assertEqual(len(reconciliations), 1)
+        original_results = [
+            part.call_id
+            for message in reconciliations[0]["original_messages"]
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        ]
+        projected_results = [
+            part.call_id
+            for message in reconciliations[0]["projected_messages"]
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        ]
+        self.assertEqual(original_results, ["prior-read"])
+        self.assertEqual(projected_results, ["prior-read"])
+
+    def test_minion_settlement_preserves_result_owned_authority(self) -> None:
         base_runtime = ExecutionRuntime()
         retired: list[dict[str, object]] = []
 
@@ -275,10 +359,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            retired,
-            [{"turn_id": turn_id, "result_ids": ("read-1",)}],
-        )
+        self.assertEqual(retired, [])
         settled = service.l1_store.turns.get(turn_id)
         self.assertEqual(str(settled.state), "settled")
         results = [
@@ -288,9 +369,10 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         ]
         self.assertEqual(len(results), 1)
-        self.assertTrue(results[0].retired)
+        self.assertFalse(results[0].retired)
+        self.assertEqual(results[0].content, "file contents")
 
-    def test_minion_recovery_aborts_stale_turn_and_retires_its_authority(self) -> None:
+    def test_minion_recovery_aborts_stale_turn_but_preserves_its_result(self) -> None:
         base_runtime = ExecutionRuntime()
         retired: list[dict[str, object]] = []
 
@@ -329,46 +411,16 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             execution_runtime=scoped_runtime,
         )
 
-        self.assertEqual(
-            retired,
-            [{"turn_id": stale_turn_id, "result_ids": ("stale-read",)}],
-        )
+        self.assertEqual(retired, [])
         self.assertEqual(str(service.l1_store.turns.get(stale_turn_id).state), "aborted")
+        stale_result = next(
+            part
+            for message in service.l1_store.turns.get(stale_turn_id).messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        )
+        self.assertEqual(stale_result.content, "stale contents")
         self.assertIsNotNone(service.active_l1_turn(active_turn_id))
-
-    def test_minion_checkpoint_reconciles_legacy_closed_result_authority(self) -> None:
-        service, _provider = self._memory_service()
-        turn_id = "memory-run:invocation:closed"
-        call = new_tool_call(
-            name="read_file",
-            args={"file_path": "README.md"},
-            call_id="closed-read",
-        )
-        service.begin_l1_turn(turn_id, user_text="read the file")
-        service.upsert_l1_assistant(
-            turn_id,
-            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
-        )
-        service.append_l1_tool_result(
-            turn_id,
-            ToolResultIR(
-                call_id=call.call_id,
-                name=call.name,
-                content="legacy restored contents",
-            ),
-        )
-        service.settle_l1_turn(turn_id)
-        retired: list[dict[str, object]] = []
-        runtime = SimpleNamespace(
-            retire_tool_results=lambda **kwargs: retired.append(dict(kwargs))
-        )
-
-        MinionRunner._retire_closed_l1_result_authority(service, runtime)
-
-        self.assertEqual(
-            retired,
-            [{"turn_id": turn_id, "result_ids": ("closed-read",)}],
-        )
 
     def test_minion_pager_retention_advances_by_tool_call(self) -> None:
         base_runtime = ExecutionRuntime()
@@ -423,7 +475,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             "expired_handle",
         )
 
-    def test_minion_renders_closed_tool_protocol_without_retired_result_body(self) -> None:
+    def test_minion_renders_closed_tool_protocol_with_result_body(self) -> None:
         service, _provider = self._memory_service()
         service.commit_l1(
             MemoryCommitRequest(
@@ -470,8 +522,8 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered.count("calling read_file"), 1)
-        self.assertNotIn("README contents", rendered)
-        self.assertEqual(rendered.count("full result retired"), 1)
+        self.assertEqual(rendered.count("README contents"), 1)
+        self.assertNotIn("full result retired", rendered)
 
     def test_active_input_is_filtered_from_l1_prompt_projection_only(self) -> None:
         service, _provider = self._memory_service()

@@ -8,9 +8,6 @@ from pal.memory.compact import strip_persistent_system_reminders
 from pal.memory.contracts import MemoryPack
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
-_LEGACY_KEEP_RECENT_TOOL_MESSAGES = 5
-
-
 @dataclass
 class MemoryPromptFragmentProvider(PromptFragmentProvider):
     provider_id: str = "memory.prompt.default"
@@ -36,11 +33,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 for message in list(pack.l1_recent_context)
                 if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
             ]
-        cleared_indices = _build_cleared_tool_indices(
-            messages,
-            keep_recent=_LEGACY_KEEP_RECENT_TOOL_MESSAGES,
-        )
-
         block_index = 0
         i = 0
         while i < len(messages):
@@ -56,16 +48,11 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 while end < len(messages) and str(messages[end].role or "").strip() == "tool":
                     end += 1
                 group = messages[i:end]
-                cleared = any(index in cleared_indices for index in range(i, end))
                 fragments.append(
                     PromptFragment(
                         section="memory",
                         title="Recent Context",
-                        content=(
-                            "[old tool interaction cleared]"
-                            if cleared
-                            else _render_closed_tool_interaction(group)
-                        ),
+                        content=_render_closed_tool_interaction(group),
                         priority=40 + block_index,
                         metadata={
                             "block_id": f"l1_recent_context_{block_index}",
@@ -83,11 +70,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     PromptFragment(
                         section="memory",
                         title="Recent Context",
-                        content=(
-                            "[old tool result cleared]"
-                            if i in cleared_indices
-                            else _render_orphaned_tool_result(message)
-                        ),
+                        content=_render_orphaned_tool_result(message),
                         priority=40 + block_index,
                         metadata={
                             "block_id": f"l1_recent_context_{block_index}",
@@ -233,58 +216,6 @@ def _is_synthetic_compaction_summary(message, *summary_texts: str) -> bool:
         return False
     content = str(getattr(message, "content", "") or "").strip()
     return content in candidates
-
-
-def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:
-    turns = _build_l1_turn_tool_groups(messages)
-    keep_turns = max(1, int(keep_recent or 0))
-    tool_turns = [groups for groups in turns if groups]
-    if len(tool_turns) <= keep_turns:
-        return set()
-
-    cleared: set[int] = set()
-    turns_to_clear = len(tool_turns) - keep_turns
-    cleared_turns = 0
-    for groups in turns:
-        if not groups:
-            continue
-        if cleared_turns >= turns_to_clear:
-            break
-        for group in groups:
-            cleared.update(group)
-        cleared_turns += 1
-    return cleared
-
-
-def _build_l1_turn_tool_groups(messages: list) -> list[list[list[int]]]:
-    turns: list[list[list[int]]] = []
-    current: list[list[int]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        role = str(message.role or "").strip()
-        if role == "user" and (current or not turns):
-            if current:
-                turns.append(current)
-            current = []
-            index += 1
-            continue
-        tool_calls = getattr(message, "tool_calls", None)
-        if role == "assistant" and tool_calls:
-            group = [index]
-            cursor = index + 1
-            while cursor < len(messages) and str(messages[cursor].role or "").strip() == "tool":
-                group.append(cursor)
-                cursor += 1
-            current.append(group)
-            index = cursor
-            continue
-        if role == "tool":
-            current.append([index])
-        index += 1
-    if current or not turns:
-        turns.append(current)
-    return turns
 
 
 def _render_memory_entry_lines(entries) -> list[str]:
