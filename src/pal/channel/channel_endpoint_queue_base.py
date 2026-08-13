@@ -53,6 +53,7 @@ class ChannelEndpointQueueBase(ABC):
     _interactive_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
     _interactive_default_ttl_seconds: float = 60.0
     _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
+    _reported_reply_failures: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     @abstractmethod
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
@@ -439,22 +440,28 @@ class ChannelEndpointQueueBase(ABC):
             return EventKind.SLASH_COMMAND
         return event_kind
 
-    def queue_reply(self, text: str, *, response_handle: ResponseHandle | None = None) -> str:
+    def queue_reply(
+        self,
+        text: str,
+        *,
+        response_handle: ResponseHandle | None = None,
+        reply_id: str | None = None,
+    ) -> str:
         handle = response_handle or self.build_response_handle()
-        reply_id = str(uuid4())
+        resolved_reply_id = str(reply_id or uuid4())
         prepared = self.prepare_final_reply(handle, text)
         if prepared is None:
-            return reply_id
+            return resolved_reply_id
         self.outbox.append(
             QueuedReply(
-                reply_id=reply_id,
+                reply_id=resolved_reply_id,
                 response_handle=handle,
                 endpoint=self.endpoint,
                 text=prepared,
             )
         )
         self._notify_ready()
-        return reply_id
+        return resolved_reply_id
 
     def queue_stream_update(
         self,
@@ -543,6 +550,7 @@ class ChannelEndpointQueueBase(ABC):
         emitted: list[EventEnvelope] = []
         for item in pending:
             if not self.attached or not self.enabled:
+                reason = "endpoint_unavailable"
                 self.outbox.append(
                     QueuedReply(
                         reply_id=item.reply_id,
@@ -552,17 +560,9 @@ class ChannelEndpointQueueBase(ABC):
                         attempts=item.attempts + 1,
                     )
                 )
-                emitted.append(
-                    EventEnvelope(
-                        event_kind=EventKind.REPLY_FAILED,
-                        source_kind=SourceKind.CHANNEL,
-                        payload={
-                            "reply_id": item.reply_id,
-                            "endpoint_id": self.endpoint.endpoint_id,
-                            "reason": "endpoint_unavailable",
-                        },
-                    )
-                )
+                failure = self._reply_failure_event_once(item, reason, permanent=False)
+                if failure is not None:
+                    emitted.append(failure)
                 continue
             try:
                 self.send_reply(item.response_handle, item.text)
@@ -579,21 +579,12 @@ class ChannelEndpointQueueBase(ABC):
                             attempts=item.attempts + 1,
                         )
                     )
-                emitted.append(
-                    EventEnvelope(
-                        event_kind=EventKind.REPLY_FAILED,
-                        source_kind=SourceKind.CHANNEL,
-                        payload={
-                            "reply_id": item.reply_id,
-                            "endpoint_id": self.endpoint.endpoint_id,
-                            "reason": str(exc),
-                            "permanent": permanent,
-                            "attempts": item.attempts + 1,
-                        },
-                    )
-                )
+                failure = self._reply_failure_event_once(item, str(exc), permanent=permanent)
+                if failure is not None:
+                    emitted.append(failure)
                 continue
             self.last_delivery_error = ""
+            self._reported_reply_failures.pop(item.reply_id, None)
             emitted.append(
                 EventEnvelope(
                     event_kind=EventKind.REPLY_DELIVERED,
@@ -602,6 +593,32 @@ class ChannelEndpointQueueBase(ABC):
                 )
             )
         return emitted
+
+    def _reply_failure_event_once(
+        self,
+        item: QueuedReply,
+        reason: str,
+        *,
+        permanent: bool,
+    ) -> EventEnvelope | None:
+        normalized_reason = str(reason or "delivery_failed")
+        if self._reported_reply_failures.get(item.reply_id) == normalized_reason:
+            return None
+        if permanent:
+            self._reported_reply_failures.pop(item.reply_id, None)
+        else:
+            self._reported_reply_failures[item.reply_id] = normalized_reason
+        return EventEnvelope(
+            event_kind=EventKind.REPLY_FAILED,
+            source_kind=SourceKind.CHANNEL,
+            payload={
+                "reply_id": item.reply_id,
+                "endpoint_id": self.endpoint.endpoint_id,
+                "reason": normalized_reason,
+                "permanent": permanent,
+                "attempts": item.attempts + 1,
+            },
+        )
 
     def flush_stream_update_outbox(self) -> list[EventEnvelope]:
         if not self.stream_update_outbox:

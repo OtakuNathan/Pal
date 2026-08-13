@@ -8,6 +8,7 @@ from pal.checklist.service import (
     CheckOutcome,
     ChecklistItem,
 )
+from pal.checklist.prompt import ChecklistPromptFragmentProvider
 
 __all__ = [
     "ChecklistService",
@@ -15,5 +16,6 @@ __all__ = [
     "CheckOutcome",
     "ChecklistItem",
     "ChecklistIntrospectionProvider",
+    "ChecklistPromptFragmentProvider",
     "register_with_core",
 ]

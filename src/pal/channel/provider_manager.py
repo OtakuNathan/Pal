@@ -387,9 +387,12 @@ class ChannelEndpointProviderManager:
             return None
         return self.provider_for_endpoint_type(endpoint.endpoint.channel_kind)
 
-    def hydrate_all(self) -> list[str]:
+    def hydrate_all(self, *, exclude_endpoint_ids: set[str] | None = None) -> list[str]:
         hydrated: list[str] = []
+        excluded = set(exclude_endpoint_ids or ())
         for record in self.repository.list_all():
+            if record.endpoint_id in excluded:
+                continue
             if not bool(record.enabled) or record.detached_at is not None:
                 continue
             provider = self.provider_for_endpoint_type(record.channel_kind)
@@ -521,6 +524,7 @@ class ChannelEndpointProviderManager:
         manifests_seen: list[str] = []
         loaded_provider_ids: list[str] = []
         disabled_provider_ids: list[str] = []
+        restored_endpoint_ids: list[str] = []
         try:
             self._clear_runtime_providers()
             primary_dir = self.runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR
@@ -547,6 +551,34 @@ class ChannelEndpointProviderManager:
                         )
             if self.runtime_provider_load_errors:
                 raise RuntimeError("runtime channel provider candidate failed validation")
+            # Reloading a provider generation is an implementation detail, not
+            # an endpoint detach operation.  Recreate every runtime endpoint
+            # that existed before the scan when its provider still exists.
+            # Temporarily publishing the old endpoint lets the new factory
+            # preserve runtime-only state (for example an in-memory Telegram
+            # token) through its normal attach path.
+            for previous_endpoint, was_attached in previous_endpoints:
+                endpoint_id = previous_endpoint.endpoint.endpoint_id
+                provider = self.provider_for_endpoint_type(
+                    previous_endpoint.endpoint.channel_kind
+                )
+                if provider is None:
+                    # A deliberately removed or disabled provider owns the
+                    # topology change; do not resurrect it from the old
+                    # generation.
+                    continue
+                record = self.repository.get(endpoint_id)
+                if record is None or record.detached_at is not None:
+                    continue
+                previous_endpoint.attached = was_attached
+                self.runtime.register_endpoint(previous_endpoint)
+                result = provider.attach_endpoint(endpoint_id, self.context())
+                if result.status != RuntimeStatus.OK:
+                    raise RuntimeError(
+                        f"runtime channel endpoint restore failed: {endpoint_id}: "
+                        f"{result.text or result.status}"
+                    )
+                restored_endpoint_ids.append(endpoint_id)
         except Exception as exc:
             if not self.runtime_provider_load_errors:
                 self.runtime_provider_load_errors.append(f"{exc.__class__.__name__}: {exc}")
@@ -569,6 +601,7 @@ class ChannelEndpointProviderManager:
                 endpoint.attached = attached
                 self.runtime.replace_endpoint(endpoint)
             loaded_provider_ids = []
+            restored_endpoint_ids = []
         self.scan_errors = list(self.runtime_provider_load_errors)
         return {
             "runtime_provider_dirs": [str(path) for path in _runtime_provider_dirs(self.runtime_root)],
@@ -576,6 +609,7 @@ class ChannelEndpointProviderManager:
             "runtime_provider_ids": sorted(self.runtime_provider_ids),
             "loaded_runtime_provider_ids": sorted(dict.fromkeys(loaded_provider_ids)),
             "disabled_runtime_provider_ids": sorted(dict.fromkeys(disabled_provider_ids)),
+            "restored_runtime_endpoint_ids": sorted(dict.fromkeys(restored_endpoint_ids)),
             "runtime_provider_load_errors": list(self.runtime_provider_load_errors),
         }
 
@@ -592,7 +626,12 @@ class ChannelEndpointProviderManager:
                 if callable(rescan):
                     plugin_result = dict(rescan())
         runtime_result = self.load_runtime_providers()
-        hydrated = self.hydrate_all() if attach_enabled_endpoints else []
+        restored = set(runtime_result.get("restored_runtime_endpoint_ids") or ())
+        hydrated = (
+            self.hydrate_all(exclude_endpoint_ids=restored)
+            if attach_enabled_endpoints
+            else []
+        )
         after = sorted(self.providers)
         return {
             "providers_before": before,
@@ -602,6 +641,7 @@ class ChannelEndpointProviderManager:
             "provider_count": len(after),
             "endpoint_type_map": dict(sorted(self.endpoint_type_to_provider.items())),
             "hydrated_endpoint_ids": hydrated,
+            "restored_endpoint_ids": sorted(restored),
             "plugin_result": plugin_result,
             "runtime_result": runtime_result,
             "runtime_provider_ids": sorted(self.runtime_provider_ids),

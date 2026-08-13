@@ -859,8 +859,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("Tool boom failed", result.text)
+        self.assertIn("Failure next steps:", result.text)
+        self.assertIn("inspect the returned tagged failure", result.text)
         self.assertEqual(result.structured["kind"], "failed")
         self.assertEqual(result.structured["error_code"], "handler_exception")
+        self.assertEqual(
+            result.structured["details"]["failure_next_steps"],
+            "inspect the returned tagged failure",
+        )
+        self.assertEqual(result.structured["affordances"][0]["tool"], "read_tool")
 
     def test_execution_tools_introspection_includes_description_and_schema(self) -> None:
         core = PalCore()
@@ -2735,6 +2742,40 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(adapter.sent, [("stdio", "world")])
         self.assertEqual([item.event_kind for item in delivered], ["reply.delivered"])
 
+    def test_channel_outbox_reports_missing_endpoint_once_and_delivers_after_restore(self) -> None:
+        channel_runtime = ChannelRuntime()
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(event_kind="user.message", source_kind="channel", payload={"text": "hello"}),
+            endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:1"),
+            response_handle=ResponseHandle(endpoint_id="telegram_main", reply_target={"chat_id": "1"}),
+        )
+        reply_id = channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(envelope, control_scope_key="telegram:1"),
+            "world",
+        )
+
+        channel_runtime.flush_outbox()
+        first = channel_runtime.mailbox.drain()
+        channel_runtime.flush_outbox()
+        second = channel_runtime.mailbox.drain()
+
+        self.assertEqual([event.event_kind for event in first], ["reply.failed"])
+        self.assertEqual(first[0].payload["reply_id"], reply_id)
+        self.assertEqual(second, [])
+        self.assertEqual(len(channel_runtime.outbox), 1)
+
+        endpoint = StubEndpoint(endpoint=envelope.endpoint)
+        channel_runtime.register_endpoint(endpoint)
+        channel_runtime.flush_outbox()
+        self.assertFalse(channel_runtime.outbox)
+        self.assertEqual(len(endpoint.outbox), 1)
+
+        channel_runtime.flush_outbox()
+        delivered = channel_runtime.mailbox.drain()
+        self.assertEqual(endpoint.sent, [("telegram_main", "world")])
+        self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
+        self.assertEqual(delivered[0].payload["reply_id"], reply_id)
+
     def test_channel_endpoint_queue_base_handles_pairing_mailbox_and_outbox(self) -> None:
         endpoint = StubEndpoint(
             endpoint=EndpointConfig(
@@ -2768,6 +2809,29 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         events = endpoint.flush_outbox()
         self.assertEqual(endpoint.sent, [("telegram_main", "world")])
         self.assertEqual([item.event_kind for item in events], ["reply.delivered"])
+
+    def test_channel_endpoint_queue_reports_same_transient_failure_once(self) -> None:
+        endpoint = StubEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:1",
+            )
+        )
+        endpoint.disable()
+        endpoint.queue_reply("world")
+
+        first = endpoint.flush_outbox()
+        second = endpoint.flush_outbox()
+
+        self.assertEqual([event.event_kind for event in first], ["reply.failed"])
+        self.assertEqual(second, [])
+        self.assertEqual(len(endpoint.outbox), 1)
+
+        endpoint.enable()
+        delivered = endpoint.flush_outbox()
+        self.assertEqual(endpoint.sent, [("telegram_main", "world")])
+        self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
 
     def test_channel_endpoint_capabilities_cover_auth_health_and_backlog_without_attach(self) -> None:
         runtime_root, database = self._create_database()

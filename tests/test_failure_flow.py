@@ -173,6 +173,33 @@ class FailureFlowTests(unittest.TestCase):
 
         self.assertEqual(len(core.calls), 1)
 
+    def test_duplicate_delivery_failures_share_one_failure_flow(self) -> None:
+        core = _RecordingFailureCore()
+        handler = FailureEventHandler(core=core, duplicate_window_seconds=60.0)
+        event = EventEnvelope(
+            event_kind=EventKind.REPLY_FAILED,
+            source_kind=SourceKind.CHANNEL,
+            payload={
+                "reply_id": "reply-1",
+                "endpoint_id": "tg-1",
+                "reason": "adapter_unavailable",
+            },
+        )
+
+        asyncio.run(handler.handle(event, context=None))
+        asyncio.run(
+            handler.handle(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_FAILED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={**event.payload, "reply_id": "reply-2"},
+                ),
+                context=None,
+            )
+        )
+
+        self.assertEqual(len(core.calls), 1)
+
     def test_failure_flow_llm_exception_returns_failed_verification(self) -> None:
         core = PalCore()
         register_core_with_core(core)

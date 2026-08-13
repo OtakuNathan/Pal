@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 from pal.core.events import EventHandler
 from pal.failure.contracts import FailureSignal
@@ -11,6 +12,12 @@ from pal.shared import EventKind
 @dataclass(frozen=True)
 class FailureEventHandler(EventHandler):
     core: "PalCore"
+    duplicate_window_seconds: float = 60.0
+    _recent_delivery_failures: dict[tuple[str, str], float] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def can_handle(self, event_kind: str) -> bool:
         return event_kind == EventKind.REPLY_FAILED
@@ -19,6 +26,8 @@ class FailureEventHandler(EventHandler):
         _ = context
         payload = event.payload if isinstance(event.payload, dict) else {}
         if _is_ephemeral_delivery_failure(payload):
+            return []
+        if self._is_duplicate_delivery_failure(payload):
             return []
         await self.core.handle_failure_async(
             FailureSignal(
@@ -39,6 +48,25 @@ class FailureEventHandler(EventHandler):
             conversation_context={"event_id": event.event_id},
         )
         return []
+
+    def _is_duplicate_delivery_failure(self, payload: dict) -> bool:
+        endpoint_id = str(payload.get("endpoint_id") or "channel_endpoint").strip().lower()
+        reason = str(payload.get("reason") or "reply delivery failed").strip().lower()
+        signature = (endpoint_id, reason)
+        now = time.monotonic()
+        cutoff = now - max(float(self.duplicate_window_seconds), 0.0)
+        stale_signatures = [
+            key
+            for key, seen_at in self._recent_delivery_failures.items()
+            if seen_at < cutoff
+        ]
+        for key in stale_signatures:
+            self._recent_delivery_failures.pop(key, None)
+        seen_at = self._recent_delivery_failures.get(signature)
+        if seen_at is not None and seen_at >= cutoff:
+            return True
+        self._recent_delivery_failures[signature] = now
+        return False
 
 
 def _is_ephemeral_delivery_failure(payload: dict) -> bool:

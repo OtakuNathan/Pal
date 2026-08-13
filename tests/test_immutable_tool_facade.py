@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import Field
 
 from pal.core import PalCore as _PalCoreBootstrap
-from pal.execution.contracts import ToolCallBudget
+from pal.execution.contracts import CapabilityResult, ToolCallBudget
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
     CompleteResult,
@@ -31,7 +31,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
 )
-from pal.shared import SINGLETON_TARGET
+from pal.shared import RuntimeStatus, SINGLETON_TARGET
 from tests.capability_fixture import (
     build_test_capability_handle,
     mount_test_capability,
@@ -343,6 +343,30 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(bad_output, FailedResult)
         self.assertEqual(bad_output.error_code, "output_validation_failed")
         self.assertEqual(calls, 1)
+
+    async def test_capability_failure_repeats_failure_guidance_and_recovery_affordance(self) -> None:
+        def blocked(_value: EchoInput) -> CapabilityResult:
+            return CapabilityResult(
+                status=RuntimeStatus.ERROR,
+                text="echo backend unavailable",
+                llm_text="echo backend unavailable",
+                structured={"error_code": "backend_unavailable"},
+            )
+
+        mount_test_capability(
+            self.runtime,
+            **_echo_kwargs(handler=blocked),
+        )
+
+        result = self.runtime.invoke_indirect_tool(
+            new_tool_call(name="echo", args={"value": "x"})
+        )
+
+        self.assertIsInstance(result, FailedResult)
+        self.assertIn("Failure next steps: correct the input before retrying", result.llm_text)
+        self.assertEqual(result.details["failure_next_steps"], "correct the input before retrying")
+        self.assertEqual(result.affordances[0].tool, "read_tool")
+        self.assertEqual(result.affordances[0].arguments, {"name": "echo"})
 
     async def test_paging_happens_after_complete_output_validation(self) -> None:
         mount_test_capability(

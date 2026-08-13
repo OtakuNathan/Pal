@@ -2013,6 +2013,39 @@ class PalV2BootstrapTests(unittest.TestCase):
             "websocket_bridge",
         )
 
+    def test_channel_provider_rescan_restores_running_endpoints_without_attach_flag(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        ChannelEndpointRepository().upsert(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:123",
+            enabled=True,
+            supports_typing=True,
+            supports_receipt_marker=True,
+            binding_metadata={},
+            send_policy_blob={},
+        )
+        handle = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        old_endpoint = handle.channel_runtime.get_endpoint("telegram_main")
+        self.assertIsNotNone(old_endpoint)
+        old_endpoint.bot_token = "runtime-only-token"
+
+        result = handle.core.context.execution_runtime.execute(
+            CapabilityCall(name="channel_provider_rescan")
+        )
+
+        self.assertEqual(result.status, "ok")
+        endpoint = handle.channel_runtime.get_endpoint("telegram_main")
+        self.assertIsNotNone(endpoint)
+        self.assertIsNot(endpoint, old_endpoint)
+        self.assertTrue(endpoint.attached)
+        self.assertEqual(endpoint.bot_token, "runtime-only-token")
+        self.assertIn("telegram_main", result.structured["restored_endpoint_ids"])
+
     def test_compose_runtime_loads_runtime_root_channel_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
         self._write_demo_runtime_channel_provider()

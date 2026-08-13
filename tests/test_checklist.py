@@ -5,10 +5,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.checklist.capabilities import ChecklistIntrospectionProvider
+from pal.checklist.capabilities import (
+    ChecklistIntrospectionProvider,
+    register_with_core as register_checklist_with_core,
+)
+from pal.checklist.prompt import ChecklistPromptFragmentProvider
 from pal.checklist.service import ChecklistService
+from pal.core import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import MailboxReplyEffect, MailboxReplyStreamUpdateEffect, TurnContinuation, channel_turn_program
+from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import CapabilityCall
 from pal.foundation import EventEnvelope
 from pal.shared import (
@@ -16,6 +23,7 @@ from pal.shared import (
     ChannelStreamUpdateKind,
     EndpointConfig,
     EventKind,
+    PromptAssemblyContext,
     ResponseHandle,
     RuntimeStatus,
     SourceKind,
@@ -186,6 +194,80 @@ class TestChecklistCapabilities:
         cleared = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
         assert cleared.status == RuntimeStatus.OK
         assert cleared.structured == {"cleared": True}
+
+
+class TestChecklistPrompt:
+    def test_task_flow_matches_checklist_lifecycle_guidance(self):
+        provider = ChecklistPromptFragmentProvider(service=ChecklistService())
+
+        fragments = provider.build_prompt_fragments(PromptAssemblyContext())
+
+        assert len(fragments) == 1
+        task_flow = fragments[0]
+        assert task_flow.section == "task_flow"
+        assert "requires doing or changing things" in task_flow.content
+        assert "meaningful side effects" in task_flow.content
+        assert "checklist_upsert" in task_flow.content
+        assert "checklist_check" in task_flow.content
+        assert "checklist_clear" in task_flow.content
+        assert "simple answer" in task_flow.content
+        assert "never authority or evidence" in task_flow.content
+
+    def test_active_checklist_is_projected_only_in_runtime_reminder_tail(self):
+        service = ChecklistService()
+        service.upsert(
+            [
+                {"step": "inspect the current state", "status": "completed"},
+                {"step": "apply <the change>"},
+            ]
+        )
+        provider = ChecklistPromptFragmentProvider(service=service)
+
+        fragments = provider.build_prompt_fragments(PromptAssemblyContext())
+
+        assert len(fragments) == 2
+        reminder = fragments[1]
+        assert reminder.metadata["prompt_target"] == "runtime_reminder"
+        assert reminder.metadata["block_id"] == "checklist_state"
+        assert "Checklist progress 1/2" in reminder.content
+        assert "✅ inspect the current state" in reminder.content
+        assert "⬜ apply &lt;the change&gt;" in reminder.content
+        assert "⬜ apply <the change>" not in reminder.content
+        assert 'authority="execution_cursor"' in reminder.content
+        assert 'trusted_as_evidence="false"' in reminder.content
+
+    def test_clear_retires_checklist_from_next_prompt_tail(self):
+        core = PalCore()
+        register_core_with_core(core)
+        service = ChecklistService()
+        handle = register_checklist_with_core(core.context, service)
+        service.upsert([{"step": "do the work"}])
+
+        active_prompt = core.build_canonical_prompt(PromptAssemblyContext())
+
+        assert handle.prompt_fragment_providers
+        assert "<task_flow>" in str(active_prompt.messages[0].text)
+        assert active_prompt.metadata["reminder_sections"] == ("checklist_state",)
+        assert "Checklist progress 0/1" in active_prompt.metadata["runtime_reminder_text"]
+
+        service.clear()
+        retired_prompt = core.build_canonical_prompt(PromptAssemblyContext())
+
+        assert retired_prompt.metadata["reminder_sections"] == ()
+        assert retired_prompt.metadata["runtime_reminder_text"] == ""
+
+    def test_progress_and_retirement_tools_are_direct_but_show_stays_indirect(self):
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_checklist_with_core(core.context, ChecklistService())
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("checklist")
+
+        generation = core.context.execution_runtime.registry_generation
+
+        for alias in ("checklist_upsert", "checklist_check", "checklist_clear"):
+            assert alias in generation.direct_aliases
+        assert "checklist_show" in generation.indirect_aliases
 
 
 class TestToolEchoFanOut:

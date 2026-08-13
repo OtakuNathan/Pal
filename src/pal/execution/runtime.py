@@ -1269,13 +1269,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     if receipt is not None
                     else EffectOutcome.UNKNOWN
                 )
+                details = dict(raw_structured or {})
+                details.setdefault(
+                    "failure_next_steps",
+                    record.guidance.failure_next_steps.strip(),
+                )
                 return FailedResult(
                     error_code=str((raw_structured or {}).get("error_code") or raw_status or "handler_failed"),
                     error=raw_text or llm_text,
                     effect=outcome,
                     retry=derive_retry_directive(record.execution, outcome),
-                    llm_text=llm_text or raw_text,
-                    details=dict(raw_structured or {}),
+                    llm_text=self._append_failure_guidance(record, llm_text or raw_text),
+                    affordances=self._default_failure_affordances(record),
+                    details=details,
                 )
             candidate = raw_structured if raw_structured is not None else {"text": raw_text}
             if record.is_mcp and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict):
@@ -1448,6 +1454,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
 
     @staticmethod
+    def _append_failure_guidance(record: CompiledToolRecord, text: str) -> str:
+        base = str(text or "").strip()
+        guidance = record.guidance.failure_next_steps.strip()
+        if not guidance or guidance.lower() in base.lower():
+            return base
+        return f"{base}\nFailure next steps: {guidance}" if base else f"Failure next steps: {guidance}"
+
+    @staticmethod
+    def _default_failure_affordances(record: CompiledToolRecord) -> list[ToolAffordance]:
+        return [
+            ToolAffordance(
+                tool="read_tool",
+                arguments={"name": record.alias},
+                reason=(
+                    "Review this tool's failure contract and retry semantics before choosing "
+                    "a recovery action."
+                ),
+            )
+        ]
+
+    @staticmethod
     def _handler_exception_result(record: CompiledToolRecord, exc: Exception) -> FailedResult:
         receipt = getattr(exc, "effect_receipt", None)
         if record.execution.effect_kind is EffectKind.NONE:
@@ -1458,24 +1485,20 @@ class ExecutionRuntime(ExecutionRuntimePort):
             outcome = EffectOutcome.UNKNOWN
         affordances = list(getattr(exc, "affordances", ()) or ())
         if not affordances:
-            affordances = [
-                ToolAffordance(
-                    tool="read_tool",
-                    arguments={"name": record.alias},
-                    reason=(
-                        "Review failure and retry semantics before recovering; reconcile the external effect first "
-                        "when effect=unknown."
-                    ),
-                )
-            ]
+            affordances = ExecutionRuntime._default_failure_affordances(record)
+        details = dict(getattr(exc, "details", {}) or {})
+        details.setdefault("failure_next_steps", record.guidance.failure_next_steps.strip())
         return FailedResult(
             error_code=str(getattr(exc, "error_code", "handler_exception") or "handler_exception"),
             error=f"{exc.__class__.__name__}: {exc}",
             effect=outcome,
             retry=derive_retry_directive(record.execution, outcome),
-            llm_text=f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
+            llm_text=ExecutionRuntime._append_failure_guidance(
+                record,
+                f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
+            ),
             affordances=affordances,
-            details=dict(getattr(exc, "details", {}) or {}),
+            details=details,
         )
 
     @staticmethod

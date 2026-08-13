@@ -137,7 +137,7 @@ class ChecklistIntrospectionProvider:
             ),
         ),
         InputModel=ChecklistCheckInput,
-        execution=INDIRECT_LOCAL_WRITE,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_check"},
         aliases=("checklist_check",),
     )
@@ -235,7 +235,7 @@ class ChecklistIntrospectionProvider:
             do_not_use_when="The task is still in progress. Clearing before the final audit skips the delivery self-check this tool exists to support.",
             failure_next_steps="If no checklist is active, the operation is an idempotent no-op. If the result is uncertain, inspect checklist_show before deciding whether another clear is needed.",
         ),
-        execution=INDIRECT_LOCAL_WRITE,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_clear"},
         aliases=("checklist_clear",),
     )
@@ -284,13 +284,18 @@ class ChecklistIntrospectionProvider:
 
 
 def register_with_core(context: "MainContext", service: ChecklistService) -> ModuleHandle:
+    from pal.checklist.prompt import ChecklistPromptFragmentProvider
+
     provider = ChecklistIntrospectionProvider(service=service)
+    prompt_provider = ChecklistPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="checklist",
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
+        prompt_fragment_providers=[prompt_provider],
         ports={"checklist": service},
     )
     context.register_module(handle)
+    context.prompt_fragment_registry.register(prompt_provider)
     return handle

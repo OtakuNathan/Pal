@@ -69,6 +69,7 @@ class ChannelRuntime(ChannelRuntimePort):
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
     ingress_compiler: ChannelIngressCompiler | None = None
+    _reported_outbox_failures: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
 
@@ -425,8 +426,22 @@ class ChannelRuntime(ChannelRuntimePort):
         pending = list(self.outbox)
         self.outbox.clear()
         for item in pending:
+            endpoint = self.get_endpoint(item.endpoint.endpoint_id)
+            if endpoint is not None:
+                # Replies accepted while a provider generation was between
+                # unload and restore belong to the endpoint queue once it is
+                # available again.  The legacy adapter registry cannot deliver
+                # provider-owned endpoints.
+                endpoint.queue_reply(
+                    item.text,
+                    response_handle=item.response_handle,
+                    reply_id=item.reply_id,
+                )
+                self._reported_outbox_failures.pop(item.reply_id, None)
+                continue
             adapter = self.adapter_registry.get(item.endpoint.channel_kind)
             if adapter is None:
+                reason = "adapter_unavailable"
                 self.outbox.append(
                     QueuedReply(
                         reply_id=item.reply_id,
@@ -436,17 +451,12 @@ class ChannelRuntime(ChannelRuntimePort):
                         attempts=item.attempts + 1,
                     )
                 )
-                self.mailbox.put(
-                    EventEnvelope(
-                        event_kind=EventKind.REPLY_FAILED,
-                        source_kind=SourceKind.CHANNEL,
-                        payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id, "reason": "adapter_unavailable"},
-                    )
-                )
+                self._report_outbox_failure_once(item, reason)
                 continue
             try:
                 adapter.send(item.response_handle, item.text)
             except Exception as exc:
+                reason = str(exc)
                 self.outbox.append(
                     QueuedReply(
                         reply_id=item.reply_id,
@@ -456,14 +466,9 @@ class ChannelRuntime(ChannelRuntimePort):
                         attempts=item.attempts + 1,
                     )
                 )
-                self.mailbox.put(
-                    EventEnvelope(
-                        event_kind=EventKind.REPLY_FAILED,
-                        source_kind=SourceKind.CHANNEL,
-                        payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id, "reason": str(exc)},
-                    )
-                )
+                self._report_outbox_failure_once(item, reason)
                 continue
+            self._reported_outbox_failures.pop(item.reply_id, None)
             self.mailbox.put(
                 EventEnvelope(
                     event_kind=EventKind.REPLY_DELIVERED,
@@ -471,6 +476,24 @@ class ChannelRuntime(ChannelRuntimePort):
                     payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id},
                 )
             )
+
+    def _report_outbox_failure_once(self, item: QueuedReply, reason: str) -> None:
+        normalized_reason = str(reason or "delivery_failed")
+        if self._reported_outbox_failures.get(item.reply_id) == normalized_reason:
+            return
+        self._reported_outbox_failures[item.reply_id] = normalized_reason
+        self.mailbox.put(
+            EventEnvelope(
+                event_kind=EventKind.REPLY_FAILED,
+                source_kind=SourceKind.CHANNEL,
+                payload={
+                    "reply_id": item.reply_id,
+                    "endpoint_id": item.endpoint.endpoint_id,
+                    "reason": normalized_reason,
+                    "attempts": item.attempts + 1,
+                },
+            )
+        )
 
     def _notify_ready(self) -> None:
         if self.on_ready is not None:
