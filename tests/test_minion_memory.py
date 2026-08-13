@@ -373,19 +373,6 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(results[0].content, "file contents")
 
     def test_minion_recovery_aborts_stale_turn_but_preserves_its_result(self) -> None:
-        base_runtime = ExecutionRuntime()
-        retired: list[dict[str, object]] = []
-
-        def record_retirement(**kwargs):
-            retired.append(dict(kwargs))
-            return tuple(kwargs.get("result_ids") or ())
-
-        base_runtime.retire_tool_results = record_retirement
-        scoped_runtime = MinionScopedExecutionRuntime(
-            base_runtime,
-            [],
-            workspace={"run_id": "memory-run"},
-        )
         service, _provider = self._memory_service()
         active_turn_id = "memory-run:invocation:new"
         stale_turn_id = "memory-run:invocation:stale"
@@ -408,10 +395,8 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         MinionRunner._abort_stale_l1_turns(
             service,
             active_turn_id=active_turn_id,
-            execution_runtime=scoped_runtime,
         )
 
-        self.assertEqual(retired, [])
         self.assertEqual(str(service.l1_store.turns.get(stale_turn_id).state), "aborted")
         stale_result = next(
             part

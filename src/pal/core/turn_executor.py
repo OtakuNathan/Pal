@@ -1878,76 +1878,46 @@ class TurnExecutor:
             },
         )
         execution_runtime = getattr(self.context, "execution_runtime", None)
-        retired_result_ids_by_turn: dict[str, tuple[str, ...]] = {}
-        l1_store = getattr(memory_service, "l1_store", None)
-        turns_store = getattr(l1_store, "turns", None)
-        for turn in list(getattr(turns_store, "turns", ()) or ()):
-            result_ids = tuple(
-                part.call_id
-                for message in turn.messages
-                for part in message.parts
-                if isinstance(part, ToolResultIR)
+        def current_l1_result_ids() -> tuple[str, ...]:
+            turns = getattr(
+                getattr(getattr(memory_service, "l1_store", None), "turns", None),
+                "turns",
+                (),
             )
-            if result_ids:
-                retired_result_ids_by_turn[str(turn.turn_id)] = result_ids
+            return tuple(
+                dict.fromkeys(
+                    part.call_id
+                    for turn in list(turns or ())
+                    for message in turn.messages
+                    for part in message.parts
+                    if isinstance(part, ToolResultIR)
+                )
+            )
+
+        result_ids_before_compact = current_l1_result_ids()
 
         after_compact = None
-        if continuation is not None or execution_runtime is not None:
-            def reconcile_compacted_l1() -> None:
-                retire = getattr(
-                    execution_runtime,
-                    "retire_tool_results",
-                    None,
+        retire_tool_results = getattr(
+            execution_runtime,
+            "retire_tool_results",
+            None,
+        )
+        if callable(retire_tool_results) and result_ids_before_compact:
+            def retire_compacted_l1_results() -> None:
+                remaining_ids = set(current_l1_result_ids())
+                removed = tuple(
+                    result_id
+                    for result_id in result_ids_before_compact
+                    if result_id not in remaining_ids
                 )
-                if callable(retire):
-                    remaining_ids = {
-                        part.call_id
-                        for turn in list(
-                            getattr(
-                                getattr(
-                                    getattr(memory_service, "l1_store", None),
-                                    "turns",
-                                    None,
-                                ),
-                                "turns",
-                                (),
-                            )
-                            or ()
-                        )
-                        for message in turn.messages
-                        for part in message.parts
-                        if isinstance(part, ToolResultIR)
-                    }
-                    for turn_id, result_ids in retired_result_ids_by_turn.items():
-                        removed = tuple(
-                            result_id
-                            for result_id in result_ids
-                            if result_id not in remaining_ids
-                        )
-                        if not removed:
-                            continue
-                        retire(
-                            turn_id=turn_id,
-                            result_ids=removed,
-                            execution_lifetime_id=logical_scope_id,
-                        )
-                if continuation is None:
-                    return
-                active_turn = getattr(
-                    memory_service,
-                    "active_l1_turn",
-                    lambda _turn_id: None,
-                )(continuation.turn_id)
-                retained_messages = (
-                    list(active_turn.messages) if active_turn is not None else []
-                )
-                self._reconcile_projected_tool_context(
-                    continuation,
-                    original_messages=retained_messages,
-                    projected_messages=retained_messages,
-                )
+                if removed:
+                    retire_tool_results(
+                        turn_id=None,
+                        result_ids=removed,
+                        execution_lifetime_id=logical_scope_id,
+                    )
 
-            after_compact = reconcile_compacted_l1
+            after_compact = retire_compacted_l1_results
         run_result = await engine.run(
             snapshot,
             llm_runtime=llm_runtime,

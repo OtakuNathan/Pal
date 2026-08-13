@@ -778,7 +778,6 @@ class MinionRunner:
         self._abort_stale_l1_turns(
             state.memory_service,
             active_turn_id=turn_id,
-            execution_runtime=state.execution_runtime,
         )
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
@@ -978,7 +977,6 @@ class MinionRunner:
         memory_service: MemoryService,
         *,
         active_turn_id: str,
-        execution_runtime: Any | None = None,
     ) -> None:
         """Close orphaned active turns left by a failed native worker attempt.
 

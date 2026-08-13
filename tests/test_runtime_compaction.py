@@ -1249,7 +1249,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertNotIn("full result retired", compaction_source)
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
-    def test_compaction_reconciles_result_owners_inside_commit_boundary(self) -> None:
+    def test_compaction_does_not_reproject_retained_active_results(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         service = _memory_with_turns(1)
@@ -1257,25 +1257,72 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         core.context.port_registry["llm:llm"] = _ScriptedLLM(
             [generation_result_from_values(text=_valid_pal_payload())]
         )
-        service.begin_l1_turn("active-result-owner", user_text="continue")
+        turn_id = "active-result-owner"
+        content = "alpha\nbeta"
+        delivery = FileDeliveryManifest(
+            file_key="/workspace/active.txt",
+            digest="digest-active",
+            total_lines=2,
+            spans=(
+                FileDeliverySpan(0, 5, 1, 1, 0, 5, 5),
+                FileDeliverySpan(6, 10, 2, 2, 0, 4, 4),
+            ),
+            complete_file=True,
+        ).to_dict()
+        runtime = core.context.execution_runtime
+        runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key="pal:resident",
+            input_id="active-input",
+        )
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "/workspace/active.txt"},
+            call_id="read-active",
+        )
+        service.begin_l1_turn(turn_id, user_text="continue")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content=content,
+                context_delivery=delivery,
+            ),
+        )
+        runtime.reconcile_tool_context(
+            turn_id=turn_id,
+            original_messages=[
+                {"role": "tool", "tool_call_id": call.call_id, "content": content}
+            ],
+            projected_messages=[
+                {
+                    "role": "tool",
+                    "tool_call_id": call.call_id,
+                    "content": "alpha",
+                    "_pal_visible_source_ranges": [[0, 5]],
+                }
+            ],
+            delivery_records={call.call_id: delivery},
+        )
+        before = runtime.logical_state.file_grant(
+            execution_lifetime_id="pal:resident",
+            file_key="/workspace/active.txt",
+            digest="digest-active",
+        )
+        self.assertIsNotNone(before)
+        self.assertFalse(before.complete)
         continuation = SimpleNamespace(
-            turn_id="active-result-owner",
+            turn_id=turn_id,
             pending_tool_call_batch=[],
             pending_tool_results=[],
             pending_assistant_tool_text="",
             preferred_llm_endpoint_id=None,
             preferred_llm_model_id=None,
-        )
-        reconciliations: list[dict[str, object]] = []
-        original = core.turn_executor._reconcile_projected_tool_context
-        core.turn_executor._reconcile_projected_tool_context = (
-            lambda _continuation, **kwargs: reconciliations.append(kwargs)
-        )
-        self.addCleanup(
-            setattr,
-            core.turn_executor,
-            "_reconcile_projected_tool_context",
-            original,
         )
 
         result = asyncio.run(
@@ -1288,11 +1335,14 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
-        self.assertEqual(len(reconciliations), 1)
-        self.assertEqual(
-            reconciliations[0]["original_messages"],
-            reconciliations[0]["projected_messages"],
+        after = runtime.logical_state.file_grant(
+            execution_lifetime_id="pal:resident",
+            file_key="/workspace/active.txt",
+            digest="digest-active",
         )
+        self.assertIsNotNone(after)
+        self.assertEqual(after.covered_ranges, before.covered_ranges)
+        self.assertFalse(after.complete)
 
     def test_manual_compact_retires_removed_result_authority_by_lifetime(self) -> None:
         core = PalCore()
