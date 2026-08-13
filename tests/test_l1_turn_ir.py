@@ -13,7 +13,7 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, ToolResultLifecycle
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.memory.turn_ir import L1TurnProtocolError, L1TurnState, L1TurnStore
 
 
@@ -65,7 +65,6 @@ class L1TurnIRTests(unittest.TestCase):
                 structured={"full": "payload"},
                 context_delivery={"source": "large.txt"},
                 replay_result_ref="pager-1",
-                visible_source_ranges=((0, 20),),
             )
         )
 
@@ -77,12 +76,10 @@ class L1TurnIRTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         )
 
-        self.assertEqual(result.lifecycle, ToolResultLifecycle.ACTIVE)
         self.assertEqual(result.content, "sensitive full result")
         self.assertEqual(dict(result.structured or {}), {"full": "payload"})
         self.assertEqual(result.replay_result_ref, "pager-1")
         self.assertEqual(dict(result.context_delivery or {}), {"source": "large.txt"})
-        self.assertEqual(result.visible_source_ranges, ((0, 20),))
         self.assertEqual(settled.messages[-1].role, MessageRole.ASSISTANT)
         self.assertEqual(
             settled.messages[-1].semantic_kind,

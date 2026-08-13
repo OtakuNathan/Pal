@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from pal.core import PalCore
 from pal.core.turn_executor import TurnExecutor
+from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.file_edit import FileEditTool
@@ -95,6 +96,23 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
         self.assertNotIn("turn-1", runtime.tool_result_pager._turn_contexts)
         self.assertIn("turn-2", runtime.tool_result_pager._turn_contexts)
+
+    def test_retiring_an_unknown_explicit_lifetime_does_not_create_it(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        runtime = core.context.execution_runtime
+
+        retired = runtime.retire_tool_results(
+            turn_id=None,
+            result_ids=("missing-result",),
+            execution_lifetime_id="missing-lifetime",
+        )
+
+        self.assertEqual(retired, ())
+        self.assertNotIn(
+            "missing-lifetime",
+            runtime.logical_state.snapshot_state()["sessions"],
+        )
 
     def test_pager_retention_is_isolated_per_execution_lifetime(self) -> None:
         pager = ToolResultPagerStore()
@@ -185,7 +203,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertEqual(str(settled.state), "settled")
         self.assertTrue(
             any(
-                isinstance(part, ToolResultIR) and not part.retired
+                isinstance(part, ToolResultIR) and part.content == "full result"
                 for message in settled.messages
                 for part in message.parts
             )
@@ -260,7 +278,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         )
         self.assertEqual(expired.state, "expired_handle")
 
-    def test_result_owned_file_grant_survives_pager_ttl_until_projection_removal(
+    def test_result_owned_file_grant_survives_pager_ttl_until_result_retirement(
         self,
     ) -> None:
         delivery = FileDeliveryManifest(
@@ -289,10 +307,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 digest="digest-a",
             )
         )
-        self.backend.reconcile_projection(
+        self.backend.retire_results(
             execution_lifetime_id="session-a",
-            projection=(),
-            deliveries=(),
+            result_ids=("read-owner",),
         )
         self.assertIsNone(
             self.backend.file_grant(
@@ -391,7 +408,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertEqual(edit.kind, "complete", edit.llm_text)
             self.assertTrue(path.read_text(encoding="utf-8").startswith("omega\n"))
 
-    def test_only_delivered_ranges_authorize_and_new_epoch_starts_empty(
+    def test_delivered_ranges_persist_until_their_result_is_retired(
         self,
     ) -> None:
         self._store_file_result()
@@ -402,10 +419,11 @@ class LogicalExecutionStateTests(unittest.TestCase):
             page_size=256,
             anchor="head",
         )
-        self.backend.reconcile_projection(
+        first_delivery = dict(page.delivery_manifest)
+        first_delivery["result_id"] = "tool-message-a"
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("tool-message-a",),
-            deliveries=(page.delivery_manifest,),
+            delivery=first_delivery,
         )
         grant = self.backend.file_grant(
             execution_lifetime_id="session-a",
@@ -415,13 +433,11 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertIsNotNone(grant)
         self.assertTrue(grant.complete)
 
-        rotated = self.backend.reconcile_projection(
+        self.backend.begin_input(
             execution_lifetime_id="session-a",
-            projection=("replacement-message",),
-            deliveries=(),
+            input_id="assignment-2",
         )
-        self.assertEqual(rotated.context_epoch, 3)
-        self.assertIsNone(
+        self.assertIsNotNone(
             self.backend.file_grant(
                 execution_lifetime_id="session-a",
                 file_key="/workspace/input.txt",
@@ -429,24 +445,16 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
         )
 
-        revealed_again = self.backend.read_pager(
+        self.backend.retire_results(
             execution_lifetime_id="session-a",
-            result_ref="result-1",
-            page=1,
-            page_size=256,
-            anchor="head",
+            result_ids=("tool-message-a",),
         )
-        self.backend.reconcile_projection(
-            execution_lifetime_id="session-a",
-            projection=("replacement-message", "pager-message"),
-            deliveries=(revealed_again.delivery_manifest,),
-        )
-        self.assertTrue(
+        self.assertIsNone(
             self.backend.file_grant(
                 execution_lifetime_id="session-a",
                 file_key="/workspace/input.txt",
                 digest="digest-a",
-            ).complete
+            )
         )
 
     def test_result_retirement_drops_inherited_ranges_with_their_owner(self) -> None:
@@ -630,10 +638,11 @@ class LogicalExecutionStateTests(unittest.TestCase):
             page_size=None,
             anchor="head",
         )
-        self.backend.reconcile_projection(
+        first_delivery = dict(first.delivery_manifest)
+        first_delivery["result_id"] = "page-1"
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("page-1",),
-            deliveries=(first.delivery_manifest,),
+            delivery=first_delivery,
         )
         partial = self.backend.file_grant(
             execution_lifetime_id="session-a",
@@ -650,10 +659,11 @@ class LogicalExecutionStateTests(unittest.TestCase):
             page_size=None,
             anchor="head",
         )
-        self.backend.reconcile_projection(
+        second_delivery = dict(second.delivery_manifest)
+        second_delivery["result_id"] = "page-2"
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("page-1", "page-2"),
-            deliveries=(first.delivery_manifest, second.delivery_manifest),
+            delivery=second_delivery,
         )
         complete = self.backend.file_grant(
             execution_lifetime_id="session-a",
@@ -686,7 +696,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
         )
 
-    def test_projection_revocation_preserves_read_before_mutate_snapshot(
+    def test_result_retirement_preserves_read_before_mutate_snapshot(
         self,
     ) -> None:
         delivery = FileDeliveryManifest(
@@ -704,15 +714,15 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
             ),
         )
-        self.backend.reconcile_projection(
+        delivered = delivery.to_dict()
+        delivered["result_id"] = "visible"
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("visible",),
-            deliveries=(delivery.to_dict(),),
+            delivery=delivered,
         )
-        self.backend.reconcile_projection(
+        self.backend.retire_results(
             execution_lifetime_id="session-a",
-            projection=(),
-            deliveries=(),
+            result_ids=("visible",),
         )
 
         self.assertIsNone(
@@ -746,10 +756,11 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
             ),
         )
-        self.backend.reconcile_projection(
+        delivered = old_delivery.to_dict()
+        delivered["result_id"] = "old-read"
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("old-read",),
-            deliveries=(old_delivery.to_dict(),),
+            delivery=delivered,
         )
         self.backend.set_file_snapshot(
             execution_lifetime_id="session-a",
@@ -760,10 +771,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
             source="mutation",
         )
 
-        self.backend.reconcile_projection(
+        self.backend.record_delivery(
             execution_lifetime_id="session-a",
-            projection=("old-read", "edit-result"),
-            deliveries=(old_delivery.to_dict(),),
+            delivery=delivered,
         )
 
         snapshot = self.backend.file_snapshot(
@@ -806,34 +816,6 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
         )
 
-    def test_minion_scoped_execution_forwards_context_reconciliation(
-        self,
-    ) -> None:
-        base = PalCore().context.execution_runtime
-        calls: list[dict[str, object]] = []
-        base.reconcile_tool_context = lambda **kwargs: calls.append(kwargs) or "ok"
-        scoped = MinionScopedExecutionRuntime(
-            base_runtime=base,
-            allowed_capabilities=[],
-        )
-        self.assertIs(
-            scoped.base_runtime.runtime.tool_result_pager,
-            base.tool_result_pager,
-        )
-        self.assertIs(
-            scoped.base_runtime.runtime.logical_state,
-            base.logical_state,
-        )
-        result = scoped.reconcile_tool_context(
-            turn_id="turn-1",
-            original_messages=[],
-            projected_messages=[],
-            delivery_records={},
-        )
-
-        self.assertEqual(result, "ok")
-        self.assertEqual(calls[0]["turn_id"], "turn-1")
-
     def test_file_mutation_is_authorized_only_after_result_delivery(
         self,
     ) -> None:
@@ -871,16 +853,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertEqual(before_delivery.kind, "failed")
 
-            tool_message = {
-                "role": "tool",
-                "tool_call_id": "read-1",
-                "content": read.llm_text,
-            }
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-1",
-                original_messages=[tool_message],
-                projected_messages=[tool_message],
-                delivery_records={"read-1": dict(read.context_delivery or {})},
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-1",
             )
             after_delivery = runtime.invoke_indirect_tool(
                 new_tool_call(
@@ -924,18 +900,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-partial-edit",
             )
-            tool_message = {
-                "role": "tool",
-                "tool_call_id": "read-partial",
-                "content": read.llm_text,
-            }
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-partial-edit",
-                original_messages=[tool_message],
-                projected_messages=[tool_message],
-                delivery_records={
-                    "read-partial": dict(read.context_delivery or {})
-                },
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-partial",
             )
 
             unseen = runtime.invoke_indirect_tool(
@@ -1064,6 +1032,63 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertEqual(edit.kind, "complete", edit.llm_text)
             self.assertEqual(path.read_text(encoding="utf-8"), "omega\nbeta\n")
 
+    def test_tool_rpc_timeout_is_returned_and_closes_the_pending_call(self) -> None:
+        core = PalCore()
+        memory = MemoryService()
+        register_memory_with_core(core.context, memory)
+        turn_id = "turn-tool-timeout"
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "README.md"},
+            call_id="read-timeout",
+        )
+        memory.begin_l1_turn(turn_id, user_text="read the file")
+        memory.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(call,),
+                semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+            ),
+        )
+
+        async def time_out(*_args, **_kwargs):
+            raise TimeoutError("test deadline")
+
+        original = core.turn_executor._execute_tool_async
+        core.turn_executor._execute_tool_async = time_out
+        continuation = SimpleNamespace(
+            turn_id=turn_id,
+            interrupted=False,
+            interrupt_reason="",
+            waiting_effect_id=None,
+            finalization_only=False,
+            pending_tool_call_batch=[call],
+            pending_tool_results=[],
+            pending_assistant_tool_text="",
+            tool_observations=[],
+            tool_batch_count=0,
+            echoed_keys=set(),
+            delivery_binding=None,
+            channel_stream_active=False,
+        )
+        try:
+            result = asyncio.run(
+                core.turn_executor.execute_turn_effect_async(
+                    continuation,
+                    ToolCallEffect(tool_call=call),
+                )
+            )
+        finally:
+            core.turn_executor._execute_tool_async = original
+
+        self.assertEqual(result.status.value, "error")
+        self.assertEqual(result.payload.call_id, call.call_id)
+        self.assertIn("timed out", result.text)
+        self.assertIn("Inspect the current state", result.text)
+        self.assertFalse(memory.active_l1_turn(turn_id).pending_call_ids)
+        self.assertEqual(continuation.pending_tool_call_batch, [])
+
     def test_failed_cross_module_delivery_rolls_back_l1_and_retires_pager(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
@@ -1173,17 +1198,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-self-mutation",
             )
-            tool_message = {
-                "role": "tool",
-                "tool_call_id": "read-1",
-                "content": read.llm_text,
-            }
-            delivery = {"read-1": dict(read.context_delivery or {})}
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-self-mutation",
-                original_messages=[tool_message],
-                projected_messages=[tool_message],
-                delivery_records=delivery,
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-1",
             )
             first = runtime.invoke_indirect_tool(
                 new_tool_call(
@@ -1202,19 +1220,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
             # Mutation authority advances only when the edit result itself is
             # retained in L1. The historical read remains as the dependency
             # that owns the unchanged post-image range.
-            edit_message = {
-                "role": "tool",
-                "tool_call_id": "edit-1",
-                "content": first.llm_text,
-            }
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-self-mutation",
-                original_messages=[tool_message, edit_message],
-                projected_messages=[tool_message, edit_message],
-                delivery_records={
-                    **delivery,
-                    "edit-1": dict(first.context_delivery or {}),
-                },
+                context_delivery=dict(first.context_delivery or {}),
+                result_id="edit-1",
             )
             second = runtime.invoke_indirect_tool(
                 new_tool_call(
@@ -1232,7 +1241,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertEqual(second.kind, "complete", second.llm_text)
             self.assertEqual(path.read_text(encoding="utf-8"), "omega\ngamma\n")
 
-    def test_context_compaction_rebuilds_only_exact_retained_file_ranges(
+    def test_prompt_projection_preserves_tool_result_and_file_authority(
         self,
     ) -> None:
         core = PalCore()
@@ -1255,25 +1264,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-compact",
             )
-            full_message = {
-                "role": "tool",
-                "tool_call_id": "read-compact",
-                "content": read.llm_text,
-            }
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-compact",
-                original_messages=[full_message],
-                projected_messages=[
-                    {
-                        **full_message,
-                        "_pal_visible_source_ranges": [
-                            [0, len(read.llm_text)]
-                        ],
-                    }
-                ],
-                delivery_records={
-                    "read-compact": dict(read.context_delivery or {})
-                },
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-compact",
             )
             context = runtime.logical_context_for_turn("turn-compact")
             full = runtime.logical_state.file_grant(
@@ -1283,35 +1277,38 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertTrue(full.complete)
 
-            first_span = dict(read.context_delivery or {})["spans"][0]
-            runtime.reconcile_tool_context(
-                turn_id="turn-compact",
-                original_messages=[full_message],
-                projected_messages=[
-                    {
-                        **full_message,
-                        "content": read.llm_text[
-                            : int(first_span["end_offset"])
-                        ],
-                        "_pal_visible_source_ranges": [
-                            [0, int(first_span["end_offset"])]
-                        ],
-                    }
+            projected = core.turn_executor._project_messages_for_prompt(
+                [
+                    LLMMessageIR(
+                        role=MessageRole.TOOL,
+                        parts=(
+                            ToolResultIR(
+                                call_id="read-compact",
+                                name="read_file",
+                                content=read.llm_text,
+                                context_delivery=dict(read.context_delivery or {}),
+                            ),
+                        ),
+                    )
                 ],
-                delivery_records={
-                    "read-compact": dict(read.context_delivery or {})
-                },
+                turn_id="turn-compact",
             )
-            compacted = runtime.logical_state.file_grant(
+            projected_result = next(
+                part
+                for message in projected
+                for part in message.parts
+                if isinstance(part, ToolResultIR)
+            )
+            self.assertEqual(projected_result.content, read.llm_text)
+            retained = runtime.logical_state.file_grant(
                 execution_lifetime_id=context.execution_lifetime_id,
                 file_key=str(path.resolve()),
                 digest=dict(read.context_delivery or {})["digest"],
             )
-            self.assertIsNotNone(compacted)
-            self.assertFalse(compacted.complete)
-            self.assertEqual(compacted.covered_ranges, ((1, 1),))
+            self.assertIsNotNone(retained)
+            self.assertTrue(retained.complete)
 
-    def test_compaction_projection_clears_file_visibility_without_expiring_pager(
+    def test_pager_retirement_does_not_retire_delivered_file_authority(
         self,
     ) -> None:
         core = PalCore()
@@ -1335,20 +1332,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-pager-compact",
             )
-            tool_message = {
-                "role": "tool",
-                "tool_call_id": "read-pager-compact",
-                "content": read.llm_text,
-            }
-            runtime.reconcile_tool_context(
+            runtime.commit_tool_delivery(
                 turn_id="turn-pager-compact",
-                original_messages=[tool_message],
-                projected_messages=[tool_message],
-                delivery_records={
-                    "read-pager-compact": dict(
-                        read.context_delivery or {}
-                    )
-                },
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-pager-compact",
             )
             manifest = runtime.tool_result_pager.store(
                 runtime_root=None,
@@ -1362,15 +1349,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 context_delivery=dict(read.context_delivery or {}),
             )
 
-            runtime.reconcile_tool_context(
-                turn_id="turn-pager-compact",
-                original_messages=[tool_message],
-                projected_messages=[],
-                delivery_records={
-                    "read-pager-compact": dict(
-                        read.context_delivery or {}
-                    )
-                },
+            runtime.logical_state.retire_pagers(
+                execution_lifetime_id=context.execution_lifetime_id,
+                result_refs=(manifest.result_ref,),
             )
 
             page = runtime.read_tool_result_page(
@@ -1378,12 +1359,14 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-pager-compact",
             )
             self.assertIsNotNone(page)
-            self.assertEqual(page.state, "ok")
-            self.assertEqual(page.current_user_turn, context.current_user_turn)
-            self.assertEqual(
-                page.expires_at_user_turn,
-                context.current_user_turn + 5,
+            self.assertEqual(page.state, "expired_handle")
+            grant = runtime.logical_state.file_grant(
+                execution_lifetime_id=context.execution_lifetime_id,
+                file_key=str(path.resolve()),
+                digest=dict(read.context_delivery or {})["digest"],
             )
+            self.assertIsNotNone(grant)
+            self.assertTrue(grant.complete)
             reread = runtime.execute_tool(
                 new_tool_call(
                     name="read_file",
@@ -1393,10 +1376,63 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-pager-compact",
             )
             self.assertTrue(reread.ok)
-            self.assertFalse(
-                bool((reread.structured or {}).get("unchanged"))
+            self.assertTrue(bool((reread.structured or {}).get("unchanged")))
+
+    def test_result_retirement_forces_unchanged_file_to_be_read_again(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        turn_id = "turn-result-retired"
+        context = runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key="result-retired-session",
+            input_id="assignment-result-retired",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "retired.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+            read = runtime.execute_tool(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-before-retirement",
+                ),
+                turn_id=turn_id,
             )
+            runtime.commit_tool_delivery(
+                turn_id=turn_id,
+                context_delivery=dict(read.context_delivery or {}),
+                result_id="read-before-retirement",
+            )
+
+            still_visible = runtime.execute_tool(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-while-visible",
+                ),
+                turn_id=turn_id,
+            )
+            self.assertTrue(bool((still_visible.structured or {}).get("unchanged")))
+
+            runtime.retire_tool_results(
+                turn_id=None,
+                result_ids=("read-before-retirement",),
+                execution_lifetime_id=context.execution_lifetime_id,
+            )
+            reread = runtime.execute_tool(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-after-retirement",
+                ),
+                turn_id=turn_id,
+            )
+
+            self.assertFalse(bool((reread.structured or {}).get("unchanged")))
             self.assertIn("alpha", reread.llm_text)
+            self.assertIsNotNone(reread.context_delivery)
 
 
 if __name__ == "__main__":

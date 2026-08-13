@@ -1,6 +1,6 @@
 provider_id = "telegram"
 entrypoint = "runtime.py"
-version = "0.2.0"
+version = "0.3.0"
 enabled = true
 
 reload_modules = []

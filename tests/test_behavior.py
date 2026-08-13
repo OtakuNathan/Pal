@@ -1396,7 +1396,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         ]
         self.assertTrue(retained_results)
-        self.assertTrue(all(not result.retired for result in retained_results))
+        self.assertTrue(all(result.content for result in retained_results))
 
     def test_behavior_guidance_renders_from_behavior_not_working_memory(self) -> None:
         self.repository.upsert_affordance(

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pal-channel-provider-telegram"
+version = "0.3.0"
+description = "Telegram channel provider for Pal"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["pal_provider_telegram"]
+package-dir = { pal_provider_telegram = "." }
+
+[tool.setuptools.package-data]
+pal_provider_telegram = ["provider.toml", "README.md"]

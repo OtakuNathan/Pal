@@ -212,7 +212,6 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         for method in (
             "execution_context",
             "execution_begin_input",
-            "execution_reconcile_projection",
             "execution_record_delivery",
             "execution_store_pager",
             "execution_read_pager",

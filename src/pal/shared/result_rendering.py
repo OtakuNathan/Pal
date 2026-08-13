@@ -30,36 +30,3 @@ def render_titled_structured_for_llm(title: str, structured: Any, *, fallback_te
     if not body:
         return normalized_title
     return f"{normalized_title}:\n{body}"
-
-
-def render_head_tail_preview_for_llm(text: str, *, max_chars: int) -> tuple[str, int]:
-    source = str(text or "")
-    if max_chars <= 0:
-        return "", 0
-    if len(source) <= max_chars:
-        return source.strip(), len(source)
-    if max_chars < 512:
-        preview = source[:max_chars].rstrip()
-        return preview, len(preview)
-
-    head_chars = max(256, max_chars // 2)
-    tail_chars = max_chars - head_chars
-    if tail_chars < 256:
-        tail_chars = 256
-        head_chars = max(1, max_chars - tail_chars)
-
-    head = source[:head_chars].rstrip()
-    tail = source[-tail_chars:].lstrip()
-    omitted_chars = max(0, len(source) - head_chars - tail_chars)
-    preview = "\n".join(
-        part
-        for part in (
-            "--- head ---",
-            head,
-            f"--- omitted {omitted_chars} chars ---",
-            "--- tail ---",
-            tail,
-        )
-        if part
-    ).strip()
-    return preview, len(head) + len(tail)

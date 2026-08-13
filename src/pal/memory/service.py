@@ -3,7 +3,6 @@ from __future__ import annotations
 from pal.shared.tool_protocol import (
     ToolCallIR,
     ToolResultIR,
-    ToolResultLifecycle,
 )
 
 from pal.shared.tool_protocol import new_tool_call
@@ -899,9 +898,6 @@ def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -
                         replay_result_ref=str(
                             result_state.get("replay_result_ref") or ""
                         ),
-                        lifecycle=ToolResultLifecycle(
-                            str(result_state.get("lifecycle") or "active")
-                        ),
                     )
                 )
         messages.append(
@@ -948,7 +944,6 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
                 "ok": bool(result.ok),
                 "kind": str(structured.get("kind") or result.status or "ok"),
                 "effect": str(structured.get("effect") or ""),
-                "lifecycle": result.lifecycle.value,
                 "replay_result_ref": result.replay_result_ref,
             }
             transcript.append(

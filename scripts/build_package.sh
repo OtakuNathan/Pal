@@ -6,6 +6,7 @@ cd "$repo_root"
 
 python_bin="${PYTHON:-python3}"
 dist_dir="$repo_root/dist"
+provider_dist_dir="$dist_dir/providers"
 runtime_overlay_dir="$dist_dir/runtime_root"
 runtime_overlay_path="$dist_dir/pal_v2-runtime-root-overlay.tar.gz"
 installer_source="$repo_root/scripts/install_package.sh"
@@ -25,6 +26,7 @@ websocket_provider_files=(
 telegram_provider_source="$repo_root/providers/telegram"
 telegram_provider_relative="channel/providers/telegram"
 telegram_provider_files=(
+  "__init__.py"
   "provider.toml"
   "runtime.py"
   "endpoint.py"
@@ -42,6 +44,7 @@ codex_harness_files=(
 mkdir -p "$dist_dir"
 rm -rf "$repo_root/build" "$repo_root/src/pal_v2.egg-info"
 rm -f "$dist_dir"/pal_v2-*.whl
+rm -rf "$provider_dist_dir"
 rm -rf "$runtime_overlay_dir"
 rm -f "$runtime_overlay_path"
 rm -f "$installer_path"
@@ -49,10 +52,17 @@ rm -rf "$install_bundle_dir"
 rm -f "$install_bundle_path"
 
 "$python_bin" -m pip wheel . --no-deps --no-build-isolation -w "$dist_dir"
+"$python_bin" -m pip wheel "$telegram_provider_source" --no-deps --no-build-isolation -w "$provider_dist_dir"
 
 wheel_path="$(ls -t "$dist_dir"/pal_v2-*.whl | head -n 1)"
 if [[ -z "${wheel_path:-}" || ! -f "$wheel_path" ]]; then
   echo "No wheel was built" >&2
+  exit 1
+fi
+
+telegram_provider_wheel_path="$(ls -t "$provider_dist_dir"/pal_channel_provider_telegram-*.whl | head -n 1)"
+if [[ -z "${telegram_provider_wheel_path:-}" || ! -f "$telegram_provider_wheel_path" ]]; then
+  echo "No Telegram provider wheel was built" >&2
   exit 1
 fi
 
@@ -502,6 +512,7 @@ tar -czf "$install_bundle_path" -C "$install_bundle_dir" .
 rm -rf "$install_bundle_dir"
 
 echo "Built $wheel_path"
+echo "Built $telegram_provider_wheel_path"
 echo "Built $runtime_overlay_path"
 echo "Built $installer_path"
 echo "Built $install_bundle_path"

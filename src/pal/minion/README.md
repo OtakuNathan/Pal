@@ -96,8 +96,8 @@ Interaction rule:
   reaches that limit, provider-committed tool items continue normally; otherwise
   the harness discards the uncommitted response and forces one bounded file,
   checklist, finding, question, or submit action instead of generic continuation
-- compaction retires the active provider prompt projection. It does not advance
-  the independent semantic-input pager clock or expire an `N+5` pager handle
+- compaction retires file authority owned by tool results it removes from L1.
+  It does not advance the independent pager clock or expire an `N+5` handle
 - Minion runtime schema v29 is a fresh cutover. Older or unrecognized runtime
   databases are archived atomically; only explicit profile and family
   overrides are copied after validation

@@ -38,6 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     configure_llm_parser(llm_parser)
 
+    # -- provider ------------------------------------------------------------
+    provider_parser = subparsers.add_parser("provider", help="Install channel-provider artifacts")
+    from pal.provider_cli import configure_provider_parser
+
+    configure_provider_parser(provider_parser)
+
     # -- run -----------------------------------------------------------------
     run_parser = subparsers.add_parser("run", help="Run the Pal runtime")
     run_parser.add_argument("--runtime-root", type=Path, required=True)
@@ -108,6 +114,11 @@ def main() -> int:
         from pal.llm.cli import run_llm_cli
 
         return run_llm_cli(args)
+
+    if args.command == "provider":
+        from pal.provider_cli import run_provider_cli
+
+        return run_provider_cli(args)
 
     # -- setup is synchronous, no asyncio ------------------------------------
     if args.command == "setup":

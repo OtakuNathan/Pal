@@ -16,7 +16,6 @@ class LogicalExecutionContext:
     execution_lifetime_id: str
     input_id: str
     current_user_turn: int
-    context_epoch: int
     retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
 
     def to_dict(self) -> dict[str, Any]:
@@ -24,7 +23,6 @@ class LogicalExecutionContext:
             "execution_lifetime_id": self.execution_lifetime_id,
             "input_id": self.input_id,
             "current_user_turn": self.current_user_turn,
-            "context_epoch": self.context_epoch,
             "retention_user_turns": self.retention_user_turns,
         }
 
@@ -34,7 +32,6 @@ class LogicalExecutionContext:
             execution_lifetime_id=str(value.get("execution_lifetime_id") or ""),
             input_id=str(value.get("input_id") or ""),
             current_user_turn=max(0, int(value.get("current_user_turn") or 0)),
-            context_epoch=max(1, int(value.get("context_epoch") or 1)),
             retention_user_turns=max(
                 1,
                 int(
@@ -347,7 +344,6 @@ class FileSnapshot:
     created_user_turn: int
     expires_at_user_turn: int
     source: str = "delivery"
-    replay_result_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -358,7 +354,6 @@ class FileSnapshot:
             "created_user_turn": self.created_user_turn,
             "expires_at_user_turn": self.expires_at_user_turn,
             "source": self.source,
-            "replay_result_ref": self.replay_result_ref,
         }
 
     @classmethod
@@ -375,17 +370,12 @@ class FileSnapshot:
                 if str(value.get("source") or "") == "mutation"
                 else "delivery"
             ),
-            replay_result_ref=str(value.get("replay_result_ref") or ""),
         )
 
 
 @dataclass(frozen=True)
 class FileResultLease:
-    """One projected tool result's RAII contribution to file authority.
-
-    ``expires_at_user_turn`` remains in the snapshot shape for compatibility;
-    projection/removal, not that legacy clock, owns lease retirement.
-    """
+    """One retained tool result's contribution to file authority."""
 
     result_id: str
     file_key: str
@@ -399,9 +389,6 @@ class FileResultLease:
     operation: str = "read"
     before_digest: str = ""
     created_user_turn: int = 0
-    expires_at_user_turn: int = 0
-    projected: bool = True
-    replay_result_ref: str = ""
     line_fragments: tuple[tuple[int, int, int, int], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -418,9 +405,6 @@ class FileResultLease:
             "operation": self.operation,
             "before_digest": self.before_digest,
             "created_user_turn": self.created_user_turn,
-            "expires_at_user_turn": self.expires_at_user_turn,
-            "projected": self.projected,
-            "replay_result_ref": self.replay_result_ref,
             "line_fragments": [list(item) for item in self.line_fragments],
         }
 
@@ -450,9 +434,6 @@ class FileResultLease:
             operation=str(value.get("operation") or "read"),
             before_digest=str(value.get("before_digest") or ""),
             created_user_turn=max(0, int(value.get("created_user_turn") or 0)),
-            expires_at_user_turn=max(0, int(value.get("expires_at_user_turn") or 0)),
-            projected=bool(value.get("projected", True)),
-            replay_result_ref=str(value.get("replay_result_ref") or ""),
             line_fragments=tuple(
                 (int(item[0]), int(item[1]), int(item[2]), int(item[3]))
                 for item in list(value.get("line_fragments") or ())
@@ -474,22 +455,13 @@ class LogicalExecutionStateBackend(Protocol):
     def context(self, execution_lifetime_id: str) -> LogicalExecutionContext:
         ...
 
-    def reconcile_projection(
-        self,
-        *,
-        execution_lifetime_id: str,
-        projection: tuple[str, ...],
-        deliveries: tuple[dict[str, Any], ...],
-    ) -> LogicalExecutionContext:
-        ...
-
     def record_delivery(
         self,
         *,
         execution_lifetime_id: str,
         delivery: dict[str, Any],
     ) -> LogicalExecutionContext:
-        """Commit one tool-result delivery without changing the projection."""
+        """Commit authority owned by one delivered tool result."""
         ...
 
     def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:
@@ -557,10 +529,8 @@ class LogicalExecutionStateBackend(Protocol):
 @dataclass
 class _SessionState:
     current_user_turn: int = 0
-    context_epoch: int = 1
     input_ids: dict[str, int] = field(default_factory=dict)
     retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
-    projection: tuple[str, ...] = ()
     handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
     expired_handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
@@ -601,78 +571,13 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.setdefault(session_id, _SessionState())
             return self._context(session_id, "", state)
 
-    def reconcile_projection(
-        self,
-        *,
-        execution_lifetime_id: str,
-        projection: tuple[str, ...],
-        deliveries: tuple[dict[str, Any], ...],
-    ) -> LogicalExecutionContext:
-        session_id = _required(execution_lifetime_id, "execution_lifetime_id")
-        normalized_projection = tuple(str(item) for item in projection)
-        with self._lock:
-            state = self._sessions.setdefault(session_id, _SessionState())
-            if state.retired:
-                raise RuntimeError("logical execution session is retired")
-            previous = state.projection
-            if normalized_projection != previous:
-                state.context_epoch += 1
-            state.projection = normalized_projection
-            state.file_results = {
-                result_id: replace(lease, projected=False)
-                for result_id, lease in state.file_results.items()
-                if result_id in normalized_projection
-            }
-            applied_result_ids: set[str] = set()
-            for delivery_index, delivery in enumerate(deliveries):
-                normalized_delivery = dict(delivery)
-                if not (
-                    normalized_delivery.get("result_id")
-                    or normalized_delivery.get("_result_id")
-                ):
-                    parsed_delivery = FileDeliveryManifest.from_dict(
-                        normalized_delivery
-                    )
-                    replay_owner = str(
-                        getattr(parsed_delivery, "replay_result_ref", "") or ""
-                    )
-                    if replay_owner in normalized_projection:
-                        normalized_delivery["result_id"] = replay_owner
-                    elif delivery_index < len(normalized_projection):
-                        # Compatibility for callers predating explicit result
-                        # ownership: deliveries are positional to projection.
-                        normalized_delivery["result_id"] = normalized_projection[
-                            delivery_index
-                        ]
-                delivery_result_id = _delivery_result_id(normalized_delivery)
-                if delivery_result_id not in normalized_projection:
-                    continue
-                self._apply_delivery(
-                    state,
-                    normalized_delivery,
-                    replace_existing=delivery_result_id not in applied_result_ids,
-                )
-                applied_result_ids.add(delivery_result_id)
-            # A projection may retain a result whose immutable evidence was
-            # committed earlier.  Re-activate only the exact owner IDs named
-            # by the current projection; previews omit their delivery and
-            # therefore remain inactive.
-            delivered_ids = applied_result_ids
-            for result_id in normalized_projection:
-                if result_id in delivered_ids and result_id in state.file_results:
-                    state.file_results[result_id] = replace(
-                        state.file_results[result_id],
-                        projected=True,
-                    )
-            return self._context(session_id, "", state)
-
     def record_delivery(
         self,
         *,
         execution_lifetime_id: str,
         delivery: dict[str, Any],
     ) -> LogicalExecutionContext:
-        """Commit a just-delivered result while preserving projection state."""
+        """Commit authority owned by a just-delivered result."""
 
         session_id = _required(execution_lifetime_id, "execution_lifetime_id")
         with self._lock:
@@ -784,11 +689,7 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.get(execution_lifetime_id)
             if state is None or state.retired:
                 return None
-            active = {
-                result_id: lease
-                for result_id, lease in state.file_results.items()
-                if lease.projected
-            }
+            active = state.file_results
             candidates = [
                 lease
                 for lease in active.values()
@@ -887,7 +788,6 @@ class InMemoryLogicalExecutionState:
                 source=(
                     "mutation" if str(source) == "mutation" else "delivery"
                 ),
-                replay_result_ref="",
             )
 
     def invalidate_file(self, *, execution_lifetime_id: str, file_key: str) -> None:
@@ -919,10 +819,8 @@ class InMemoryLogicalExecutionState:
                 "sessions": {
                     session_id: {
                         "current_user_turn": state.current_user_turn,
-                        "context_epoch": state.context_epoch,
                         "input_ids": dict(state.input_ids),
                         "retention_user_turns": state.retention_user_turns,
-                        "projection": list(state.projection),
                         "handles": {
                             key: manifest.to_dict(include_payload=True)
                             for key, manifest in state.handles.items()
@@ -956,10 +854,10 @@ class InMemoryLogicalExecutionState:
                 raise ValueError("execution runtime snapshot contains an invalid session")
             allowed_fields = {
                 "current_user_turn",
-                "context_epoch",
+                "context_epoch",  # accepted and ignored from older snapshots
                 "input_ids",
                 "retention_user_turns",
-                "projection",
+                "projection",  # accepted and ignored from older snapshots
                 "handles",
                 "expired_handles",
                 "snapshots",
@@ -1026,7 +924,6 @@ class InMemoryLogicalExecutionState:
                 )
             state = _SessionState(
                 current_user_turn=current_user_turn,
-                context_epoch=max(1, int(raw.get("context_epoch") or 1)),
                 input_ids=input_ids,
                 retention_user_turns=max(
                     1,
@@ -1035,7 +932,6 @@ class InMemoryLogicalExecutionState:
                         or DEFAULT_RESULT_RETENTION_USER_TURNS
                     ),
                 ),
-                projection=tuple(str(item) for item in list(raw.get("projection") or ())),
                 handles=handles,
                 expired_handles=expired_handles,
                 snapshots=snapshots,
@@ -1060,7 +956,6 @@ class InMemoryLogicalExecutionState:
                 raise ValueError("execution runtime snapshot file result identity mismatch")
             if state.retired and (
                 state.input_ids
-                or state.projection
                 or state.handles
                 or state.expired_handles
                 or state.snapshots
@@ -1101,12 +996,6 @@ class InMemoryLogicalExecutionState:
                     origin={},
                     delivery_manifest={},
                 )
-            retired_refs = {manifest.result_ref for manifest in retired}
-            for result_ref in retired_refs:
-                state.file_results.pop(result_ref, None)
-            for file_key, snapshot in tuple(state.snapshots.items()):
-                if snapshot.replay_result_ref in retired_refs:
-                    state.snapshots.pop(file_key, None)
             return retired
 
     def retire_results(
@@ -1159,7 +1048,6 @@ class InMemoryLogicalExecutionState:
             execution_lifetime_id=session_id,
             input_id=input_id,
             current_user_turn=state.current_user_turn,
-            context_epoch=state.context_epoch,
             retention_user_turns=state.retention_user_turns,
         )
 
@@ -1192,10 +1080,7 @@ class InMemoryLogicalExecutionState:
         state.snapshots = {
             key: snapshot
             for key, snapshot in state.snapshots.items()
-            if (
-                state.current_user_turn < snapshot.expires_at_user_turn
-                and snapshot.replay_result_ref not in expired
-            )
+            if state.current_user_turn < snapshot.expires_at_user_turn
         }
 
     @staticmethod
@@ -1274,9 +1159,6 @@ class InMemoryLogicalExecutionState:
             operation=manifest.operation,
             before_digest=manifest.before_digest,
             created_user_turn=state.current_user_turn,
-            expires_at_user_turn=state.current_user_turn + state.retention_user_turns,
-            projected=True,
-            replay_result_ref=manifest.replay_result_ref,
             line_fragments=merged_fragments,
         )
         previous_snapshot = state.snapshots.get(manifest.file_key)
@@ -1313,7 +1195,6 @@ class InMemoryLogicalExecutionState:
                 if manifest.operation in {"edit", "write"}
                 else "delivery"
             ),
-            replay_result_ref=manifest.replay_result_ref,
         )
 
 

@@ -199,9 +199,7 @@ class FileCapabilityMixin:
             FileReadTool(
                 cache=state,
                 visibility_cache=visibility,
-                visibility_scope=(
-                    f"{context.execution_lifetime_id}:{context.context_epoch}"
-                ),
+                visibility_scope=context.execution_lifetime_id,
                 defer_delivery=defer_delivery,
             ),
             call,

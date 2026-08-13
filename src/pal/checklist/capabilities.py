@@ -77,9 +77,9 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
-            purpose="Open or replace a user-visible checklist for multi-step work, keeping concrete progress and unfinished work explicit.",
-            use_when="Strongly prefer using this when work has multiple concrete steps, meaningful side effects, or a realistic risk of missing a follow-up. Open it early, keep steps concrete, clearly mark the first side-effecting step, and update it as work evolves. If the task requires a durable architect/coder/verifier workflow, use minion_start_workflow instead.",
-            do_not_use_when="Single-step or conversational work. Durable facts or decisions belong in remember_memory, not this checklist. Minion Task ledger work is Manager-owned. Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
+            purpose="Create or replace Pal's active checklist.",
+            use_when="The task-flow guidance calls for a checklist, or its concrete steps have materially changed.",
+            do_not_use_when="The active checklist already matches the work.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
             next_tool_hints=(
                 NextToolHint(
@@ -121,10 +121,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="check",
         guidance=ToolGuidance(
-            purpose="Tick one step of the active checklist as completed.",
-            use_when="Pal finished one concrete step of an open checklist and wants the user to see progress (core fans the echo out to the channel). When the last step is checked, remember to call checklist_clear once the work is re-verified.",
-            do_not_use_when="No active checklist (upsert first). Inventing completion for work not actually finished — check only what was really done. Using it as evidence or a submission gate.",
-            failure_next_steps="If no active checklist, call checklist_upsert first. If the step string does not match an open step exactly, re-check the exact step text from checklist_show.",
+            purpose="Mark one exact step in Pal's active checklist as completed.",
+            use_when="That concrete step has actually completed.",
+            do_not_use_when="The step is still pending or no checklist is active.",
+            failure_next_steps="If no checklist is active, call checklist_upsert. If the step does not match exactly, use checklist_show to recover its text.",
             next_tool_hints=(
                 NextToolHint(
                     name="checklist_show",
@@ -187,10 +187,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="show",
         guidance=ToolGuidance(
-            purpose="Inspect Pal's own active checklist.",
-            use_when="Pal needs to recall exact step texts, confirm what remains, or re-check progress mid-task.",
-            do_not_use_when="Reading the user's durable memory (use recall_memory). Reading Minion Task ledger state (use minion_task_status).",
-            failure_next_steps="Read-only. If inactive, no checklist is open.",
+            purpose="Read Pal's active checklist and exact step text.",
+            use_when="Exact step text or current progress is needed.",
+            do_not_use_when="The runtime reminder already provides enough checklist state.",
+            failure_next_steps="If inactive, no checklist is open.",
             next_tool_hints=(
                 NextToolHint(
                     name="checklist_check",
@@ -230,10 +230,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="clear",
         guidance=ToolGuidance(
-            purpose="Tear down Pal's own task checklist.",
-            use_when="Every step is completed and Pal re-verified the work against the list. Before delivering the result, audit the checklist one more time for anything missed; only then clear it. Also clear when the task changed and the list is stale.",
-            do_not_use_when="The task is still in progress. Clearing before the final audit skips the delivery self-check this tool exists to support.",
-            failure_next_steps="If no checklist is active, the operation is an idempotent no-op. If the result is uncertain, inspect checklist_show before deciding whether another clear is needed.",
+            purpose="Remove Pal's active checklist.",
+            use_when="The checklist has reached a terminal state defined by the task-flow guidance.",
+            do_not_use_when="Checklist work remains in progress.",
+            failure_next_steps="If inactive, this is an idempotent no-op. If uncertain, use checklist_show to inspect the current state.",
         ),
         execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_clear"},

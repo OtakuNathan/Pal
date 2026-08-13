@@ -1404,6 +1404,12 @@ class PalCore:
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
+        if self.turn_manager.latest_active_turn_id() is not None:
+            await self._complete_compact_reply_async(
+                action,
+                "Compaction is unavailable while a conversation turn is active. Try again after the current turn finishes.",
+            )
+            return
         memory_service = self.context.require_port("memory:memory")
         l1_items = list(
             getattr(getattr(memory_service, "l1_store", None), "items", ())
@@ -1418,14 +1424,9 @@ class PalCore:
             reserved_output_tokens=4096,
         )
         if not run_result.success:
-            detail = (
-                "the non-removable role/context anchor exceeds the model budget"
-                if run_result.status == "uncompactable_hard_context"
-                else "memory state was left unchanged"
-            )
             await self._complete_compact_reply_async(
                 action,
-                f"Compaction failed - {detail}.",
+                "Compaction failed - memory state was left unchanged.",
             )
             return
         result = run_result.memory_result
@@ -1433,10 +1434,9 @@ class PalCore:
         summary_count = getattr(result, "metadata", {}).get("compact_summary_count", 0) if result else 0
         retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
         storage_text = "L1 compact summary updated." if summary_count else "No compact summary was stored."
-        quality_text = " Degraded mechanical checkpoint used." if run_result.degraded else ""
         await self._complete_compact_reply_async(
             action,
-            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.{quality_text}",
+            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
         )
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:

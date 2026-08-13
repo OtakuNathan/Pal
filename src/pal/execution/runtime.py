@@ -226,7 +226,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         clock_id: str,
         retention_steps: int | None = None,
     ) -> LogicalExecutionContext:
-        """Advance one host-defined result-retention step in this lifetime.
+        """Advance one host-defined pager/cache retention step in this lifetime.
 
         Resident Pal advances the same backend with semantic user inputs.
         Autonomous runtimes such as Minion may instead advance it per tool
@@ -262,100 +262,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if not normalized:
             return ()
         lifetime = str(execution_lifetime_id or "").strip()
-        context = (
-            self.logical_state.context(lifetime)
-            if lifetime
-            else self.logical_context_for_turn(turn_id)
-        )
+        if lifetime:
+            return self.logical_state.retire_results(
+                execution_lifetime_id=lifetime,
+                result_ids=normalized,
+            )
+        context = self.logical_context_for_turn(turn_id)
         return self.logical_state.retire_results(
             execution_lifetime_id=context.execution_lifetime_id,
             result_ids=normalized,
-        )
-
-    def reconcile_tool_context(
-        self,
-        *,
-        turn_id: str | None,
-        original_messages: list[dict[str, Any]],
-        projected_messages: list[dict[str, Any]],
-        delivery_records: dict[str, dict[str, Any]],
-    ) -> LogicalExecutionContext:
-        context = self.logical_context_for_turn(turn_id)
-        original_by_call = {
-            str(message.get("tool_call_id") or ""): str(message.get("content") or "")
-            for message in original_messages
-            if str(message.get("role") or "") == "tool"
-        }
-        projection: list[str] = []
-        deliveries: list[dict[str, Any]] = []
-        for message in projected_messages:
-            if str(message.get("role") or "") != "tool":
-                continue
-            call_id = str(message.get("tool_call_id") or "")
-            content = str(message.get("content") or "")
-            projection.append(call_id)
-            manifest = FileDeliveryManifest.from_dict(delivery_records.get(call_id))
-            source = original_by_call.get(call_id, "")
-            if manifest is None or not source:
-                continue
-            raw_ranges = message.get("_pal_visible_source_ranges")
-            visible_ranges = tuple(
-                (max(0, int(item[0])), min(len(source), int(item[1])))
-                for item in list(raw_ranges or ())
-                if isinstance(item, (list, tuple))
-                and len(item) == 2
-                and int(item[1]) > int(item[0])
-            )
-            if not visible_ranges and content == source:
-                visible_ranges = ((0, len(source)),)
-            if not visible_ranges:
-                continue
-            sliced = tuple(
-                candidate
-                for start_offset, end_offset in visible_ranges
-                if (
-                    candidate := manifest.slice(start_offset, end_offset)
-                ) is not None
-            )
-            if not sliced:
-                continue
-            projected_manifest = FileDeliveryManifest(
-                file_key=manifest.file_key,
-                digest=manifest.digest,
-                total_lines=manifest.total_lines,
-                spans=tuple(
-                    span for candidate in sliced for span in candidate.spans
-                ),
-                empty_file=any(candidate.empty_file for candidate in sliced),
-                empty_marker=manifest.empty_marker,
-                replay_result_ref=manifest.replay_result_ref,
-                operation=manifest.operation,
-                before_digest=manifest.before_digest,
-                inherited_ranges=tuple(
-                    item
-                    for candidate in sliced
-                    for item in candidate.inherited_ranges
-                ),
-                parent_result_ids=tuple(
-                    sorted(
-                        {
-                            item
-                            for candidate in sliced
-                            for item in candidate.parent_result_ids
-                        }
-                    )
-                ),
-                complete_file=any(
-                    candidate.complete_file for candidate in sliced
-                ),
-            )
-            delivery = projected_manifest.to_dict()
-            delivery["result_id"] = call_id
-            deliveries.append(delivery)
-        return self.logical_state.reconcile_projection(
-            execution_lifetime_id=context.execution_lifetime_id,
-            projection=tuple(projection),
-            deliveries=tuple(deliveries),
         )
 
     def commit_tool_delivery(
@@ -1336,9 +1251,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 details={"output_schema": record.output_schema},
             )
         # File delivery spans are offsets into the exact LLM-visible text.
-        # Trimming a trailing newline here makes an otherwise complete edit
-        # proof one byte shorter than its manifest and silently drops
-        # inherited file authority during L1 projection reconciliation.
+        # Trimming a trailing newline here would make an otherwise complete
+        # edit proof one byte shorter than its manifest.
         rendered = (
             llm_text
             if isinstance(context_delivery, dict) and llm_text

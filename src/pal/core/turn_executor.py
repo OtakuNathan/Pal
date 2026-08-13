@@ -67,7 +67,6 @@ from pal.shared import (
     default_tool_result_text,
 )
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.agent_io import ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
@@ -227,11 +226,7 @@ class TurnExecutor:
         if not run_result.success:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
-                text=(
-                    "Memory compaction could not reduce the non-removable current context."
-                    if run_result.status == "uncompactable_hard_context"
-                    else "Memory compaction failed; memory and active protocol were left unchanged."
-                ),
+                text="Memory compaction failed; memory and the active tool RPC were left unchanged.",
                 payload=run_result,
             )
         compact_result = run_result.memory_result
@@ -406,7 +401,35 @@ class TurnExecutor:
                 )
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
-            raise
+            failure = (
+                f"Tool {execution_call.name} timed out before returning a result."
+                if isinstance(exc, TimeoutError)
+                else (
+                    f"Tool {execution_call.name} did not complete: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+            )
+            guidance = (
+                "Its side effects may be incomplete or unknown. Inspect the current state, "
+                "then retry the operation if appropriate."
+            )
+            tool_result = ToolExecutionResult(
+                name=execution_call.name,
+                ok=False,
+                text=f"{failure}\n{guidance}",
+                llm_text=f"{failure}\n{guidance}",
+                structured={
+                    "error_code": (
+                        "tool_timeout"
+                        if isinstance(exc, TimeoutError)
+                        else "tool_rpc_failed"
+                    ),
+                    "error_type": exc.__class__.__name__,
+                    "effect": "unknown",
+                    "retry": "reconcile_first",
+                },
+                call_id=getattr(execution_call, "call_id", None),
+            )
         if self._should_enter_failure_flow_for_tool_result(tool_result):
             failure_result = await self._handle_failure_async(
                 FailureSignal(
@@ -969,19 +992,15 @@ class TurnExecutor:
                 prompt_region=PromptRegionIR.ACTIVE_INPUT,
             )
         settled_messages: list[LLMMessageIR] = []
-        original_tool_context_messages: list[LLMMessageIR] = []
-        projected_tool_context_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
         for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
             original = list(getattr(settled_turn, "messages", ()) or ())
-            projected = self._project_active_messages_for_prompt(
+            projected = self._project_messages_for_prompt(
                 original,
                 turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
                 artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
-            original_tool_context_messages.extend(original)
-            projected_tool_context_messages.extend(projected)
             settled_messages.extend(
                 replace(message, prompt_region=PromptRegionIR.SETTLED_HISTORY)
                 for message in projected
@@ -989,15 +1008,12 @@ class TurnExecutor:
         active_messages: list[LLMMessageIR] = []
         if active_turn is not None:
             active_messages = list(active_turn.messages)
-            original_active_messages = list(active_messages)
-            active_messages = self._project_active_messages_for_prompt(
+            active_messages = self._project_messages_for_prompt(
                 active_messages,
                 turn_id=continuation.turn_id,
                 artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
-            original_tool_context_messages.extend(original_active_messages)
-            projected_tool_context_messages.extend(active_messages)
             active_messages = [
                 replace(
                     message,
@@ -1009,11 +1025,6 @@ class TurnExecutor:
                 )
                 for index, message in enumerate(active_messages)
             ]
-        self._reconcile_projected_tool_context(
-            continuation,
-            original_messages=original_tool_context_messages,
-            projected_messages=projected_tool_context_messages,
-        )
         runtime_reminder = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
         tail_messages = (
             [
@@ -1167,7 +1178,6 @@ class TurnExecutor:
             max_output_tokens_estimate=token_limit,
             max_output_bytes=cfg.max_output_size_bytes,
             max_result_spill_chars=cfg.default_max_result_size_chars,
-            max_result_group_chars=cfg.max_tool_results_per_message_chars,
             preview_chars=cfg.active_tool_result_preview,
             artifact_bucket_id=continuation.turn_id,
             max_read_bytes=cfg.max_output_size_bytes,
@@ -1200,7 +1210,7 @@ class TurnExecutor:
                 total += len(part.call_id) + len(part.name) + len(part.content)
         return total
 
-    def _project_active_messages_for_prompt(
+    def _project_messages_for_prompt(
         self,
         messages: list[LLMMessageIR],
         *,
@@ -1208,9 +1218,9 @@ class TurnExecutor:
         artifact_scope_key: str = "pal:resident",
         capabilities: dict[str, Any] | None = None,
     ) -> list[LLMMessageIR]:
-        """Apply prompt-only size limits without mutating the L1 working set."""
+        """Resolve prompt-only artifact representations without changing L1 results."""
 
-        projected = [
+        return [
             self._project_artifact_refs(
                 message,
                 turn_id=turn_id,
@@ -1219,55 +1229,6 @@ class TurnExecutor:
             )
             for message in messages
         ]
-        result_indices = [
-            index
-            for index, message in enumerate(projected)
-            if any(isinstance(part, ToolResultIR) for part in message.parts)
-        ]
-        total = sum(
-            len(part.content)
-            for message in projected
-            for part in message.parts
-            if isinstance(part, ToolResultIR)
-        )
-        limit = self._config.max_tool_results_per_message_chars
-        for index in result_indices:
-            if total <= limit:
-                break
-            message = projected[index]
-            parts = list(message.parts)
-            for part_index, part in enumerate(parts):
-                if not isinstance(part, ToolResultIR):
-                    continue
-                rendered, visible_ranges = self._render_tool_preview_with_ranges(
-                    part.content
-                )
-                rendered = self._append_replay_affordance(rendered, part.replay_result_ref)
-                total -= len(part.content) - len(rendered)
-                parts[part_index] = replace(
-                    part,
-                    content=rendered,
-                    visible_source_ranges=visible_ranges,
-                )
-            projected[index] = replace(message, parts=tuple(parts))
-        for index in result_indices:
-            if total <= limit:
-                break
-            message = projected[index]
-            parts = list(message.parts)
-            for part_index, part in enumerate(parts):
-                if not isinstance(part, ToolResultIR):
-                    continue
-                minimal = self._render_minimal_tool_observation(part.content)
-                minimal = self._append_replay_affordance(minimal, part.replay_result_ref)
-                total -= len(part.content) - len(minimal)
-                parts[part_index] = replace(
-                    part,
-                    content=minimal,
-                    visible_source_ranges=(),
-                )
-            projected[index] = replace(message, parts=tuple(parts))
-        return projected
 
     def _project_artifact_refs(
         self,
@@ -1319,104 +1280,6 @@ class TurnExecutor:
                 continue
             parts.append(part)
         return replace(message, parts=tuple(parts))
-
-    def _reconcile_projected_tool_context(
-        self,
-        continuation: Any,
-        *,
-        original_messages: list[LLMMessageIR],
-        projected_messages: list[LLMMessageIR],
-    ) -> None:
-        runtime = getattr(self.context, "execution_runtime", None)
-        reconcile = getattr(runtime, "reconcile_tool_context", None)
-        if not callable(reconcile):
-            return
-
-        def records(messages: list[LLMMessageIR]) -> list[dict[str, Any]]:
-            return [
-                {
-                    "role": "tool",
-                    "tool_call_id": part.call_id,
-                    "content": part.content,
-                    "_pal_visible_source_ranges": [
-                        [start, end]
-                        for start, end in part.visible_source_ranges
-                    ],
-                }
-                for message in messages
-                for part in message.parts
-                if isinstance(part, ToolResultIR)
-            ]
-
-        deliveries = {
-            part.call_id: dict(part.context_delivery)
-            for message in original_messages
-            for part in message.parts
-            if isinstance(part, ToolResultIR) and part.context_delivery is not None
-        }
-        reconcile(
-            turn_id=str(continuation.turn_id),
-            original_messages=records(original_messages),
-            projected_messages=records(projected_messages),
-            delivery_records=deliveries,
-        )
-
-    @staticmethod
-    def _append_replay_affordance(content: str, result_ref: str) -> str:
-        ref = str(result_ref or "").strip()
-        if not ref:
-            return content
-        return (
-            f"{content.rstrip()}\n\n"
-            "full_result: "
-            f"read_tool_result(result_ref={json.dumps(ref)}, page=1, anchor=\"head\")"
-        )
-
-    def _render_tool_preview(self, content: str) -> str:
-        return self._render_tool_preview_with_ranges(content)[0]
-
-    def _render_tool_preview_with_ranges(
-        self,
-        content: str,
-    ) -> tuple[str, tuple[tuple[int, int], ...]]:
-        if len(content) <= self._config.active_tool_result_preview:
-            return content, ((0, len(content)),) if content else ()
-        preview, preview_size = render_head_tail_preview_for_llm(
-            content,
-            max_chars=self._config.active_tool_result_preview,
-        )
-        if self._config.active_tool_result_preview < 512:
-            visible = content[: self._config.active_tool_result_preview].rstrip()
-            ranges = ((0, len(visible)),) if visible else ()
-        else:
-            head_chars = max(256, self._config.active_tool_result_preview // 2)
-            tail_chars = self._config.active_tool_result_preview - head_chars
-            if tail_chars < 256:
-                tail_chars = 256
-                head_chars = max(
-                    1,
-                    self._config.active_tool_result_preview - tail_chars,
-                )
-            head = content[:head_chars].rstrip()
-            raw_tail_start = max(0, len(content) - tail_chars)
-            tail = content[raw_tail_start:].lstrip()
-            tail_start = len(content) - len(tail)
-            ranges = tuple(
-                item
-                for item in ((0, len(head)), (tail_start, len(content)))
-                if item[1] > item[0]
-            )
-        rendered = (
-            f"{preview}\n\n"
-            f"[preview only: original={len(content)} chars, kept={preview_size} chars]"
-        )
-        return rendered, ranges
-
-    @staticmethod
-    def _render_minimal_tool_observation(content: str) -> str:
-        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
-        summary = lines[0] if lines else "tool result summarized due to prompt budget pressure"
-        return summary[:180].rstrip() or "tool result summarized due to prompt budget pressure"
 
     @staticmethod
     def _is_hard_budget_overflow(advice) -> bool:
@@ -1837,26 +1700,6 @@ class TurnExecutor:
                 None,
             )
         )
-        if continuation is not None:
-            if getattr(continuation, "pending_tool_call_batch", None):
-                return CompactionRunResult(
-                    status="protocol_not_closed",
-                    failures=("pending_tool_call_batch",),
-                    clock_kind=engine.policy.clock_kind,
-                )
-            if getattr(continuation, "pending_tool_results", None):
-                return CompactionRunResult(
-                    status="protocol_not_closed",
-                    failures=("pending_tool_results",),
-                    clock_kind=engine.policy.clock_kind,
-                )
-            active_turn = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(continuation.turn_id)
-            if active_turn is not None and active_turn.pending_call_ids:
-                return CompactionRunResult(
-                    status="protocol_not_closed",
-                    failures=("l1_pending_tool_calls",),
-                    clock_kind=engine.policy.clock_kind,
-                )
         try:
             clock_value = max(
                 0,
@@ -1911,10 +1754,17 @@ class TurnExecutor:
                     if result_id not in remaining_ids
                 )
                 if removed:
+                    retirement_turn_id = (
+                        str(continuation.turn_id)
+                        if continuation is not None
+                        else None
+                    )
                     retire_tool_results(
-                        turn_id=None,
+                        turn_id=retirement_turn_id,
                         result_ids=removed,
-                        execution_lifetime_id=logical_scope_id,
+                        execution_lifetime_id=(
+                            "" if retirement_turn_id else logical_scope_id
+                        ),
                     )
 
             after_compact = retire_compacted_l1_results

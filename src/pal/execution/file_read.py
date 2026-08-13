@@ -321,33 +321,6 @@ class FileReadTool:
                 utf8_bom=utf8_bom,
             )
 
-        if (
-            self.defer_delivery
-            and cached_state is not None
-            and cached_state.full_view
-            and cached_state.replay_result_ref
-        ):
-            result_ref = cached_state.replay_result_ref
-            replay = (
-                f"{FILE_UNCHANGED_STUB}\n"
-                "The complete bytes are available from the existing result handle: "
-                f"read_tool_result(result_ref={result_ref!r}, page=1, anchor='head')"
-            )
-            return _result(
-                RuntimeStatus.OK,
-                replay,
-                file_path=str(resolved),
-                start_line=start,
-                end_line=end,
-                total_lines=total_lines,
-                truncated=end < total_lines,
-                full_view=True,
-                unchanged=True,
-                encoding="utf-8",
-                utf8_bom=utf8_bom,
-                replay_result_ref=result_ref,
-            )
-
         if total_lines == 0:
             manifest = FileDeliveryManifest(
                 file_key=file_cache_key(resolved),

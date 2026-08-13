@@ -8,6 +8,7 @@ from pal.core.compaction import (
     CompactionClockKind,
     CompactionSnapshot,
     CompactionUnit,
+    compaction_visible_token_limit,
     extract_json_object,
 )
 from pal.foundation import utc_now
@@ -41,8 +42,6 @@ _PAL_TOP_LEVEL_FIELDS = frozenset(
         "continuity",
         "summary",
         "memory_candidates",
-        "degraded",
-        "degraded_failures",
     }
 )
 _PAL_MEMORY_CANDIDATE_FIELDS = frozenset(
@@ -109,7 +108,7 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "- Keep temporary task state temporary. Do not turn it into a user preference, durable fact, or permanent task.\n"
     "- If a task is complete, cancelled, superseded, or contradicted by newer user text, move it to retired_or_superseded_context.\n"
     "- Write a complete bounded continuity summary. Do not trail off or rely on output continuation.\n"
-    "- Keep the final visible JSON checkpoint at or below 20,000 tokens. This limit applies to the JSON, not private reasoning.\n"
+    "- Obey the request-specific visible checkpoint limit below. It applies to the JSON, not private reasoning.\n"
     "- If the source is long, preserve active continuity first, then user constraints, decisions, and warm history.\n"
     "- Prioritize durable user preferences, stable user status/context, real goals/plans/commitments, confirmed project decisions, and long-lived constraints.\n"
     "- Do not create entries from jokes, temporary emotions, momentary frustration, speculation, transient runtime state, or unconfirmed intent.\n"
@@ -134,8 +133,11 @@ class PalCompactionPolicy:
     accepts_memory_candidates: bool = True
 
     def system_prompt(self, snapshot: CompactionSnapshot) -> str:
-        _ = snapshot
-        return COMPACT_PAL_STRUCTURED_SYSTEM
+        limit = compaction_visible_token_limit(snapshot)
+        return (
+            f"{COMPACT_PAL_STRUCTURED_SYSTEM}\n"
+            f"The final visible JSON checkpoint for this request must not exceed {limit:,} tokens."
+        )
 
     def build_source(
         self,
@@ -151,7 +153,7 @@ class PalCompactionPolicy:
             "- Frozen L1 below is the only compaction truth source.",
             "- The previous compact seed, when present, is already part of frozen L1.",
             "- Every L1 unit below is atomic. Never split a tool call from its result.",
-            "- Recovery-required units describe failed, rejected, unknown-effect, or incomplete work and must preserve recovery meaning.",
+            "- Record failed, rejected, or unknown-effect work accurately; never claim its side effects succeeded.",
         ]
         if validation_error:
             lines.extend(
@@ -173,15 +175,10 @@ class PalCompactionPolicy:
         if not units:
             lines.append("No ordinary history units remain.")
         for unit in units:
-            state = (
-                "recovery_required"
-                if unit.recovery_required
-                else "closed_success"
-            )
             lines.extend(
                 [
                     "",
-                    f"### {unit.unit_id} source={unit.source} state={state}",
+                    f"### {unit.unit_id} source={unit.source} state=closed",
                     unit.text or "[empty unit]",
                 ]
             )
@@ -197,86 +194,6 @@ class PalCompactionPolicy:
         payload = extract_json_object(raw_text)
         _validate_pal_checkpoint_payload(payload, policy_id=self.policy_id)
         return _make_pal_summary_entry(payload)
-
-    def degraded_checkpoint(
-        self,
-        snapshot: CompactionSnapshot,
-        units: Sequence[CompactionUnit],
-        *,
-        failures: Sequence[str],
-    ) -> L2Entry:
-        tail = list(units)[-3:]
-        recovery = [unit for unit in units if unit.recovery_required]
-        previous = _previous_pal_continuity(snapshot.previous_summary)
-        recent_text = [_bounded_text(unit.text, limit=1200) for unit in tail]
-        temporary_state = [
-            {
-                "source": unit.source,
-                "state": (
-                    "recovery_required"
-                    if unit.recovery_required
-                    else "recent_safe_tail"
-                ),
-                "text": _bounded_text(unit.text, limit=1200),
-            }
-            for unit in _dedupe_units([*recovery, *tail])
-        ]
-        summary_text = (
-            "Degraded compaction checkpoint: semantic generation did not produce a valid checkpoint. "
-            "The previous seed, recent L1 tail, and recovery-required work were retained mechanically."
-        )
-        payload: dict[str, Any] = {
-            "schema": self.policy_id,
-            "kind": "pal",
-            "degraded": True,
-            "continuity": {
-                "current_focus": str(previous.get("current_focus") or _latest_l1_text(units, limit=600)),
-                "primary_request_and_intent": str(
-                    previous.get("primary_request_and_intent")
-                    or _latest_l1_text(units, limit=1200)
-                ),
-                "active_operating_instructions": list(previous.get("active_operating_instructions") or ()),
-                "active_requests": list(previous.get("active_requests") or ()),
-                "temporary_task_state": [
-                    *list(previous.get("temporary_task_state") or ()),
-                    *temporary_state,
-                ],
-                "key_decisions": list(previous.get("key_decisions") or ()),
-                "pending_questions": list(previous.get("pending_questions") or ()),
-                "recent_raw_turns": [
-                    *list(previous.get("recent_raw_turns") or ())[-3:],
-                    *recent_text,
-                ],
-                "warm_compressed_turns": list(previous.get("warm_compressed_turns") or ()),
-                "retired_or_superseded_context": list(
-                    previous.get("retired_or_superseded_context") or ()
-                ),
-                "optional_next_step": str(
-                    previous.get("optional_next_step")
-                    or "Reconcile every recovery-required L1 unit before repeating side effects."
-                ),
-            },
-            "summary": {
-                "summary": summary_text,
-                "search_text": "\n".join(
-                    [
-                        _previous_seed(snapshot.previous_summary),
-                        *(unit.text for unit in recovery),
-                        *(unit.text for unit in tail),
-                    ]
-                ).strip()
-                or summary_text,
-            },
-            "memory_candidates": [],
-            "degraded_failures": [
-                str(item)[:240] for item in failures[-3:]
-            ],
-        }
-        return self.validate_checkpoint(
-            json.dumps(payload, ensure_ascii=False),
-            snapshot,
-        )
-
 
 def _make_pal_summary_entry(payload: dict[str, Any]) -> L2Entry:
     summary_payload = dict(payload.get("summary") or {})
@@ -301,13 +218,6 @@ def _make_pal_summary_entry(payload: dict[str, Any]) -> L2Entry:
             payload.get("memory_candidates")
         ),
     }
-    if bool(payload.get("degraded")):
-        normalized_payload["degraded"] = True
-        normalized_payload["degraded_failures"] = [
-            str(item)[:240]
-            for item in list(payload.get("degraded_failures") or ())[-3:]
-            if str(item)
-        ]
     return L2Entry(
         entry_id=SUMMARY_ENTRY_ID,
         kind="summary",
@@ -366,15 +276,6 @@ def _validate_pal_checkpoint_payload(
         raise ValueError("memory_candidates must be an array")
     for index, candidate in enumerate(candidates):
         _validate_pal_memory_candidate(candidate, index=index)
-
-    if "degraded" in payload and not isinstance(payload.get("degraded"), bool):
-        raise ValueError("degraded must be a boolean")
-    if "degraded_failures" in payload:
-        failures = payload.get("degraded_failures")
-        if not isinstance(failures, list) or not all(
-            isinstance(item, str) for item in failures
-        ):
-            raise ValueError("degraded_failures must be an array of strings")
 
 
 def _validate_pal_memory_candidate(candidate: Any, *, index: int) -> None:
@@ -489,14 +390,6 @@ def _render_pal_compact_context(
             ).strip()
             kind = str(item.get("kind") or "candidate").strip()
             lines.append(f"- {kind}: {title}")
-    if bool(payload.get("degraded")):
-        lines.extend(
-            [
-                "",
-                "### Checkpoint Quality",
-                "degraded: reconcile the current request and recovery-required state before repeating side effects.",
-            ]
-        )
     lines.append("</compact_context>")
     return "\n".join(lines).strip()
 
@@ -598,52 +491,6 @@ def _previous_seed(entry: L2Entry | None) -> str:
             default=str,
         )
     return entry.rendered or entry.summary or "Previous seed was empty."
-
-
-def _previous_pal_continuity(entry: L2Entry | None) -> dict[str, Any]:
-    if entry is None:
-        return {}
-    payload = dict(entry.payload or {})
-    continuity = payload.get("continuity")
-    if not isinstance(continuity, dict):
-        return {}
-    return _normalize_pal_v2_continuity(continuity)
-
-
-def _latest_l1_text(
-    units: Sequence[CompactionUnit],
-    *,
-    limit: int,
-) -> str:
-    for unit in reversed(list(units)):
-        text = _bounded_text(unit.text, limit=limit)
-        if text:
-            return text
-    return ""
-
-
-def _bounded_text(value: str, *, limit: int) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    head = max(1, limit // 2)
-    tail = max(1, limit - head)
-    return (
-        text[:head].rstrip()
-        + f"\n[... omitted {len(text) - head - tail} chars ...]\n"
-        + text[-tail:].lstrip()
-    )
-
-
-def _dedupe_units(units: Sequence[CompactionUnit]) -> list[CompactionUnit]:
-    result: list[CompactionUnit] = []
-    seen: set[str] = set()
-    for unit in units:
-        if unit.unit_id in seen:
-            continue
-        seen.add(unit.unit_id)
-        result.append(unit)
-    return result
 
 
 __all__ = [

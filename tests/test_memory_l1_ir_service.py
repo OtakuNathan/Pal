@@ -57,7 +57,6 @@ class MemoryL1IRServiceTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         )
         self.assertEqual(result.content, "ok")
-        self.assertFalse(result.retired)
         self.assertTrue(service.build_pack(MemoryPackRequest()).l1_recent_context)
 
     def test_late_result_after_interrupt_is_rejected(self) -> None:

@@ -13,7 +13,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.max_lines_to_read, 2_000)
         self.assertEqual(cfg.default_max_output_tokens, 25_000)
         self.assertEqual(cfg.default_max_result_size_chars, 50_000)
-        self.assertEqual(cfg.max_tool_results_per_message_chars, 200_000)
         self.assertEqual(cfg.stagnation_repeat_threshold, 3)
         self.assertEqual(cfg.llm_base_retry_delay_ms, 500)
         self.assertEqual(cfg.llm_max_output_recovery_attempts, 3)
@@ -58,12 +57,11 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text(
-                '[budget]\ndefault_max_result_size_chars = 99_000\nmax_tool_results_per_message_chars = 150_000\n',
+                '[budget]\ndefault_max_result_size_chars = 99_000\n',
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
             self.assertEqual(cfg.default_max_result_size_chars, 99_000)
-            self.assertEqual(cfg.max_tool_results_per_message_chars, 150_000)
             self.assertEqual(cfg.stagnation_repeat_threshold, 3)
 
     def test_load_reads_stagnation_section(self) -> None:

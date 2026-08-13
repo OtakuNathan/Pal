@@ -13,7 +13,7 @@ Owns:
   Minion hosts
 - shared compaction orchestration: immutable snapshots, atomic history units,
   budget preflight, an independently configured model-attempt budget,
-  validation, degraded checkpoints, and commit ordering
+  validation, transactional commit ordering, and no mutation on failure
 - stagnation guard orchestration
 - module runtime-state orchestration: deterministic snapshot/restore order,
   reverse-order whole-runtime reset, exact incarnation checks, and encrypted
@@ -55,11 +55,13 @@ Interaction rule:
   any unmatched/duplicate protocol and incomplete stream fragments instead of
   fabricating results. Turn closure releases provider-only continuation data
 - one logical turn may create at most three compact generations. Semantic
-  generation gets three attempts before a mechanical checkpoint, and the
-  prompt plus local validator cap visible checkpoint JSON at an estimated
-  20,000 tokens while preserving provider-declared model reasoning headroom
-- a policy owns schema, prompt, validation, rendering, degraded semantics, and
-  whether durable-memory candidates are allowed
+  generation gets three attempts before that compact RPC fails with memory
+  unchanged. The prompt plus local validator cap visible checkpoint JSON at
+  half the selected input budget or the absolute 20,000-token ceiling,
+  whichever is smaller, while preserving provider-declared model reasoning
+  headroom
+- a policy owns schema, prompt, validation, rendering, and whether
+  durable-memory candidates are allowed
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`

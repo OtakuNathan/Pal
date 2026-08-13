@@ -3690,7 +3690,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn('"kind": "paged"', tool_message.text)
         self.assertIn('"tool": "read_tool_result"', tool_message.text)
 
-    def test_turn_runtime_degrades_older_tool_results_when_current_turn_group_exceeds_limit(self) -> None:
+    def test_turn_runtime_preserves_delivered_tool_results_until_compaction(self) -> None:
         class MultiToolLLMRuntime:
             def __init__(self) -> None:
                 self.requests = []
@@ -3724,7 +3724,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
         core = PalCore(config=RuntimeConfig(
-            max_tool_results_per_message_chars=20_000,
             default_max_result_size_chars=120_000,
             active_tool_result_preview=400,
         ))
@@ -3752,8 +3751,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         retry_request = generate_requests[-1]
         tool_messages = [message for message in retry_request.messages if message.role.value == "tool"]
         self.assertEqual(len(tool_messages), 2)
-        self.assertIn("[preview only:", tool_messages[0].parts[0].content)
-        self.assertNotIn("[preview only:", tool_messages[1].parts[0].content)
+        self.assertEqual(tool_messages[0].parts[0].content, "X" * 12_000)
+        self.assertEqual(tool_messages[1].parts[0].content, "X" * 12_000)
 
     def test_execution_runtime_pages_large_tool_results_in_memory(self) -> None:
         core = PalCore()
@@ -3980,7 +3979,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         text="",
                         tool_calls=[],
                         finish_reason="compact_required",
-                        target_input_budget=256,
+                        target_input_budget=512,
                         reserved_output_tokens=64,
                         preferred_endpoint_id="fallback-small",
                         preferred_model_id="fallback-small-model",

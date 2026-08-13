@@ -19,7 +19,6 @@ class RuntimeConfig:
     # tool / prompt budget
     default_max_result_size_chars: int = 50_000
     max_tool_result_tokens: int = 100_000
-    max_tool_results_per_message_chars: int = 200_000
     active_tool_result_preview: int = 1_000
     tool_result_pager_retention_user_turns: int = 5
     chars_per_token: float = 3.5
@@ -80,7 +79,6 @@ class RuntimeConfig:
         cls._apply_section(kwargs, raw, "budget", {
             "default_max_result_size_chars": int,
             "max_tool_result_tokens": int,
-            "max_tool_results_per_message_chars": int,
             "active_tool_result_preview": int,
             "tool_result_pager_retention_user_turns": int,
             "chars_per_token": float,

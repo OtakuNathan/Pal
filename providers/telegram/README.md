@@ -11,3 +11,18 @@ database owns only endpoint registration and lifecycle projection.
 Inline-keyboard callback mappings and native Telegram message targets are
 durable provider projections. Human-review truth and decision validity remain
 owned by Minion.
+
+Build and install the provider independently from Pal core:
+
+```bash
+python -m pip wheel ./providers/telegram --no-deps -w ./dist/providers
+pal provider install ./dist/providers/pal_channel_provider_telegram-*.whl \
+  --runtime-root ~/.pal
+```
+
+The wheel is a versioned provider artifact, not a request to install its code
+into Pal's shared Python environment. `pal provider install` validates and
+atomically publishes its payload under the runtime root, archives the previous
+copy, and leaves endpoint configuration, credentials, and provider data alone.
+Run `channel_provider_rescan` in Pal (or restart the service) to activate the
+new generation.

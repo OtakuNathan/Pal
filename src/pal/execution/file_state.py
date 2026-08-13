@@ -229,7 +229,6 @@ class FileState:
     content: str
     mtime_ns: int
     full_view: bool = True
-    replay_result_ref: str = ""
     covered_ranges: tuple[tuple[int, int], ...] = ()
     authority_result_ids: tuple[str, ...] = ()
 
@@ -424,11 +423,6 @@ class SessionFileStateCache:
         except (OSError, UnicodeError):
             return None
         digest = content_digest(content)
-        snapshot = self.backend.file_snapshot(
-            execution_lifetime_id=self.context.execution_lifetime_id,
-            file_key=file_cache_key(resolved),
-            digest=digest,
-        )
         grant = self.backend.file_grant(
             execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(resolved),
@@ -440,7 +434,6 @@ class SessionFileStateCache:
             content=content,
             mtime_ns=mtime_ns,
             full_view=grant.complete,
-            replay_result_ref=(snapshot.replay_result_ref if snapshot is not None else ""),
             covered_ranges=grant.covered_ranges,
             authority_result_ids=grant.result_ids,
         )

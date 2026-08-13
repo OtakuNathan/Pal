@@ -118,6 +118,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("result-specific recovery affordances", routing.content)
         self.assertIn("suggested next tool only when", routing.content)
         self.assertIn("never blindly retry a mutation", routing.content)
+        self.assertIn("each tool call as one RPC", routing.content)
         self.assertIn("point-in-time observations", routing.content)
         self.assertIn("Replaying a stored result does not refresh", routing.content)
 
@@ -272,10 +273,6 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 policy=GenerationPolicyIR(max_output_tokens=256),
             ),
         )
-        reconciliations: list[dict[str, object]] = []
-        executor._reconcile_projected_tool_context = (
-            lambda _continuation, **kwargs: reconciliations.append(kwargs)
-        )
         continuation = SimpleNamespace(
             turn_id=current_turn_id,
             preferred_llm_endpoint_id=None,
@@ -285,7 +282,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             finalization_only=False,
         )
 
-        executor.build_turn_prompt(
+        prompt = executor.build_turn_prompt(
             continuation,
             _minion_prompt_context(
                 self._runner().pack,
@@ -295,20 +292,12 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             max_output_tokens=256,
         )
 
-        self.assertEqual(len(reconciliations), 1)
-        original_results = [
-            part.call_id
-            for message in reconciliations[0]["original_messages"]
-            for part in message.parts
-            if isinstance(part, ToolResultIR)
-        ]
         projected_results = [
             part.call_id
-            for message in reconciliations[0]["projected_messages"]
+            for message in prompt.messages
             for part in message.parts
             if isinstance(part, ToolResultIR)
         ]
-        self.assertEqual(original_results, ["prior-read"])
         self.assertEqual(projected_results, ["prior-read"])
 
     def test_minion_settlement_preserves_result_owned_authority(self) -> None:
@@ -369,7 +358,6 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         ]
         self.assertEqual(len(results), 1)
-        self.assertFalse(results[0].retired)
         self.assertEqual(results[0].content, "file contents")
 
     def test_minion_recovery_aborts_stale_turn_but_preserves_its_result(self) -> None:

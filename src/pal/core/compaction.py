@@ -20,10 +20,18 @@ from pal.memory.contracts import (
     MemoryCompactRequest,
     MemoryCompactResult,
 )
-from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.shared import LLMFinishReason, LLMPreflightStatus
 
 MAX_COMPACTION_VISIBLE_TOKENS = 20_000
+
+
+def compaction_visible_token_limit(snapshot: "CompactionSnapshot") -> int:
+    """Bound a checkpoint to half the selected endpoint's input budget."""
+
+    target = max(0, int(snapshot.target_input_budget or 0))
+    if target <= 0:
+        return MAX_COMPACTION_VISIBLE_TOKENS
+    return max(1, min(MAX_COMPACTION_VISIBLE_TOKENS, target // 2))
 
 
 class CompactionClockKind(StrEnum):
@@ -33,19 +41,12 @@ class CompactionClockKind(StrEnum):
 
 @dataclass(frozen=True)
 class CompactionUnit:
-    """One history item that must be retained or removed as a whole."""
+    """One protocol-closed history item kept or omitted as a whole from compact input."""
 
     unit_id: str
     source: str
     text: str
     order: int
-    closed: bool = True
-    successful: bool = True
-    recovery_required: bool = False
-
-    @property
-    def removable(self) -> bool:
-        return self.closed and self.successful and not self.recovery_required
 
 
 @dataclass(frozen=True)
@@ -75,9 +76,23 @@ class CompactionSnapshot:
         clock_value: int,
         metadata: dict[str, Any] | None = None,
     ) -> "CompactionSnapshot":
-        raw_items = list(
-            getattr(getattr(memory_service, "l1_store", None), "items", ()) or ()
+        l1_store = getattr(memory_service, "l1_store", None)
+        raw_items = list(getattr(l1_store, "items", ()) or ())
+        turns = list(
+            getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
         )
+        if len(turns) == len(raw_items):
+            raw_items = [
+                transcript
+                for turn, transcript in zip(turns, raw_items)
+                if str(
+                    getattr(
+                        getattr(turn, "state", ""),
+                        "value",
+                        getattr(turn, "state", ""),
+                    )
+                ) != "active"
+            ]
         memory_items = tuple(
             tuple(_copy_l1_message(item) for item in list(transcript or ()))
             for transcript in raw_items
@@ -133,15 +148,6 @@ class CompactionPolicy(Protocol):
     ) -> L2Entry:
         ...
 
-    def degraded_checkpoint(
-        self,
-        snapshot: CompactionSnapshot,
-        units: Sequence[CompactionUnit],
-        *,
-        failures: Sequence[str],
-    ) -> L2Entry:
-        ...
-
 @dataclass(frozen=True)
 class CompactionRunResult:
     status: str
@@ -150,13 +156,12 @@ class CompactionRunResult:
     memory_result: MemoryCompactResult | None = None
     source_sizes: tuple[int, ...] = ()
     failures: tuple[str, ...] = ()
-    degraded: bool = False
     clock_kind: CompactionClockKind = CompactionClockKind.USER_TURN
     clock_value: int = 0
 
     @property
     def success(self) -> bool:
-        return self.status in {"compacted", "degraded"}
+        return self.status == "compacted"
 
 
 @dataclass
@@ -168,7 +173,7 @@ class CompactionEngine:
     timeout_seconds: float = 180.0
     # Keep enough provider output headroom for models that count hidden
     # reasoning against max_output_tokens. The policy prompt independently
-    # caps the visible checkpoint at 20k tokens.
+    # caps the visible checkpoint at half the input budget, up to 20k tokens.
     max_output_tokens: int = 64_000
 
     async def run(
@@ -184,14 +189,6 @@ class CompactionEngine:
             llm_runtime=llm_runtime,
             fallback=self.max_output_tokens,
         )
-        protocol_error = validate_frozen_l1_protocol(snapshot)
-        if protocol_error:
-            return self._result(
-                snapshot,
-                status="protocol_not_closed",
-                attempts=0,
-                failures=(protocol_error,),
-            )
         units = list(build_compaction_units(snapshot))
         retained = list(units)
         source_sizes: list[int] = []
@@ -199,20 +196,6 @@ class CompactionEngine:
         attempts = 0
         validation_error = ""
         consecutive_schema_failures = 0
-
-        hard_check = await self._hard_context_fits(
-            snapshot,
-            retained,
-            llm_runtime=llm_runtime,
-        )
-        if not hard_check:
-            return self._result(
-                snapshot,
-                status="uncompactable_hard_context",
-                attempts=0,
-                source_sizes=source_sizes,
-                failures=("uncompactable_hard_context",),
-            )
 
         while attempts < max(1, int(self.max_attempts or 1)):
             source = self.policy.build_source(
@@ -237,13 +220,8 @@ class CompactionEngine:
                     aggressive=False,
                 )
                 if shrunk is None:
-                    return self._result(
-                        snapshot,
-                        status="uncompactable_hard_context",
-                        attempts=attempts,
-                        source_sizes=source_sizes,
-                        failures=(*failures, "uncompactable_hard_context"),
-                    )
+                    failures.append("input:base_context_over_budget")
+                    break
                 retained = shrunk
                 continue
 
@@ -269,13 +247,8 @@ class CompactionEngine:
                     aggressive=False,
                 )
                 if shrunk is None:
-                    return self._result(
-                        snapshot,
-                        status="uncompactable_hard_context",
-                        attempts=attempts,
-                        source_sizes=source_sizes,
-                        failures=(*failures, "uncompactable_hard_context"),
-                    )
+                    failures.append("input:base_context_over_budget")
+                    break
                 retained = shrunk
                 validation_error = ""
                 continue
@@ -302,16 +275,25 @@ class CompactionEngine:
 
             raw_text = str(getattr(outcome, "text", "") or "").strip()
             try:
-                visible_tokens = _estimate_visible_tokens(raw_text)
-                if visible_tokens > MAX_COMPACTION_VISIBLE_TOKENS:
+                visible_limit = compaction_visible_token_limit(snapshot)
+                raw_visible_tokens = _estimate_visible_tokens(raw_text)
+                if raw_visible_tokens > visible_limit:
                     raise ValueError(
-                        "checkpoint exceeds the 20,000-token visible output "
-                        f"limit (estimated {visible_tokens})"
+                        f"checkpoint exceeds the {visible_limit:,}-token visible "
+                        f"output limit (estimated {raw_visible_tokens})"
                     )
                 summary_entry = self.policy.validate_checkpoint(
                     raw_text,
                     snapshot,
                 )
+                rendered_visible_tokens = _estimate_visible_tokens(
+                    summary_entry.rendered or summary_entry.summary
+                )
+                if rendered_visible_tokens > visible_limit:
+                    raise ValueError(
+                        f"rendered checkpoint exceeds the {visible_limit:,}-token "
+                        f"visible output limit (estimated {rendered_visible_tokens})"
+                    )
             except Exception as exc:
                 consecutive_schema_failures += 1
                 validation_error = _validation_error(exc)
@@ -352,51 +334,13 @@ class CompactionEngine:
                 failures=failures,
             )
 
-        degraded_entry = self.policy.degraded_checkpoint(
-            snapshot,
-            retained,
-            failures=tuple(failures),
-        )
-        committed = await self._commit(
-            snapshot,
-            memory_service=memory_service,
-            summary_entry=degraded_entry,
-            after_commit=after_commit,
-        )
-        if isinstance(committed, Exception):
-            return self._result(
-                snapshot,
-                status="commit_failed",
-                attempts=attempts,
-                source_sizes=source_sizes,
-                failures=(*failures, f"commit:{type(committed).__name__}"),
-            )
         return self._result(
             snapshot,
-            status="degraded",
+            status="failed",
             attempts=attempts,
-            summary_entry=degraded_entry,
-            memory_result=committed,
             source_sizes=source_sizes,
             failures=failures,
-            degraded=True,
         )
-
-    async def _hard_context_fits(
-        self,
-        snapshot: CompactionSnapshot,
-        units: Sequence[CompactionUnit],
-        *,
-        llm_runtime: Any,
-    ) -> bool:
-        hard_units = [unit for unit in units if not unit.removable]
-        source = self.policy.build_source(snapshot, hard_units).strip()
-        request = self._request(snapshot, source, attempt=0)
-        advice = await _preflight(llm_runtime, request)
-        if advice is not None:
-            return not _preflight_requires_compaction(advice)
-        fallback_budget = max(1, int(snapshot.target_input_budget or 0))
-        return len(source) <= fallback_budget
 
     def _request(
         self,
@@ -501,7 +445,7 @@ class CompactionEngine:
         aggressive: bool,
     ) -> list[CompactionUnit] | None:
         candidate = list(retained)
-        removable_count = sum(1 for unit in candidate if unit.removable)
+        removable_count = len(candidate)
         drop_goal = (
             max(1, (removable_count + 3) // 4)
             if aggressive
@@ -509,17 +453,9 @@ class CompactionEngine:
         )
         dropped = 0
         while True:
-            oldest_index = next(
-                (
-                    index
-                    for index, unit in enumerate(candidate)
-                    if unit.removable
-                ),
-                None,
-            )
-            if oldest_index is None:
+            if not candidate:
                 return None
-            candidate.pop(oldest_index)
+            candidate.pop(0)
             dropped += 1
             rendered_size = len(
                 self.policy.build_source(
@@ -594,7 +530,6 @@ class CompactionEngine:
         memory_result: MemoryCompactResult | None = None,
         source_sizes: Sequence[int] = (),
         failures: Sequence[str] = (),
-        degraded: bool = False,
     ) -> CompactionRunResult:
         return CompactionRunResult(
             status=status,
@@ -603,7 +538,6 @@ class CompactionEngine:
             memory_result=memory_result,
             source_sizes=tuple(max(0, int(size)) for size in source_sizes),
             failures=tuple(str(item) for item in failures if str(item)),
-            degraded=bool(degraded),
             clock_kind=snapshot.clock_kind,
             clock_value=snapshot.clock_value,
         )
@@ -624,9 +558,6 @@ def build_compaction_units(
     for index, transcript in enumerate(snapshot.memory_items):
         if not transcript or _transcript_is_summary(transcript):
             continue
-        recovery_required = any(
-            _message_requires_recovery(message) for message in transcript
-        )
         units.append(
             CompactionUnit(
                 unit_id=f"memory:{index}",
@@ -636,26 +567,11 @@ def build_compaction_units(
                     max_chars=unit_text_limit,
                 ),
                 order=order,
-                closed=True,
-                successful=not recovery_required,
-                recovery_required=recovery_required,
             )
         )
         order += 1
 
     return tuple(units)
-
-
-def validate_frozen_l1_protocol(
-    snapshot: CompactionSnapshot,
-) -> str:
-    """Return an invariant error when frozen L1 contains an orphan batch."""
-
-    for transcript_index, transcript in enumerate(snapshot.memory_items):
-        error = l1_tool_protocol_validation_error(transcript)
-        if error:
-            return f"L1 transcript {transcript_index} {error}"
-    return ""
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -932,30 +848,6 @@ def _message_kind(message: L1TranscriptMessage) -> L1MessageKind:
         return L1MessageKind.ASSISTANT_REPLY
 
 
-def _message_requires_recovery(message: L1TranscriptMessage) -> bool:
-    kind = _message_kind(message)
-    if kind in {
-        L1MessageKind.TURN_INTERRUPTED,
-        L1MessageKind.TURN_ABORTED,
-    }:
-        return True
-    state = dict(message.payload.get("_pal_result_state") or {})
-    return _result_state_requires_recovery(state)
-
-
-def _result_state_requires_recovery(state: dict[str, Any]) -> bool:
-    if not state:
-        return False
-    if not bool(state.get("ok")):
-        return True
-    if str(state.get("kind") or "").strip().lower() in {
-        "failed",
-        "rejected",
-    }:
-        return True
-    return str(state.get("effect") or "").strip().lower() == "unknown"
-
-
 def _render_l1_transcript(
     transcript: Sequence[L1TranscriptMessage],
     *,
@@ -1026,6 +918,6 @@ __all__ = [
     "CompactionSnapshot",
     "CompactionUnit",
     "build_compaction_units",
+    "compaction_visible_token_limit",
     "extract_json_object",
-    "validate_frozen_l1_protocol",
 ]

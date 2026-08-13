@@ -145,13 +145,14 @@ class TestChecklistCapabilities:
     def setup_method(self) -> None:
         self.provider = ChecklistIntrospectionProvider(service=ChecklistService())
 
-    def test_upsert_guidance_strongly_encourages_visible_progress_tracking(self):
+    def test_tool_guidance_is_a_concise_local_contract(self):
         blueprint = ChecklistIntrospectionProvider.upsert.__capability_action_blueprints__[0]
         assert blueprint.guidance is not None
-        assert "Strongly prefer" in blueprint.guidance.use_when
-        assert "user-visible checklist" in blueprint.guidance.purpose
-        assert "unfinished work explicit" in blueprint.guidance.purpose
-        assert "realistic risk of missing a follow-up" in blueprint.guidance.use_when
+        assert blueprint.guidance.purpose == "Create or replace Pal's active checklist."
+        assert "task-flow guidance" in blueprint.guidance.use_when
+        assert "Strongly prefer" not in blueprint.guidance.use_when
+        assert "minion_start_workflow" not in blueprint.guidance.use_when
+        assert "remember_memory" not in blueprint.guidance.do_not_use_when
 
     def test_upsert_returns_structured_snapshot(self):
         result = self.provider.upsert(

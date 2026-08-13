@@ -24,7 +24,6 @@ from pal.shared.json_values import thaw_json
 from pal.shared.tool_protocol import (
     ToolCallIR,
     ToolResultIR,
-    ToolResultLifecycle,
 )
 
 
@@ -151,7 +150,6 @@ def part_to_payload(part: Any) -> dict[str, Any]:
         return {
             "kind": "tool_result", "call_id": part.call_id, "name": part.name,
             "content": part.content, "ok": part.ok, "status": part.status,
-            "lifecycle": part.lifecycle.value,
             "structured": thaw_json(part.structured) if part.structured is not None else None,
             # Runtime-only truth. Provider shape codecs deliberately ignore it.
             "context_delivery": (
@@ -160,9 +158,6 @@ def part_to_payload(part: Any) -> dict[str, Any]:
                 else None
             ),
             "replay_result_ref": part.replay_result_ref,
-            "visible_source_ranges": [
-                [start, end] for start, end in part.visible_source_ranges
-            ],
         }
     raise TypeError(f"unsupported LLM IR part: {type(part).__name__}")
 
@@ -197,9 +192,6 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
             call_id=str(payload.get("call_id") or ""), name=str(payload.get("name") or ""),
             content=str(payload.get("content") or ""), ok=bool(payload.get("ok", True)),
             status=str(payload.get("status") or "ok"),
-            lifecycle=ToolResultLifecycle(
-                str(payload.get("lifecycle") or "active")
-            ),
             structured=dict(payload["structured"]) if isinstance(payload.get("structured"), Mapping) else None,
             context_delivery=(
                 dict(payload["context_delivery"])
@@ -207,10 +199,5 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
                 else None
             ),
             replay_result_ref=str(payload.get("replay_result_ref") or ""),
-            visible_source_ranges=tuple(
-                (int(item[0]), int(item[1]))
-                for item in list(payload.get("visible_source_ranges") or ())
-                if isinstance(item, (list, tuple)) and len(item) == 2
-            ),
         )
     raise ValueError(f"unknown LLM IR part kind: {kind}")

@@ -164,10 +164,6 @@ class RuntimeStateTests(unittest.TestCase):
         )
         payload = copy.deepcopy(MemoryRuntimeStatePort(service).snapshot_state())
         payload["l1_turns"][0]["state"] = "settled"
-        for message in payload["l1_turns"][0]["messages"]:
-            for part in message["parts"]:
-                if part["kind"] == "tool_result":
-                    part.pop("lifecycle")
 
         restored = MemoryService()
         port = MemoryRuntimeStatePort(restored)
@@ -183,7 +179,6 @@ class RuntimeStateTests(unittest.TestCase):
             if isinstance(part, ToolResultIR)
         ]
         self.assertEqual(len(results), 1)
-        self.assertFalse(results[0].retired)
         self.assertEqual(results[0].content, "legacy full file result")
 
     def test_execution_restore_and_reset_owns_in_memory_pager(self) -> None:

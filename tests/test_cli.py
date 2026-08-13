@@ -102,6 +102,25 @@ class PalV2CliParserTests(unittest.TestCase):
         self.assertEqual(args.command, "client")
         self.assertEqual(args.message, "hello")
 
+    def test_provider_install_subcommand_parses_wheels_and_runtime_root(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "provider",
+                "install",
+                "telegram.whl",
+                "bridge.whl",
+                "--runtime-root",
+                "/tmp/pal-runtime",
+                "--force",
+            ]
+        )
+
+        self.assertEqual(args.command, "provider")
+        self.assertEqual(args.provider_command, "install")
+        self.assertEqual(args.wheels, [Path("telegram.whl"), Path("bridge.whl")])
+        self.assertEqual(args.runtime_root, Path("/tmp/pal-runtime"))
+        self.assertTrue(args.force)
+
 
 if __name__ == "__main__":
     unittest.main()

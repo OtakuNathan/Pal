@@ -59,7 +59,6 @@ class ExecutionRuntimeStatePort:
                 or not context.execution_lifetime_id
                 or not context.input_id
                 or context.current_user_turn > state.current_user_turn
-                or context.context_epoch > state.context_epoch
             ):
                 raise ValueError(
                     "execution runtime snapshot turn context has no owning lifetime"

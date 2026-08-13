@@ -608,14 +608,6 @@ class MinionScopedExecutionRuntime:
             return ()
         return tuple(retire(**kwargs) or ())
 
-    def reconcile_tool_context(self, **kwargs: Any) -> Any:
-        reconcile = getattr(
-            self._original_runtime,
-            "reconcile_tool_context",
-            None,
-        )
-        return reconcile(**kwargs) if callable(reconcile) else None
-
     def commit_tool_delivery(self, **kwargs: Any) -> Any:
         commit = getattr(
             self._original_runtime,

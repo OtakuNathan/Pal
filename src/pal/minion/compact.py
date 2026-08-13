@@ -8,6 +8,7 @@ from pal.core.compaction import (
     CompactionClockKind,
     CompactionSnapshot,
     CompactionUnit,
+    compaction_visible_token_limit,
     extract_json_object,
 )
 from pal.foundation import utc_now
@@ -35,10 +36,10 @@ MINION_COMPACTION_SYSTEM_PROMPT = (
     "Every continuity field is an array. Every item must contain exactly the keys named above; empty arrays are valid.\n"
     'Valid minimal example: {"schema":"pal.compaction.minion.v3","kind":"minion","continuity":{"technical_route":[],"active_work":[],"active_errors":[],"active_issues":[],"next_actions":[]},"summary":{"summary":"No active work remains.","search_text":"no active work"}}\n'
     "Do not emit memory_candidates. Do not include hidden reasoning, internal deliberation, chain-of-thought, or a prose replay of the role assignment.\n"
-    "Failed, rejected, unknown-effect, and incomplete tool batches are recovery state: retain the evidence and do not claim their side effects succeeded.\n"
-    "Closed successful tool batches may be compressed into verified work state. Never invent a tool result.\n"
+    "Record failed, rejected, and unknown-effect tool work accurately; do not claim its side effects succeeded.\n"
+    "Closed tool batches may be compressed into verified work state. Never invent a tool result.\n"
     "Checklist state is the macro plan; this checkpoint is the precise cursor within it.\n"
-    "Keep the final visible JSON checkpoint at or below 20,000 tokens. This limit applies to the JSON, not private reasoning.\n"
+    "Obey the request-specific visible checkpoint limit below. It applies to the JSON, not private reasoning.\n"
     "Output JSON only, without markdown fences."
 )
 
@@ -61,7 +62,7 @@ _CONTINUITY_ITEM_FIELDS = {
     "next_actions": frozenset({"action", "target", "expected_result"}),
 }
 _MINION_TOP_LEVEL_FIELDS = frozenset(
-    {"schema", "kind", "continuity", "summary", "degraded"}
+    {"schema", "kind", "continuity", "summary"}
 )
 _FORBIDDEN_REASONING_KEYS = frozenset(
     {
@@ -82,8 +83,11 @@ class MinionCompactionPolicy:
     accepts_memory_candidates: bool = False
 
     def system_prompt(self, snapshot: CompactionSnapshot) -> str:
-        _ = snapshot
-        return MINION_COMPACTION_SYSTEM_PROMPT
+        limit = compaction_visible_token_limit(snapshot)
+        return (
+            f"{MINION_COMPACTION_SYSTEM_PROMPT}\n"
+            f"The final visible JSON checkpoint for this request must not exceed {limit:,} tokens."
+        )
 
     def build_source(
         self,
@@ -99,7 +103,7 @@ class MinionCompactionPolicy:
             "- Frozen L1 below is the only compaction truth source.",
             "- External module contracts, checklist files, code, and recalled memory remain projected outside compact.",
             "- The previous compact seed, when present, is already part of frozen L1.",
-            "- Atomic L1 units may not be split. Recovery-required units must retain recovery affordances.",
+            "- Atomic L1 units may not be split. Record uncertain outcomes without claiming success.",
             "- Preserve exact files, symbols, commands, latest error evidence, excluded paths, and the next executable action.",
         ]
         if validation_error:
@@ -123,15 +127,10 @@ class MinionCompactionPolicy:
         if not units:
             lines.append("No ordinary work-history units remain.")
         for unit in units:
-            state = (
-                "recovery_required"
-                if unit.recovery_required
-                else "closed_success"
-            )
             lines.extend(
                 [
                     "",
-                    f"### {unit.unit_id} source={unit.source} state={state}",
+                    f"### {unit.unit_id} source={unit.source} state=closed",
                     unit.text or "[empty unit]",
                 ]
             )
@@ -186,8 +185,6 @@ class MinionCompactionPolicy:
             "search_text",
             "summary",
         )
-        if "degraded" in payload and not isinstance(payload.get("degraded"), bool):
-            raise ValueError("degraded must be a boolean")
         normalized_payload: dict[str, Any] = {
             "schema": self.policy_id,
             "kind": "minion",
@@ -200,94 +197,7 @@ class MinionCompactionPolicy:
                 "search_text": search_text,
             },
         }
-        if bool(payload.get("degraded")):
-            normalized_payload["degraded"] = True
         return _make_minion_summary_entry(normalized_payload)
-
-    def degraded_checkpoint(
-        self,
-        snapshot: CompactionSnapshot,
-        units: Sequence[CompactionUnit],
-        *,
-        failures: Sequence[str],
-    ) -> L2Entry:
-        recovery = [unit for unit in units if unit.recovery_required]
-        recent = list(units)[-3:]
-        safe_tail = _dedupe_units([*recovery, *recent])
-        previous = _previous_minion_continuity(snapshot.previous_summary)
-        payload: dict[str, Any] = {
-            "schema": self.policy_id,
-            "kind": "minion",
-            "degraded": True,
-            "continuity": {
-                "technical_route": [
-                    *list(previous.get("technical_route") or ()),
-                    {
-                        "route": "continue from frozen L1 and external module contract",
-                        "rationale": "semantic compaction did not produce a valid checkpoint",
-                    },
-                ],
-                "active_work": list(previous.get("active_work") or ()) + [
-                    {
-                        "goal": "recover precise work cursor",
-                        "target": unit.source,
-                        "action": _bounded_text(unit.text, limit=1200),
-                        "status": (
-                            "recovery_required"
-                            if unit.recovery_required
-                            else "recent_safe_tail"
-                        ),
-                    }
-                    for unit in safe_tail
-                ],
-                "active_errors": list(previous.get("active_errors") or ()) + [
-                    {
-                        "symptom": "recovery-required tool batch",
-                        "latest_evidence": _bounded_text(
-                            unit.text,
-                            limit=1200,
-                        ),
-                        "current_hypothesis": "effect must be reconciled before retry",
-                    }
-                    for unit in recovery
-                ],
-                "active_issues": [
-                    *list(previous.get("active_issues") or ()),
-                    {
-                        "issue": "semantic checkpoint generation failed",
-                        "known_facts": [
-                            str(item)[:240] for item in failures[-3:]
-                        ],
-                        "status": "degraded",
-                        "excluded_paths": [
-                            "do not infer success from missing or truncated output"
-                        ],
-                    }
-                ],
-                "next_actions": [
-                    *list(previous.get("next_actions") or ()),
-                    {
-                        "action": "consult the external module contract and reconcile recovery-required L1 work",
-                        "target": "current workspace and frozen L1 checkpoint",
-                        "expected_result": "a verified precise cursor before the next side effect",
-                    }
-                ],
-            },
-            "summary": {
-                "summary": (
-                    "Degraded Minion work checkpoint: recent safe work and all "
-                    "recovery-required batches were retained mechanically."
-                ),
-                "search_text": "\n".join(
-                    unit.text for unit in safe_tail
-                ).strip()
-                or "degraded minion work checkpoint",
-            },
-        }
-        return self.validate_checkpoint(
-            json.dumps(payload, ensure_ascii=False),
-            snapshot,
-        )
 
 
 def render_minion_compact_context_for_llm(
@@ -320,14 +230,6 @@ def render_minion_compact_context_for_llm(
     summary_text = str(summary or "").strip()
     if summary_text:
         lines.extend(["", "### Summary", summary_text])
-    if bool(payload.get("degraded")):
-        lines.extend(
-            [
-                "",
-                "### Checkpoint Quality",
-                "degraded: reconcile against first-hand role inputs and the journal before repeating side effects.",
-            ]
-        )
     lines.append("</compact_context>")
     return "\n".join(lines).strip()
 
@@ -374,18 +276,6 @@ def _previous_seed(entry: L2Entry | None) -> str:
             default=str,
         )
     return entry.rendered or entry.summary or "Previous seed was empty."
-
-
-def _previous_minion_continuity(entry: L2Entry | None) -> dict[str, list[Any]]:
-    if entry is None:
-        return {}
-    continuity = dict(entry.payload or {}).get("continuity")
-    if not isinstance(continuity, dict):
-        return {}
-    return {
-        key: _normalize_checkpoint_field(continuity.get(key))
-        for key in _CONTINUITY_FIELDS
-    }
 
 
 def _normalize_checkpoint_field(value: Any) -> list[Any]:
@@ -503,32 +393,6 @@ def _markdown_item_text(value: object) -> str:
             if (text := _markdown_item_text(item))
         )
     return str(value).strip()
-
-
-def _bounded_text(value: str, *, limit: int) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    head = max(1, limit // 2)
-    tail = max(1, limit - head)
-    return (
-        text[:head].rstrip()
-        + f"\n[... omitted {len(text) - head - tail} chars ...]\n"
-        + text[-tail:].lstrip()
-    )
-
-
-def _dedupe_units(
-    units: Sequence[CompactionUnit],
-) -> list[CompactionUnit]:
-    result: list[CompactionUnit] = []
-    seen: set[str] = set()
-    for unit in units:
-        if unit.unit_id in seen:
-            continue
-        seen.add(unit.unit_id)
-        result.append(unit)
-    return result
 
 
 __all__ = [

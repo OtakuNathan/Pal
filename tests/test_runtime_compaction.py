@@ -515,7 +515,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
         self.assertEqual(retry.model_hint, "small-model")
         self.assertEqual(retry.policy.max_output_tokens, 64_000)
-        self.assertIn("20,000 tokens", retry.messages[0].text)
+        self.assertIn("256 tokens", retry.messages[0].text)
 
     def test_compactor_uses_provider_output_ceiling_for_reasoning_headroom(self) -> None:
         service = _memory_with_turns(2)
@@ -538,7 +538,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "compacted")
         self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 128_000)
         self.assertIn(
-            "20,000 tokens",
+            "4,096 tokens",
             llm.generate_requests[0].messages[0].text,
         )
 
@@ -571,9 +571,9 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-    def test_valid_but_oversized_checkpoint_is_retried(self) -> None:
+    def test_checkpoint_over_half_the_input_budget_is_retried(self) -> None:
         oversized = json.loads(_valid_pal_payload())
-        oversized["summary"]["summary"] = "界" * 20_001
+        oversized["summary"]["summary"] = "界" * 4_097
         llm = _ScriptedLLM(
             [
                 generation_result_from_values(
@@ -595,12 +595,41 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "compacted")
         self.assertEqual(result.attempts, 2)
         self.assertIn(
-            "20,000-token visible output limit",
+            "4,096-token visible output limit",
             llm.generate_requests[1].messages[-1].text,
         )
 
-    def test_three_failures_commit_degraded_checkpoint_and_continue(self) -> None:
+    def test_checkpoint_limit_retains_the_absolute_twenty_thousand_cap(self) -> None:
+        service = _memory_with_turns(1)
+        original = _snapshot(service)
+        snapshot = CompactionSnapshot(
+            target_input_budget=100_000,
+            reserved_output_tokens=original.reserved_output_tokens,
+            clock_kind=original.clock_kind,
+            clock_value=original.clock_value,
+            memory_items=original.memory_items,
+            metadata=original.metadata,
+        )
+        llm = _ScriptedLLM(
+            [generation_result_from_values(text=_valid_pal_payload())]
+        )
+
+        result = asyncio.run(
+            CompactionEngine(PalCompactionPolicy()).run(
+                snapshot,
+                llm_runtime=llm,
+                memory_service=service,
+            )
+        )
+
+        self.assertEqual(result.status, "compacted")
+        self.assertIn("20,000 tokens", llm.generate_requests[0].messages[0].text)
+
+    def test_three_failures_leave_memory_unchanged(self) -> None:
         service = _memory_with_turns()
+        snapshot = _snapshot(service)
+        before_l1 = deepcopy(service.l1_store.items)
+        before_l2 = deepcopy(service.l2_store.items)
         llm = _ScriptedLLM(
             [
                 RuntimeError("transient"),
@@ -614,20 +643,21 @@ class SharedCompactionEngineTests(unittest.TestCase):
 
         result = asyncio.run(
             CompactionEngine(PalCompactionPolicy()).run(
-                _snapshot(service),
+                snapshot,
                 llm_runtime=llm,
                 memory_service=service,
             )
         )
 
-        self.assertEqual(result.status, "degraded")
-        self.assertTrue(result.degraded)
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(result.success)
         self.assertEqual(result.attempts, 3)
-        self.assertTrue(
-            service.l1_store.items[0][0].payload.get("degraded")
-        )
+        self.assertIsNone(result.summary_entry)
+        self.assertIsNone(result.memory_result)
+        self.assertEqual(service.l1_store.items, before_l1)
+        self.assertEqual(service.l2_store.items, before_l2)
 
-    def test_degraded_checkpoint_preserves_previous_l1_continuity_seed(self) -> None:
+    def test_failure_preserves_previous_checkpoint_and_new_l1(self) -> None:
         service = _memory_with_turns(2)
         initial_payload = json.loads(_valid_pal_payload("stable seed"))
         initial_payload["continuity"]["active_requests"] = [
@@ -657,9 +687,12 @@ class SharedCompactionEngineTests(unittest.TestCase):
             ]
         )
 
-        degraded = asyncio.run(
+        snapshot = _snapshot(service, l1_input="")
+        before_l1 = deepcopy(service.l1_store.items)
+        before_l2 = deepcopy(service.l2_store.items)
+        failed = asyncio.run(
             CompactionEngine(PalCompactionPolicy()).run(
-                _snapshot(service, l1_input=""),
+                snapshot,
                 llm_runtime=_ScriptedLLM(
                     [
                         RuntimeError("one"),
@@ -671,19 +704,15 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(degraded.status, "degraded")
-        payload = service.l1_store.items[0][0].payload
-        self.assertEqual(
-            payload["continuity"]["active_requests"],
-            ["preserve this active request"],
-        )
-        self.assertIn(
-            "new work after the stable seed",
-            json.dumps(payload, ensure_ascii=False),
-        )
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(service.l1_store.items, before_l1)
+        self.assertEqual(service.l2_store.items, before_l2)
 
-    def test_timeout_consumes_attempts_then_uses_degraded_checkpoint(self) -> None:
+    def test_timeout_consumes_attempts_then_leaves_memory_unchanged(self) -> None:
         service = _memory_with_turns()
+        snapshot = _snapshot(service)
+        before_l1 = deepcopy(service.l1_store.items)
+        before_l2 = deepcopy(service.l2_store.items)
         llm = _SlowLLM([])
 
         result = asyncio.run(
@@ -691,17 +720,47 @@ class SharedCompactionEngineTests(unittest.TestCase):
                 PalCompactionPolicy(),
                 timeout_seconds=0.01,
             ).run(
-                _snapshot(service),
+                snapshot,
                 llm_runtime=llm,
                 memory_service=service,
             )
         )
 
-        self.assertEqual(result.status, "degraded")
+        self.assertEqual(result.status, "failed")
         self.assertEqual(result.attempts, 3)
         self.assertEqual(len(llm.generate_requests), 3)
+        self.assertEqual(service.l1_store.items, before_l1)
+        self.assertEqual(service.l2_store.items, before_l2)
 
-    def test_unreconciled_failed_mutation_remains_hard_context(self) -> None:
+    def test_base_context_over_budget_fails_without_committing(self) -> None:
+        service = _memory_with_turns(1)
+        snapshot = _snapshot(service)
+        before_l1 = deepcopy(service.l1_store.items)
+        before_l2 = deepcopy(service.l2_store.items)
+        llm = _ScriptedLLM(
+            [],
+            preflight=lambda _request: LLMPreflightAdvice(
+                status=LLMPreflightStatus.COMPACT_REQUIRED,
+                target_input_budget=128,
+            ),
+        )
+
+        result = asyncio.run(
+            CompactionEngine(PalCompactionPolicy()).run(
+                snapshot,
+                llm_runtime=llm,
+                memory_service=service,
+            )
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.attempts, 0)
+        self.assertIn("input:base_context_over_budget", result.failures)
+        self.assertEqual(llm.generate_requests, [])
+        self.assertEqual(service.l1_store.items, before_l1)
+        self.assertEqual(service.l2_store.items, before_l2)
+
+    def test_closed_failed_mutation_can_be_dropped_to_fit_compaction(self) -> None:
         service = _memory_with_turns(1)
         def preflight(request):
             source = request.request.messages[-1].text
@@ -747,8 +806,6 @@ class SharedCompactionEngineTests(unittest.TestCase):
                 },
             ],
         )
-        before = deepcopy(service.l1_store.items)
-
         result = asyncio.run(
             CompactionEngine(PalCompactionPolicy()).run(
                 snapshot,
@@ -757,12 +814,16 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, "uncompactable_hard_context")
-        self.assertEqual(result.attempts, 0)
-        self.assertEqual(len(llm.generate_requests), 0)
-        self.assertEqual(service.l1_store.items, before)
+        self.assertEqual(result.status, "compacted")
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(len(llm.generate_requests), 1)
+        self.assertEqual(len(service.l1_store.items), 1)
+        self.assertEqual(
+            service.l1_store.items[0][0].kind,
+            L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+        )
 
-    def test_atomic_l1_unit_keeps_unknown_effect_and_rejects_incomplete_batch(self) -> None:
+    def test_atomic_l1_unit_includes_unknown_effect_and_ignores_active_batch(self) -> None:
         service = _memory_with_turns(1)
         unknown_protocol = [
             {
@@ -797,8 +858,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         tool_unit = units[-1]
 
         self.assertEqual(tool_unit.source, "memory")
-        self.assertTrue(tool_unit.recovery_required)
-        self.assertFalse(tool_unit.removable)
+        self.assertIn("write outcome unknown", tool_unit.text)
 
         incomplete_service = _memory_with_turns(1)
         incomplete_protocol, _ = l1_tool_protocol_transcript(
@@ -846,14 +906,27 @@ class SharedCompactionEngineTests(unittest.TestCase):
             clock_kind=CompactionClockKind.USER_TURN,
             clock_value=7,
         )
+        self.assertFalse(
+            any(
+                message.tool_call_id == "read-2"
+                for transcript in incomplete_snapshot.memory_items
+                for message in transcript
+            )
+        )
         result = asyncio.run(
             CompactionEngine(PalCompactionPolicy()).run(
                 incomplete_snapshot,
-                llm_runtime=_ScriptedLLM([]),
+                llm_runtime=_ScriptedLLM(
+                    [generation_result_from_values(text=_valid_pal_payload())]
+                ),
                 memory_service=incomplete_service,
             )
         )
-        self.assertEqual(result.status, "protocol_not_closed")
+        self.assertTrue(result.success)
+        self.assertEqual(
+            incomplete_service.active_l1_turn("corrupted-active-tool-call").pending_call_ids,
+            frozenset({"read-2"}),
+        )
 
     def test_closed_tool_body_is_bounded_but_visible_to_compaction(self) -> None:
         service = _memory_with_turns(1)
@@ -1294,20 +1367,10 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
                 context_delivery=delivery,
             ),
         )
-        runtime.reconcile_tool_context(
+        runtime.commit_tool_delivery(
             turn_id=turn_id,
-            original_messages=[
-                {"role": "tool", "tool_call_id": call.call_id, "content": content}
-            ],
-            projected_messages=[
-                {
-                    "role": "tool",
-                    "tool_call_id": call.call_id,
-                    "content": "alpha",
-                    "_pal_visible_source_ranges": [[0, 5]],
-                }
-            ],
-            delivery_records={call.call_id: delivery},
+            context_delivery=delivery,
+            result_id=call.call_id,
         )
         before = runtime.logical_state.file_grant(
             execution_lifetime_id="pal:resident",
@@ -1315,7 +1378,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             digest="digest-active",
         )
         self.assertIsNotNone(before)
-        self.assertFalse(before.complete)
+        self.assertTrue(before.complete)
         continuation = SimpleNamespace(
             turn_id=turn_id,
             pending_tool_call_batch=[],
@@ -1342,7 +1405,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
         self.assertIsNotNone(after)
         self.assertEqual(after.covered_ranges, before.covered_ranges)
-        self.assertFalse(after.complete)
+        self.assertTrue(after.complete)
 
     def test_manual_compact_retires_removed_result_authority_by_lifetime(self) -> None:
         core = PalCore()
@@ -1417,6 +1480,94 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         )
 
+    def test_minion_compact_retires_authority_from_bound_execution_lifetime(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = _memory_with_turns(1)
+        register_memory_with_core(core.context, service)
+        core.turn_executor._compaction_engine = CompactionEngine(
+            MinionCompactionPolicy()
+        )
+        core.context.port_registry["llm:llm"] = _ScriptedLLM(
+            [generation_result_from_values(text=_valid_minion_payload())]
+        )
+        runtime = core.context.execution_runtime
+        turn_id = "minion-result-owner"
+        execution_lifetime_id = "agent-session-123"
+        runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key=execution_lifetime_id,
+            input_id="minion-input",
+        )
+        delivery = FileDeliveryManifest(
+            file_key="/workspace/minion-input.txt",
+            digest="digest-minion",
+            total_lines=1,
+            spans=(FileDeliverySpan(0, 8, 1, 1, 0, 8, 8),),
+            complete_file=True,
+        ).to_dict()
+        runtime.commit_tool_delivery(
+            turn_id=turn_id,
+            context_delivery=delivery,
+            result_id="read-minion-compact",
+        )
+        call = new_tool_call(
+            name="read_file",
+            args={"file_path": "/workspace/minion-input.txt"},
+            call_id="read-minion-compact",
+        )
+        service.begin_l1_turn(turn_id, user_text="read the minion file")
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content="1: minion",
+                context_delivery=delivery,
+            ),
+        )
+        service.settle_l1_turn(turn_id)
+        continuation = SimpleNamespace(
+            turn_id=turn_id,
+            pending_tool_call_batch=[],
+            pending_tool_results=[],
+            pending_assistant_tool_text="",
+            preferred_llm_endpoint_id=None,
+            preferred_llm_model_id=None,
+        )
+
+        result = asyncio.run(
+            core.turn_executor.compact_memory_async(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
+                assembly_context=PromptAssemblyContext(
+                    core_mode="minion",
+                    turn_kind="minion",
+                    work_order_id="work-1",
+                    metadata={"prompt_cache_scope_id": "minion:run-1"},
+                ),
+                continuation=continuation,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertIsNone(
+            runtime.logical_state.file_grant(
+                execution_lifetime_id=execution_lifetime_id,
+                file_key="/workspace/minion-input.txt",
+                digest="digest-minion",
+            )
+        )
+        self.assertNotIn(
+            "minion:run-1",
+            runtime.logical_state.snapshot_state()["sessions"],
+        )
+
     def test_manual_compact_uses_same_engine_and_opens_candidate_approval(self) -> None:
         core = PalCore()
         register_core_with_core(core)
@@ -1474,6 +1625,39 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(statuses[-1][0], "interactive_open")
         spec = statuses[-1][1]["spec"]
         self.assertIn("Compact candidates need approval", spec.text)
+
+    def test_manual_compact_is_rejected_while_resident_turn_is_active(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = _memory_with_turns(1)
+        register_memory_with_core(core.context, service)
+        llm = _PurposeAwareLLM()
+        core.context.port_registry["llm:llm"] = llm
+        core.state.active_turn_id = "busy-turn"
+        core.state.active_turns["busy-turn"] = SimpleNamespace(turn_id="busy-turn")
+        replies: list[str] = []
+
+        async def capture_reply(_route, text: str) -> None:
+            replies.append(text)
+
+        core._reply_to_route_async = capture_reply
+
+        asyncio.run(
+            core._handle_compact_memory_async(
+                ControlAction(
+                    action_kind="compact_memory",
+                    target_scope="memory",
+                    route=ControlRoute(
+                        endpoint_id="memory",
+                        channel_kind="memory",
+                    ),
+                )
+            )
+        )
+
+        self.assertIn("current turn finishes", replies[-1])
+        self.assertEqual(llm.requests, [])
+        self.assertEqual(len(service.l1_store.turns.turns), 1)
 
     def test_pal_clock_advances_only_after_successful_user_turn_commit(self) -> None:
         core = PalCore()
