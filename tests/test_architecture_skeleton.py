@@ -14,6 +14,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pal.channel import (
     ChannelAdapter,
@@ -25,6 +26,7 @@ from pal.channel import (
     ResponseHandle,
     register_with_core as register_channel_with_core,
 )
+from pal.channel.contracts import ChannelDeliveryError
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import (
     CompactionClockKind,
@@ -1566,6 +1568,35 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("memory_provider_inventory", tool_names)
         self.assertNotIn("shell", tool_names)
 
+    def test_channel_failure_surface_prefers_reload_over_destructive_controls(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_channel_with_core(core.context, ChannelRuntime())
+        for module_id in ("execution", "channel"):
+            core.publish_module_capabilities(module_id)
+
+        descriptors = core.tool_surface.select_failure_descriptors(
+            FailureSignal(
+                subsystem="channel",
+                component="telegram_main",
+                failure_kind="delivery_failure",
+                severity="medium",
+                primary_blocker="delivery failed",
+                related_ids={"endpoint_id": "telegram_main"},
+                safe_to_retry=True,
+                repair_domain="channel:endpoint",
+            )
+        )
+        canonical_paths = {
+            str(descriptor.canonical_path or "")
+            for descriptor in descriptors
+        }
+
+        self.assertIn("op_channel_mgmt_reload_provider", canonical_paths)
+        self.assertNotIn("op_channel_mgmt_disable", canonical_paths)
+        self.assertNotIn("op_channel_mgmt_detach", canonical_paths)
+
     def test_failure_flow_llm_blocker_fails_without_work_order(self) -> None:
         core = PalCore()
         register_failure_with_core(core, FailureRuntime())
@@ -2776,6 +2807,84 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
         self.assertEqual(delivered[0].payload["reply_id"], reply_id)
 
+    def test_channel_outbox_reemits_transient_failure_after_cooldown(self) -> None:
+        channel_runtime = ChannelRuntime()
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind="user.message",
+                source_kind="channel",
+                payload={"text": "hello"},
+            ),
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:1",
+            ),
+            response_handle=ResponseHandle(endpoint_id="telegram_main"),
+        )
+        channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(
+                envelope,
+                control_scope_key="telegram:1",
+            ),
+            "world",
+        )
+
+        with patch(
+            "pal.channel.runtime.time.monotonic",
+            side_effect=(0.0, 30.0, 61.0),
+        ):
+            event_counts = []
+            for _ in range(3):
+                channel_runtime.flush_outbox()
+                event_counts.append(len(channel_runtime.mailbox.drain()))
+
+        self.assertEqual(event_counts, [1, 0, 1])
+        self.assertEqual(channel_runtime.outbox[0].attempts, 3)
+
+    def test_channel_runtime_does_not_retry_permanent_adapter_failure(self) -> None:
+        class PermanentFailureAdapter:
+            channel_kind = "stdio"
+
+            def send(self, response_handle: ResponseHandle, text: str) -> None:
+                _ = response_handle, text
+                raise ChannelDeliveryError(
+                    "recipient rejected the message",
+                    permanent=True,
+                    reason="recipient_rejected",
+                )
+
+        channel_runtime = ChannelRuntime()
+        channel_runtime.adapter_registry.register(PermanentFailureAdapter())
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind="user.message",
+                source_kind="channel",
+                payload={"text": "hello"},
+            ),
+            endpoint=EndpointConfig(
+                endpoint_id="stdio",
+                channel_kind="stdio",
+                binding_key="stdout",
+            ),
+            response_handle=ResponseHandle(endpoint_id="stdio"),
+        )
+        reply_id = channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(
+                envelope,
+                control_scope_key="stdio",
+            ),
+            "world",
+        )
+
+        channel_runtime.flush_outbox()
+        events = channel_runtime.mailbox.drain()
+
+        self.assertFalse(channel_runtime.outbox)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].payload["reply_id"], reply_id)
+        self.assertTrue(events[0].payload["permanent"])
+
     def test_channel_endpoint_queue_base_handles_pairing_mailbox_and_outbox(self) -> None:
         endpoint = StubEndpoint(
             endpoint=EndpointConfig(
@@ -2832,6 +2941,26 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         delivered = endpoint.flush_outbox()
         self.assertEqual(endpoint.sent, [("telegram_main", "world")])
         self.assertEqual([event.event_kind for event in delivered], ["reply.delivered"])
+
+    def test_channel_endpoint_queue_reemits_transient_failure_after_cooldown(self) -> None:
+        endpoint = StubEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:1",
+            )
+        )
+        endpoint.disable()
+        endpoint.queue_reply("world")
+
+        with patch(
+            "pal.channel.channel_endpoint_queue_base.time.monotonic",
+            side_effect=(0.0, 30.0, 61.0),
+        ):
+            event_counts = [len(endpoint.flush_outbox()) for _ in range(3)]
+
+        self.assertEqual(event_counts, [1, 0, 1])
+        self.assertEqual(endpoint.outbox[0].attempts, 3)
 
     def test_channel_endpoint_capabilities_cover_auth_health_and_backlog_without_attach(self) -> None:
         runtime_root, database = self._create_database()

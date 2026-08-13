@@ -30,6 +30,7 @@ from pal.shared import EventKind, SourceKind
 
 INTERACTIVE_STATUS_KINDS = {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}
 TRANSIENT_TEXT_STATUS_KINDS = {"llm_waiting"}
+TRANSIENT_REPLY_FAILURE_REPORT_INTERVAL_SECONDS = 60.0
 
 
 @dataclass
@@ -53,7 +54,11 @@ class ChannelEndpointQueueBase(ABC):
     _interactive_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
     _interactive_default_ttl_seconds: float = 60.0
     _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
-    _reported_reply_failures: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _reported_reply_failures: dict[str, tuple[str, float]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     @abstractmethod
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
@@ -602,12 +607,22 @@ class ChannelEndpointQueueBase(ABC):
         permanent: bool,
     ) -> EventEnvelope | None:
         normalized_reason = str(reason or "delivery_failed")
-        if self._reported_reply_failures.get(item.reply_id) == normalized_reason:
-            return None
         if permanent:
             self._reported_reply_failures.pop(item.reply_id, None)
         else:
-            self._reported_reply_failures[item.reply_id] = normalized_reason
+            now = time.monotonic()
+            previous = self._reported_reply_failures.get(item.reply_id)
+            if (
+                previous is not None
+                and previous[0] == normalized_reason
+                and now - previous[1]
+                < TRANSIENT_REPLY_FAILURE_REPORT_INTERVAL_SECONDS
+            ):
+                return None
+            self._reported_reply_failures[item.reply_id] = (
+                normalized_reason,
+                now,
+            )
         return EventEnvelope(
             event_kind=EventKind.REPLY_FAILED,
             source_kind=SourceKind.CHANNEL,

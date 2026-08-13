@@ -58,12 +58,12 @@ class FailureEventHandler(EventHandler):
         stale_signatures = [
             key
             for key, seen_at in self._recent_delivery_failures.items()
-            if seen_at < cutoff
+            if seen_at <= cutoff
         ]
         for key in stale_signatures:
             self._recent_delivery_failures.pop(key, None)
         seen_at = self._recent_delivery_failures.get(signature)
-        if seen_at is not None and seen_at >= cutoff:
+        if seen_at is not None and seen_at > cutoff:
             return True
         self._recent_delivery_failures[signature] = now
         return False

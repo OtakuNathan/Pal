@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -19,7 +20,10 @@ from pal.channel.contracts import (
     QueuedStreamUpdate,
     TurnDeliveryBinding,
 )
-from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
+from pal.channel.channel_endpoint_queue_base import (
+    TRANSIENT_REPLY_FAILURE_REPORT_INTERVAL_SECONDS,
+    ChannelEndpointBase,
+)
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
@@ -69,7 +73,11 @@ class ChannelRuntime(ChannelRuntimePort):
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
     ingress_compiler: ChannelIngressCompiler | None = None
-    _reported_outbox_failures: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _reported_outbox_failures: dict[str, tuple[str, float]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
 
@@ -104,6 +112,7 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         endpoint.on_ready = self._notify_ready
         if not self._started:
+            _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.endpoint_registry.register(endpoint)
             return
 
@@ -127,6 +136,7 @@ class ChannelRuntime(ChannelRuntimePort):
             raise
         # Registry replacement is the commit point.  Until the candidate has
         # started successfully, readers continue to resolve the old endpoint.
+        _transfer_endpoint_runtime_state(old_endpoint, endpoint)
         self.endpoint_registry.register(endpoint)
         self._queue_cached_control_catalog(endpoint)
 
@@ -146,6 +156,8 @@ class ChannelRuntime(ChannelRuntimePort):
             future.result(timeout=timeout_seconds)
             return
         if not self._started:
+            old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+            _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.register_endpoint(endpoint)
             return
         asyncio.run(_replace())
@@ -457,16 +469,24 @@ class ChannelRuntime(ChannelRuntimePort):
                 adapter.send(item.response_handle, item.text)
             except Exception as exc:
                 reason = str(exc)
-                self.outbox.append(
-                    QueuedReply(
-                        reply_id=item.reply_id,
-                        response_handle=item.response_handle,
-                        endpoint=item.endpoint,
-                        text=item.text,
-                        attempts=item.attempts + 1,
-                    )
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(
+                    getattr(exc, "permanent", False)
                 )
-                self._report_outbox_failure_once(item, reason)
+                if not permanent:
+                    self.outbox.append(
+                        QueuedReply(
+                            reply_id=item.reply_id,
+                            response_handle=item.response_handle,
+                            endpoint=item.endpoint,
+                            text=item.text,
+                            attempts=item.attempts + 1,
+                        )
+                    )
+                self._report_outbox_failure_once(
+                    item,
+                    reason,
+                    permanent=permanent,
+                )
                 continue
             self._reported_outbox_failures.pop(item.reply_id, None)
             self.mailbox.put(
@@ -477,11 +497,30 @@ class ChannelRuntime(ChannelRuntimePort):
                 )
             )
 
-    def _report_outbox_failure_once(self, item: QueuedReply, reason: str) -> None:
+    def _report_outbox_failure_once(
+        self,
+        item: QueuedReply,
+        reason: str,
+        *,
+        permanent: bool = False,
+    ) -> None:
         normalized_reason = str(reason or "delivery_failed")
-        if self._reported_outbox_failures.get(item.reply_id) == normalized_reason:
-            return
-        self._reported_outbox_failures[item.reply_id] = normalized_reason
+        if permanent:
+            self._reported_outbox_failures.pop(item.reply_id, None)
+        else:
+            now = time.monotonic()
+            previous = self._reported_outbox_failures.get(item.reply_id)
+            if (
+                previous is not None
+                and previous[0] == normalized_reason
+                and now - previous[1]
+                < TRANSIENT_REPLY_FAILURE_REPORT_INTERVAL_SECONDS
+            ):
+                return
+            self._reported_outbox_failures[item.reply_id] = (
+                normalized_reason,
+                now,
+            )
         self.mailbox.put(
             EventEnvelope(
                 event_kind=EventKind.REPLY_FAILED,
@@ -490,6 +529,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     "reply_id": item.reply_id,
                     "endpoint_id": item.endpoint.endpoint_id,
                     "reason": normalized_reason,
+                    "permanent": permanent,
                     "attempts": item.attempts + 1,
                 },
             )
@@ -498,3 +538,55 @@ class ChannelRuntime(ChannelRuntimePort):
     def _notify_ready(self) -> None:
         if self.on_ready is not None:
             self.on_ready()
+
+
+def _transfer_endpoint_runtime_state(
+    old_endpoint: ChannelEndpointBase | None,
+    new_endpoint: ChannelEndpointBase,
+) -> None:
+    """Move transport-neutral pending work at the endpoint swap boundary."""
+
+    if old_endpoint is None or old_endpoint is new_endpoint:
+        return
+
+    for attribute in (
+        "mailbox",
+        "outbox",
+        "attachment_outbox",
+        "status_outbox",
+        "stream_update_outbox",
+    ):
+        old_queue = getattr(old_endpoint, attribute, None)
+        new_queue = getattr(new_endpoint, attribute, None)
+        old_items = getattr(old_queue, "items", old_queue)
+        new_items = getattr(new_queue, "items", new_queue)
+        if old_items is None or new_items is None or not old_items:
+            continue
+        candidate_items = tuple(new_items)
+        new_items.clear()
+        new_items.extend(old_items)
+        new_items.extend(candidate_items)
+        old_items.clear()
+
+    for attribute in (
+        "_reported_reply_failures",
+        "_stream_sessions",
+        "_interactive_messages",
+    ):
+        old_values = getattr(old_endpoint, attribute, None)
+        new_values = getattr(new_endpoint, attribute, None)
+        if not isinstance(old_values, dict) or not isinstance(new_values, dict):
+            continue
+        for key, value in old_values.items():
+            new_values.setdefault(key, value)
+        old_values.clear()
+
+    old_commands = list(
+        getattr(old_endpoint, "_control_commands_manifest", ()) or ()
+    )
+    if old_commands and not getattr(
+        new_endpoint,
+        "_control_commands_manifest",
+        None,
+    ):
+        new_endpoint._control_commands_manifest = old_commands

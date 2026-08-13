@@ -1382,6 +1382,37 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
+    async def test_channel_replace_transfers_pending_reply_ownership(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target=self.route.reply_target
+        )
+        reply_id = self.endpoint.queue_reply(
+            "queued before reload",
+            response_handle=handle,
+        )
+        await self.channel_runtime.start_async()
+        replacement = _StubEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key="runtime.sock",
+            )
+        )
+
+        await self.channel_runtime.replace_endpoint_async(replacement)
+
+        self.assertFalse(self.endpoint.outbox)
+        self.assertEqual(
+            [item.reply_id for item in replacement.outbox],
+            [reply_id],
+        )
+        delivered = replacement.flush_outbox()
+        self.assertEqual(
+            replacement.sent_replies,
+            [("queued before reload", dict(self.route.reply_target))],
+        )
+        self.assertEqual(delivered[0].payload["reply_id"], reply_id)
+
     async def test_channel_replace_from_running_channel_loop_requires_async_api(self) -> None:
         await self.channel_runtime.start_async()
         replacement = _StubEndpoint(

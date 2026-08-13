@@ -2046,6 +2046,44 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(endpoint.bot_token, "runtime-only-token")
         self.assertIn("telegram_main", result.structured["restored_endpoint_ids"])
 
+    def test_channel_provider_rescan_transfers_pending_reply_ownership(self) -> None:
+        repository = ChannelEndpointRepository()
+        repository.upsert(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:123",
+            enabled=True,
+            binding_metadata={},
+        )
+        runtime = ChannelRuntime()
+        provider = ChannelIntrospectionProvider(
+            runtime=runtime,
+            repository=repository,
+            runtime_root=self.runtime_root,
+        )
+        provider.provider_manager.load_runtime_providers()
+        provider.provider_manager.hydrate_all()
+        old_endpoint = runtime.get_endpoint("telegram_main")
+        self.assertIsNotNone(old_endpoint)
+        pending_reply_id = old_endpoint.queue_reply(
+            "reply queued before provider rescan",
+            response_handle=old_endpoint.build_response_handle(
+                reply_target={"chat_id": "123"}
+            ),
+        )
+
+        result = provider.provider_manager.rescan_providers()
+
+        self.assertFalse(result["scan_errors"])
+        endpoint = runtime.get_endpoint("telegram_main")
+        self.assertIsNotNone(endpoint)
+        self.assertIsNot(endpoint, old_endpoint)
+        self.assertEqual(
+            [item.reply_id for item in endpoint.outbox],
+            [pending_reply_id],
+        )
+        self.assertFalse(old_endpoint.outbox)
+
     def test_compose_runtime_loads_runtime_root_channel_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
         self._write_demo_runtime_channel_provider()

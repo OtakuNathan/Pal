@@ -200,6 +200,27 @@ class FailureFlowTests(unittest.TestCase):
 
         self.assertEqual(len(core.calls), 1)
 
+    def test_delivery_failure_flow_can_retry_at_cooldown_boundary(self) -> None:
+        handler = FailureEventHandler(
+            core=_RecordingFailureCore(),
+            duplicate_window_seconds=60.0,
+        )
+        payload = {
+            "reply_id": "reply-1",
+            "endpoint_id": "tg-1",
+            "reason": "adapter_unavailable",
+        }
+
+        with patch(
+            "pal.failure.handler.time.monotonic",
+            side_effect=(0.0, 60.0),
+        ):
+            first_duplicate = handler._is_duplicate_delivery_failure(payload)
+            boundary_duplicate = handler._is_duplicate_delivery_failure(payload)
+
+        self.assertFalse(first_duplicate)
+        self.assertFalse(boundary_duplicate)
+
     def test_failure_flow_llm_exception_returns_failed_verification(self) -> None:
         core = PalCore()
         register_core_with_core(core)
