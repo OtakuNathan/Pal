@@ -85,12 +85,12 @@ It owns:
 - the main turn loop
 - prompt assembly
 - memory / LLM / execution / control coordination
-- worker/minion spawning and observation
+- worker/bunshin spawning and observation
 - final user-visible replies
 
 ## Worker Responsibilities
 
-Workers and minions own delegated work. They may:
+Workers and bunshins own delegated work. They may:
 
 - perform task-specific execution
 - write workspace artifacts
@@ -218,6 +218,6 @@ is appropriate.
 ## Non-Goals
 
 - This document does not define channel-specific UX.
-- This document does not define every minion profile.
+- This document does not define every bunshin profile.
 - This document does not require one universal service manager.
 - This document does not define UI screens beyond the bootstrap data contract.

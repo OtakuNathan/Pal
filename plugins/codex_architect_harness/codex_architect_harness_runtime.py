@@ -9,12 +9,12 @@ from pathlib import Path
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.foundation.sidecar import python_subprocess_env
-from pal.minion.harnesses import (
+from pal.bunshin.harnesses import (
     CODEX_ARCHITECT_HARNESS_ID,
     HARNESS_LAUNCH_HOST,
     HARNESS_PROTOCOL_VERSION,
-    MinionHarnessRegistry,
-    MinionHarnessSpec,
+    BunshinHarnessRegistry,
+    BunshinHarnessSpec,
 )
 from pal.plugins.contracts import PluginBuildContext
 
@@ -55,7 +55,7 @@ def _resolve_codex_binary() -> Path:
 @dataclass
 class CodexArchitectHarnessBundle:
     plugin_dir: Path
-    registry: MinionHarnessRegistry
+    registry: BunshinHarnessRegistry
     plugin_id: str = "codex_architect_harness"
     version: str = "0.1.0"
 
@@ -76,7 +76,7 @@ class CodexArchitectHarnessBundle:
         worker = (self.plugin_dir / "codex_architect_worker.py").resolve()
         if not worker.is_file():
             raise RuntimeError(f"Codex Architect worker is missing: {worker}")
-        spec = MinionHarnessSpec(
+        spec = BunshinHarnessSpec(
             harness_id=CODEX_ARCHITECT_HARNESS_ID,
             protocol_version=HARNESS_PROTOCOL_VERSION,
             supported_roles=("architect",),
@@ -109,10 +109,10 @@ class CodexArchitectHarnessBundle:
 def build_plugin(
     context: PluginBuildContext,
 ) -> CodexArchitectHarnessBundle:
-    registry = context.services.get("minion_harness_registry")
-    if not isinstance(registry, MinionHarnessRegistry):
+    registry = context.services.get("bunshin_harness_registry")
+    if not isinstance(registry, BunshinHarnessRegistry):
         raise RuntimeError(
-            "Codex Architect harness requires minion_harness_registry service"
+            "Codex Architect harness requires bunshin_harness_registry service"
         )
     if context.plugin_dir is None:
         raise RuntimeError("Codex Architect harness plugin_dir is required")

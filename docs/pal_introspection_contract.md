@@ -153,7 +153,7 @@ flowchart LR
 - 诊断问题
 - 制定修复方案
 - 创建 maintenance task
-- 调用 minions 修复组件
+- 调用 bunshins 修复组件
 - 验证结果
 - 重新注册组件
 - 回滚失败组件

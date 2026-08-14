@@ -12,17 +12,17 @@ from hypothesis_jsonschema import from_schema
 
 from pal.execution import generated_tool_models
 from pal.execution.tool_facade import StrictToolModel
-from pal.minion.scoped_execution import (
-    MinionScopedExecutionOpMinionArtifactEditInput,
-    MinionScopedExecutionShellInput,
+from pal.bunshin.scoped_execution import (
+    BunshinScopedExecutionOpBunshinArtifactEditInput,
+    BunshinScopedExecutionShellInput,
 )
-from pal.minion.v2.capabilities import (
-    MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
-    MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+from pal.bunshin.v2.capabilities import (
+    BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
+    BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
 )
-from pal.minion.v2.work_items import (
-    MinionAddFindingInput,
-    MinionUpdateChecklistInput,
+from pal.bunshin.v2.work_items import (
+    BunshinAddFindingInput,
+    BunshinUpdateChecklistInput,
 )
 
 
@@ -45,23 +45,23 @@ DECLARED_INPUT_MODELS = tuple(sorted({
             and isinstance(value, type)
             and issubclass(value, StrictToolModel)
         ),
-        ("MinionAddFindingInput", MinionAddFindingInput),
-        ("MinionUpdateChecklistInput", MinionUpdateChecklistInput),
+        ("BunshinAddFindingInput", BunshinAddFindingInput),
+        ("BunshinUpdateChecklistInput", BunshinUpdateChecklistInput),
         (
-            "MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput",
-            MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+            "BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput",
+            BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
         ),
         (
-            "MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput",
-            MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+            "BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput",
+            BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
         ),
         (
-            "MinionScopedExecutionOpMinionArtifactEditInput",
-            MinionScopedExecutionOpMinionArtifactEditInput,
+            "BunshinScopedExecutionOpBunshinArtifactEditInput",
+            BunshinScopedExecutionOpBunshinArtifactEditInput,
         ),
         (
-            "MinionScopedExecutionShellInput",
-            MinionScopedExecutionShellInput,
+            "BunshinScopedExecutionShellInput",
+            BunshinScopedExecutionShellInput,
         ),
     )
 }.items()))

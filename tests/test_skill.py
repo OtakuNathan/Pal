@@ -24,7 +24,7 @@ from pal.execution.tool_facade import CompleteResult, EffectKind, Idempotency, R
 from pal.foundation import PalV2Database
 from pal.llm import generation_result_from_values
 from pal.lsp import build_lsp_plugin
-from pal.minion import register_with_core as register_minion_with_core
+from pal.bunshin import register_with_core as register_bunshin_with_core
 from pal.skill import (
     SKILL_STATUS_ACTIVE,
     SKILL_STATUS_DISABLED,
@@ -509,7 +509,7 @@ Run the workflow.
             self.assertEqual(skill.module_id, "lsp")
             self.assertTrue(skill.active)
             self.assertIn("<runtime_root>/plugins/lsp/servers/<server_id>.toml", skill.manual_text)
-            self.assertNotIn("<runtime_root>/plugins/minion/workspace_environment/<preparer_id>.toml", skill.manual_text)
+            self.assertNotIn("<runtime_root>/plugins/bunshin/workspace_environment/<preparer_id>.toml", skill.manual_text)
             self.assertNotIn("WorkspaceEnvironmentPreparer", skill.manual_text)
             self.assertNotIn("workspace_environment.py", skill.manual_text)
             self.assertIn("lsp_rescan", skill.capability_refs)
@@ -529,17 +529,17 @@ Run the workflow.
         finally:
             handle.shutdown_sync()
 
-    def test_minion_module_does_not_declare_legacy_development_skills(self) -> None:
+    def test_bunshin_module_does_not_declare_legacy_development_skills(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
         core.publish_module_capabilities("skill")
-        handle = register_minion_with_core(core.context, runtime_root=self.root)
-        core.publish_module_capabilities("minion")
+        handle = register_bunshin_with_core(core.context, runtime_root=self.root)
+        core.publish_module_capabilities("bunshin")
         try:
-            self.assertIsNone(self.skill_repository.get_skill("pal.minion.development"))
-            self.assertIsNone(self.skill_repository.get_skill("pal.minion.profile.development"))
+            self.assertIsNone(self.skill_repository.get_skill("pal.bunshin.development"))
+            self.assertIsNone(self.skill_repository.get_skill("pal.bunshin.profile.development"))
         finally:
             handle.shutdown_sync()
 
@@ -604,29 +604,29 @@ Run the workflow.
         finally:
             lsp_handle.shutdown_sync()
 
-        pre_minion_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add minion workflow scheduler repair bill with GateDefinition", top_k=5))
+        pre_bunshin_advice = asyncio.run(
+            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add bunshin workflow scheduler repair bill with GateDefinition", top_k=5))
         )
-        self.assertNotIn("declared.skill.pal_minion_development", {candidate.affordance_id for candidate in pre_minion_advice.candidates})
+        self.assertNotIn("declared.skill.pal_bunshin_development", {candidate.affordance_id for candidate in pre_bunshin_advice.candidates})
 
-        handle = register_minion_with_core(core.context, runtime_root=self.root)
-        core.publish_module_capabilities("minion")
+        handle = register_bunshin_with_core(core.context, runtime_root=self.root)
+        core.publish_module_capabilities("bunshin")
         try:
-            minion_advice = asyncio.run(
-                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add minion workflow scheduler repair bill with GateDefinition", top_k=5))
+            bunshin_advice = asyncio.run(
+                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add bunshin workflow scheduler repair bill with GateDefinition", top_k=5))
             )
             profile_advice = asyncio.run(
                 behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="create a new minion profile toml with workflow_next and capability_groups", top_k=5)
+                    BehaviorAdviceRequest(scenario="create a new bunshin profile toml with workflow_next and capability_groups", top_k=5)
                 )
             )
-            affordances = {candidate.affordance_id for candidate in [*minion_advice.candidates, *profile_advice.candidates]}
-            self.assertNotIn("declared.skill.pal_minion_development", affordances)
-            self.assertNotIn("declared.skill.pal_minion_profile_development", affordances)
+            affordances = {candidate.affordance_id for candidate in [*bunshin_advice.candidates, *profile_advice.candidates]}
+            self.assertNotIn("declared.skill.pal_bunshin_development", affordances)
+            self.assertNotIn("declared.skill.pal_bunshin_profile_development", affordances)
         finally:
             handle.shutdown_sync()
 
-    def test_non_minion_development_skill_routes_remain_discoverable(self) -> None:
+    def test_non_bunshin_development_skill_routes_remain_discoverable(self) -> None:
         core = PalCore()
         behavior_service = BehaviorService(repository=self.behavior_repository)
         register_core_with_core(core)

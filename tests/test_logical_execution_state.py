@@ -24,7 +24,7 @@ from pal.execution.session_state import (
     PagerHandleManifest,
     content_digest,
 )
-from pal.minion.scoped_execution import MinionScopedExecutionRuntime
+from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.llm.ir import LLMMessageIR, MessageRole
 from pal.memory import MemoryService, register_with_core as register_memory_with_core
 from pal.memory.contracts import L1MessageKind
@@ -125,9 +125,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
         )
         pager.begin_turn(
             runtime_root=None,
-            turn_id="minion-turn",
-            scope_key="minion",
-            input_id="minion-input",
+            turn_id="bunshin-turn",
+            scope_key="bunshin",
+            input_id="bunshin-input",
             retention_user_turns=2,
         )
 
@@ -141,14 +141,14 @@ class LogicalExecutionStateTests(unittest.TestCase):
             rendered="resident",
             page_size=256,
         )
-        minion = pager.store(
+        bunshin = pager.store(
             runtime_root=None,
-            turn_id="minion-turn",
-            result_ref="minion-result",
+            turn_id="bunshin-turn",
+            result_ref="bunshin-result",
             tool_name="read_file",
             status="ok",
             ok=True,
-            rendered="minion",
+            rendered="bunshin",
             page_size=256,
         )
 
@@ -157,7 +157,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             9,
         )
         self.assertEqual(
-            minion.expires_at_user_turn - minion.created_user_turn,
+            bunshin.expires_at_user_turn - bunshin.created_user_turn,
             2,
         )
 

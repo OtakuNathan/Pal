@@ -1,7 +1,7 @@
 # Execution state-machine models
 
 `FileResultAuthorization.tla` models result-owned authorization shared by Pal
-and Minion file tools.  File content is abstracted to bounded versions and
+and Bunshin file tools.  File content is abstracted to bounded versions and
 line regions; Python refines those regions with the canonical line map and
 refines the atomic mutation action with digest-checked filesystem CAS.
 

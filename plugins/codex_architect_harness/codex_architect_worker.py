@@ -14,17 +14,17 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.foundation import utc_now
-from pal.minion.harness_request import (
+from pal.bunshin.harness_request import (
     architect_harness_assignment_fingerprint,
     compile_architect_harness_request,
 )
-from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
-from pal.minion.v2.contract_submission import contract_submit_tool_result
-from pal.minion.v2.work_items import (
+from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, BunshinRoleGatewayClient
+from pal.bunshin.v2.contract_submission import contract_submit_tool_result
+from pal.bunshin.v2.work_items import (
     read_work_items,
     update_checklist_tool_result,
 )
-from pal.shared import MinionInvocationPack
+from pal.shared import BunshinInvocationPack
 
 
 class CodexHarnessError(RuntimeError):
@@ -229,27 +229,27 @@ class CodexArchitectWorker:
         self,
         *,
         runtime_root: Path,
-        pack: MinionInvocationPack,
-        minion_id: str,
+        pack: BunshinInvocationPack,
+        bunshin_id: str,
         run_id: str,
     ) -> None:
         self.runtime_root = Path(runtime_root)
         self.pack = pack
-        self.minion_id = str(minion_id)
+        self.bunshin_id = str(bunshin_id)
         self.run_id = str(run_id)
         self.request = compile_architect_harness_request(pack)
         self.assignment_fingerprint = (
             architect_harness_assignment_fingerprint(pack)
         )
         token = str(os.environ.get(ROLE_GATEWAY_TOKEN_ENV) or "").strip()
-        self.gateway = MinionRoleGatewayClient(self.runtime_root, token)
-        binding = dict(dict(pack.metadata or {}).get("minion_v2") or {})
+        self.gateway = BunshinRoleGatewayClient(self.runtime_root, token)
+        binding = dict(dict(pack.metadata or {}).get("bunshin_v2") or {})
         self.workflow_id = str(binding.get("workflow_id") or "")
         self.harness_config = dict(binding.get("harness_config") or {})
         self.workspace = {
             **dict(pack.workspace or {}),
             "runtime_root": str(self.runtime_root),
-            "minion_v2": binding,
+            "bunshin_v2": binding,
         }
         self.controls: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.plan_revision = 0
@@ -551,7 +551,7 @@ class CodexArchitectWorker:
             {
                 "clarification_id": clarification_id,
                 "run_id": self.run_id,
-                "minion_id": self.minion_id,
+                "bunshin_id": self.bunshin_id,
                 "invocation_id": self.pack.invocation_id,
                 "workflow_id": self.workflow_id,
                 "title": str(
@@ -735,11 +735,11 @@ class CodexArchitectWorker:
         event = {
             "type": "event",
             "event_kind": str(event_kind),
-            "minion_id": self.minion_id,
+            "bunshin_id": self.bunshin_id,
             "run_id": self.run_id,
             "invocation_id": self.pack.invocation_id,
             "workflow_id": self.workflow_id,
-            "minion_profile": self.pack.minion_profile,
+            "bunshin_profile": self.pack.bunshin_profile,
             "payload": dict(payload),
             "created_at": utc_now(),
         }
@@ -758,8 +758,8 @@ async def _run(args: argparse.Namespace) -> int:
     )
     worker = CodexArchitectWorker(
         runtime_root=Path(args.runtime_root),
-        pack=MinionInvocationPack.from_dict(dict(payload)),
-        minion_id=str(args.minion_id),
+        pack=BunshinInvocationPack.from_dict(dict(payload)),
+        bunshin_id=str(args.bunshin_id),
         run_id=str(args.run_id),
     )
     return await worker.run()
@@ -769,7 +769,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--pack-json", required=True)
-    parser.add_argument("--minion-id", required=True)
+    parser.add_argument("--bunshin-id", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     try:

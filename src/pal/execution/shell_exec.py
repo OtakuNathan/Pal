@@ -40,7 +40,7 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
     ),
     do_not_use_when=(
-        "Do not use for Pal runtime, module, capability, or Minion state when a Pal tool is available. "
+        "Do not use for Pal runtime, module, capability, or Bunshin state when a Pal tool is available. "
         "Use read_file for UTF-8 file reads, edit_file for focused edits, write_file for complete writes, and "
         "delete_path for deletion. Repository text search remains a run_shell task: use rg, as described above. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "

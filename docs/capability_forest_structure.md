@@ -264,7 +264,7 @@ Module nodes represent first-party Pal subsystems such as:
 - `memory`
 - `channel`
 - `execution`
-- `minion`
+- `bunshin`
 
 Plugin/provider nodes represent concrete providers under those subsystems, such
 as:

@@ -31,7 +31,7 @@ flowchart TD
 - 子系统健康状态异常
 - provider 不可用
 - 插件加载失败
-- minion 或 proactive 流程阻塞
+- bunshin 或 proactive 流程阻塞
 - memory recall 或 execution 路径异常
 - channel delivery 失败
 
@@ -107,7 +107,7 @@ developer report 是结构化对象，不是随口自然语言抱怨。
 - provider id
 - plugin id
 - scheduler
-- minion adapter
+- bunshin adapter
 
 ## `severity`
 

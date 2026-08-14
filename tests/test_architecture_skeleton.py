@@ -91,7 +91,7 @@ from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, TurnDeliveryBinding, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
 from pal.wizard import WizardService
-from pal.minion import register_with_core as register_minion_with_core
+from pal.bunshin import register_with_core as register_bunshin_with_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -369,14 +369,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.memory",
             "pal.execution",
             "pal.failure",
-            "pal.minion",
+            "pal.bunshin",
             "pal.proactive",
             "pal.web_search",
             "pal.web_fetch",
-            "pal.minion",
+            "pal.bunshin",
             "pal.bootstrap",
             "pal.wizard",
-            "pal.minion",
+            "pal.bunshin",
             "pal.plugins",
         )
         for module_name in modules:
@@ -402,7 +402,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.llm": ("LLMIntrospectionProvider", "register_with_core", "inspect_llm"),
             "pal.memory": ("MemoryIntrospectionProvider", "register_with_core", "inspect_memory"),
             "pal.execution": ("ExecutionIntrospectionProvider", "register_with_core", "inspect_execution"),
-            "pal.minion": ("MinionV2WorkflowService", "register_with_core", "inspect_minion"),
+            "pal.bunshin": ("BunshinV2WorkflowService", "register_with_core", "inspect_bunshin"),
             "pal.proactive": ("ProactiveIntrospectionProvider", "register_with_core", "inspect_proactive"),
             "pal.web_search": ("WebSearchIntrospectionProvider", "register_with_core", "inspect_web_search"),
             "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),
@@ -481,10 +481,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         missing.append(f"{path.relative_to(ROOT)}:{node.lineno}:{node.name}")
         self.assertEqual(missing, [])
 
-    def test_minion_does_not_depend_on_user_facing_channel_modules(self) -> None:
+    def test_bunshin_does_not_depend_on_user_facing_channel_modules(self) -> None:
         for relative_path in (
-            "src/pal/minion/v2/contracts.py",
-            "src/pal/minion/v2/service.py",
+            "src/pal/bunshin/v2/contracts.py",
+            "src/pal/bunshin/v2/service.py",
         ):
             self._assert_no_forbidden_imports(
                 ROOT / relative_path,
@@ -499,7 +499,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "src/pal/control/routing.py",
             "src/pal/control/handler.py",
             "src/pal/proactive/turns.py",
-            "src/pal/minion/runner.py",
+            "src/pal/bunshin/runner.py",
         ):
             self._assert_no_forbidden_imports(
                 ROOT / relative_path,
@@ -526,29 +526,29 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core_runtime = (ROOT / "src/pal/core/runtime.py").read_text(encoding="utf-8")
         core_prompt = (ROOT / "src/pal/core/prompt.py").read_text(encoding="utf-8")
         llm_model_hooks = (ROOT / "src/pal/llm/model_hooks.py").read_text(encoding="utf-8")
-        minion_source = (ROOT / "src/pal/minion/source.py").read_text(encoding="utf-8")
+        bunshin_source = (ROOT / "src/pal/bunshin/source.py").read_text(encoding="utf-8")
         control_interactions = (ROOT / "src/pal/control/interactions.py").read_text(encoding="utf-8")
-        minion_interactions = (ROOT / "src/pal/minion/interactions.py").read_text(encoding="utf-8")
+        bunshin_interactions = (ROOT / "src/pal/bunshin/interactions.py").read_text(encoding="utf-8")
         memory_interactions = (ROOT / "src/pal/memory/interactions.py").read_text(encoding="utf-8")
 
         self.assertNotIn("InteractionMessageSpec(", core_runtime)
         self.assertNotIn("InteractionButtonSpec(", core_runtime)
-        self.assertNotIn('"minion:minion"', core_runtime)
+        self.assertNotIn('"bunshin:bunshin"', core_runtime)
         self.assertNotIn("event_notify", core_runtime)
         self.assertNotIn("memory_candidate_decision", core_runtime)
         self.assertNotIn("l3_commit_args_from_memory_candidate", core_runtime)
-        self.assertNotIn("op_minion", core_prompt)
-        self.assertNotIn("MINION_LLM_REQUEST_HOOKS", llm_model_hooks)
-        self.assertNotIn("MINION_BEHAVIOR_ROUTING_HOOK", llm_model_hooks)
-        self.assertNotIn("minion_behavior_routing", llm_model_hooks)
+        self.assertNotIn("op_bunshin", core_prompt)
+        self.assertNotIn("BUNSHIN_LLM_REQUEST_HOOKS", llm_model_hooks)
+        self.assertNotIn("BUNSHIN_BEHAVIOR_ROUTING_HOOK", llm_model_hooks)
+        self.assertNotIn("bunshin_behavior_routing", llm_model_hooks)
         self.assertFalse((ROOT / "src/pal/llm/request_hooks.py").exists())
-        self.assertNotIn("InteractionMessageSpec(", minion_source)
-        self.assertNotIn("InteractionButtonSpec(", minion_source)
+        self.assertNotIn("InteractionMessageSpec(", bunshin_source)
+        self.assertNotIn("InteractionButtonSpec(", bunshin_source)
         self.assertIn("InteractionMessageSpec(", control_interactions)
         self.assertNotIn("memory_candidate_approval", control_interactions)
-        self.assertNotIn("minion_", control_interactions)
-        self.assertIn("InteractionMessageSpec(", minion_interactions)
-        self.assertIn("InteractionButtonSpec(", minion_interactions)
+        self.assertNotIn("bunshin_", control_interactions)
+        self.assertIn("InteractionMessageSpec(", bunshin_interactions)
+        self.assertIn("InteractionButtonSpec(", bunshin_interactions)
         self.assertIn("InteractionMessageSpec(", memory_interactions)
         self.assertIn("InteractionButtonSpec(", memory_interactions)
 
@@ -573,7 +573,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse((ROOT / "src/pal/llm/adapters.py").exists())
         for relative_path in (
             "src/pal/llm/runtime.py",
-            "src/pal/minion/runner.py",
+            "src/pal/bunshin/runner.py",
             "src/pal/wizard/runtime.py",
         ):
             content = (ROOT / relative_path).read_text(encoding="utf-8")
@@ -583,7 +583,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         for relative_path in (
             "src/pal/core/tool_surface.toml",
             "src/pal/execution/generated_tool_models.py",
-            "src/pal/minion/profiles.py",
+            "src/pal/bunshin/profiles.py",
         ):
             content = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertNotIn(retired_git_canonical, content)
@@ -640,21 +640,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core = PalCore()
             register_core_with_core(core)
             register_execution_with_core(core.context)
-            register_minion_with_core(
+            register_bunshin_with_core(
                 core.context,
                 runtime_root=Path(temp_dir),
             )
 
             core.publish_module_capabilities("core")
             core.publish_module_capabilities("execution")
-            core.publish_module_capabilities("minion")
+            core.publish_module_capabilities("bunshin")
 
             result = core.context.execution_runtime.execute(
-                CapabilityCall(name="minion_task_status", args={})
+                CapabilityCall(name="bunshin_task_status", args={})
             )
 
             self.assertEqual(result.status, RuntimeStatus.INVALID)
-        self.assertIn("No active Minion Task", result.llm_text)
+        self.assertIn("No active Bunshin Task", result.llm_text)
 
     def test_execution_compiles_one_facade_generation_without_legacy_tool_registrations(self) -> None:
         core = PalCore()
@@ -1067,8 +1067,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "If not_text_readable, use vision",
             "lsp_document_symbols/workspace_symbols",
             "lsp_definition/references/hover/call hierarchy",
-            "use minion directly",
-            "minion status tools",
+            "use bunshin directly",
+            "bunshin status tools",
             "checklist_show/upsert/check/clear",
             'failure_next_steps="Read-only."',
             'failure_next_steps="No external dependencies."',
@@ -1256,7 +1256,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             capability["description"],
         )
         self.assertIn(
-            "Pal runtime, module, capability, or Minion state",
+            "Pal runtime, module, capability, or Bunshin state",
             capability["description"],
         )
         self.assertIn("Repository text search remains a run_shell task", capability["description"])
@@ -1392,7 +1392,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             exec_tool = next(item for item in request.tools if item.name == "run_shell")
             self.assertIn("cmd", exec_tool.input_schema["properties"])
             self.assertIn(
-                "Pal runtime, module, capability, or Minion state",
+                "Pal runtime, module, capability, or Bunshin state",
                 exec_tool.description,
             )
             self.assertIn(
@@ -1710,7 +1710,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             register_identity_with_core(core.context, identity_service)
             register_control_with_core(core.context, ControlPlane())
-            register_minion_with_core(core.context)
+            register_bunshin_with_core(core.context)
             register_proactive_with_core(core.context, proactive_manager)
             register_memory_with_core(core.context, memory_service)
 
@@ -1788,8 +1788,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<priority>", prompt.messages[0].text)
             self.assertIn("<tool_routing>", prompt.messages[0].text)
             self.assertNotIn("<task_flow>", prompt.messages[0].text)
-            self.assertNotIn("minion_task_search", prompt.messages[0].text)
-            self.assertNotIn("minion_dispatch_workflow", prompt.messages[0].text)
+            self.assertNotIn("bunshin_task_search", prompt.messages[0].text)
+            self.assertNotIn("bunshin_dispatch_workflow", prompt.messages[0].text)
             self.assertIn("<tool_efficiency>", prompt.messages[0].text)
             system_text = prompt.messages[0].text
             self.assertIn("<mutation_policy>", system_text)
@@ -1799,7 +1799,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("<capability_guide>", system_text)
             self.assertIn("<recalled_memories> contains durable memory context", system_text)
             self.assertIn("execution/capability", system_text)
-            self.assertNotIn("minion", system_text.split("<source_of_truth>", 1)[0].lower())
+            self.assertNotIn("bunshin", system_text.split("<source_of_truth>", 1)[0].lower())
             self.assertIn("Memory tool descriptions", system_text)
             self.assertIn("prefixes such as fact: and case:", system_text)
             self.assertNotIn("memory_recall", system_text)
@@ -2125,14 +2125,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_main_loop_type_is_available(self) -> None:
         self.assertIs(MainLoop, importlib.import_module("pal.core").MainLoop)
 
-    def test_main_loop_drains_channel_proactive_and_minion_sources(self) -> None:
+    def test_main_loop_drains_channel_proactive_and_bunshin_sources(self) -> None:
         core = PalCore()
         channel_runtime = ChannelRuntime()
         proactive_manager = ProactiveManager()
 
         register_channel_with_core(core.context, channel_runtime)
         register_proactive_with_core(core.context, proactive_manager)
-        register_minion_with_core(core.context)
+        register_bunshin_with_core(core.context)
         register_control_with_core(core.context, ControlPlane())
 
         channel_runtime.emit(
@@ -2147,8 +2147,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
         proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="svc-1", trigger_kind="manual"))
-        minion_provider = core.context.port_registry["minion:minion"]
-        minion_provider._buffer_event(
+        bunshin_provider = core.context.port_registry["bunshin:bunshin"]
+        bunshin_provider._buffer_event(
             {"event_kind": "terminal", "work_order_id": "wf-1", "payload": {"summary": "completed"}}
         )
 
@@ -2157,7 +2157,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         processed_kinds = [item.event_kind for item in processed]
         self.assertIn("slash_command", processed_kinds)
         self.assertIn("proactive.trigger", processed_kinds)
-        self.assertIn("minion.terminal", processed_kinds)
+        self.assertIn("bunshin.terminal", processed_kinds)
         self.assertIn("control.action", processed_kinds)
 
     def test_foundation_modules_do_not_publish_lifecycle_capabilities(self) -> None:
@@ -2217,31 +2217,31 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(observed.structured["degraded"])
 
     def test_detachable_module_detach_withdraws_capabilities_and_reattach_restores_them(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="pal_minion_lifecycle_test_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="pal_bunshin_lifecycle_test_") as tmp:
             core = PalCore()
-            register_minion_with_core(core.context, runtime_root=Path(tmp))
-            core.publish_module_capabilities("minion")
+            register_bunshin_with_core(core.context, runtime_root=Path(tmp))
+            core.publish_module_capabilities("bunshin")
             try:
-                self.assertIn("minion_task_status", core.context.capability_registry.descriptors)
-                self.assertIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertIn("bunshin_task_status", core.context.capability_registry.descriptors)
+                self.assertIn("bunshin.manager", core.context.event_source_registry.sources)
 
-                detached = core.detach_module("minion")
+                detached = core.detach_module("bunshin")
                 self.assertEqual(detached, "ok")
-                self.assertNotIn("minion_task_status", core.context.capability_registry.descriptors)
-                self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertNotIn("bunshin_task_status", core.context.capability_registry.descriptors)
+                self.assertNotIn("bunshin.manager", core.context.event_source_registry.sources)
 
-                reattached = core.reattach_module("minion")
+                reattached = core.reattach_module("bunshin")
                 self.assertEqual(reattached, "ok")
-                self.assertIn("minion_task_status", core.context.capability_registry.descriptors)
-                self.assertIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertIn("bunshin_task_status", core.context.capability_registry.descriptors)
+                self.assertIn("bunshin.manager", core.context.event_source_registry.sources)
                 observed = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_task_status", args={})
+                    CapabilityCall(name="bunshin_task_status", args={})
                 )
                 self.assertEqual(observed.status, RuntimeStatus.INVALID)
-                self.assertIn("No active Minion Task", observed.llm_text)
+                self.assertIn("No active Bunshin Task", observed.llm_text)
             finally:
                 with contextlib.suppress(Exception):
-                    core.detach_module("minion")
+                    core.detach_module("bunshin")
 
     def test_memory_can_switch_active_l3_provider_via_registered_capability(self) -> None:
         core = PalCore()
@@ -4455,7 +4455,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIn("execution/capability", system_map.content)
         self.assertIn("memory: durable facts", system_map.content)
-        self.assertNotIn("minion", system_map.content.lower())
+        self.assertNotIn("bunshin", system_map.content.lower())
         self.assertIn("Use the right source for the truth needed", source_of_truth.content)
         self.assertIn("live introspection/capability calls", source_of_truth.content)
         self.assertIn("<recalled_memories> contains durable memory context", prompt_context_policy.content)

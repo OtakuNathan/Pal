@@ -9,7 +9,7 @@ from pal.foundation.persistence import utc_now
 
 
 @dataclass(frozen=True)
-class MinionInvocationPack:
+class BunshinInvocationPack:
     invocation_id: str
     goal: str = ""
     schema_version: int = 1
@@ -24,7 +24,7 @@ class MinionInvocationPack:
     approval_policy: dict[str, Any] = field(default_factory=dict)
     profile_group: str = "general"
     profile_name: str = "generic"
-    minion_profile: str = "generic"
+    bunshin_profile: str = "generic"
     resolved_profile: dict[str, Any] = field(default_factory=dict)
     continuity: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -32,10 +32,10 @@ class MinionInvocationPack:
     def __post_init__(self) -> None:
         if not self.instruction and self.goal:
             object.__setattr__(self, "instruction", self.goal)
-        group, name = _profile_ref_parts(self.profile_group, self.profile_name, self.minion_profile)
+        group, name = _profile_ref_parts(self.profile_group, self.profile_name, self.bunshin_profile)
         object.__setattr__(self, "profile_group", group)
         object.__setattr__(self, "profile_name", name)
-        object.__setattr__(self, "minion_profile", _canonical_profile_id(group, name))
+        object.__setattr__(self, "bunshin_profile", _canonical_profile_id(group, name))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,19 +53,19 @@ class MinionInvocationPack:
             "approval_policy": dict(self.approval_policy),
             "profile_group": self.profile_group or "general",
             "profile_name": self.profile_name or "generic",
-            "minion_profile": self.minion_profile or "generic",
+            "bunshin_profile": self.bunshin_profile or "generic",
             "resolved_profile": dict(self.resolved_profile),
             "continuity": dict(self.continuity),
             "metadata": dict(self.metadata),
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "MinionInvocationPack":
+    def from_dict(cls, payload: dict[str, Any]) -> "BunshinInvocationPack":
         if not isinstance(payload, dict):
-            raise ValueError("MinionInvocationPack payload must be an object")
+            raise ValueError("BunshinInvocationPack payload must be an object")
         invocation_id = str(payload.get("invocation_id") or "").strip()
         if not invocation_id:
-            raise ValueError("MinionInvocationPack.invocation_id is required")
+            raise ValueError("BunshinInvocationPack.invocation_id is required")
         allowed_capabilities = _string_list(payload.get("allowed_capabilities"))
         return cls(
             schema_version=int(payload.get("schema_version") or 1),
@@ -82,7 +82,7 @@ class MinionInvocationPack:
             approval_policy=_dict(payload.get("approval_policy")),
             profile_group=str(payload.get("profile_group") or ""),
             profile_name=str(payload.get("profile_name") or ""),
-            minion_profile=str(payload.get("minion_profile") or "generic"),
+            bunshin_profile=str(payload.get("bunshin_profile") or "generic"),
             resolved_profile=_dict(payload.get("resolved_profile")),
             continuity=_dict(payload.get("continuity")),
             metadata=_dict(payload.get("metadata")),
@@ -92,19 +92,19 @@ class MinionInvocationPack:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
 
     @classmethod
-    def from_json(cls, raw: str) -> "MinionInvocationPack":
+    def from_json(cls, raw: str) -> "BunshinInvocationPack":
         try:
             payload = json.loads(str(raw or "{}"))
         except json.JSONDecodeError as exc:
-            raise ValueError(f"MinionInvocationPack JSON is invalid: {exc}") from exc
+            raise ValueError(f"BunshinInvocationPack JSON is invalid: {exc}") from exc
         return cls.from_dict(payload)
 
 
 @dataclass(frozen=True)
-class MinionApprovalDecision:
+class BunshinApprovalDecision:
     approval_id: str
     decision: str
-    minion_id: str = ""
+    bunshin_id: str = ""
     run_id: str = ""
     decided_at: str = field(default_factory=utc_now)
 
@@ -112,15 +112,15 @@ class MinionApprovalDecision:
         return {
             "approval_id": self.approval_id,
             "decision": self.decision,
-            "minion_id": self.minion_id,
+            "bunshin_id": self.bunshin_id,
             "run_id": self.run_id,
             "decided_at": self.decided_at,
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "MinionApprovalDecision":
+    def from_dict(cls, payload: dict[str, Any]) -> "BunshinApprovalDecision":
         if not isinstance(payload, dict):
-            raise ValueError("MinionApprovalDecision payload must be an object")
+            raise ValueError("BunshinApprovalDecision payload must be an object")
         approval_id = str(payload.get("approval_id") or "").strip()
         decision = str(payload.get("decision") or "").strip().lower()
         if not approval_id:
@@ -130,7 +130,7 @@ class MinionApprovalDecision:
         return cls(
             approval_id=approval_id,
             decision=decision,
-            minion_id=str(payload.get("minion_id") or ""),
+            bunshin_id=str(payload.get("bunshin_id") or ""),
             run_id=str(payload.get("run_id") or ""),
             decided_at=str(payload.get("decided_at") or utc_now()),
         )

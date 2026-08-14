@@ -320,7 +320,7 @@ def test_prompt_cache_scope_accounting_is_lru_bounded() -> None:
     coordinator = PromptCacheCoordinator(max_scope_count=8)
     for index in range(40):
         coordinator.plan(
-            replace(_request(), logical_scope_id=f"minion:{index}"),
+            replace(_request(), logical_scope_id=f"bunshin:{index}"),
             context,
         )
 

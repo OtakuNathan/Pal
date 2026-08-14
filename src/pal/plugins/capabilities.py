@@ -70,7 +70,7 @@ class PluginsIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list",
         guidance=ToolGuidance(
             purpose="List known first-party and third-party plugins with usable names and enabled/attached status.",
-            use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. minion, mcp). The authoritative source for module ownership and lifecycle state.",
+            use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. bunshin, mcp). The authoritative source for module ownership and lifecycle state.",
             do_not_use_when="Checking core/channel/execution internals (use their own show/observe). Searching capabilities by function (use search_tools).",
             failure_next_steps="Read-only. If a plugin is not listed, it may not be installed — check plugin directories or run plugin_rescan.",
         ), aliases=("plugins_list",), execution=DIRECT_LOCAL_READ)

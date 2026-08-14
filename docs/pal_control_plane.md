@@ -27,7 +27,7 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 
 `Control` 是 `Pal` 的独立控制平面。
 
-它负责让用户、minions 和系统能够通过显式可理解的方式治理 `Pal`，而不是把所有命令都丢进开放式 agent reasoning。
+它负责让用户、bunshins 和系统能够通过显式可理解的方式治理 `Pal`，而不是把所有命令都丢进开放式 agent reasoning。
 
 ## Position
 
@@ -46,7 +46,7 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 - 显式命令语义
 - 审批语义
 - pause / resume / cancel / approve 之类的治理动作
-- minions permission handoff
+- bunshins permission handoff
 - system control signal normalization
 - deterministic control parsing
 
@@ -63,7 +63,7 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 `Control` 的输入固定来自三类来源：
 
 - slash command
-- minions approval request
+- bunshins approval request
 - system control signal
 
 可选地，也可以承接：
@@ -142,7 +142,7 @@ flowchart LR
 
 其中：
 
-- `approve` 用于 minions 请求权限时的治理中继
+- `approve` 用于 bunshins 请求权限时的治理中继
 - `approve` 不等于业务工具
 - `approve` 默认不直接修改业务对象，而是释放某个受控动作的执行权
 
@@ -165,7 +165,7 @@ approval 的生命周期至少包含：
 - rejected
 - consumed
 
-这保证审批既能被用户理解，也能被 tasking、minions replacement、failure reporting 正式引用。
+这保证审批既能被用户理解，也能被 tasking、bunshins replacement、failure reporting 正式引用。
 
 ## System Control Channel Boundary
 
@@ -179,11 +179,11 @@ approval 的生命周期至少包含：
 
 也就是说，控制面可以接系统信号，但不能退化成“万能消息总线”。
 
-## minions Approval Flow
+## bunshins Approval Flow
 
 ```mermaid
 sequenceDiagram
-    participant W as minions
+    participant W as bunshins
     participant C as Control
     participant U as User
     participant X as Execution
@@ -230,7 +230,7 @@ sequenceDiagram
 - `Control` 不属于数据面。
 - `Control` 不直接实施副作用。
 - `approve` 是 built-in control capability。
-- minions approval 必须通过 `Control`。
+- bunshins approval 必须通过 `Control`。
 - `Control` 默认走 deterministic path。
 - 只有匹配到已注册 command 或 alias 的 slash-like 输入才被消费为控制命令。
 - 未匹配的 `/...` 输入必须回落为普通 `user.message`，不能被 control path 截断成 unknown-command reply。

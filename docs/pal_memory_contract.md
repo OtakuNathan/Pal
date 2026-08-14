@@ -79,7 +79,7 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 
 - `L1` 属于 runtime memory
 - `L1` 只存在 RAM
-- Pal 进程重启后 `L1` 丢失；durable Minion role session 会完整序列化并恢复 L1
+- Pal 进程重启后 `L1` 丢失；durable Bunshin role session 会完整序列化并恢复 L1
 - `L1` 不属于 Core durable state
 - `L1` 不是 summary bucket
 
@@ -743,9 +743,9 @@ embedding provider 不可用时退化为原有 hash 去重。
 host policy 区分两类结构化 compact：
 
 - `pal.compaction.pal.v2`：本体会话连续性。保留当前焦点、用户请求、操作约束、决策、问题和近期对话。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
-- `pal.compaction.minion.v3`：只保存工作现场，包括技术路线、当前工作、活跃错误、活跃问题和下一步动作。角色任务由 `task.yaml` 或绑定的 `ModuleWorkView` 机械投影，不能由 compactor 重写。闭合的 tool protocol 增量进入 L1，冻结的 L1 是 compact 唯一输入；不再维护第二份 protocol journal，不生成 `memory_candidates`，也不保存原始思维链。
+- `pal.compaction.bunshin.v3`：只保存工作现场，包括技术路线、当前工作、活跃错误、活跃问题和下一步动作。角色任务由 `task.yaml` 或绑定的 `ModuleWorkView` 机械投影，不能由 compactor 重写。闭合的 tool protocol 增量进入 L1，冻结的 L1 是 compact 唯一输入；不再维护第二份 protocol journal，不生成 `memory_candidates`，也不保存原始思维链。
 
-自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Minion 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
+自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
 ## retire
 

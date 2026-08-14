@@ -18,7 +18,7 @@ Does not own:
 - local side effects
 - tasking state
 - scheduler state
-- Pal/Minion compaction prompts, schemas, validators, or renderers
+- Pal/Bunshin compaction prompts, schemas, validators, or renderers
 
 Exposes:
 - `LLMRequestIR`, `LLMMessageIR`, `LLMResponseIR`, and shape codecs

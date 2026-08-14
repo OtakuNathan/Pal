@@ -72,8 +72,8 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "PAL_MINION_SANDBOXED": "1",
-                "PAL_MINION_CONTINUATION_RETRY": "1",
+                "PAL_BUNSHIN_SANDBOXED": "1",
+                "PAL_BUNSHIN_CONTINUATION_RETRY": "1",
             },
             clear=False,
         ):

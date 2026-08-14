@@ -56,7 +56,7 @@ def collect_dependency_checks() -> tuple[WizardDependencyCheck, ...]:
         _check_playwright_chromium(),
         _check_git(),
         _check_codex_cli(),
-        _check_minion_sandbox(),
+        _check_bunshin_sandbox(),
         _check_ollama_embedding(),
         _check_service_manager(),
     ]
@@ -187,7 +187,7 @@ def _check_git() -> WizardDependencyCheck:
         check_id="tool.git",
         title="Git",
         status=CHECK_STATUS_WARN,
-        detail="git is not on PATH. Coder minion repo workflows will be limited.",
+        detail="git is not on PATH. Coder bunshin repo workflows will be limited.",
         required=False,
         fix="Install git and make sure it is on PATH.",
     )
@@ -213,61 +213,61 @@ def _check_codex_cli() -> WizardDependencyCheck:
     )
 
 
-def _check_minion_sandbox() -> WizardDependencyCheck:
-    disabled = str(os.environ.get("PAL_MINION_SANDBOX") or "").strip().lower() in {"0", "false", "no", "off", "disabled"}
+def _check_bunshin_sandbox() -> WizardDependencyCheck:
+    disabled = str(os.environ.get("PAL_BUNSHIN_SANDBOX") or "").strip().lower() in {"0", "false", "no", "off", "disabled"}
     if disabled:
         return WizardDependencyCheck(
-            check_id="minion.sandbox",
-            title="Minion sandbox",
+            check_id="bunshin.sandbox",
+            title="Bunshin sandbox",
             status=CHECK_STATUS_INFO,
-            detail="PAL_MINION_SANDBOX disables minion sandboxing for this process.",
+            detail="PAL_BUNSHIN_SANDBOX disables bunshin sandboxing for this process.",
             required=False,
-            fix="Unset PAL_MINION_SANDBOX or set it to 1 to use sandboxed minions.",
+            fix="Unset PAL_BUNSHIN_SANDBOX or set it to 1 to use sandboxed bunshins.",
         )
     system = platform.system().lower()
     if system == "linux":
         bwrap = shutil.which("bwrap")
         if bwrap:
             return WizardDependencyCheck(
-                check_id="minion.sandbox",
-                title="Minion sandbox",
+                check_id="bunshin.sandbox",
+                title="Bunshin sandbox",
                 status=CHECK_STATUS_OK,
-                detail=f"bubblewrap found at {bwrap}; Linux minion runners can be sandboxed.",
+                detail=f"bubblewrap found at {bwrap}; Linux bunshin runners can be sandboxed.",
             )
         return WizardDependencyCheck(
-            check_id="minion.sandbox",
-            title="Minion sandbox",
+            check_id="bunshin.sandbox",
+            title="Bunshin sandbox",
             status=CHECK_STATUS_MISSING,
-            detail="bubblewrap is not on PATH. Minion runners fail closed when sandboxing is enabled.",
+            detail="bubblewrap is not on PATH. Bunshin runners fail closed when sandboxing is enabled.",
             fix="Install bubblewrap, for example: sudo apt-get install bubblewrap",
         )
     if system == "darwin":
         docker = shutil.which("docker")
-        image = str(os.environ.get("PAL_MINION_DOCKER_IMAGE") or "").strip()
+        image = str(os.environ.get("PAL_BUNSHIN_DOCKER_IMAGE") or "").strip()
         if docker and image:
             return WizardDependencyCheck(
-                check_id="minion.sandbox",
-                title="Minion sandbox",
+                check_id="bunshin.sandbox",
+                title="Bunshin sandbox",
                 status=CHECK_STATUS_WARN,
-                detail="Docker is configured for a future macOS minion sandbox backend, but this build only wires the Linux bubblewrap runner.",
+                detail="Docker is configured for a future macOS bunshin sandbox backend, but this build only wires the Linux bubblewrap runner.",
                 required=False,
-                fix="Run Pal minions on Linux with bubblewrap, or set PAL_MINION_SANDBOX=0 until the Docker backend is wired.",
+                fix="Run Pal bunshins on Linux with bubblewrap, or set PAL_BUNSHIN_SANDBOX=0 until the Docker backend is wired.",
             )
         return WizardDependencyCheck(
-            check_id="minion.sandbox",
-            title="Minion sandbox",
+            check_id="bunshin.sandbox",
+            title="Bunshin sandbox",
             status=CHECK_STATUS_WARN,
-            detail="The Linux bubblewrap minion sandbox is unavailable on macOS in this build.",
+            detail="The Linux bubblewrap bunshin sandbox is unavailable on macOS in this build.",
             required=False,
-            fix="Set PAL_MINION_SANDBOX=0 for local macOS minions, or run minions on Linux.",
+            fix="Set PAL_BUNSHIN_SANDBOX=0 for local macOS bunshins, or run bunshins on Linux.",
         )
     return WizardDependencyCheck(
-        check_id="minion.sandbox",
-        title="Minion sandbox",
+        check_id="bunshin.sandbox",
+        title="Bunshin sandbox",
         status=CHECK_STATUS_WARN,
-        detail=f"No minion sandbox backend is implemented for {platform.system() or 'this platform'}.",
+        detail=f"No bunshin sandbox backend is implemented for {platform.system() or 'this platform'}.",
         required=False,
-        fix="Set PAL_MINION_SANDBOX=0 to run minions without the sandbox on this platform.",
+        fix="Set PAL_BUNSHIN_SANDBOX=0 to run bunshins without the sandbox on this platform.",
     )
 
 

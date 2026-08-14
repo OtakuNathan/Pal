@@ -10,7 +10,7 @@ Owns:
 - registry ownership for visibility and mount policy
 - prompt fragment registry and prompt assembly seam
 - the shared `AgentTurnRuntime` prompt/turn-execution kernel used by Pal and
-  Minion hosts
+  Bunshin hosts
 - shared compaction orchestration: immutable snapshots, atomic history units,
   budget preflight, an independently configured model-attempt budget,
   validation, transactional commit ordering, and no mutation on failure
@@ -43,7 +43,7 @@ Interaction rule:
 - all channel input enters one resident mailbox and one L1/execution lifetime;
   channels select only the response transport and never create a persona,
   conversation, or execution scope
-- Pal and Minion supply host policy and ports to the same `AgentTurnRuntime`;
+- Pal and Bunshin supply host policy and ports to the same `AgentTurnRuntime`;
   they do not maintain separate prompt compilers or turn executors
 - automatic compaction is requested only by the real model context-budget
   path; host clocks annotate snapshots but never trigger fixed-round compact

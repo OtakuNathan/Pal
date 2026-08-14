@@ -455,7 +455,7 @@ Control interactions are channel-neutral. Prefer the base `ChannelEndpointQueueB
 
 Only override channel-specific rendering, such as inline keyboards, slash-command menus, callback payloads, receipts, typing indicators, or transport-specific message editing. Avoid hard-coding Telegram-only assumptions into shared control or core code.
 
-The shared contract is typed data, not UI widgets. Core/control may produce `InteractionMessageSpec`, `InteractionButtonSpec`, `InteractionResult`, status kinds, attachments, and text; the provider decides how those become inline keyboards, menus, edits, reactions, receipts, native commands, or no-op fallbacks. Do not introduce channel-specific callback payloads, button shapes, or slash-command parsing into `core`, `control`, `minion`, `llm`, or `memory`.
+The shared contract is typed data, not UI widgets. Core/control may produce `InteractionMessageSpec`, `InteractionButtonSpec`, `InteractionResult`, status kinds, attachments, and text; the provider decides how those become inline keyboards, menus, edits, reactions, receipts, native commands, or no-op fallbacks. Do not introduce channel-specific callback payloads, button shapes, or slash-command parsing into `core`, `control`, `bunshin`, `llm`, or `memory`.
 
 ## Lifecycle and Hot Reload
 

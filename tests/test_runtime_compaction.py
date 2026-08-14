@@ -51,7 +51,7 @@ from pal.memory import (
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.memory.turn_ir import L1TurnIR
 from pal.core.pal_compaction import COMPACT_PAL_STRUCTURED_SYSTEM
-from pal.minion.compact import MinionCompactionPolicy
+from pal.bunshin.compact import BunshinCompactionPolicy
 from pal.shared import (
     ChannelEnvelope,
     EndpointConfig,
@@ -97,11 +97,11 @@ def _valid_pal_payload(
     )
 
 
-def _valid_minion_payload() -> str:
+def _valid_bunshin_payload() -> str:
     return json.dumps(
         {
-            "schema": "pal.compaction.minion.v3",
-            "kind": "minion",
+            "schema": "pal.compaction.bunshin.v3",
+            "kind": "bunshin",
             "continuity": {
                 "technical_route": [
                     {
@@ -141,7 +141,7 @@ def _valid_minion_payload() -> str:
                 ],
             },
             "summary": {
-                "summary": "Minion is testing the shared compaction engine.",
+                "summary": "Bunshin is testing the shared compaction engine.",
                 "search_text": "compaction.py schema restore focused tests",
             },
         },
@@ -367,7 +367,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
         )
 
-    def test_compaction_cache_scope_is_isolated_per_minion_run(self) -> None:
+    def test_compaction_cache_scope_is_isolated_per_bunshin_run(self) -> None:
         service = _memory_with_turns()
         snapshot = CompactionSnapshot.capture(
             service,
@@ -375,13 +375,13 @@ class SharedCompactionEngineTests(unittest.TestCase):
             reserved_output_tokens=2_048,
             clock_kind=CompactionClockKind.LLM_ROUND,
             clock_value=3,
-            metadata={"prompt_cache_scope_id": "minion:run-7"},
+            metadata={"prompt_cache_scope_id": "bunshin:run-7"},
         )
-        engine = CompactionEngine(MinionCompactionPolicy())
+        engine = CompactionEngine(BunshinCompactionPolicy())
 
         request = engine._request(snapshot, "compact this run", attempt=0)
 
-        self.assertEqual(request.logical_scope_id, "minion:run-7:compaction")
+        self.assertEqual(request.logical_scope_id, "bunshin:run-7:compaction")
         self.assertEqual(
             [message.prompt_region.value for message in request.messages],
             ["stable_system", "active_dynamic"],
@@ -1083,7 +1083,7 @@ class CompactionPolicyTests(unittest.TestCase):
             entry.rendered,
         )
 
-    def test_minion_v3_preserves_work_cursor_without_role_task_or_candidates(self) -> None:
+    def test_bunshin_v3_preserves_work_cursor_without_role_task_or_candidates(self) -> None:
         service = _memory_with_turns(1)
         snapshot = _snapshot(
             service,
@@ -1091,14 +1091,14 @@ class CompactionPolicyTests(unittest.TestCase):
             clock_kind=CompactionClockKind.LLM_ROUND,
         )
 
-        entry = MinionCompactionPolicy().validate_checkpoint(
-            _valid_minion_payload(),
+        entry = BunshinCompactionPolicy().validate_checkpoint(
+            _valid_bunshin_payload(),
             snapshot,
         )
 
         self.assertEqual(
             entry.payload["schema"],
-            "pal.compaction.minion.v3",
+            "pal.compaction.bunshin.v3",
         )
         self.assertIn(
             "src/pal/core/compaction.py",
@@ -1109,23 +1109,23 @@ class CompactionPolicyTests(unittest.TestCase):
         self.assertNotIn("memory_candidates", entry.payload)
         self.assertNotIn("secret role assignment", entry.rendered)
         self.assertIn(
-            '<compact_context kind="minion" authority="work_checkpoint">',
+            '<compact_context kind="bunshin" authority="work_checkpoint">',
             entry.rendered,
         )
 
-    def test_minion_v3_rejects_memory_candidates_and_chain_of_thought(self) -> None:
+    def test_bunshin_v3_rejects_memory_candidates_and_chain_of_thought(self) -> None:
         service = _memory_with_turns(1)
-        payload = json.loads(_valid_minion_payload())
+        payload = json.loads(_valid_bunshin_payload())
         payload["memory_candidates"] = []
         with self.assertRaisesRegex(ValueError, "memory_candidates"):
-            MinionCompactionPolicy().validate_checkpoint(
+            BunshinCompactionPolicy().validate_checkpoint(
                 json.dumps(payload),
                 _snapshot(service),
             )
         payload.pop("memory_candidates")
         payload["continuity"]["chain_of_thought"] = "private"
         with self.assertRaisesRegex(ValueError, "reasoning"):
-            MinionCompactionPolicy().validate_checkpoint(
+            BunshinCompactionPolicy().validate_checkpoint(
                 json.dumps(payload),
                 _snapshot(service),
             )
@@ -1148,12 +1148,12 @@ class CompactionPolicyTests(unittest.TestCase):
                 _snapshot(service),
             )
 
-    def test_minion_v3_rejects_scalar_continuity_fields(self) -> None:
+    def test_bunshin_v3_rejects_scalar_continuity_fields(self) -> None:
         service = _memory_with_turns(1)
-        payload = json.loads(_valid_minion_payload())
+        payload = json.loads(_valid_bunshin_payload())
         payload["continuity"]["active_work"] = "still editing compaction.py"
         with self.assertRaisesRegex(ValueError, "active_work.*array"):
-            MinionCompactionPolicy().validate_checkpoint(
+            BunshinCompactionPolicy().validate_checkpoint(
                 json.dumps(payload),
                 _snapshot(service),
             )
@@ -1480,28 +1480,28 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         )
 
-    def test_minion_compact_retires_authority_from_bound_execution_lifetime(self) -> None:
+    def test_bunshin_compact_retires_authority_from_bound_execution_lifetime(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
         core.turn_executor._compaction_engine = CompactionEngine(
-            MinionCompactionPolicy()
+            BunshinCompactionPolicy()
         )
         core.context.port_registry["llm:llm"] = _ScriptedLLM(
-            [generation_result_from_values(text=_valid_minion_payload())]
+            [generation_result_from_values(text=_valid_bunshin_payload())]
         )
         runtime = core.context.execution_runtime
-        turn_id = "minion-result-owner"
+        turn_id = "bunshin-result-owner"
         execution_lifetime_id = "agent-session-123"
         runtime.begin_tool_result_turn(
             turn_id=turn_id,
             scope_key=execution_lifetime_id,
-            input_id="minion-input",
+            input_id="bunshin-input",
         )
         delivery = FileDeliveryManifest(
-            file_key="/workspace/minion-input.txt",
-            digest="digest-minion",
+            file_key="/workspace/bunshin-input.txt",
+            digest="digest-bunshin",
             total_lines=1,
             spans=(FileDeliverySpan(0, 8, 1, 1, 0, 8, 8),),
             complete_file=True,
@@ -1509,14 +1509,14 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         runtime.commit_tool_delivery(
             turn_id=turn_id,
             context_delivery=delivery,
-            result_id="read-minion-compact",
+            result_id="read-bunshin-compact",
         )
         call = new_tool_call(
             name="read_file",
-            args={"file_path": "/workspace/minion-input.txt"},
-            call_id="read-minion-compact",
+            args={"file_path": "/workspace/bunshin-input.txt"},
+            call_id="read-bunshin-compact",
         )
-        service.begin_l1_turn(turn_id, user_text="read the minion file")
+        service.begin_l1_turn(turn_id, user_text="read the bunshin file")
         service.upsert_l1_assistant(
             turn_id,
             LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)),
@@ -1526,7 +1526,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             ToolResultIR(
                 call_id=call.call_id,
                 name=call.name,
-                content="1: minion",
+                content="1: bunshin",
                 context_delivery=delivery,
             ),
         )
@@ -1546,10 +1546,10 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
                 assembly_context=PromptAssemblyContext(
-                    core_mode="minion",
-                    turn_kind="minion",
+                    core_mode="bunshin",
+                    turn_kind="bunshin",
                     work_order_id="work-1",
-                    metadata={"prompt_cache_scope_id": "minion:run-1"},
+                    metadata={"prompt_cache_scope_id": "bunshin:run-1"},
                 ),
                 continuation=continuation,
             )
@@ -1559,12 +1559,12 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertIsNone(
             runtime.logical_state.file_grant(
                 execution_lifetime_id=execution_lifetime_id,
-                file_key="/workspace/minion-input.txt",
-                digest="digest-minion",
+                file_key="/workspace/bunshin-input.txt",
+                digest="digest-bunshin",
             )
         )
         self.assertNotIn(
-            "minion:run-1",
+            "bunshin:run-1",
             runtime.logical_state.snapshot_state()["sessions"],
         )
 

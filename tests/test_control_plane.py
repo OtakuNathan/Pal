@@ -919,7 +919,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 inner_self.values.append(enabled)
 
         dependent = DebugAwarePort()
-        self.core.context.port_registry["minion:minion"] = dependent
+        self.core.context.port_registry["bunshin:bunshin"] = dependent
         first = self._make_channel_envelope(turn_id="turn-log-1", request_id="req-log-1")
         continuation = self.core.turn_manager.start(first)
         self.assertFalse(continuation.turn_settings_snapshot["prompt_log_enabled"])
@@ -962,16 +962,16 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Primary endpoint for future turns: new", self.endpoint.outbox[-1].text)
         self.assertIn("Removed/disabled: old", self.endpoint.outbox[-1].text)
 
-    async def test_refresh_llm_endpoint_also_refreshes_loaded_minion_runtime(self) -> None:
-        class MinionPort:
+    async def test_refresh_llm_endpoint_also_refreshes_loaded_bunshin_runtime(self) -> None:
+        class BunshinPort:
             calls = 0
 
             async def refresh_llm_endpoints(inner_self):
                 inner_self.calls += 1
                 return {"ok": True, "runtime_loaded": True, "refreshed": True}
 
-        minion = MinionPort()
-        self.core.context.port_registry["minion:minion"] = minion
+        bunshin = BunshinPort()
+        self.core.context.port_registry["bunshin:bunshin"] = bunshin
 
         await self.core.handle_control_action_async(
             ControlAction(
@@ -981,9 +981,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(minion.calls, 1)
+        self.assertEqual(bunshin.calls, 1)
         self.assertIn(
-            "Dependent LLM runtimes refreshed: minion:minion",
+            "Dependent LLM runtimes refreshed: bunshin:bunshin",
             self.endpoint.outbox[-1].text,
         )
 
@@ -1132,7 +1132,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         statuses = list(self.endpoint.status_outbox)
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_update")
-        self.assertEqual(statuses[-2].payload["spec"].text, "Debug log: off\nUse /log start or /log end. Changes apply to new turns and Minion role runs only.")
+        self.assertEqual(statuses[-2].payload["spec"].text, "Debug log: off\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
 
     async def test_base_channel_falls_back_to_interaction_text(self) -> None:
         delivery = ControlDelivery(
@@ -1185,7 +1185,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(statuses), 2)
         self.assertTrue(self.core.state.prompt_log_enabled)
         self.assertEqual(statuses[-2].kind, "interactive_resolve")
-        self.assertEqual(statuses[-2].payload["spec"].text, "Debug logging enabled for new turns and Minion role runs.")
+        self.assertEqual(statuses[-2].payload["spec"].text, "Debug logging enabled for new turns and Bunshin role runs.")
         self.assertEqual(statuses[-1].kind, "working_stop")
 
     async def test_log_panel_marks_current_status(self) -> None:
@@ -1211,7 +1211,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses[-2].kind, "interactive_update")
         spec = statuses[-2].payload["spec"]
         flattened = [button for row in spec.buttons for button in row]
-        self.assertEqual(spec.text, "Debug log: on\nUse /log start or /log end. Changes apply to new turns and Minion role runs only.")
+        self.assertEqual(spec.text, "Debug log: on\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
         self.assertTrue(any(button.label == "> Start logging" and button.action_key == "control.log.start" for button in flattened))
         self.assertTrue(any(button.label == "Stop logging" and button.action_key == "control.log.end" for button in flattened))
 

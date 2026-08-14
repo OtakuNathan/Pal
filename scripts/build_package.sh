@@ -71,97 +71,97 @@ required_wheel_paths=(
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"
-  "pal/minion/families.py"
-  "pal/minion/harness_request.py"
-  "pal/minion/harnesses.py"
-  "pal/minion/profiles.py"
-  "pal/minion/manager.py"
-  "pal/minion/runner.py"
-  "pal/minion/sandbox.py"
-  "pal/minion/scoped_execution.py"
-  "pal/minion/family_templates/general.toml"
-  "pal/minion/family_templates/lifestyle.toml"
-  "pal/minion/family_templates/software_engineering.toml"
-  "pal/minion/profile_templates/generic.toml"
-  "pal/minion/profile_templates/general/architect.toml"
-  "pal/minion/profile_templates/general/reviewer.toml"
-  "pal/minion/profile_templates/general/verifier.toml"
-  "pal/minion/profile_templates/lifestyle/architect.toml"
-  "pal/minion/profile_templates/lifestyle/nutritionist.toml"
-  "pal/minion/profile_templates/lifestyle/reviewer.toml"
-  "pal/minion/architecture_templates/base/schema.json"
-  "pal/minion/architecture_templates/base/architect.yaml.j2"
-  "pal/minion/architecture_specializations/general.v1/specialization.json"
-  "pal/minion/architecture_specializations/general.v1/preamble.j2"
-  "pal/minion/architecture_specializations/general.v1/context.j2"
-  "pal/minion/architecture_specializations/general.v1/module_definition.j2"
-  "pal/minion/architecture_specializations/general.v1/graph_satellite.j2"
-  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/specialization.json"
-  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/preamble.j2"
-  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/context.j2"
-  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/module_definition.j2"
-  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/graph_satellite.j2"
-  "pal/minion/architecture_specializations/software_engineering.v1/specialization.json"
-  "pal/minion/architecture_specializations/software_engineering.v1/preamble.j2"
-  "pal/minion/architecture_specializations/software_engineering.v1/context.j2"
-  "pal/minion/architecture_specializations/software_engineering.v1/module_definition.j2"
-  "pal/minion/architecture_specializations/software_engineering.v1/graph_satellite.j2"
-  "pal/minion/profile_templates/software_engineering/v2_architect.toml"
-  "pal/minion/profile_templates/software_engineering/v2_coder.toml"
-  "pal/minion/profile_templates/software_engineering/v2_reviewer.toml"
-  "pal/minion/profile_templates/software_engineering/v2_verifier.toml"
-  "pal/minion/v2/adapters.py"
-  "pal/minion/v2/artifacts.py"
-  "pal/minion/v2/architecture_templates.py"
-  "pal/minion/v2/candidate_builder.py"
-  "pal/minion/v2/capabilities.py"
-  "pal/minion/v2/catalog.py"
-  "pal/minion/v2/ask_question.py"
-  "pal/minion/v2/contract_protocol.py"
-  "pal/minion/v2/contract_runtime.py"
-  "pal/minion/v2/contract_submission.py"
-  "pal/minion/v2/contracts.py"
-  "pal/minion/v2/coroutine_runtime.py"
-  "pal/minion/v2/cycle_protocol.py"
-  "pal/minion/v2/delivery.py"
-  "pal/minion/v2/execution.py"
-  "pal/minion/v2/graph_compiler.py"
-  "pal/minion/v2/graph_executor.py"
-  "pal/minion/v2/graph_protocol.py"
-  "pal/minion/v2/graph_satellites.py"
-  "pal/minion/v2/machines.py"
-  "pal/minion/v2/module_protocol.py"
-  "pal/minion/v2/orchestration.py"
-  "pal/minion/v2/paths.py"
-  "pal/minion/v2/process_lifecycle.py"
-  "pal/minion/v2/projections.py"
-  "pal/minion/v2/recovery.py"
-  "pal/minion/v2/replan.py"
-  "pal/minion/v2/repository.py"
-  "pal/minion/v2/review_findings.py"
-  "pal/minion/v2/review_submission.py"
-  "pal/minion/v2/role_gateway.py"
-  "pal/minion/v2/role_runtime.py"
-  "pal/minion/v2/service.py"
-  "pal/minion/v2/sessions.py"
-  "pal/minion/v2/skeleton.py"
-  "pal/minion/v2/submission_drafts.py"
-  "pal/minion/v2/submission_preflight.py"
-  "pal/minion/v2/swe_verification.py"
-  "pal/minion/v2/task_ledger.py"
-  "pal/minion/v2/verification.py"
-  "pal/minion/v2/verification_builder.py"
-  "pal/minion/v2/work_items.py"
-  "pal/minion/v2/worker_main.py"
-  "pal/minion/v2/workflow_runtime.py"
-  "pal/minion/v2/semantic_orchestration/architecture.py"
-  "pal/minion/v2/semantic_orchestration/contracts.py"
-  "pal/minion/v2/semantic_orchestration/implementation.py"
-  "pal/minion/v2/semantic_orchestration/orchestrator.py"
-  "pal/minion/v2/semantic_orchestration/review.py"
-  "pal/minion/v2/semantic_orchestration/verification.py"
-  "pal/plugins_builtin/minion/plugin.toml"
-  "pal/plugins_builtin/minion/runtime.py"
+  "pal/bunshin/families.py"
+  "pal/bunshin/harness_request.py"
+  "pal/bunshin/harnesses.py"
+  "pal/bunshin/profiles.py"
+  "pal/bunshin/manager.py"
+  "pal/bunshin/runner.py"
+  "pal/bunshin/sandbox.py"
+  "pal/bunshin/scoped_execution.py"
+  "pal/bunshin/family_templates/general.toml"
+  "pal/bunshin/family_templates/lifestyle.toml"
+  "pal/bunshin/family_templates/software_engineering.toml"
+  "pal/bunshin/profile_templates/generic.toml"
+  "pal/bunshin/profile_templates/general/architect.toml"
+  "pal/bunshin/profile_templates/general/reviewer.toml"
+  "pal/bunshin/profile_templates/general/verifier.toml"
+  "pal/bunshin/profile_templates/lifestyle/architect.toml"
+  "pal/bunshin/profile_templates/lifestyle/nutritionist.toml"
+  "pal/bunshin/profile_templates/lifestyle/reviewer.toml"
+  "pal/bunshin/architecture_templates/base/schema.json"
+  "pal/bunshin/architecture_templates/base/architect.yaml.j2"
+  "pal/bunshin/architecture_specializations/general.v1/specialization.json"
+  "pal/bunshin/architecture_specializations/general.v1/preamble.j2"
+  "pal/bunshin/architecture_specializations/general.v1/context.j2"
+  "pal/bunshin/architecture_specializations/general.v1/module_definition.j2"
+  "pal/bunshin/architecture_specializations/general.v1/graph_satellite.j2"
+  "pal/bunshin/architecture_specializations/lifestyle.nutrition_checkin.v1/specialization.json"
+  "pal/bunshin/architecture_specializations/lifestyle.nutrition_checkin.v1/preamble.j2"
+  "pal/bunshin/architecture_specializations/lifestyle.nutrition_checkin.v1/context.j2"
+  "pal/bunshin/architecture_specializations/lifestyle.nutrition_checkin.v1/module_definition.j2"
+  "pal/bunshin/architecture_specializations/lifestyle.nutrition_checkin.v1/graph_satellite.j2"
+  "pal/bunshin/architecture_specializations/software_engineering.v1/specialization.json"
+  "pal/bunshin/architecture_specializations/software_engineering.v1/preamble.j2"
+  "pal/bunshin/architecture_specializations/software_engineering.v1/context.j2"
+  "pal/bunshin/architecture_specializations/software_engineering.v1/module_definition.j2"
+  "pal/bunshin/architecture_specializations/software_engineering.v1/graph_satellite.j2"
+  "pal/bunshin/profile_templates/software_engineering/v2_architect.toml"
+  "pal/bunshin/profile_templates/software_engineering/v2_coder.toml"
+  "pal/bunshin/profile_templates/software_engineering/v2_reviewer.toml"
+  "pal/bunshin/profile_templates/software_engineering/v2_verifier.toml"
+  "pal/bunshin/v2/adapters.py"
+  "pal/bunshin/v2/artifacts.py"
+  "pal/bunshin/v2/architecture_templates.py"
+  "pal/bunshin/v2/candidate_builder.py"
+  "pal/bunshin/v2/capabilities.py"
+  "pal/bunshin/v2/catalog.py"
+  "pal/bunshin/v2/ask_question.py"
+  "pal/bunshin/v2/contract_protocol.py"
+  "pal/bunshin/v2/contract_runtime.py"
+  "pal/bunshin/v2/contract_submission.py"
+  "pal/bunshin/v2/contracts.py"
+  "pal/bunshin/v2/coroutine_runtime.py"
+  "pal/bunshin/v2/cycle_protocol.py"
+  "pal/bunshin/v2/delivery.py"
+  "pal/bunshin/v2/execution.py"
+  "pal/bunshin/v2/graph_compiler.py"
+  "pal/bunshin/v2/graph_executor.py"
+  "pal/bunshin/v2/graph_protocol.py"
+  "pal/bunshin/v2/graph_satellites.py"
+  "pal/bunshin/v2/machines.py"
+  "pal/bunshin/v2/module_protocol.py"
+  "pal/bunshin/v2/orchestration.py"
+  "pal/bunshin/v2/paths.py"
+  "pal/bunshin/v2/process_lifecycle.py"
+  "pal/bunshin/v2/projections.py"
+  "pal/bunshin/v2/recovery.py"
+  "pal/bunshin/v2/replan.py"
+  "pal/bunshin/v2/repository.py"
+  "pal/bunshin/v2/review_findings.py"
+  "pal/bunshin/v2/review_submission.py"
+  "pal/bunshin/v2/role_gateway.py"
+  "pal/bunshin/v2/role_runtime.py"
+  "pal/bunshin/v2/service.py"
+  "pal/bunshin/v2/sessions.py"
+  "pal/bunshin/v2/skeleton.py"
+  "pal/bunshin/v2/submission_drafts.py"
+  "pal/bunshin/v2/submission_preflight.py"
+  "pal/bunshin/v2/swe_verification.py"
+  "pal/bunshin/v2/task_ledger.py"
+  "pal/bunshin/v2/verification.py"
+  "pal/bunshin/v2/verification_builder.py"
+  "pal/bunshin/v2/work_items.py"
+  "pal/bunshin/v2/worker_main.py"
+  "pal/bunshin/v2/workflow_runtime.py"
+  "pal/bunshin/v2/semantic_orchestration/architecture.py"
+  "pal/bunshin/v2/semantic_orchestration/contracts.py"
+  "pal/bunshin/v2/semantic_orchestration/implementation.py"
+  "pal/bunshin/v2/semantic_orchestration/orchestrator.py"
+  "pal/bunshin/v2/semantic_orchestration/review.py"
+  "pal/bunshin/v2/semantic_orchestration/verification.py"
+  "pal/plugins_builtin/bunshin/plugin.toml"
+  "pal/plugins_builtin/bunshin/runtime.py"
 )
 
 missing=()
@@ -327,38 +327,38 @@ with zipfile.ZipFile(wheel_path) as wheel:
         fail("wheel metadata does not declare the websockets dependency")
 
     legacy_paths = {
-        "pal/minion/plan_builder.py",
-        "pal/minion/plan_store.py",
-        "pal/minion/serial_scheduler.py",
-        "pal/minion/step_executor_main.py",
-        "pal/minion/step_executor_runner.py",
-        "pal/minion/review_gate_store.py",
-        "pal/minion/review_orchestrator.py",
-        "pal/minion/workspace_environment.py",
-        "pal/minion/profile_templates/software_engineering/architect.toml",
-        "pal/minion/profile_templates/software_engineering/coder.toml",
-        "pal/minion/profile_templates/software_engineering/reviewer.toml",
-        "pal/minion/profile_templates/general/requirements_analyst.toml",
-        "pal/minion/profile_templates/general/researcher.toml",
-        "pal/minion/profile_templates/general/contract_planner.toml",
-        "pal/minion/profile_templates/general/architecture_reviewer.toml",
-        "pal/minion/profile_templates/lifestyle/requirements_analyst.toml",
-        "pal/minion/profile_templates/lifestyle/researcher.toml",
-        "pal/minion/profile_templates/lifestyle/contract_planner.toml",
-        "pal/minion/profile_templates/lifestyle/architecture_reviewer.toml",
-        "pal/minion/profile_templates/software_engineering/v2_requirements_analyst.toml",
-        "pal/minion/profile_templates/software_engineering/v2_researcher.toml",
-        "pal/minion/profile_templates/software_engineering/v2_contract_planner.toml",
-        "pal/minion/profile_templates/software_engineering/v2_architecture_reviewer.toml",
-        "pal/minion/v2/workers.py",
+        "pal/bunshin/plan_builder.py",
+        "pal/bunshin/plan_store.py",
+        "pal/bunshin/serial_scheduler.py",
+        "pal/bunshin/step_executor_main.py",
+        "pal/bunshin/step_executor_runner.py",
+        "pal/bunshin/review_gate_store.py",
+        "pal/bunshin/review_orchestrator.py",
+        "pal/bunshin/workspace_environment.py",
+        "pal/bunshin/profile_templates/software_engineering/architect.toml",
+        "pal/bunshin/profile_templates/software_engineering/coder.toml",
+        "pal/bunshin/profile_templates/software_engineering/reviewer.toml",
+        "pal/bunshin/profile_templates/general/requirements_analyst.toml",
+        "pal/bunshin/profile_templates/general/researcher.toml",
+        "pal/bunshin/profile_templates/general/contract_planner.toml",
+        "pal/bunshin/profile_templates/general/architecture_reviewer.toml",
+        "pal/bunshin/profile_templates/lifestyle/requirements_analyst.toml",
+        "pal/bunshin/profile_templates/lifestyle/researcher.toml",
+        "pal/bunshin/profile_templates/lifestyle/contract_planner.toml",
+        "pal/bunshin/profile_templates/lifestyle/architecture_reviewer.toml",
+        "pal/bunshin/profile_templates/software_engineering/v2_requirements_analyst.toml",
+        "pal/bunshin/profile_templates/software_engineering/v2_researcher.toml",
+        "pal/bunshin/profile_templates/software_engineering/v2_contract_planner.toml",
+        "pal/bunshin/profile_templates/software_engineering/v2_architecture_reviewer.toml",
+        "pal/bunshin/v2/workers.py",
     }
     leaked = sorted(legacy_paths & names)
     if leaked:
-        fail(f"legacy Minion workflow files were packaged: {leaked}")
+        fail(f"legacy Bunshin workflow files were packaged: {leaked}")
 
     required_roles = {"architect", "reviewer", "implementation", "verifier"}
     for family_id in ("general", "lifestyle", "software_engineering"):
-        path = f"pal/minion/family_templates/{family_id}.toml"
+        path = f"pal/bunshin/family_templates/{family_id}.toml"
         payload = tomllib.loads(read_text(path))
         if payload.get("family_id") != family_id:
             fail(f"{path} has the wrong family_id")
@@ -373,7 +373,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if not specialization:
             fail(f"{path} must declare architecture.specialization")
         specialization_path = (
-            "pal/minion/architecture_specializations/"
+            "pal/bunshin/architecture_specializations/"
             f"{specialization}/specialization.json"
         )
         specialization_payload = json.loads(
@@ -388,7 +388,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if any(not str(value).endswith(".v2") for value in dict(payload.get("adapters") or {}).values()):
             fail(f"{path} references a non-V2 adapter")
 
-    profile_paths = sorted(name for name in names if name.startswith("pal/minion/profile_templates/") and name.endswith(".toml"))
+    profile_paths = sorted(name for name in names if name.startswith("pal/bunshin/profile_templates/") and name.endswith(".toml"))
     if len(profile_paths) != 11:
         fail(f"expected 11 builtin role profiles, found {len(profile_paths)}")
     for path in profile_paths:
@@ -410,7 +410,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if metadata.get("builtin") is not True:
             fail(f"{path} must be a managed builtin profile")
 
-    scoped_execution = read_text("pal/minion/scoped_execution.py")
+    scoped_execution = read_text("pal/bunshin/scoped_execution.py")
     for token in (
         "CANDIDATE_BUILDER_TOOL_SPECS",
         "VERIFICATION_BUILDER_TOOL_SPECS",
@@ -427,22 +427,22 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "PLAN_BUILDER_CAPABILITIES",
         "CONTRACT_BUILDER_TOOL_SPECS",
         "SKELETON_BUILDER_TOOL_SPECS",
-        "op_minion_checkpoint_commit",
-        "op_minion_review_checkpoint",
+        "op_bunshin_checkpoint_commit",
+        "op_bunshin_review_checkpoint",
     ):
         if forbidden in scoped_execution:
             fail(f"scoped execution contains legacy capability {forbidden}")
 
     generated_models = read_text("pal/execution/generated_tool_models.py")
     for forbidden in (
-        "MinionV2ContractBuilder",
-        "MinionV2SkeletonBuilder",
+        "BunshinV2ContractBuilder",
+        "BunshinV2SkeletonBuilder",
         "'executor': (Literal['profile', 'null']",
     ):
         if forbidden in generated_models:
             fail(f"generated tool models contain legacy contract protocol {forbidden}")
 
-    manager = read_text("pal/minion/manager.py")
+    manager = read_text("pal/bunshin/manager.py")
     for forbidden in ('"spawn"', '"finalize"', '"tick"', '"recover"'):
         if forbidden in manager:
             fail(f"V2 manager exposes legacy RPC {forbidden}")

@@ -37,7 +37,7 @@ class ChecklistService:
     never routed by a manager. The active plan is a single slot because Pal
     executes one turn at a time; a new upsert replaces the old plan.
 
-    The item shape borrows minion's checklist format
+    The item shape borrows bunshin's checklist format
     (``{"plan": [{"step": ..., "status": ...}]}``) so the shapes stay
     interoperable, but this is deliberately NOT a cursor: no gating, no
     ordering enforcement, no external authority. Pal opens a list when work

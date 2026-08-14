@@ -14,8 +14,8 @@ from pal.lsp.connector import AsyncLspConnector, LspProtocolError
 from pal.lsp.environment import prepare_workspace_lsp_environment
 from pal.lsp.ipc import LspManagerClient
 from pal.lsp.manager import LspManager, LspServerState
-from pal.minion.ipc import MinionManagerClient
-from pal.minion.lsp_prewarm import DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS, lsp_prewarm_plan, prewarm_workspace_lsp
+from pal.bunshin.ipc import BunshinManagerClient
+from pal.bunshin.lsp_prewarm import DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS, lsp_prewarm_plan, prewarm_workspace_lsp
 
 
 class LspConfigTests(unittest.TestCase):
@@ -91,7 +91,7 @@ install_hint = "install pyright"
             slowest_window_ms + 10_000,
         )
 
-    def test_minion_manager_rpc_timeout_covers_lsp_prewarm_window(self) -> None:
+    def test_bunshin_manager_rpc_timeout_covers_lsp_prewarm_window(self) -> None:
         templates = load_builtin_lsp_templates()
         slowest_window_ms = max(
             item.config.startup_timeout_ms + item.config.diagnostics_timeout_ms
@@ -99,11 +99,11 @@ install_hint = "install pyright"
         )
 
         self.assertGreaterEqual(
-            int(MinionManagerClient(self.root).request_timeout_seconds * 1000),
+            int(BunshinManagerClient(self.root).request_timeout_seconds * 1000),
             slowest_window_ms + 10_000,
         )
 
-    def test_runtime_lsp_config_root_mirrors_minion_profile_layout(self) -> None:
+    def test_runtime_lsp_config_root_mirrors_bunshin_profile_layout(self) -> None:
         self.assertEqual(lsp_config_root(self.root), self.root / "plugins" / "lsp" / "servers")
 
 

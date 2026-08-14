@@ -274,11 +274,11 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_wizard_provision_runtime_creates_third_party_plugin_directory(self) -> None:
         self.assertTrue((self.registration.runtime.runtime_root / "plugins").is_dir())
 
-    def test_wizard_leaves_minion_catalog_ownership_to_the_sidecar(self) -> None:
-        minion_plugin_root = self.registration.runtime.runtime_root / "plugins" / "minion"
+    def test_wizard_leaves_bunshin_catalog_ownership_to_the_sidecar(self) -> None:
+        bunshin_plugin_root = self.registration.runtime.runtime_root / "plugins" / "bunshin"
 
-        self.assertFalse((minion_plugin_root / "profiles").exists())
-        self.assertFalse((minion_plugin_root / "families").exists())
+        self.assertFalse((bunshin_plugin_root / "profiles").exists())
+        self.assertFalse((bunshin_plugin_root / "families").exists())
 
     def test_identity_repository_bootstraps_singletons(self) -> None:
         repository = IdentityRepository()
@@ -599,7 +599,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("inspect_web_layout", tool_names)
         self.assertNotIn("screenshot_web", tool_names)
 
-    def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
+    def test_compose_runtime_loads_bunshin_as_first_party_builtin_plugin(self) -> None:
         if not _local_sidecar_bind_available():
             self.skipTest("local socket binding is unavailable in this test sandbox")
         self.wizard.seed_defaults(self.registration)
@@ -610,20 +610,20 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         records = handle.plugin_host.list_plugins()
-        minion_record = next(item for item in records if item["plugin_id"] == "minion")
-        self.assertEqual(minion_record["source"], "first_party")
-        self.assertTrue(minion_record["attached"])
-        self.assertIsNotNone(handle.core.context.module_registry.get("minion"))
-        self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
-        self.assertIn("minion_task_status", handle.core.context.capability_registry.descriptors)
-        self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
+        bunshin_record = next(item for item in records if item["plugin_id"] == "bunshin")
+        self.assertEqual(bunshin_record["source"], "first_party")
+        self.assertTrue(bunshin_record["attached"])
+        self.assertIsNotNone(handle.core.context.module_registry.get("bunshin"))
+        self.assertIn("bunshin_start_workflow", handle.core.context.capability_registry.descriptors)
+        self.assertIn("bunshin_task_status", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("bunshin_dispatch_workflow", handle.core.context.capability_registry.descriptors)
         search = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})
+            CapabilityCall(name="op_tool_search", args={"query": "start bunshin workflow"})
         )
-        minion_hit = self._find_search_hit_by_alias(handle.core, search, "minion_start_workflow")
-        self.assertEqual(minion_hit["alias"], "minion_start_workflow")
-        self.assertEqual(minion_hit["module_id"], "minion")
-        self.assertIn("input_shape", minion_hit)
+        bunshin_hit = self._find_search_hit_by_alias(handle.core, search, "bunshin_start_workflow")
+        self.assertEqual(bunshin_hit["alias"], "bunshin_start_workflow")
+        self.assertEqual(bunshin_hit["module_id"], "bunshin")
+        self.assertIn("input_shape", bunshin_hit)
 
     def test_stub_runtime_provisions_builtin_plugins_for_fresh_compose(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_stub_builtin_test_"))
@@ -635,15 +635,15 @@ class PalV2BootstrapTests(unittest.TestCase):
                 registration=provisioned.registration,
                 database=provisioned.database,
             )
-            self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
-            self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
+            self.assertIn("bunshin_start_workflow", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("bunshin_dispatch_workflow", handle.core.context.capability_registry.descriptors)
             search = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})
+                CapabilityCall(name="op_tool_search", args={"query": "start bunshin workflow"})
             )
-            minion_hit = self._find_search_hit_by_alias(handle.core, search, "minion_start_workflow")
-            self.assertEqual(minion_hit["alias"], "minion_start_workflow")
-            self.assertEqual(minion_hit["module_id"], "minion")
-            self.assertIn("input_shape", minion_hit)
+            bunshin_hit = self._find_search_hit_by_alias(handle.core, search, "bunshin_start_workflow")
+            self.assertEqual(bunshin_hit["alias"], "bunshin_start_workflow")
+            self.assertEqual(bunshin_hit["module_id"], "bunshin")
+            self.assertIn("input_shape", bunshin_hit)
         finally:
             provisioned.database.close()
             shutil.rmtree(root, ignore_errors=True)
@@ -881,7 +881,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         expected = {
             "lsp": "pal.lsp",
             "mcp": "pal.mcp",
-            "minion": "pal.minion",
+            "bunshin": "pal.bunshin",
             "sqlite_vec_l3": "pal.plugins.l3",
             "web_fetch": "pal.web_fetch",
             "web_search": "pal.web_search",
@@ -903,7 +903,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         expectations = {
             "lsp": ("pal.lsp", "lsp_show"),
             "mcp": ("pal.mcp", "mcp_show"),
-            "minion": ("pal.minion", "minion_start_workflow"),
+            "bunshin": ("pal.bunshin", "bunshin_start_workflow"),
             "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show"),
             "web_fetch": ("pal.web_fetch", "web_fetch_show"),
             "web_search": ("pal.web_search", "web_search_show"),
@@ -949,49 +949,49 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         initial_registry = handle.core.context.capability_registry
-        prefixes = ("pal.minion", "pal.plugins_builtin.minion")
+        prefixes = ("pal.bunshin", "pal.plugins_builtin.bunshin")
         original_modules = {
             name: module
             for name, module in sys.modules.items()
             if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
         }
         try:
-            old_handle = handle.core.context.module_registry.require("minion")
+            old_handle = handle.core.context.module_registry.require("bunshin")
             old_provider = old_handle.introspection_provider
-            old_manager = old_handle.ports["minion"]
+            old_manager = old_handle.ports["bunshin"]
             old_pid = int(old_manager._require_manager()["manager_pid"])
-            old_source = handle.core.context.event_source_registry.sources["minion.manager"]
-            old_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
+            old_source = handle.core.context.event_source_registry.sources["bunshin.manager"]
+            old_handler = handle.core.context.event_handler_registry.by_module["bunshin"][0][1]
 
-            detached = handle.core.detach_module("minion")
+            detached = handle.core.detach_module("bunshin")
 
             self.assertEqual(detached, "ok")
-            self.assertIn("minion_start_workflow", initial_registry.descriptors)
-            self.assertNotIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
-            self.assertNotIn("minion.manager", handle.core.context.event_source_registry.sources)
-            self.assertNotIn("minion", handle.core.context.event_handler_registry.by_module)
+            self.assertIn("bunshin_start_workflow", initial_registry.descriptors)
+            self.assertNotIn("bunshin_start_workflow", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("bunshin.manager", handle.core.context.event_source_registry.sources)
+            self.assertNotIn("bunshin", handle.core.context.event_handler_registry.by_module)
             self.assertFalse(old_manager.client.socket_path.exists())
-            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
+            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "bunshin")
             self.assertFalse(record["attached"])
 
-            probe_name = "pal.minion.__pal_hot_reload_probe__"
+            probe_name = "pal.bunshin.__pal_hot_reload_probe__"
             sys.modules[probe_name] = types.ModuleType(probe_name)
 
-            reattached = handle.core.reattach_module("minion")
+            reattached = handle.core.reattach_module("bunshin")
 
             self.assertEqual(reattached, "ok")
             self.assertNotIn(probe_name, sys.modules)
-            self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
-            new_handle = handle.core.context.module_registry.require("minion")
-            new_manager = new_handle.ports["minion"]
+            self.assertIn("bunshin_start_workflow", handle.core.context.capability_registry.descriptors)
+            new_handle = handle.core.context.module_registry.require("bunshin")
+            new_manager = new_handle.ports["bunshin"]
             new_pid = int(new_manager._require_manager()["manager_pid"])
-            new_source = handle.core.context.event_source_registry.sources["minion.manager"]
-            new_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
+            new_source = handle.core.context.event_source_registry.sources["bunshin.manager"]
+            new_handler = handle.core.context.event_handler_registry.by_module["bunshin"][0][1]
             self.assertIsNot(new_handle.introspection_provider, old_provider)
             self.assertNotEqual(new_pid, old_pid)
             self.assertIsNot(new_source, old_source)
             self.assertIsNot(new_handler, old_handler)
-            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
+            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "bunshin")
             self.assertTrue(record["attached"])
         finally:
             asyncio.run(handle.stop_async())
@@ -1233,13 +1233,13 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "kind": "case",
                     "scope": "task",
                     "task_id": "task-1",
-                    "summary": "Recovered the minion after memory pressure crash.",
-                    "search_text": "Minion crashed under memory pressure. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
-                    "situation_text": "Minion crashed under memory pressure",
-                    "task_text": "Stabilize the minion",
+                    "summary": "Recovered the bunshin after memory pressure crash.",
+                    "search_text": "Bunshin crashed under memory pressure. Restarted the bunshin and reduced concurrency. Queue drain recovered and latency normalized.",
+                    "situation_text": "Bunshin crashed under memory pressure",
+                    "task_text": "Stabilize the bunshin",
                     "action_text": "Restarted it and reduced concurrency",
                     "result_text": "Latency normalized",
-                    "topics": ["minion", "stability"],
+                    "topics": ["bunshin", "stability"],
                 },
             )
         )
@@ -1249,7 +1249,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             CapabilityCall(
                 name="op_memory_recall",
                 args={
-                    "queries": ["minion memory pressure stabilize"],
+                    "queries": ["bunshin memory pressure stabilize"],
                     "limit": 4,
                 },
             )
@@ -1258,7 +1258,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             CapabilityCall(
                 name="op_memory_recall",
                 args={
-                    "queries": ["minion memory pressure stabilize"],
+                    "queries": ["bunshin memory pressure stabilize"],
                     "limit": 4,
                     "view": "origin",
                 },
@@ -1269,8 +1269,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 name="op_memory_update",
                 args={
                     "mem_ref": mem_ref,
-                    "summary": "Recovered the minion after memory pressure.",
-                    "topics": ["minion", "recovery"],
+                    "summary": "Recovered the bunshin after memory pressure.",
+                    "topics": ["bunshin", "recovery"],
                 },
             )
         )
@@ -1287,26 +1287,26 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(corrected.status, "ok")
         self.assertEqual(recalled.structured["hit_count"], 1)
         self.assertEqual(recalled.structured["hits_preview"][0]["mem_ref"], mem_ref)
-        self.assertEqual(recalled.structured["hits_preview"][0]["summary"], "Recovered the minion after memory pressure crash.")
+        self.assertEqual(recalled.structured["hits_preview"][0]["summary"], "Recovered the bunshin after memory pressure crash.")
         self.assertEqual(recalled.structured["view"], "summary")
         self.assertNotIn("hits", recalled.structured)
         self.assertNotIn("projected_entries", recalled.structured)
         self.assertNotIn("projected_entries", recalled.llm_text)
-        self.assertNotIn("Restarted the minion and reduced concurrency.", recalled.llm_text)
-        self.assertIn("Recovered the minion after memory pressure crash.", recalled.llm_text)
+        self.assertNotIn("Restarted the bunshin and reduced concurrency.", recalled.llm_text)
+        self.assertIn("Recovered the bunshin after memory pressure crash.", recalled.llm_text)
         self.assertEqual(recalled_origin.structured["view"], "origin")
         self.assertEqual(recalled_origin.structured["hit_count"], 1)
         self.assertEqual(recalled_origin.structured["hits_preview"][0]["mem_ref"], mem_ref)
-        self.assertIn("Restarted the minion", recalled_origin.structured["hits_preview"][0]["search_text"])
+        self.assertIn("Restarted the bunshin", recalled_origin.structured["hits_preview"][0]["search_text"])
         self.assertNotIn("hits", recalled_origin.structured)
         self.assertNotIn("projected_entries", recalled_origin.structured)
-        self.assertIn("Restarted the minion and reduced concurrency.", recalled_origin.llm_text)
+        self.assertIn("Restarted the bunshin and reduced concurrency.", recalled_origin.llm_text)
         self.assertNotIn("projected_entries", recalled_origin.llm_text)
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
         self.assertIn(mem_ref, handle.memory_service.l2_store.items)
         self.assertIn(mem_ref, handle.memory_service.l2_store.heat_registry)
-        self.assertEqual(handle.memory_service.l2_store.items[mem_ref].summary, "Recovered the minion after memory pressure.")
+        self.assertEqual(handle.memory_service.l2_store.items[mem_ref].summary, "Recovered the bunshin after memory pressure.")
 
     def test_sqlite_vec_l3_commit_truth_topics_and_pending_index(self) -> None:
         service = MemoryService()
@@ -1413,18 +1413,18 @@ class PalV2BootstrapTests(unittest.TestCase):
                 kind="case",
                 scope="task",
                 task_id="task-1",
-                title="Recover minion",
-                summary="Recovered the minion after memory pressure crash.",
-                search_text="Minion crashed under memory pressure. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
-                situation_text="Minion crashed under memory pressure",
-                task_text="Stabilize the minion",
+                title="Recover bunshin",
+                summary="Recovered the bunshin after memory pressure crash.",
+                search_text="Bunshin crashed under memory pressure. Restarted the bunshin and reduced concurrency. Queue drain recovered and latency normalized.",
+                situation_text="Bunshin crashed under memory pressure",
+                task_text="Stabilize the bunshin",
                 action_text="Restarted it and reduced concurrency",
                 result_text="Latency normalized",
-                topics=["minion", "stability"],
+                topics=["bunshin", "stability"],
             )
         )
 
-        recall = provider.recall(MemoryQuery(queries=["minion memory pressure stabilize"], limit=4))
+        recall = provider.recall(MemoryQuery(queries=["bunshin memory pressure stabilize"], limit=4))
 
         self.assertEqual(recall.hits[0]["document_id"], result.document_id)
         self.assertEqual(recall.metadata["retrieval_mode"], "lexical")
@@ -1540,23 +1540,23 @@ class PalV2BootstrapTests(unittest.TestCase):
                 kind="case",
                 scope="task",
                 task_id="task-1",
-                title="Restart flaky minion",
-                summary="Restarted flaky minion after memory pressure crash.",
-                search_text="Minion crashed after high memory pressure. Task was to stabilize the background minion. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
-                situation_text="Minion crashed after high memory pressure",
-                task_text="Stabilize the background minion",
-                action_text="Restarted the minion and reduced concurrency",
+                title="Restart flaky bunshin",
+                summary="Restarted flaky bunshin after memory pressure crash.",
+                search_text="Bunshin crashed after high memory pressure. Task was to stabilize the background bunshin. Restarted the bunshin and reduced concurrency. Queue drain recovered and latency normalized.",
+                situation_text="Bunshin crashed after high memory pressure",
+                task_text="Stabilize the background bunshin",
+                action_text="Restarted the bunshin and reduced concurrency",
                 result_text="Queue drain recovered and latency normalized",
-                topics=["minion", "stability"],
+                topics=["bunshin", "stability"],
             )
         )
         provider.refresh_indexes(limit=8)
 
-        st_hit = provider.recall(MemoryQuery(queries=["minion high memory pressure stabilize"], limit=4))
+        st_hit = provider.recall(MemoryQuery(queries=["bunshin high memory pressure stabilize"], limit=4))
         ar_only = provider.recall(MemoryQuery(queries=["latency normalized"], limit=4))
 
         self.assertEqual(st_hit.hits[0]["document_id"], result.document_id)
-        self.assertIn("Action: Restarted the minion", st_hit.hits[0]["rendered"])
+        self.assertIn("Action: Restarted the bunshin", st_hit.hits[0]["rendered"])
         self.assertGreaterEqual(len(ar_only.hits), 0)
 
     def test_sqlite_vec_l3_correct_marks_stale_and_updates_topics(self) -> None:
@@ -4008,7 +4008,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
         spec = InteractionMessageSpec(
             interaction_id="review_long",
-            interaction_kind="minion_v2_architecture_review",
+            interaction_kind="bunshin_v2_architecture_review",
             text=("architecture contract\n" * 600).strip(),
             buttons=(
                 (
@@ -4046,7 +4046,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_telegram_endpoint_restores_durable_interaction_after_endpoint_restart(self) -> None:
         spec = InteractionMessageSpec(
             interaction_id="review_restart",
-            interaction_kind="minion_v2_architecture_review",
+            interaction_kind="bunshin_v2_architecture_review",
             text="Review ready",
             buttons=(
                 (
@@ -4054,7 +4054,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
                         label="Accept",
                         action_key="control.action.dispatch",
                         action_args={
-                            "action_kind": "minion_v2_human_decision",
+                            "action_kind": "bunshin_v2_human_decision",
                             "args": {"decision": "accept"},
                         },
                     ),

@@ -703,7 +703,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
     def test_semantic_router_cannot_drop_deterministic_candidates(self) -> None:
         def biased_router(**kwargs):
             candidates = tuple(kwargs["candidates"])
-            return tuple(candidate for candidate in candidates if candidate.affordance_id == "minion.route")
+            return tuple(candidate for candidate in candidates if candidate.affordance_id == "bunshin.route")
 
         service = BehaviorService(repository=self.repository, execution_runtime=self.runtime, semantic_router=biased_router)
         service.repository.upsert_affordance(
@@ -719,12 +719,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
         service.repository.upsert_affordance(
             AffordanceDescriptor(
-                affordance_id="minion.route",
+                affordance_id="bunshin.route",
                 module_id="test",
-                title="Minion route",
-                scenario_text="schedule daily push delegated to minion",
-                prompt_hint="Consider Minion for delegated work.",
-                activation_terms=("schedule", "daily", "push", "delegate", "minion"),
+                title="Bunshin route",
+                scenario_text="schedule daily push delegated to bunshin",
+                prompt_hint="Consider Bunshin for delegated work.",
+                activation_terms=("schedule", "daily", "push", "delegate", "bunshin"),
                 activation_threshold=0.0,
             )
         )
@@ -732,7 +732,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         result = asyncio.run(service.advise_async(BehaviorAdviceRequest(scenario="schedule daily push", top_k=5)))
         ids = [candidate.affordance_id for candidate in result.candidates]
 
-        self.assertIn("minion.route", ids)
+        self.assertIn("bunshin.route", ids)
         self.assertIn("proactive.route", ids)
 
     def test_skill_inject_returns_manual_without_executing_capability(self) -> None:
@@ -1081,9 +1081,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
             AffordanceDescriptor(
                 affordance_id="rendered.line.route",
                 module_id="behavior",
-                title="Minion skill dispatch",
-                scenario_text="dispatching minion tasks",
-                prompt_hint="Before dispatching a minion, search the skill library for matching skills and inject them first.",
+                title="Bunshin skill dispatch",
+                scenario_text="dispatching bunshin tasks",
+                prompt_hint="Before dispatching a bunshin, search the skill library for matching skills and inject them first.",
                 source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
                 activation_threshold=0.0,
             )
@@ -1091,14 +1091,14 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         result = AffordanceUpdateTool(service=self.service).invoke(
             {
-                "affordance": "- Minion skill dispatch: Before dispatching a minion, search the skill library for matching skills and inject them first.",
-                "prompt_hint": "Before dispatching minion tasks, inject matching skills first.",
+                "affordance": "- Bunshin skill dispatch: Before dispatching a bunshin, search the skill library for matching skills and inject them first.",
+                "prompt_hint": "Before dispatching bunshin tasks, inject matching skills first.",
             }
         )
         stored = self.repository.get_affordance("rendered.line.route")
 
         self.assertEqual(result.status, "ok")
-        self.assertEqual(stored.prompt_hint, "Before dispatching minion tasks, inject matching skills first.")
+        self.assertEqual(stored.prompt_hint, "Before dispatching bunshin tasks, inject matching skills first.")
 
     def test_update_affordance_tool_matches_rendered_guidance_with_colon_title(self) -> None:
         title = "Task routing: handle social/simple work directly, delegate implementation"
@@ -1288,7 +1288,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         surfaces = system.split("<operating_rules>", 1)[0]
         self.assertIn("execution/capability", surfaces)
         self.assertIn("behavior: behavior guidance", surfaces)
-        self.assertNotIn("minion", system.split("</system_map>", 1)[0].lower())
+        self.assertNotIn("bunshin", system.split("</system_map>", 1)[0].lower())
         source_of_truth = system.split("<source_of_truth>", 1)[1].split("</source_of_truth>", 1)[0]
         self.assertIn("Use the right source for the truth needed", source_of_truth)
         self.assertIn("live introspection/capability calls", source_of_truth)

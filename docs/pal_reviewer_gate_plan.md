@@ -1,12 +1,12 @@
 # Pal Reviewer Gate Hardening Plan
 
 Status: historical hardening plan. The current implementation sync point is
-`pal_minion_v1.md#gate-loop`. The implemented system is profile-driven:
+`pal_bunshin_v1.md#gate-loop`. The implemented system is profile-driven:
 profiles declare `[gate_policy] gates = [...]`, runtime expands those names into
 `GateSpec` values, and the review orchestrator schedules gates after milestone
 result events.
 
-This plan turns the reviewer from an optional after-the-fact reviewer into a required gate in Pal's software-engineering minion workflow.
+This plan turns the reviewer from an optional after-the-fact reviewer into a required gate in Pal's software-engineering bunshin workflow.
 
 It is intentionally strict. Pal V1 has not been publicly released, so the workflow should be cleaned up now instead of preserving weak compatibility.
 
@@ -53,7 +53,7 @@ plan_revised
 plan_override_accepted
 ```
 
-`minion_accept_plan` should require a passing plan-review gate unless `human_override` is explicitly provided with a reason.
+`bunshin_accept_plan` should require a passing plan-review gate unless `human_override` is explicitly provided with a reason.
 
 ### Milestone States
 
@@ -115,8 +115,8 @@ The implemented reviewer surface has one generic plan-review submitter plus a
 checkpoint-specific wrapper:
 
 ```text
-op_minion_review_gate_submit
-op_minion_review_checkpoint
+op_bunshin_review_gate_submit
+op_bunshin_review_checkpoint
 ```
 
 Inputs:
@@ -137,8 +137,8 @@ Policy:
 - Expose it only to reviewer/verifier profiles.
 - The repository validates target existence and hash/commit binding.
 - The manager consumes the gate result; the runner does not self-advance.
-- Use `op_minion_review_gate_submit` for `plan_acceptance`.
-- Use `op_minion_review_checkpoint` for `checkpoint_verification` and `repair_verification`; Pal binds the checkpoint target and tool evidence.
+- Use `op_bunshin_review_gate_submit` for `plan_acceptance`.
+- Use `op_bunshin_review_checkpoint` for `checkpoint_verification` and `repair_verification`; Pal binds the checkpoint target and tool evidence.
 
 Plan acceptance is now a manager/control action, not a public capability call. It should change from the old direct call shape:
 
@@ -170,7 +170,7 @@ For each coder milestone:
 4. Manager records the claim and does not advance the milestone cursor yet.
 5. Manager spawns or schedules a reviewer run with a scoped review work order.
 6. Reviewer inspects plan, diff, checkpoint commit, tests, and evidence.
-7. Reviewer submits the gate. Plan reviewers use `op_minion_review_gate_submit`; checkpoint and repair reviewers use `op_minion_review_checkpoint`.
+7. Reviewer submits the gate. Plan reviewers use `op_bunshin_review_gate_submit`; checkpoint and repair reviewers use `op_bunshin_review_checkpoint`.
 8. Manager handles verdict:
    - `pass`: write milestone closure, advance cursor, send next milestone to same coder runner if available.
    - `fail`: send same coder runner a repair turn with `review_gate_ref` and required fixes.
@@ -196,7 +196,7 @@ Reviewer should not receive:
 
 - future milestones unrelated to the review
 - write access to the coder workspace
-- minion control capabilities
+- bunshin control capabilities
 - memory mutation capabilities
 
 Reviewer may write temporary probes under `/tmp`, `$TMPDIR`, or an isolated verifier workspace.
@@ -261,7 +261,7 @@ Plan reviewer verdict:
 - `fail`: plan must be revised
 - `partial`: plan needs human decision or missing external truth source
 
-`minion_revise_plan` remains the mechanism for updating the same plan. The new reviewer gate decides whether the revised plan is acceptable.
+`bunshin_revise_plan` remains the mechanism for updating the same plan. The new reviewer gate decides whether the revised plan is acceptable.
 
 ## Checkpoint Review Gate
 
@@ -320,7 +320,7 @@ LSP evidence is useful but not absolute. For high-risk API claims, pair it with 
 
 ### Slice 2: Plan Acceptance Gate
 
-- Update `minion_accept_plan` to require a passing plan-review gate.
+- Update `bunshin_accept_plan` to require a passing plan-review gate.
 - Store review gate ref in acceptance marker.
 - Add explicit human override path with reason.
 - Add tests for missing review, failed review, stale review, and override.

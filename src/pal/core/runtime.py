@@ -1278,9 +1278,9 @@ class PalCore:
                     }
                 )
         message = (
-            "Debug logging enabled for new turns and Minion role runs."
+            "Debug logging enabled for new turns and Bunshin role runs."
             if enabled
-            else "Debug logging disabled for new turns and Minion role runs."
+            else "Debug logging disabled for new turns and Bunshin role runs."
         )
         await self._complete_action_reply_async(action, message)
 

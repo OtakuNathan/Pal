@@ -29,7 +29,7 @@ class ChecklistPromptFragmentProvider:
                     "the active checklist; when every step is complete and re-verified, retire it "
                     "with `checklist_clear`. Also clear a checklist that the user cancelled or made "
                     "stale. Do not use a checklist for a simple answer, a single conversational "
-                    "exchange, durable knowledge, or a Manager-owned Minion workflow. The checklist "
+                    "exchange, durable knowledge, or a Manager-owned Bunshin workflow. The checklist "
                     "is an execution scratchpad, never authority or evidence."
                 ),
                 priority=91,

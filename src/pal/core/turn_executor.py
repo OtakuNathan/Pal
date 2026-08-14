@@ -512,7 +512,7 @@ class TurnExecutor:
         returning structured ``{"echo": {"markdown": ..., "dedupe_key": ...}}``.
         Core is the only actor that touches the output port; the tool itself
         never knows the envelope or the channel. Only channel turns carry an
-        envelope, so service/minion turns silently ignore echo declarations —
+        envelope, so service/bunshin turns silently ignore echo declarations —
         there is physically no path to send "to the LLM itself".
         """
         structured = dict(tool_result.structured or {})
@@ -921,8 +921,8 @@ class TurnExecutor:
         logical_scope_id = str(metadata.get("prompt_cache_scope_id") or "").strip()
         if not logical_scope_id:
             logical_scope_id = (
-                f"minion:{assembly_context.work_order_id or continuation.turn_id}"
-                if assembly_context.core_mode == "minion"
+                f"bunshin:{assembly_context.work_order_id or continuation.turn_id}"
+                if assembly_context.core_mode == "bunshin"
                 else "pal:resident"
             )
         artifact_scope_key = str(
@@ -1061,7 +1061,7 @@ class TurnExecutor:
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         # PromptCompiler intentionally emits only provider-facing prompt
         # metadata.  Logical cache/artifact ownership is executor-owned, so
-        # restore it after compilation instead of allowing Minion requests to
+        # restore it after compilation instead of allowing Bunshin requests to
         # silently fall back to the resident Pal scope.
         metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
@@ -1682,13 +1682,13 @@ class TurnExecutor:
             metadata.get("prompt_cache_scope_id") or ""
         ).strip()
         if not logical_scope_id:
-            minion_scope_key = (
+            bunshin_scope_key = (
                 getattr(assembly_context, "work_order_id", "")
                 or getattr(continuation, "turn_id", "")
             )
             logical_scope_id = (
-                f"minion:{minion_scope_key}"
-                if getattr(assembly_context, "core_mode", "") == "minion"
+                f"bunshin:{bunshin_scope_key}"
+                if getattr(assembly_context, "core_mode", "") == "bunshin"
                 else "pal:resident"
             )
         metadata["prompt_cache_scope_id"] = logical_scope_id

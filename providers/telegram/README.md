@@ -10,7 +10,7 @@ database owns only endpoint registration and lifecycle projection.
 
 Inline-keyboard callback mappings and native Telegram message targets are
 durable provider projections. Human-review truth and decision validity remain
-owned by Minion.
+owned by Bunshin.
 
 Build and install the provider independently from Pal core:
 

@@ -1,0 +1,1905 @@
+from __future__ import annotations
+
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
+import asyncio
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from pal.core import PalCore
+from pal.execution import register_with_core as register_execution_with_core
+from pal.bunshin.catalog import BunshinCatalogService
+from pal.bunshin.profiles import BunshinProfileRegistry, resolve_pinned_bunshin_pack
+from pal.bunshin.scoped_execution import (
+    BunshinScopedExecutionRuntime,
+    BunshinScopedExecutionShellInput,
+)
+from pal.bunshin.workspace_tools import _normalized_reference_paths
+from pal.execution.contracts import CapabilityResult
+from pal.execution.runtime import ExecutionRuntime
+from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
+from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
+from pal.bunshin.v2.contract_runtime import ContractArtifactAccess
+from pal.bunshin.v2.catalog import BunshinV2Catalog
+from pal.bunshin.v2.contracts import AggregateType
+from pal.bunshin.v2.execution import ExecutionCompiler
+from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
+from pal.bunshin.v2.graph_protocol import RoleBinding
+from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.v2.role_contracts import (
+    OrchestrationRole,
+    RoleActivation,
+    RoleMode,
+    validate_family_binding_payload,
+)
+from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.v2.semantic_orchestration import (
+    apply_v2_research_capability_policy,
+    apply_v2_role_capability_policy,
+)
+from pal.bunshin.v2.semantic_orchestration.orchestrator import (
+    SemanticOrchestrator,
+    _role_mode_profile_payload,
+)
+from pal.shared import BunshinInvocationPack, RuntimeStatus
+from tests.capability_fixture import mount_test_capability
+from pal.shared import ToolExecutionResult
+
+
+class BunshinV2FamilyBindingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="pal_v2_family_"))
+        self.repository = BunshinV2Repository(self.root)
+        self.store = ContentAddressedArtifactStore(self.root, self.repository)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _lifestyle_graph(self, contract, *, workflow_id: str):
+        return GraphCompiler().compile(
+            contract,
+            graph_id=workflow_id,
+            generation=1,
+            bindings=GraphCompileBindings(
+                producer=RoleBinding(
+                    "null",
+                    reason="external_human_execution",
+                ),
+                checker=RoleBinding(
+                    "null",
+                    reason="external_human_execution",
+                ),
+                execution_adapter="artifact_bundle.v2",
+            ),
+            satellite_projector=FamilyGraphSatelliteProjector(
+                specialization_id="lifestyle.nutrition_checkin.v1",
+                template="""satellite_data:
+  architecture: {{ document | tojson }}
+workspace_policy: {}
+""",
+            ),
+            source_ref="architect.yaml",
+            workspace_authority_rules=(),
+        )
+
+    def _pack(self, profile: str) -> BunshinInvocationPack:
+        group, name = profile.split(".", 1)
+        return BunshinProfileRegistry(runtime_root=self.root).resolve_pack(
+            BunshinInvocationPack(
+                invocation_id="inv-family",
+                goal="test",
+                profile_group=group,
+                profile_name=name,
+                bunshin_profile=profile,
+            )
+        )
+
+    def test_lifestyle_binding_resolves_all_roles_and_artifact_adapters(self) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "lifestyle.nutritionist"
+        )
+        binding = self.store.read_json(ref)
+        self.assertEqual(binding["schema_version"], "7")
+        self.assertEqual(binding["workflow_template"], "contract_dag.v2")
+        self.assertEqual(
+            set(binding["role_bindings"]),
+            {"architect", "reviewer", "implementation", "verifier"},
+        )
+        self.assertEqual(binding["execution_adapter"], "artifact_bundle.v2")
+        self.assertEqual(
+            binding["role_bindings"]["architect"]["role_profile"][
+                "canonical_profile_id"
+            ],
+            "lifestyle.architect",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["reviewer"]["role_profile"][
+                "canonical_profile_id"
+            ],
+            "lifestyle.reviewer",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["participant"],
+            "null",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["verifier"]["participant"],
+            "null",
+        )
+        self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
+        self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 3000)
+        architecture = dict(binding["architecture_definition"])
+        self.assertEqual(
+            architecture["specialization_id"],
+            "lifestyle.nutrition_checkin.v1",
+        )
+        self.assertEqual(architecture["family_id"], "lifestyle")
+        self.assertEqual(len(architecture["generation_hash"]), 64)
+        schema = self.store.read_json(architecture["schema_ref"])
+        template = dict(
+            self.store.read_json(architecture["template_ref"])
+        )
+        self.assertEqual(
+            schema["x-pal-specialization-id"],
+            architecture["specialization_id"],
+        )
+        self.assertEqual(
+            template["generation_hash"],
+            architecture["generation_hash"],
+        )
+        satellite_template = dict(
+            self.store.read_json(architecture["satellite_template_ref"])
+        )
+        self.assertEqual(
+            satellite_template["generation_hash"],
+            architecture["generation_hash"],
+        )
+        self.assertIn("satellite_data", satellite_template["template"])
+        self.assertNotIn(
+            "contract",
+            binding["role_bindings"]["architect"]["role_profile"],
+        )
+
+    def test_family_binding_rejects_legacy_implicit_profile_executor(self) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "lifestyle.nutritionist"
+        )
+        binding = dict(self.store.read_json(ref))
+        binding["schema_version"] = "3"
+        binding["role_bindings"]["architect"].pop("participant")
+        with self.assertRaisesRegex(
+            ValueError,
+            "schema_version 7",
+        ):
+            validate_family_binding_payload(binding)
+
+    def test_family_binding_requires_an_execution_adapter_strategy(
+        self,
+    ) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "generic"
+        )
+        binding = dict(self.store.read_json(ref))
+        binding.pop("execution_adapter")
+        with self.assertRaisesRegex(ValueError, "execution_adapter is required"):
+            validate_family_binding_payload(binding)
+
+    def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding("generic")
+        binding = self.store.read_json(ref)
+        self.assertEqual(binding["workflow_template"], "contract_dag.v2")
+        self.assertEqual(
+            set(binding["role_bindings"]),
+            {"architect", "reviewer", "implementation", "verifier"},
+        )
+        self.assertEqual(binding["execution_adapter"], "artifact_bundle.v2")
+        self.assertEqual(binding["primary_profile"]["canonical_profile_id"], "generic")
+
+    def test_family_binding_pins_profile_definition_across_catalog_refresh(self) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_coder"
+        )
+        binding = self.store.read_json(ref)
+        pinned = dict(binding["role_bindings"]["implementation"]["role_profile"])
+        original_name = str(pinned["display_name"])
+
+        BunshinCatalogService(self.root).set_profile_override(
+            profile="software_engineering.v2_coder",
+            changes={"display_name": "Future Workflow Coder"},
+        )
+        current = BunshinProfileRegistry(runtime_root=self.root).get("software_engineering.v2_coder")
+        resolved = resolve_pinned_bunshin_pack(
+            BunshinInvocationPack(
+                invocation_id="inv-pinned-profile",
+                goal="test",
+                profile_group="software_engineering",
+                profile_name="v2_coder",
+                bunshin_profile="software_engineering.v2_coder",
+            ),
+            profile_payload=pinned,
+            family_payload=dict(binding),
+        )
+
+        self.assertEqual(current.display_name, "Future Workflow Coder")
+        self.assertEqual(resolved.resolved_profile["display_name"], original_name)
+
+    def test_software_family_selects_internal_role_profiles_independent_of_task_profile(self) -> None:
+        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_architect"
+        )
+        binding = self.store.read_json(ref)
+
+        self.assertEqual(
+            binding["primary_profile"]["canonical_profile_id"],
+            "software_engineering.v2_architect",
+        )
+        self.assertEqual(
+            {
+                role: value["role_profile"]["canonical_profile_id"]
+                for role, value in binding["role_bindings"].items()
+            },
+            {
+                "architect": "software_engineering.v2_architect",
+                "reviewer": "software_engineering.v2_reviewer",
+                "implementation": "software_engineering.v2_coder",
+                "verifier": "software_engineering.v2_verifier",
+            },
+        )
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["selector"],
+            "software_engineering.v2_coder",
+        )
+
+    def test_software_task_creation_cannot_bind_architect_as_implementation(self) -> None:
+        service = BunshinV2WorkflowService(self.root)
+        created = service.create_task(
+            {
+                "title": "Software task",
+                "objective": "Exercise the software family role binding",
+                "profile": "software_engineering.v2_architect",
+                "workspace": {
+                    "kind": "new_project",
+                    "project_name": "software-role-binding",
+                    "primary_language": "python",
+                },
+            }
+        )
+
+        binding = self.store.read_json(created["family_binding_ref"])
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["role_profile"][
+                "canonical_profile_id"
+            ],
+            "software_engineering.v2_coder",
+        )
+
+    def test_architect_authors_contract_and_task_profile_is_not_an_executor(self) -> None:
+        planner = apply_v2_role_capability_policy(
+            self._pack("lifestyle.architect"),
+            activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+        )
+        self.assertIn("op_bunshin_contract_submit", planner.allowed_capabilities)
+        self.assertIn("op_file_write", planner.allowed_capabilities)
+        self.assertIn("op_file_edit", planner.allowed_capabilities)
+        self.assertNotIn("op_bunshin_artifact_write", planner.allowed_capabilities)
+
+        task_profile = apply_v2_role_capability_policy(
+            self._pack("lifestyle.nutritionist"),
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+        )
+        self.assertNotIn("op_file_write", task_profile.allowed_capabilities)
+        self.assertNotIn("op_file_edit", task_profile.allowed_capabilities)
+        self.assertNotIn(
+            "op_bunshin_artifact_write",
+            task_profile.allowed_capabilities,
+        )
+
+    def test_task_creation_requires_primary_profile_and_ignores_no_family_shortcut(self) -> None:
+        service = BunshinV2WorkflowService(self.root)
+        with self.assertRaisesRegex(ValueError, "explicit primary bunshin profile"):
+            service.create_task(
+                {
+                    "title": "Unbound task",
+                    "objective": "Must not infer an executor from a family",
+                    "family_id": "software_engineering",
+                    "workspace": {"kind": "new_project", "project_name": "unbound"},
+                }
+            )
+
+    def test_artifact_producer_cannot_fabricate_manager_submission_report(self) -> None:
+        repo = self.root / "guard-repo"
+        repo.mkdir()
+        scoped = BunshinScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_bunshin_artifact_write"],
+            workspace={
+                "run_id": "artifact-guard-test",
+                "repo_path": str(repo),
+                "artifact_dir": str(self.root / "guard-artifacts"),
+                "artifact_stage_dir": str(self.root / "guard-stage"),
+                "manager_owned_submission_paths": ["producer_report.json"],
+            },
+        )
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="artifact_write",
+                    args={
+                        "relative_path": "producer_report.json",
+                        "content": "{}",
+                    },
+                )
+            )
+        )
+        self.assertFalse(rejected.ok)
+        self.assertIn("Manager-owned", rejected.llm_text)
+
+        product = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="artifact_write",
+                    args={
+                        "relative_path": "checkin.json",
+                        "content": '{"status":"recorded"}',
+                        "role": "deliverable",
+                    },
+                )
+            )
+        )
+        self.assertTrue(product.ok, product.text)
+
+    def test_verifier_can_only_submit_through_the_schema_bound_protocol(self) -> None:
+        software = apply_v2_role_capability_policy(
+            self._pack("software_engineering.v2_verifier"),
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+        )
+        self.assertIn("op_bunshin_verification_pass", software.allowed_capabilities)
+        self.assertIn(
+            "op_bunshin_verification_request_module_repair",
+            software.allowed_capabilities,
+        )
+        self.assertIn(
+            "op_bunshin_verification_run_diff_risk",
+            software.allowed_capabilities,
+        )
+        self.assertIn(
+            "op_bunshin_verification_run_historical_regression",
+            software.allowed_capabilities,
+        )
+        self.assertIn("op_file_read", software.allowed_capabilities)
+        self.assertNotIn("op_bunshin_verification_submit", software.allowed_capabilities)
+        self.assertNotIn("op_bunshin_contract_submit", software.allowed_capabilities)
+        self.assertNotIn("op_bunshin_review_submit", software.allowed_capabilities)
+        self.assertIn("op_file_write", software.allowed_capabilities)
+        self.assertNotIn(
+            "op_bunshin_verification_scratch_write",
+            software.allowed_capabilities,
+        )
+        for profile in ("general.verifier",):
+            with self.subTest(profile=profile):
+                verifier = apply_v2_role_capability_policy(
+                    self._pack(profile),
+                    activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+                )
+                self.assertIn("op_bunshin_verification_pass", verifier.allowed_capabilities)
+                self.assertIn(
+                    "op_bunshin_verification_request_module_repair",
+                    verifier.allowed_capabilities,
+                )
+                self.assertNotIn(
+                    "op_bunshin_verification_scratch_write",
+                    verifier.allowed_capabilities,
+                )
+                self.assertNotIn("op_bunshin_verification_submit", verifier.allowed_capabilities)
+                self.assertIn("op_exec_shell", verifier.allowed_capabilities)
+                self.assertNotIn("op_bunshin_artifact_write", verifier.allowed_capabilities)
+                self.assertNotIn("op_bunshin_artifact_edit", verifier.allowed_capabilities)
+
+        standalone = apply_v2_role_capability_policy(
+            self._pack("software_engineering.v2_reviewer"),
+            activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+        )
+        self.assertIn("op_bunshin_review_submit", standalone.allowed_capabilities)
+        self.assertIn("op_exec_shell", standalone.allowed_capabilities)
+        self.assertNotIn("op_file_edit", standalone.allowed_capabilities)
+        self.assertNotIn("op_file_write", standalone.allowed_capabilities)
+        self.assertNotIn("op_bunshin_artifact_write", standalone.allowed_capabilities)
+        self.assertNotIn("op_bunshin_verification_submit", standalone.allowed_capabilities)
+
+        for profile in (
+            "general.generic",
+            "lifestyle.nutritionist",
+        ):
+            for activation in (
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+            ):
+                with self.subTest(profile=profile, activation=activation):
+                    bound = apply_v2_role_capability_policy(
+                        self._pack(profile), activation=activation
+                    )
+                    self.assertIn("op_bunshin_add_finding", bound.allowed_capabilities)
+                    if activation.role == OrchestrationRole.VERIFIER:
+                        self.assertIn(
+                            "op_bunshin_verification_pass",
+                            bound.allowed_capabilities,
+                        )
+                        self.assertIn(
+                            "op_bunshin_verification_request_module_repair",
+                            bound.allowed_capabilities,
+                        )
+                        self.assertNotIn(
+                            "op_bunshin_verification_submit",
+                            bound.allowed_capabilities,
+                        )
+
+        coder = apply_v2_role_capability_policy(
+            self._pack("software_engineering.v2_coder"),
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+        )
+        self.assertIn("op_bunshin_candidate_submit", coder.allowed_capabilities)
+        self.assertIn("op_bunshin_update_checklist", coder.allowed_capabilities)
+        self.assertNotIn("op_bunshin_artifact_write", coder.allowed_capabilities)
+
+    def test_verifier_profile_compiles_to_one_mode_specific_contract(self) -> None:
+        base = dict(
+            self._pack("software_engineering.v2_verifier").resolved_profile
+        )
+
+        module = _role_mode_profile_payload(base, mode="module")
+        self.assertIn("exactly one module Candidate", module["identity_fragment"])
+        self.assertIn("Do not search for task.yaml", module["behavior_fragment"])
+        self.assertIn("authored graph sink", module["behavior_fragment"])
+        self.assertIn("real public surface", module["behavior_fragment"])
+        self.assertIn("same node cycle", module["behavior_fragment"])
+
+    def test_role_binding_replaces_the_shared_profiles_output_contract(self) -> None:
+        cases = (
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+                "architect.yaml",
+                ["ContractArtifact"],
+            ),
+            (
+                "lifestyle.nutritionist",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                "contract_review.json",
+                ["ContractReviewArtifact"],
+            ),
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+                "contract_review.json",
+                ["ContractReviewArtifact"],
+            ),
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+                "verification_submission.json",
+                ["SemanticVerificationSubmissionArtifact"],
+            ),
+            (
+                "lifestyle.nutritionist",
+                RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
+                "producer_report.json",
+                ["UnitProducerReport", "UnitSplitRequest"],
+            ),
+            (
+                "software_engineering.v2_architect",
+                RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.REVISION),
+                "architect.yaml",
+                ["ContractArtifact"],
+            ),
+            (
+                "software_engineering.v2_reviewer",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                "contract_review.json",
+                ["ContractReviewArtifact"],
+            ),
+            (
+                "software_engineering.v2_coder",
+                RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+                "coder_report.json",
+                ["ModuleCoderReport", "ModuleSplitRequest"],
+            ),
+        )
+        for profile, activation, primary_artifact, output_types in cases:
+            with self.subTest(profile=profile, activation=activation):
+                bound = apply_v2_role_capability_policy(
+                    self._pack(profile),
+                    activation=activation,
+                )
+                workspace_policy = dict(bound.workspace["output_policy"])
+                resolved_policy = dict(
+                    bound.resolved_profile["effective_output_policy"]
+                )
+                self.assertEqual(workspace_policy["primary_artifact"], primary_artifact)
+                self.assertEqual(workspace_policy["allowed_output_types"], output_types)
+                self.assertEqual(resolved_policy, workspace_policy)
+
+    def test_verification_submit_is_hydrated_in_the_scoped_runtime(self) -> None:
+        scoped = BunshinScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_bunshin_verification_submit"],
+            workspace={
+                "run_id": "verification-submit-test",
+                "artifact_dir": str(self.root / "artifacts"),
+                "artifact_stage_dir": str(self.root / "artifact-stage"),
+            },
+        )
+        spec = scoped.get_capability_spec("op_bunshin_verification_submit")
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec["name"], "verification_submit")
+        self.assertEqual(
+            scoped.resolve_capability_address("verification_submit"),
+            "op_bunshin_verification_submit",
+        )
+        self.assertEqual(
+            scoped.get_capability_spec("verification_submit")["name"],
+            "verification_submit",
+        )
+        self.assertFalse(spec["input_schema"]["additionalProperties"])
+        self.assertEqual(spec["input_schema"]["properties"], {})
+
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="verification_submit",
+                    args={
+                        "cases": [
+                            {
+                                "name": "bounded smoke probe",
+                                "case_kind": "unit",
+                                "command": ["python", "-m", "pytest", "-q"],
+                                "expected_exit_codes": [0],
+                                "requirements": [],
+                                "locations": [],
+                                "invariants": [],
+                                "description": "Run the focused project suite.",
+                            }
+                        ],
+                        "findings": [],
+                        "reviewer_summary": "Run the bounded smoke probe.",
+                    },
+                )
+            )
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "invalid_arguments")
+        self.assertIn("Extra inputs are not permitted", result.llm_text)
+        self.assertFalse((self.root / "artifact-stage" / "verification_plan.json").exists())
+
+    def test_worker_only_canonical_names_are_exposed_through_role_native_aliases(self) -> None:
+        scoped = BunshinScopedExecutionRuntime(
+            ExecutionRuntime(),
+            [
+                "op_bunshin_contract_submit",
+                "op_bunshin_candidate_submit",
+                "op_bunshin_ask_question",
+            ],
+            workspace={
+                "artifact_dir": str(self.root / "alias-artifacts"),
+                "artifact_stage_dir": str(self.root / "alias-stage"),
+            },
+        )
+
+        expected = {
+            "op_bunshin_contract_submit": "contract_submit",
+            "op_bunshin_candidate_submit": "candidate_submit",
+            "op_bunshin_ask_question": "ask_question",
+        }
+        for canonical, public_name in expected.items():
+            with self.subTest(canonical=canonical):
+                spec = scoped.get_capability_spec(canonical)
+                self.assertIsNotNone(spec)
+                assert spec is not None
+                self.assertEqual(spec["name"], public_name)
+                self.assertEqual(scoped.resolve_capability_address(public_name), canonical)
+                self.assertNotIn("bunshin_", str(spec["guidance"]))
+
+    def test_architect_has_no_external_research_surface(self) -> None:
+        architect = self._pack("lifestyle.architect")
+        self.assertNotIn("op_web_search", architect.allowed_capabilities)
+        self.assertNotIn("op_web_read", architect.allowed_capabilities)
+        local = apply_v2_research_capability_policy(architect, research_mode="local_only")
+        self.assertNotIn("op_web_search", local.allowed_capabilities)
+        self.assertNotIn("op_web_read", local.allowed_capabilities)
+
+    def test_software_architect_gets_web_only_when_research_mode_allows_it(self) -> None:
+        architect = self._pack("software_engineering.v2_architect")
+        self.assertIn("op_web_search", architect.allowed_capabilities)
+        self.assertIn("op_web_read", architect.allowed_capabilities)
+        local = apply_v2_research_capability_policy(architect, research_mode="local_only")
+        external = apply_v2_research_capability_policy(architect, research_mode="external_allowed")
+        self.assertNotIn("op_web_search", local.allowed_capabilities)
+        self.assertNotIn("op_web_read", local.allowed_capabilities)
+        self.assertIn("op_web_search", external.allowed_capabilities)
+        self.assertIn("op_web_read", external.allowed_capabilities)
+
+    def test_architect_roles_receive_contract_file_authoring_surface(self) -> None:
+        for profile in ("general.architect", "lifestyle.architect"):
+            with self.subTest(profile=profile):
+                requirements = self._pack(profile)
+                self.assertNotIn("op_bunshin_requirements_replace_batch", requirements.allowed_capabilities)
+                self.assertNotIn("op_bunshin_requirements_submit", requirements.allowed_capabilities)
+                self.assertIn("op_file_read", requirements.allowed_capabilities)
+                self.assertNotIn("op_bunshin_input_read", requirements.allowed_capabilities)
+                self.assertNotIn("op_bunshin_evidence_submit", requirements.allowed_capabilities)
+                self.assertIn("op_bunshin_contract_submit", requirements.allowed_capabilities)
+                self.assertIn("op_file_write", requirements.allowed_capabilities)
+                self.assertIn("op_file_edit", requirements.allowed_capabilities)
+                self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "writable_workspace")
+
+        software = self._pack("software_engineering.v2_architect")
+        self.assertIn("op_bunshin_contract_submit", software.allowed_capabilities)
+        self.assertNotIn("op_bunshin_artifact_edit", software.allowed_capabilities)
+        self.assertNotIn("op_bunshin_task_revision_submit", software.allowed_capabilities)
+        self.assertIn("op_file_write", software.allowed_capabilities)
+        self.assertIn("op_file_edit", software.allowed_capabilities)
+        self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
+
+    def test_scoped_tool_execution_rejects_missing_logical_lifetime(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={"repo_path": str(self.root)},
+        )
+
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(self.root / "missing.txt")},
+                )
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.structured["reason"], "missing_execution_lifetime")
+
+    def test_file_reader_uses_sandbox_visible_path_without_reference_selector(self) -> None:
+        bound = self.root / "workflow-request.json"
+        bound.write_text('{"goal":"bounded"}\n', encoding="utf-8")
+
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        generic_reader = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={
+                "run_id": "file-reader-test",
+                "repo_path": str(self.root),
+            },
+        )
+        spec = generic_reader.get_capability_spec("op_file_read")
+        assert spec is not None
+        properties = dict(spec["input_schema"]["properties"])
+        self.assertIn("file_path", properties)
+        self.assertNotIn("root", properties)
+        self.assertNotIn("reference_name", properties)
+
+        result = asyncio.run(
+            generic_reader.execute_tool_async(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(bound)},
+                )
+            )
+        )
+
+        self.assertTrue(result.ok, result.text)
+        self.assertIn('"bounded"', result.llm_text)
+
+    def test_scoped_file_tools_reject_verifier_corpus_before_host_mutation(self) -> None:
+        repo = self.root / "scoped-file-guard"
+        product = repo / "src" / "router.py"
+        verifier_case = repo / "tests" / "router" / "verification" / "test_router.py"
+        product.parent.mkdir(parents=True)
+        verifier_case.parent.mkdir(parents=True)
+        product.write_text("old\n", encoding="utf-8")
+        verifier_case.write_text("assert False\n", encoding="utf-8")
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_write"],
+            workspace={
+                "run_id": "file-write-guard-test",
+                "repo_path": str(repo),
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "src"},
+                ],
+                "read_only_overlay_paths": [
+                    "tests/router/verifier",
+                ],
+            },
+        )
+
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": "tests/router/verifier/test_router.py",
+                        "content": "assert True\n",
+                    },
+                )
+            )
+        )
+        accepted = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": "src/new_router.py",
+                        "content": "new\n",
+                    },
+                )
+            )
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.structured["reason"], "path_not_writable")
+        self.assertEqual(rejected.structured["policy_reason"], "read_only_overlay")
+        self.assertEqual(verifier_case.read_text(encoding="utf-8"), "assert False\n")
+        self.assertTrue(accepted.ok, accepted.llm_text)
+        self.assertEqual((repo / "src" / "new_router.py").read_text(), "new\n")
+
+    def test_scoped_file_tools_reject_parent_without_compiled_write_scopes(self) -> None:
+        repo = self.root / "architecture-worktree"
+        repo.mkdir()
+        outside = self.root / "include" / "escaped.hpp"
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_write"],
+            workspace={
+                "run_id": "architecture-file-guard-test",
+                "repo_path": str(repo),
+            },
+        )
+
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": str(outside),
+                        "content": "escaped\n",
+                    },
+                )
+            )
+        )
+        accepted = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": "include/inside.hpp",
+                        "content": "inside\n",
+                    },
+                )
+            )
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.structured["reason"], "path_not_writable")
+        self.assertEqual(
+            rejected.structured["policy_reason"],
+            "path_outside_workspace",
+        )
+        self.assertFalse(outside.exists())
+        self.assertTrue(accepted.ok, accepted.llm_text)
+        self.assertEqual(
+            (repo / "include" / "inside.hpp").read_text(),
+            "inside\n",
+        )
+
+    def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={"repo_path": str(self.root)},
+        )
+
+        generation = scoped.registry_generation
+        self.assertEqual(list(generation.direct_aliases).count("read_file"), 1)
+        self.assertEqual(
+            generation.direct_aliases["read_file"].canonical_path,
+            "op_file_read",
+        )
+
+    def test_verifier_keeps_the_truthful_shell_input_schema(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        base_description = str(
+            core.context.execution_runtime.registry_generation.provider_specs["run_shell"][
+                "function"
+            ]["description"]
+        )
+        self.assertNotIn("assigned task", base_description)
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_exec_shell"],
+            workspace={
+                "run_id": "verifier-shell-test",
+                "repo_path": str(self.root),
+                "bunshin_v2": {"role": "verifier"},
+            },
+            capability_guidance_overrides={
+                "op_exec_shell": {
+                    "use_when": "Role-local shell use text.",
+                    "do_not_use_when": "Role-local shell prohibition.",
+                    "failure_next_steps": "Role-local recovery.",
+                }
+            },
+        )
+
+        spec = scoped.get_capability_spec("op_exec_shell")
+        assert spec is not None
+        properties = dict(spec["input_schema"]["properties"])
+        self.assertIn("cwd", properties)
+        self.assertEqual(
+            properties["cmd"]["description"],
+            "Shell command to execute as one string. Pipelines and shell operators are accepted.",
+        )
+        self.assertNotIn("checkpoint", properties["cmd"]["description"])
+        self.assertEqual(properties["timeout_ms"]["default"], 180_000)
+        self.assertEqual(
+            BunshinScopedExecutionShellInput.model_validate(
+                {"cmd": "python -m pytest tests/"}
+            ).timeout_ms,
+            180_000,
+        )
+        provider = {
+            item["function"]["name"]: item["function"]
+            for item in scoped.build_llm_tool_contracts()
+        }["run_shell"]
+        description = str(provider["description"])
+        self.assertIn("Use when: Use bounded workspace discovery", description)
+        self.assertIn("Prefer rg for text search and rg --files for file enumeration", description)
+        self.assertIn("fall back to find, grep, or ls", description)
+        self.assertIn("Stay focused on your assigned task", description)
+        self.assertIn("Once an exact file is known, call read_file", description)
+        self.assertIn("Git is available here only for classified read-only inspection", description)
+        self.assertIn("Git mutations and unknown Git subcommands are trapped", description)
+        self.assertNotIn("Bunshin", description)
+        self.assertIn("If a command is trapped, do not retry it", description)
+        self.assertNotIn("Role-local", description)
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="run_shell",
+                    args={"cmd": "true"},
+                    call_id="shell-default-timeout",
+                )
+            )
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.structured["timeout_ms"], 180_000)
+
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
+            BunshinScopedExecutionRuntime(
+                core.context.execution_runtime,
+                ["op_exec_shell"],
+                capability_guidance_overrides={
+                    "op_exec_shell": {"summary": "unstructured legacy override"}
+                },
+            )
+
+    def test_workflow_tool_guidance_override_is_compiled_into_provider_surface(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = BunshinScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={"repo_path": str(self.root)},
+            capability_guidance_overrides={
+                "op_file_read": {
+                    "use_when": "Use this reader only after an exact path is known.",
+                    "do_not_use_when": "Do not use it for broad repository archaeology.",
+                }
+            },
+        )
+
+        provider = {
+            item["function"]["name"]: item["function"]
+            for item in scoped.build_llm_tool_contracts()
+        }["read_file"]
+
+        self.assertIn(
+            "Use when: Use this reader only after an exact path is known.",
+            provider["description"],
+        )
+        self.assertIn(
+            "Do not use when: Do not use it for broad repository archaeology.",
+            provider["description"],
+        )
+        self.assertIn(
+            "refer to the earlier read result and do not call read_file again",
+            provider["description"],
+        )
+
+    def test_workflow_tool_specs_separate_purpose_from_decision_guidance(self) -> None:
+        scoped = BunshinScopedExecutionRuntime(
+            ExecutionRuntime(),
+            [
+                "op_bunshin_update_checklist",
+                "op_bunshin_ask_question",
+                "op_bunshin_contract_submit",
+                "op_bunshin_add_finding",
+                "op_bunshin_review_submit",
+                "op_bunshin_candidate_submit",
+                "op_bunshin_candidate_report_architecture_defect",
+                "op_bunshin_candidate_request_module_split",
+                "op_bunshin_verification_pass",
+                "op_bunshin_verification_request_module_repair",
+                "op_bunshin_verification_run_diff_risk",
+                "op_bunshin_verification_run_lsp_check",
+                "op_bunshin_verification_check_unavailable",
+                "op_bunshin_verification_draft_status",
+            ],
+            workspace={},
+        )
+        providers = {
+            item["function"]["name"]: item["function"]
+            for item in scoped.build_llm_tool_contracts()
+        }
+
+        checklist = str(providers["update_checklist"]["description"])
+        self.assertIn(
+            "Purpose: Replace the current role's complete compact semantic work cursor.",
+            checklist,
+        )
+        self.assertIn("Use when: Initialize it after understanding", checklist)
+        self.assertIn(
+            "Do not use when: Do not use it as contract truth or evidence",
+            checklist,
+        )
+
+        submit = str(providers["candidate_submit"]["description"])
+        self.assertIn(
+            "Purpose: Submit the current module Candidate for independent verification.",
+            submit,
+        )
+        self.assertIn("Use when: Use after every checklist item is completed", submit)
+        self.assertIn("without a contracted product delta", submit)
+
+        defect = str(
+            providers["candidate_report_architecture_defect"]["description"]
+        )
+        self.assertIn("changing a public boundary", defect)
+        self.assertIn("ordinary implementation difficulty", defect)
+
+        split = str(providers["candidate_request_module_split"]["description"])
+        self.assertIn("genuinely cannot fit one Candidate cycle", split)
+        self.assertIn("preferred refactor", split)
+
+        question = str(providers["ask_question"]["description"])
+        self.assertIn("Purpose: Suspend the current role invocation", question)
+        self.assertIn("material ambiguity", question)
+        self.assertIn("private implementation choice", question)
+
+        contract = str(providers["contract_submit"]["description"])
+        self.assertIn("independent semantic review", contract)
+        self.assertIn("unreconciled declarations", contract)
+
+        review = str(providers["review_submit"]["description"])
+        self.assertIn("Manager derive its verdict", review)
+        self.assertIn("separate Markdown verdict", review)
+
+        finding = str(providers["add_finding"]["description"])
+        self.assertIn("one actionable defect", finding)
+        self.assertIn("Do not invent or maintain finding identities", finding)
+
+        verification_pass = str(providers["verification_pass"]["description"])
+        self.assertIn("successful semantic verification outcome", verification_pass)
+        self.assertIn("missing required evidence", verification_pass)
+
+        module_repair = str(
+            providers["verification_request_module_repair"]["description"]
+        )
+        self.assertIn("reproduced implementation defects", module_repair)
+        self.assertIn("verifier-corpus", module_repair)
+
+        diff_risk = str(providers["verification_run_diff_risk"]["description"])
+        self.assertIn("candidate delta review verification case", diff_risk)
+        self.assertIn("changed Git review range", diff_risk)
+
+        lsp = str(providers["verification_run_lsp_check"]["description"])
+        self.assertIn("Manager-prepared context", lsp)
+        self.assertIn("Do not invoke a language-server executable", lsp)
+
+        unavailable = str(
+            providers["verification_check_unavailable"]["description"]
+        )
+        self.assertIn("required verification obligation", unavailable)
+        self.assertIn("Do not use for a failed check", unavailable)
+
+        draft_status = str(providers["verification_draft_status"]["description"])
+        self.assertIn("select the next unfinished risk-directed action", draft_status)
+        self.assertIn("Do not poll it repeatedly", draft_status)
+
+    def test_reference_normalization_preserves_semantic_reference_name(self) -> None:
+        bound = self.root / "bound-input.json"
+        bound.write_text('{"value":true}\n', encoding="utf-8")
+
+        references = _normalized_reference_paths(
+            {
+                "reference_paths": [
+                    {
+                        "name": "module_work_view",
+                        "path": str(bound),
+                        "required": True,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(references[0]["name"], "module_work_view")
+        self.assertTrue(references[0]["required"])
+
+    def test_software_profiles_preserve_engineering_rules_and_lsp_surface(self) -> None:
+        coder = self._pack("software_engineering.v2_coder")
+        behavior = str(coder.resolved_profile["behavior_fragment"])
+        self.assertIn("standard-library", behavior)
+        self.assertIn("hand-rolled infrastructure", behavior)
+        self.assertIn("fabricate an API", behavior)
+        self.assertIn("test adapter", behavior)
+        self.assertIn("production backend", behavior)
+        self.assertIn("test_debugging", coder.allowed_skills)
+        architect = self._pack("software_engineering.v2_architect")
+        self.assertIn("op_exec_shell", architect.allowed_capabilities)
+        self.assertIn("op_file_read", architect.allowed_capabilities)
+        self.assertIn("op_lsp_definition", coder.allowed_capabilities)
+        self.assertIn("op_lsp_references", coder.allowed_capabilities)
+        self.assertIn("op_lsp_diagnostics", coder.allowed_capabilities)
+        self.assertNotIn("op_lsp_prepare_workspace", coder.allowed_capabilities)
+        self.assertNotIn("op_lsp_doctor", coder.allowed_capabilities)
+        self.assertNotIn("op_bunshin_developer_note", coder.allowed_capabilities)
+        self.assertEqual(
+            coder.workspace.get("workspace_policy", {}).get("mode"),
+            "writable_git_branch",
+        )
+        self.assertEqual(
+            self._pack("software_engineering.v2_verifier")
+            .workspace.get("workspace_policy", {})
+            .get("mode"),
+            "writable_git_branch",
+        )
+        self.assertEqual(
+            self._pack("software_engineering.v2_reviewer")
+            .workspace.get("workspace_policy", {})
+            .get("mode"),
+            "read_only_repo",
+        )
+        overrides = dict(coder.resolved_profile["capability_guidance_overrides"])
+        self.assertIn(
+            "Manager prepares and probes LSP",
+            str(coder.resolved_profile["behavior_fragment"]),
+        )
+        self.assertIn("known symbol at a file position", overrides["op_lsp_definition"]["use_when"])
+        self.assertIn(
+            "behavioral, build, or test proof",
+            overrides["op_lsp_diagnostics"]["do_not_use_when"],
+        )
+        self.assertIn("cross-file text search", overrides["op_file_read"]["do_not_use_when"])
+        self.assertNotIn("tests/<module_name>/developer", overrides["op_file_write"]["use_when"])
+        self.assertNotIn("op_exec_shell", overrides)
+
+        for profile in (
+            "software_engineering.v2_coder",
+            "software_engineering.v2_reviewer",
+            "software_engineering.v2_verifier",
+        ):
+            with self.subTest(profile=profile):
+                capabilities = self._pack(profile).allowed_capabilities
+                self.assertNotIn("op_path_delete", capabilities)
+
+        reviewer_overrides = dict(
+            self._pack("software_engineering.v2_reviewer").resolved_profile[
+                "capability_guidance_overrides"
+            ]
+        )
+        verifier_overrides = dict(
+            self._pack("software_engineering.v2_verifier").resolved_profile[
+                "capability_guidance_overrides"
+            ]
+        )
+        self.assertNotIn("op_exec_shell", reviewer_overrides)
+        self.assertNotIn("op_exec_shell", verifier_overrides)
+
+        verifier_behavior = str(
+            self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"]
+        )
+        self.assertIn("Manager-bound contract as adjudication truth", verifier_behavior)
+        self.assertIn("smallest sufficient checks", verifier_behavior)
+        self.assertNotIn("tests/<module_name>/verifier", verifier_behavior)
+        architecture_review_behavior = str(
+            self._pack("software_engineering.v2_reviewer").resolved_profile[
+                "behavior_fragment"
+            ]
+        )
+        architecture_review_playbook = {
+            str(item["key"]): dict(item)
+            for item in self._pack("software_engineering.v2_reviewer")
+            .resolved_profile["role"]["playbook"]["steps"]
+        }
+        coverage = architecture_review_playbook["requirement_coverage"]
+        self.assertIn("every binding requirement", coverage["instruction"])
+        composition = architecture_review_playbook["contract_composition"]
+        self.assertIn("required data, state, errors", composition["instruction"])
+        self.assertIn("ownership, lifecycle transitions", composition["instruction"])
+        feasibility = architecture_review_playbook["end_to_end_feasibility"]
+        self.assertIn("ordered contract handoffs", feasibility["instruction"])
+        self.assertIn("without relying on current product implementation", feasibility["done_when"])
+        self.assertIn(
+            "required production platform/API/backend must remain explicit",
+            architecture_review_behavior,
+        )
+        standalone_review_behavior = str(
+            _role_mode_profile_payload(
+                dict(
+                    self._pack("software_engineering.v2_reviewer").resolved_profile
+                ),
+                mode="standalone",
+            )["behavior_fragment"]
+        )
+        self.assertNotIn("project tests, build output", architecture_review_behavior)
+        self.assertIn("project tests, build output", standalone_review_behavior)
+        self.assertIn("current implementation", standalone_review_behavior)
+        self.assertIn(
+            "Do not pass an unclassified bound reference path",
+            reviewer_overrides["op_file_read"]["do_not_use_when"],
+        )
+
+        binding_ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_coder"
+        )
+        binding = self.store.read_json(binding_ref)
+        self.assertEqual(
+            binding["role_bindings"]["reviewer"]["role_profile"]["canonical_profile_id"],
+            "software_engineering.v2_reviewer",
+        )
+        self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
+        self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
+
+        forbidden_author_fields = (
+            "workflow_id",
+            "revision_id",
+            "module_id",
+            "unit_id",
+            "requirement_id",
+            "evidence_id",
+            "finding_id",
+            "case_id",
+            "artifact_sha",
+            "json_pointer",
+        )
+        for profile_name in (
+            "software_engineering.v2_coder",
+            "software_engineering.v2_verifier",
+            "software_engineering.v2_reviewer",
+        ):
+            output_contract = str(self._pack(profile_name).resolved_profile["output_contract_fragment"])
+            for field_name in forbidden_author_fields:
+                self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
+
+    def test_worker_authoring_tools_never_expose_manager_identity_fields(self) -> None:
+        from pal.bunshin.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
+        from pal.bunshin.v2.contract_submission import CONTRACT_SUBMIT_TOOL_SPEC
+        from pal.bunshin.v2.review_submission import REVIEW_SUBMIT_TOOL_SPEC
+        from pal.bunshin.v2.swe_verification import SWE_VERIFICATION_TOOL_SPECS
+        from pal.bunshin.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
+        from pal.bunshin.v2.work_items import (
+            ADD_FINDING_TOOL_SPEC,
+            UPDATE_CHECKLIST_TOOL_SPEC,
+        )
+
+        forbidden_exact = {
+            "handle",
+            "refs",
+            "json_pointer",
+            "artifact_sha",
+            "input_read",
+        }
+
+        def property_names(schema):
+            result = []
+            if not isinstance(schema, dict):
+                return result
+            for name, child in dict(schema.get("properties") or {}).items():
+                result.append(str(name))
+                result.extend(property_names(child))
+            result.extend(property_names(schema.get("items")))
+            return result
+
+        tool_groups = (
+            CANDIDATE_BUILDER_TOOL_SPECS,
+            {"op_bunshin_contract_submit": CONTRACT_SUBMIT_TOOL_SPEC},
+            {"op_bunshin_review_submit": REVIEW_SUBMIT_TOOL_SPEC},
+            {
+                "op_bunshin_update_checklist": UPDATE_CHECKLIST_TOOL_SPEC,
+                "op_bunshin_add_finding": ADD_FINDING_TOOL_SPEC,
+            },
+            SWE_VERIFICATION_TOOL_SPECS,
+            VERIFICATION_BUILDER_TOOL_SPECS,
+        )
+        for group in tool_groups:
+            for capability, spec in group.items():
+                with self.subTest(capability=capability):
+                    for name in property_names(spec["InputModel"].model_json_schema(mode="validation")):
+                        lowered = name.casefold()
+                        self.assertNotIn(lowered, forbidden_exact)
+                        self.assertFalse(lowered.endswith("_id"), name)
+                        self.assertFalse(lowered.endswith("_ref"), name)
+                        self.assertFalse(lowered.endswith("_sha"), name)
+
+    def test_scoped_contract_provider_exposes_contract_submit(self) -> None:
+        scoped = BunshinScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_bunshin_contract_submit"],
+            workspace={},
+        )
+
+        provider = scoped.build_llm_tool_contracts()[0]["function"]
+
+        self.assertEqual(provider["name"], "contract_submit")
+        self.assertEqual(provider["input_schema"]["properties"], {})
+        self.assertIn("architect.yaml", provider["description"])
+
+    def test_product_requirements_do_not_absorb_family_workflow_policy(self) -> None:
+        service = BunshinV2WorkflowService(self.root)
+        with self.assertRaisesRegex(ValueError, "normalized Requirements"):
+            service.prepare_requirements(
+                {
+                    "title": "Tiny router",
+                    "sections": {"Routing": ["Route requests deterministically."]},
+                }
+            )
+        prepared = service.prepare_requirements(
+            {
+                "title": "Tiny router",
+                "task_spec": {"objective": "Route requests deterministically."},
+                # Workflow policy belongs to FamilyBindingArtifact even if a
+                # caller accidentally includes it in this request envelope.
+                "policies": {"verification": {"require_warning_clean": True}},
+            }
+        )
+        task_ledger = self.store.read_json(prepared["requirements_ref"])
+        binding = self.store.read_json(
+            BunshinV2Catalog(self.root, self.store).publish_family_binding(
+                "software_engineering.v2_coder"
+            )
+        )
+
+        self.assertEqual(task_ledger["title"], "Tiny router")
+        self.assertEqual(
+            task_ledger["original"],
+            {"objective": "Route requests deterministically."},
+        )
+        self.assertNotIn("policies", task_ledger["original"])
+        self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
+
+    def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
+        architect = str(self._pack("software_engineering.v2_architect").resolved_profile["behavior_fragment"])
+        architecture_review = str(
+            self._pack("software_engineering.v2_reviewer").resolved_profile["behavior_fragment"]
+        )
+        coder = str(
+            self._pack("software_engineering.v2_coder").resolved_profile[
+                "behavior_fragment"
+            ]
+        )
+        verifier_profile = dict(
+            self._pack("software_engineering.v2_verifier").resolved_profile
+        )
+        verifier = str(
+            _role_mode_profile_payload(
+                verifier_profile,
+                mode="module",
+            )["behavior_fragment"]
+        )
+        generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
+        architect_playbook = str(
+            self._pack("software_engineering.v2_architect").resolved_profile[
+                "role"
+            ]["playbook"]
+        )
+        coder_playbook = str(
+            self._pack("software_engineering.v2_coder").resolved_profile["role"][
+                "playbook"
+            ]
+        )
+        reviewer_playbook = str(
+            self._pack("software_engineering.v2_reviewer").resolved_profile[
+                "role"
+            ]["playbook"]
+        )
+
+        # Stable role philosophy remains explicit even though invocation-specific
+        # and mechanically enforced rules are no longer duplicated here.
+        self.assertIn("immutable task.yaml ledger as product truth", architect)
+        self.assertIn("one bounded consistency pass", architect)
+        self.assertIn("newer text wins only where meanings conflict", architect)
+        self.assertIn("Mechanically verify examples", architect)
+        self.assertIn("request one user clarification through the harness and wait", architect)
+        self.assertIn("Never retry unchanged errors", architect)
+        self.assertIn("Retry a rejection only after changing the relevant input or state", architect)
+        self.assertIn("call ask_question and wait", architect)
+        self.assertIn("Design the smallest complete system at module level", architect)
+        self.assertIn("architect.yaml is the final submission projection", architect)
+        self.assertIn("Once the design is settled", architect)
+        self.assertIn("Immediately begin file-edit calls", architect)
+        self.assertIn("instead of restating, rehearsing, simulating", architect)
+        self.assertIn("every state, worker, object, and resource has exactly one owner", architect)
+        self.assertIn("lifecycle transitions and composition joins close", architect)
+        self.assertIn("private implementation is explicitly deferred", architect)
+        self.assertIn("one acyclic Contract Dependency Graph", architect)
+        self.assertIn("A composition root or runtime entrypoint is a product module", architect)
+        self.assertIn("Build commands, manifests, test runners", architect)
+        self.assertIn("meaningful end-to-end scenarios", architect)
+        self.assertIn("established project or language/runtime primitives", architect)
+        self.assertIn("invalid combinations cannot be expressed as well-formed programs", architect)
+        self.assertIn("concepts/requires when available", architect)
+        self.assertIn("focused SFINAE/detection probes for earlier standards", architect)
+        self.assertIn("participates in overload resolution", architect)
+        self.assertIn("later function-body failure does not satisfy it", architect)
+        self.assertIn("without unnecessary dynamic allocation", architect)
+        self.assertIn("operator-visible entrypoint", architect)
+        self.assertIn("MSDN-like normative API documentation", architect)
+        self.assertIn("never tests or another module's corpus", architect)
+        self.assertIn("Manager derives both test corpora", architect)
+        self.assertIn("no speculative extension seam", architect)
+        self.assertIn("Defer optional capability costs until use", architect_playbook)
+        self.assertIn("genuinely irreversible transition", architect_playbook)
+        self.assertIn("object-address side table", architecture_review)
+        self.assertIn("Audit requirement coverage", architecture_review)
+        self.assertIn("Review semantic composition, not private implementation", architecture_review)
+        self.assertIn("never to prove that requested work is not implemented yet", architecture_review)
+        self.assertIn("expected Coder work, not an architecture finding", architecture_review)
+        self.assertIn("Every state, worker, object, and resource needs one owner", architecture_review)
+        self.assertIn("Perform an ambiguity audit", architecture_review)
+        self.assertIn("partial output followed by error", architecture_review)
+        self.assertIn("copy/move/share/reset/reuse", architecture_review)
+        self.assertIn("Compilation and LSP support", architecture_review)
+        self.assertIn("Tests remain verification evidence", architecture_review)
+        self.assertIn(
+            "The Reviewer logical coroutine persists across Candidates",
+            architecture_review,
+        )
+        self.assertIn("a prior PASS is context rather than evidence", architecture_review)
+        self.assertIn("regress_candidate", reviewer_playbook)
+        self.assertIn("current_delta", reviewer_playbook)
+        self.assertIn("disposition=advisory with priority=p2", architecture_review)
+        self.assertIn("never fail at the first defect", architecture_review)
+        self.assertIn("A real defect remains blocking at p2", architecture_review)
+        self.assertIn("Never block acceptance for a stylistic type-level abstraction", architecture_review)
+        self.assertIn("missing enforcement is a blocking contract_defect", architecture_review)
+        self.assertIn("positive and negative declaration probe", architecture_review)
+        self.assertIn("invalid combinations cannot be expressed as well-formed programs", architecture_review)
+        self.assertIn("focused SFINAE/detection probes", architecture_review)
+        self.assertIn("MSDN-like normative API documentation", architecture_review)
+        self.assertIn("speculative seam without one", architecture_review)
+        self.assertIn("real scenario from entrypoint", reviewer_playbook)
+        self.assertIn("deferred optional costs", reviewer_playbook)
+
+        self.assertIn("Accepted Skeleton declarations", coder)
+        self.assertIn("public declaration/code shape", coder)
+        self.assertIn("visible private dependency body is not authority", coder)
+        self.assertIn("Work depth-first inside the owned module", coder)
+        self.assertIn("standard-library", coder)
+        self.assertIn("hand-rolled infrastructure", coder)
+        self.assertIn("Functional Core / Imperative Shell", coder)
+        self.assertIn("process-global registry", coder)
+        self.assertIn("make illegal states or malformed data hard to represent", coder)
+        self.assertIn("invalid combinations cannot be expressed as well-formed programs", coder)
+        self.assertIn("concepts/requires when available", coder)
+        self.assertIn("focused SFINAE/detection probes for earlier standards", coder)
+        self.assertIn("Prefer compile-time rejection", coder)
+        self.assertIn("Preserve every accepted declaration's static constraints exactly", coder)
+        self.assertIn("Avoid dynamic allocation, unnecessary copying", coder)
+        self.assertIn("checklist is its execution cursor, never authority", coder)
+        self.assertIn("Preserve MSDN-like docs", coder)
+        self.assertIn("Make code self-documenting", coder)
+        self.assertIn("owned public facade inward", coder_playbook)
+        self.assertIn("deferred optional costs", coder_playbook)
+
+        self.assertIn("complete adjudication scope", verifier)
+        self.assertIn("public declaration/code shape", verifier)
+        self.assertIn("real public edges", verifier)
+        self.assertIn("may be a stale baseline", verifier)
+        self.assertIn("record a dependency finding", verifier)
+        self.assertIn("Do not search for task.yaml", verifier)
+        self.assertIn("reuse them across Candidate repairs", verifier)
+        self.assertIn("material complexity or resource growth", verifier)
+        self.assertIn("authored graph sink", verifier)
+        self.assertIn("real public surface", verifier)
+        self.assertIn("same node cycle", verifier)
+        self.assertIn("interactive TTY with a PTY-style harness", verifier)
+        self.assertIn("do not invent facts", generic)
+        self.assertIn("never acceptance evidence", verifier)
+        self.assertIn("minimum sufficient focused build/test path", verifier)
+        self.assertIn("disposition=advisory with priority=p2", verifier)
+        self.assertIn("Do not block acceptance for stylistic type-level abstraction", verifier)
+        self.assertIn("positive and negative consumer compile probe", verifier)
+        self.assertIn("does not prove overload exclusion", verifier)
+        self.assertIn("invalid combinations cannot be expressed as well-formed programs", verifier)
+        self.assertIn("MSDN-like normative API documentation", verifier)
+        self.assertIn("setup and protocol costs are absent until it is exercised", verifier)
+        self.assertNotIn("owned_impl", coder)
+        self.assertNotIn("owned_test", coder)
+
+        # Prompt budgets prevent mechanical policy from creeping back into every
+        # role while leaving the semantic philosophy readable in one place.
+        self.assertLess(len(architect), 7_500)
+        self.assertLess(len(architecture_review), 7_000)
+        self.assertLess(len(coder), 5_500)
+        for behavior in (architect, architecture_review, coder):
+            self.assertNotIn("Do not run git commit", behavior)
+            self.assertNotIn("tests/<module_name>/developer", behavior)
+            self.assertNotIn("tests/<module_name>/verifier", behavior)
+
+    def test_every_architect_profile_gates_design_on_source_consistency(self) -> None:
+        for profile in (
+            "general.architect",
+            "lifestyle.architect",
+            "software_engineering.v2_architect",
+        ):
+            with self.subTest(profile=profile):
+                behavior = str(self._pack(profile).resolved_profile["behavior_fragment"])
+                self.assertIn("bounded consistency pass", behavior)
+                self.assertIn("mechanically verify", behavior.lower())
+                self.assertIn("request one user clarification through the harness and wait", behavior)
+
+    def test_profile_tool_guidance_override_is_applied_to_scoped_surface(self) -> None:
+        researcher = self._pack("software_engineering.v2_architect")
+        override = dict(
+            researcher.resolved_profile["capability_guidance_overrides"]["op_web_search"]
+        )
+        base = ExecutionRuntime()
+        mount_test_capability(
+            base,
+                alias="web_search",
+                canonical_path="op_web_search",
+                family="web",
+                source="test",
+                InputModel=EmptyToolInput,
+                OutputModel=StructuredToolOutput,
+                guidance=ToolGuidance(
+                    purpose="generic web description",
+                    use_when="generic web description",
+                    do_not_use_when="Do not use for local-only research.",
+                    failure_next_steps="Correct input or inspect the returned failure.",
+                ),
+                execution=DIRECT_EXTERNAL_READ,
+                handler=lambda _value: CapabilityResult(status=RuntimeStatus.OK, text="ok", llm_text="ok"),
+        )
+        scoped = BunshinScopedExecutionRuntime(
+            base,
+            ["op_web_search"],
+            capability_guidance_overrides=dict(
+                researcher.resolved_profile["capability_guidance_overrides"]
+            ),
+        )
+
+        spec = {
+            item["function"]["name"]: item["function"]
+            for item in scoped.build_llm_tool_contracts()
+        }["web_search"]
+
+        self.assertIn("Purpose: generic web description", spec["description"])
+        self.assertIn(f"Use when: {override['use_when']}", spec["description"])
+        self.assertIn(f"Do not use when: {override['do_not_use_when']}", spec["description"])
+        self.assertIn(f"Failure next steps: {override['failure_next_steps']}", spec["description"])
+
+    def test_role_workspace_provisioning_never_injects_capabilities(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        (source / "reference.txt").write_text("truth", encoding="utf-8")
+        planner = apply_v2_role_capability_policy(
+            self._pack("lifestyle.architect"),
+            activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+        )
+        planner = BunshinInvocationPack.from_dict(
+            {**planner.to_dict(), "workspace": {**dict(planner.workspace), "repo_path": str(source)}}
+        )
+        prepared = prepare_v2_role_workspace(self.root, planner, run_id="planner-run")
+        self.assertEqual(prepared.allowed_capabilities, planner.allowed_capabilities)
+        self.assertFalse(any("checkpoint" in item for item in prepared.allowed_capabilities))
+        self.assertTrue((Path(prepared.workspace["repo_path"]) / "reference.txt").is_file())
+
+    def test_workspace_preparation_detects_languages_without_modifying_source(self) -> None:
+        source = self.root / "prepared-source"
+        source.mkdir()
+        (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        before = (source / "main.py").read_bytes()
+
+        workspace, report = prepare_v2_workspace_environment({"repo_path": str(source)})
+
+        self.assertIn("python", workspace["languages"])
+        self.assertEqual(workspace["primary_language"], "python")
+        self.assertFalse(report["source_modified"])
+        self.assertEqual((source / "main.py").read_bytes(), before)
+        self.assertTrue(report["environment_fingerprint"])
+
+    def test_workspace_preparation_preserves_declared_primary_language_for_lsp_manager(self) -> None:
+        source = self.root / "mixed-language-source"
+        source.mkdir()
+        (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        (source / "native.cpp").write_text("int native_value = 1;\n", encoding="utf-8")
+
+        workspace, report = prepare_v2_workspace_environment(
+            {
+                "repo_path": str(source),
+                "primary_language": "python",
+            },
+            runtime_root=self.root,
+        )
+
+        self.assertEqual(workspace["primary_language"], "python")
+        self.assertEqual(workspace["languages"][0], "python")
+        self.assertNotIn("lsp_setup", workspace)
+        self.assertNotIn("lsp_setup", report)
+
+    def test_cpp_workspace_preparation_leaves_lsp_context_to_lsp_manager(self) -> None:
+        source = self.root / "cpp-source"
+        source.mkdir()
+        (source / "main.cpp").write_text('#include "include/value.h"\nint main() { return value(); }\n', encoding="utf-8")
+        include = source / "include"
+        include.mkdir()
+        (include / "value.h").write_text("inline int value() { return 0; }\n", encoding="utf-8")
+        before = sorted(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
+
+        workspace, report = prepare_v2_workspace_environment(
+            {
+                "repo_path": str(source),
+                "primary_language": "cpp",
+                "cpp_standard": "c++14",
+            },
+            runtime_root=self.root,
+        )
+
+        after = sorted(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
+        self.assertEqual(workspace["primary_language"], "cpp")
+        self.assertEqual(workspace["cpp_standard"], "c++14")
+        self.assertNotIn("lsp_setup", workspace)
+        self.assertEqual(before, after)
+        self.assertFalse(report["source_modified"])
+
+    def test_lifestyle_task_compiles_artifact_workspace_epoch(self) -> None:
+        service = BunshinV2WorkflowService(self.root)
+        service.create_task(
+            {
+                "task_id": "nutrition-task",
+                "title": "Weekly nutrition check-in",
+                "objective": "Produce a non-medical structured check-in",
+                "profile": "lifestyle.nutritionist",
+                "workspace": {"kind": "artifact_project", "project_name": "nutrition"},
+            }
+        )
+        prepared = service.prepare_requirements(
+            {
+                "title": "Weekly nutrition check-in",
+                "task_spec": {
+                    "objective": "Produce a non-medical structured check-in."
+                },
+            }
+        )
+        service.start_workflow(
+            {
+                "delivery_binding": {
+                    "channel_id": "socket_test",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "test-session", "request_id": "test-request"},
+                    "control_scope_key": "socket:socket_test:test-session",
+                },
+                "workflow_id": "nutrition-workflow",
+                "task_id": "nutrition-task",
+                "operation": "new_requirement",
+                "goal": "Summarize declared nutrition observations without inventing facts",
+                "requirements_ref": prepared["requirements_ref"],
+            }
+        )
+        contracts = ContractArtifactAccess(
+            self.store, self.repository
+        )
+        manifest = self.store.put_json(
+            {
+                "requirements_ref": dict(prepared["requirements_ref"]),
+                "contract_schema": "lifestyle.nutrition_checkin.v1",
+                "contract": {
+                    "schema_version": "2",
+                    "graph": {"sink": "checkin"},
+                    "context": {
+                        "goal": "Produce a structured nutrition check-in.",
+                        "hard_restrictions": ["non-medical guidance"],
+                        "safety_boundary": (
+                            "Escalate medical concerns to a qualified clinician."
+                        ),
+                    },
+                    "requirements": {
+                        "checkin_output": {
+                            "claim": "Produce the structured check-in.",
+                            "owner": "checkin",
+                            "contract_path": ["checkin.structured_checkin"],
+                        }
+                    },
+                    "modules": {
+                        "checkin": {
+                            "responsibility": (
+                                "Produce the structured check-in artifact."
+                            ),
+                            "execution": "produce",
+                            "provides": ["structured_checkin"],
+                            "dependencies": {},
+                            "definition": {
+                                "meals": [],
+                                "training": ["record declared activity"],
+                                "restrictions": ["do not invent health facts"],
+                                "inputs": ["declared observations"],
+                                "outputs": ["structured_checkin"],
+                                "ownership": (
+                                    "The user owns execution and adjustment."
+                                ),
+                                "lifecycle": (
+                                    "Collect, summarize, review externally."
+                                ),
+                                "safety_invariants": [
+                                    "No diagnosis or treatment advice."
+                                ],
+                            },
+                        }
+                    },
+                    "scenarios": {
+                        "produce_checkin": {
+                            "modules": ["checkin"],
+                            "requirement_refs": ["checkin_output"],
+                            "entrypoint": {
+                                "module": "checkin",
+                                "surface": "structured_checkin",
+                            },
+                            "contract_flow": [
+                                "observations -> checkin -> user"
+                            ],
+                            "observable_behavior": (
+                                "The user receives the structured check-in."
+                            ),
+                            "failure_behavior": (
+                                "Missing observations remain explicit."
+                            ),
+                            "environment": "External human execution.",
+                        }
+                    },
+                },
+            },
+            artifact_type="ContractArtifact",
+        )
+        manifest_payload = dict(self.store.read_json(manifest))
+        manifest = self.store.put_json(
+            {
+                **manifest_payload,
+                "graph_ir": self._lifestyle_graph(
+                    manifest_payload["contract"],
+                    workflow_id="nutrition-workflow",
+                ).to_dict(),
+            },
+            artifact_type="ContractArtifact",
+        )
+        compilation = ExecutionCompiler(self.repository, contracts).compile_epoch(
+            workflow_id="nutrition-workflow",
+            epoch_id="nutrition-epoch",
+            manifest_ref=manifest,
+        )
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["checkin"])
+        self.assertEqual(node.payload["execution_adapter"], "artifact_bundle.v2")
+        self.assertEqual(node.payload["node_kind"], "unit")
+        self.assertTrue(Path(node.payload["workspace_path"]).is_dir())
+
+    def test_nutritionist_null_executors_complete_delivery_end_to_end(self) -> None:
+        service = BunshinV2WorkflowService(self.root)
+        created = service.create_task(
+            {
+                "task_id": "nutritionist-e2e-task",
+                "title": "Nutritionist E2E",
+                "objective": "Produce a non-medical nutrition check-in",
+                "profile": "lifestyle.nutritionist",
+                "workspace": {
+                    "kind": "artifact_project",
+                    "project_name": "nutritionist-e2e",
+                },
+            }
+        )
+        prepared = service.prepare_requirements(
+            {
+                "title": "Nutritionist E2E",
+                "task_spec": {
+                    "objective": "Produce a non-medical nutrition check-in."
+                },
+            }
+        )
+        service.start_workflow(
+            {
+                "delivery_binding": {
+                    "channel_id": "socket_test",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "test-session", "request_id": "test-request"},
+                    "control_scope_key": "socket:socket_test:test-session",
+                },
+                "workflow_id": "nutritionist-e2e-workflow",
+                "task_id": created["task_id"],
+                "operation": "new_requirement",
+                "goal": "Produce the contracted check-in",
+                "requirements_ref": prepared["requirements_ref"],
+            }
+        )
+
+        # This E2E targets execution/delivery. Architect and reviewer have real
+        # profile participants, so replace their already-covered LLM phase with an
+        # accepted ContractArtifact. First execute the Manager-owned START_WORKFLOW
+        # action, then retire only the unexecuted architecture-routing effect.
+        bootstrap = asyncio.run(
+            BunshinV2OutboxProcessor(service).process_once(limit=1)
+        )
+        self.assertEqual(bootstrap["failed"], 0)
+        for effect in service.repository.claim_outbox(
+            "nutritionist-e2e-bootstrap",
+            limit=100,
+        ):
+            service.repository.complete_outbox_effect(
+                str(effect["effect_id"]),
+                worker_id="nutritionist-e2e-bootstrap",
+            )
+
+        manifest = service.artifacts.put_json(
+            {
+                "requirements_ref": dict(prepared["requirements_ref"]),
+                "contract_schema": "lifestyle.nutrition_checkin.v1",
+                "contract": {
+                    "schema_version": "2",
+                    "graph": {"sink": "checkin"},
+                    "context": {
+                        "goal": "Produce a structured nutrition check-in.",
+                        "hard_restrictions": ["non-medical guidance"],
+                        "safety_boundary": (
+                            "Escalate medical concerns to a qualified clinician."
+                        ),
+                    },
+                    "requirements": {
+                        "checkin_output": {
+                            "claim": "Produce the structured check-in.",
+                            "owner": "checkin",
+                            "contract_path": ["checkin.structured_checkin"],
+                        }
+                    },
+                    "modules": {
+                        "checkin": {
+                            "responsibility": (
+                                "Produce the structured check-in artifact."
+                            ),
+                            "execution": "produce",
+                            "provides": ["structured_checkin"],
+                            "dependencies": {},
+                            "definition": {
+                                "meals": [],
+                                "training": ["record declared activity"],
+                                "restrictions": ["do not invent health facts"],
+                                "inputs": ["declared observations"],
+                                "outputs": ["structured_checkin"],
+                                "ownership": "The user owns execution.",
+                                "lifecycle": "Collect, summarize, review externally.",
+                                "safety_invariants": [
+                                    "No diagnosis or treatment advice."
+                                ],
+                            },
+                        }
+                    },
+                    "scenarios": {
+                        "produce_checkin": {
+                            "modules": ["checkin"],
+                            "requirement_refs": ["checkin_output"],
+                            "entrypoint": {
+                                "module": "checkin",
+                                "surface": "structured_checkin",
+                            },
+                            "contract_flow": [
+                                "observations -> checkin -> user"
+                            ],
+                            "observable_behavior": (
+                                "The user receives the structured check-in."
+                            ),
+                            "failure_behavior": (
+                                "Missing observations remain explicit."
+                            ),
+                            "environment": "External human execution.",
+                        }
+                    },
+                },
+            },
+            artifact_type="ContractArtifact",
+        )
+        manifest_payload = dict(service.artifacts.read_json(manifest))
+        manifest = service.artifacts.put_json(
+            {
+                **manifest_payload,
+                "graph_ir": self._lifestyle_graph(
+                    manifest_payload["contract"],
+                    workflow_id="nutritionist-e2e-workflow",
+                ).to_dict(),
+            },
+            artifact_type="ContractArtifact",
+        )
+        compilation = ExecutionCompiler(
+            service.repository,
+            service.contracts,
+        ).compile_epoch(
+            workflow_id="nutritionist-e2e-workflow",
+            epoch_id="nutritionist-e2e-epoch",
+            manifest_ref=manifest,
+        )
+        processor = BunshinV2OutboxProcessor(
+            service,
+            semantic_effects=SemanticOrchestrator(service),
+        )
+
+        for _ in range(20):
+            result = asyncio.run(processor.process_once(limit=20))
+            self.assertEqual(result["failed"], 0)
+            workflow = service.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                "nutritionist-e2e-workflow",
+            )
+            if workflow is not None and workflow.state == "COMPLETED":
+                break
+            self.assertGreater(result["claimed"], 0)
+        else:
+            self.fail("nutritionist workflow did not reach delivery")
+
+        nodes = {
+            item.aggregate_id: item
+            for item in service.repository.list_workflow_snapshots(
+                "nutritionist-e2e-workflow"
+            )
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+        }
+        self.assertEqual(set(nodes), set(compilation.node_run_ids))
+        self.assertTrue(all(item.state == "ACCEPTED" for item in nodes.values()))
+        self.assertTrue(
+            all(bool(item.payload.get("null_execution")) for item in nodes.values())
+        )
+        epoch = service.repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            compilation.epoch_id,
+        )
+        self.assertEqual(epoch.state, "COMPLETED")
+        deliverable_ref = dict(epoch.payload["published_deliverable_ref"])
+        deliverable = dict(service.artifacts.read_json(deliverable_ref))
+        self.assertEqual(deliverable["workflow_id"], "nutritionist-e2e-workflow")
+        destination = Path(str(deliverable["destination"]))
+        self.assertTrue((destination / "architect.yaml").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

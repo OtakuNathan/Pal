@@ -38,7 +38,7 @@ class LspManagerClient:
         self._client = SidecarRpcClient(
             endpoint=_lsp_endpoint(self.runtime_root),
             request_timeout_seconds=self.request_timeout_seconds,
-            unix_only=os.environ.get("PAL_MINION_SANDBOXED") == "1",
+            unix_only=os.environ.get("PAL_BUNSHIN_SANDBOXED") == "1",
         )
 
     @property

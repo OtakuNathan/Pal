@@ -11,7 +11,7 @@
 Pal is an event-driven agent runtime built for a single user. It runs as a
 service on your machine, talks through local and messaging channels, remembers
 what matters, and acts through a governed capability system. Ordinary requests
-stay in the fast conversational path; larger jobs can be delegated to Minion as
+stay in the fast conversational path; larger jobs can be delegated to Bunshin as
 durable, reviewable workflows.
 
 The implementation is deliberately structured, but that complexity stays
@@ -27,7 +27,7 @@ Pal is designed around a few stubborn principles that show up in every layer:
 
 - **Explicit beats implicit.** Nothing should be quietly decided for you. If a behavior can be silent, it will eventually betray you — so Pal makes trade-offs visible and reversible.
 - **Compile the constraint into the structure.** Don't ask an agent to *remember* to follow a rule; encode the rule so the system physically can't violate it. Contract-first interfaces, constitutional import rules, and read-only introspection are all this principle in disguise.
-- **Pay only for what you ask for.** The bare path is fast precisely because it costs nothing; every optional feature you enable (memory, verification, a minion) is a ledger you can inspect.
+- **Pay only for what you ask for.** The bare path is fast precisely because it costs nothing; every optional feature you enable (memory, verification, a bunshin) is a ledger you can inspect.
 - **The executor is unreliable, so the structure must not be.** Every durable subsystem assumes the process can die, the model can ramble, and the network can lie — and checkpoints, ledgers, and gates are what make that survivable.
 
 ## Quick Start
@@ -111,7 +111,7 @@ daemon never notices.
 **Reboot the brain — you do it, not Pal.** Pal cannot restart itself. A
 session reset is a slash command (`/reset`); a full daemon restart is
 `systemctl --user restart pal` on Linux (or restarting the LaunchAgent on
-macOS), performed by the operator. Because memory (L1/L2/L3), minion task
+macOS), performed by the operator. Because memory (L1/L2/L3), bunshin task
 ledgers, and invocation checkpoints are all durable on disk, restarting the
 brain costs nothing — the conversation continues with memory intact. That's
 the developer loop: break it, fix it, restart, `pal tty` back in.
@@ -122,11 +122,11 @@ programmatically instead of just typing at it.
 
 ### Platform Support
 
-- **Linux** — fully supported. Minion workflows run sandboxed with
+- **Linux** — fully supported. Bunshin workflows run sandboxed with
   **bubblewrap (`bwrap`)**: the sandbox fails closed, so a missing or partial
-  bwrap means Minion refuses to run rather than running unsandboxed.
+  bwrap means Bunshin refuses to run rather than running unsandboxed.
 - **macOS** — supported for the core runtime (service registration via
-  launchd); the Minion sandbox backend is not wired for macOS in this build.
+  launchd); the Bunshin sandbox backend is not wired for macOS in this build.
   **Use a Python with module-loadable SQLite** — the installer forces Homebrew
   Python for this reason: the system Python ships a static SQLite without
   `load_extension`, so `sqlite-vec` cannot load and **L3 memory silently degrades
@@ -140,7 +140,7 @@ programmatically instead of just typing at it.
 Pal runs as a systemd-supervised daemon. You talk to it through channels (Unix socket, Telegram, etc.). Every conversation is a **turn** — Pal normalizes your input, runs it through the LLM, executes tools if needed, and replies.
 
 ```
-systemd → Pal daemon → minions
+systemd → Pal daemon → bunshins
                 ↑
          Unix socket / Telegram
 ```
@@ -163,7 +163,7 @@ Wizard (outside runtime — provisions databases, first-run setup)
 Pal has three memory layers, modeled after how you actually think:
 
 - **L1** — the complete working set of the current logical conversation or
-  role session. It is runtime state; durable Minion sessions checkpoint and
+  role session. It is runtime state; durable Bunshin sessions checkpoint and
   restore it across worker-process restarts.
 - **L2** — recent context (128 items, 8 top-of-mind). Runtime-only, with hot/ghost/dormant heat states.
 - **L3** — durable long-term memory. Pluggable backends (default: `sqlite-vec` with Ollama vector embeddings + FTS). This is where Pal remembers your preferences, project facts, and lessons learned.
@@ -243,21 +243,21 @@ and a `sidecar.py` + `ssd1306.py` driver that talk to the OLED over a Unix
 socket — the hardware runs in a sidecar process, exactly the boundary the
 development manual demands.
 
-Built-in plugins include Minion, LSP, MCP, SQLite-vec L3 memory, web search
+Built-in plugins include Bunshin, LSP, MCP, SQLite-vec L3 memory, web search
 (Brave + DuckDuckGo), and web fetch (Playwright + HTTP). Enabled built-ins are
 attached automatically during startup; users do not assemble the runtime by
 hand.
 
-## Minion: Durable Agent Workflows
+## Bunshin: Durable Agent Workflows
 
-Minion is Pal's delegation layer — the part that takes a real task and
+Bunshin is Pal's delegation layer — the part that takes a real task and
 runs it to completion as a **durable workflow**, not a chat. This is the largest
 and most battle-tested subsystem in the codebase: it has executed full
 end-to-end software projects (architecture review → implementation → verification)
 and lifestyle planning tasks (nutrition, weekly meal/training plans) entirely
 through the agent pipeline, with a human approving at the gates.
 
-Minion supports multiple **task families**, each with its own architecture
+Bunshin supports multiple **task families**, each with its own architecture
 templates, role profiles, and contract shapes. Current families include
 `software_engineering` (Git-backed code projects with CMake/CTest verification)
 and `lifestyle` (artifact-producing tasks like nutrition planning). A family
@@ -318,19 +318,19 @@ on a 6-module DAG); modules that depend on others queue behind their acceptances
 - **TLA+ verified concurrency model.** The workflow state machine — architecture
   lifecycle, graph generation, replan/reuse, role assignment recovery, and
   active-lineage triage — is specified in TLA+ and checked before the
-  implementation is trusted. The specs live in `spec/minion_v2/` and are the
+  implementation is trusted. The specs live in `spec/bunshin_v2/` and are the
   authoritative source for what states are legal, what transitions are allowed,
   and what invariants must hold. When a bug is found and fixed, the fix is
   validated against the spec first, then ported to code.
 - **Observable by construction.** Workflow state, role assignments, attempts,
   durable checklists, submissions, and completed-turn timing/token metrics live
-  in `minion.sqlite3`. Prompt/event logging remains an explicit runtime policy;
+  in `bunshin.sqlite3`. Prompt/event logging remains an explicit runtime policy;
   status does not pretend that an interrupted, unsettled turn consumed zero
   work merely because no completed-turn metrics exist.
 
 ### The Human In The Loop
 
-Minion is explicitly *not* autonomous-by-default. Human review gates are
+Bunshin is explicitly *not* autonomous-by-default. Human review gates are
 first-class state (`human_review` / `human_wait`): the workflow pauses, publishes
 the durable review, and waits. Nothing ships without a human approving the gate
 that the task defines.
@@ -373,9 +373,9 @@ Tests use `unittest` with `tempfile.mkdtemp` for isolation. No Makefile or tox.
 
 ## Database
 
-Pal stores runtime state in SQLite via Peewee, with Minion owning a separate
+Pal stores runtime state in SQLite via Peewee, with Bunshin owning a separate
 SQLite database beneath the runtime root. A packaged upgrade runs
-`pal setup --upgrade`, applies the current LLM and Minion schema migrations,
+`pal setup --upgrade`, applies the current LLM and Bunshin schema migrations,
 and preserves user configuration. `RawSQLHookRegistry` lets plugins declare
 their SQL requirements without moving schema ownership into PalCore.
 
@@ -385,7 +385,7 @@ These are the lines that don't get crossed:
 
 - **`core` does not import `.models` or `.repository` from other modules**
 - **`control` does not depend on `execution.runtime`**
-- **`minion` does not import `channel`**
+- **`bunshin` does not import `channel`**
 - **`memory` does not import plugin implementations directly**
 - **`wizard` and `bootstrap` do not expose `register_with_core`**
 - **Secrets are write-only** — never returned through introspection

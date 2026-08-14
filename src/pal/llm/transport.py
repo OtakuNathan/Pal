@@ -46,7 +46,7 @@ class EncodedTransportRequest:
 
 
 class LLMJSONTransportPort(Protocol):
-    """Transport-only boundary shared by resident and remote Minion runtimes."""
+    """Transport-only boundary shared by resident and remote Bunshin runtimes."""
 
     def frames(
         self,

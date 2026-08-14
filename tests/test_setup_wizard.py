@@ -732,38 +732,38 @@ class TestDependencyDoctor(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
-    def test_minion_sandbox_check_accepts_linux_bwrap(self) -> None:
+    def test_bunshin_sandbox_check_accepts_linux_bwrap(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
-        with patch.dict(os.environ, {"PAL_MINION_SANDBOX": "1"}, clear=False):
+        with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOX": "1"}, clear=False):
             with patch.object(dep_mod.platform, "system", return_value="Linux"):
                 with patch.object(dep_mod.shutil, "which", return_value="/usr/bin/bwrap"):
-                    check = dep_mod._check_minion_sandbox()
+                    check = dep_mod._check_bunshin_sandbox()
 
         self.assertEqual(check.status, "ok")
         self.assertTrue(check.required)
         self.assertIn("bubblewrap", check.detail)
 
-    def test_minion_sandbox_check_blocks_missing_linux_bwrap(self) -> None:
+    def test_bunshin_sandbox_check_blocks_missing_linux_bwrap(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
-        with patch.dict(os.environ, {"PAL_MINION_SANDBOX": "1"}, clear=False):
+        with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOX": "1"}, clear=False):
             with patch.object(dep_mod.platform, "system", return_value="Linux"):
                 with patch.object(dep_mod.shutil, "which", return_value=None):
-                    check = dep_mod._check_minion_sandbox()
+                    check = dep_mod._check_bunshin_sandbox()
 
         self.assertEqual(check.status, "missing")
         self.assertTrue(check.blocking)
         self.assertIn("sudo apt-get install bubblewrap", check.fix)
 
-    def test_minion_sandbox_check_reports_macos_backend_as_unwired(self) -> None:
+    def test_bunshin_sandbox_check_reports_macos_backend_as_unwired(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
-        env = {"PAL_MINION_SANDBOX": "1", "PAL_MINION_DOCKER_IMAGE": "pal-minion:latest"}
+        env = {"PAL_BUNSHIN_SANDBOX": "1", "PAL_BUNSHIN_DOCKER_IMAGE": "pal-bunshin:latest"}
         with patch.dict(os.environ, env, clear=False):
             with patch.object(dep_mod.platform, "system", return_value="Darwin"):
                 with patch.object(dep_mod.shutil, "which", return_value="/usr/local/bin/docker"):
-                    check = dep_mod._check_minion_sandbox()
+                    check = dep_mod._check_bunshin_sandbox()
 
         self.assertEqual(check.status, "warn")
         self.assertFalse(check.required)

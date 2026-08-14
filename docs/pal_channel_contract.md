@@ -280,7 +280,7 @@ def build_channel_provider(context):
 
 Interaction 是统一语义，不是统一 UI。
 
-Core、control、minion、tasking 等模块可以产生 typed interaction intent，例如：
+Core、control、bunshin、tasking 等模块可以产生 typed interaction intent，例如：
 
 - command list
 - confirmation

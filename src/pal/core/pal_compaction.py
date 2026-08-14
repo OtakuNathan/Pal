@@ -96,7 +96,7 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "Field boundaries. Do not mix these up:\n"
     "- active_operating_instructions = HOW Pal should work. Examples: 'plan first, do not edit code yet'; 'do not touch L3'; 'render prompt as XML+Markdown, not JSON'. Not a concrete implementation task.\n"
     "- active_requests = WHAT Pal should do. Examples: 'implement Pal compact v2'; 'add real-LLM compaction tests'; 'route automatic compact candidates through approval'. Not a style rule.\n"
-    "- temporary_task_state = ephemeral progress needed to resume. Examples: 'hot/raw=5 and warm=20 are chosen'; 'Minion is out of scope'; 'automatic approval delivery still needs wiring'. It expires when done, cancelled, or superseded.\n"
+    "- temporary_task_state = ephemeral progress needed to resume. Examples: 'hot/raw=5 and warm=20 are chosen'; 'Bunshin is out of scope'; 'automatic approval delivery still needs wiring'. It expires when done, cancelled, or superseded.\n"
     "- retired_or_superseded_context = things the model must stop using. Examples: old tasks already completed, old assumptions corrected by the user, context older than the warm window with no active effect.\n"
     "\n"
     "Rules:\n"

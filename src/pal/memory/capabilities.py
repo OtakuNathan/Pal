@@ -141,7 +141,7 @@ class MemoryIntrospectionProvider:
             )
         source_kind = str(action.args.get("source_kind") or "").strip()
         source_ref = str(action.args.get("source_ref") or action.target_id or "").strip()
-        default_scope = "task" if source_kind == "minion" else "system"
+        default_scope = "task" if source_kind == "bunshin" else "system"
         fallback_task_id = source_ref if default_scope == "task" else ""
         committed = 0
         skipped = 0

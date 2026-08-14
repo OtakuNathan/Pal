@@ -6,7 +6,7 @@ It is a design baseline, not an implementation status claim. Implementation shou
 
 ## Goal
 
-Pal's engineering workflow should improve by adding harder truth sources and stronger review gates, not by giving coder minions more unchecked freedom.
+Pal's engineering workflow should improve by adding harder truth sources and stronger review gates, not by giving coder bunshins more unchecked freedom.
 
 The target direction:
 
@@ -14,7 +14,7 @@ The target direction:
 - Make reviewers participate at every important development node: plan, code, checkpoint, repair, and acceptance.
 - Let the manager own scheduling, ledger facts, and gate decisions.
 - Prevent shell from becoming an invisible editor.
-- Keep LLM-facing prompts small and role-scoped; do not show a minion work it should not execute.
+- Keep LLM-facing prompts small and role-scoped; do not show a bunshin work it should not execute.
 
 ## Reviewer Position
 
@@ -269,7 +269,7 @@ It should:
 - detect unauthorized workspace mutation where practical
 - preserve enough event and artifact refs for later resume
 
-The runner should not see work it should not execute. If the current turn is only milestone 3, the minion prompt should not invite it to execute milestone 4.
+The runner should not see work it should not execute. If the current turn is only milestone 3, the bunshin prompt should not invite it to execute milestone 4.
 
 ## Comparison Notes
 

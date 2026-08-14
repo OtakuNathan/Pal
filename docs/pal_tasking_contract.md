@@ -1,17 +1,17 @@
 # Pal Tasking Contract
 
-> 目标：定义 `tasking`、`minions`、checkpoint、ledger、workspace 治理，以及 `Pal` 如何观察和终止 minions。
+> 目标：定义 `tasking`、`bunshins`、checkpoint、ledger、workspace 治理，以及 `Pal` 如何观察和终止 bunshins。
 
 ## 目标
 
 `tasking` 是 `Pal` 处理专业性任务和长链执行的正式子系统。
 
-这一版的重点不是重发明 task subsystem 语义，而是把旧版本里已经比较明确的 task / minions / work_order / approval / checkpoint / ledger 语义，正式从 `Pal runtime` 身上剥离出来，收成 first-party plugin family。
+这一版的重点不是重发明 task subsystem 语义，而是把旧版本里已经比较明确的 task / bunshins / work_order / approval / checkpoint / ledger 语义，正式从 `Pal runtime` 身上剥离出来，收成 first-party plugin family。
 
 它的意义不是“再开一个执行器”，而是把不适合 `Pal` 直接完成的工作放进：
 
 - 干净的 task context
-- 可替换的 minions execution world
+- 可替换的 bunshins execution world
 - 可检查、可恢复、可记账的执行链
 
 ## 旧语义对齐原则
@@ -20,12 +20,12 @@
 
 需要保留的旧语义包括：
 
-- `Pal` 是主体，minions 不是主体
-- `supervisor -> pal -> minions` 的进程关系
-- minions 不直接接触用户，只与 `Pal` 通信
+- `Pal` 是主体，bunshins 不是主体
+- `supervisor -> pal -> bunshins` 的进程关系
+- bunshins 不直接接触用户，只与 `Pal` 通信
 - `work_order` 是正式对象，不是临时执行片段
 - `approval` 是正式对象，不是瞬时按钮
-- continuity 绑定 `checkpoint / ledger`，不绑定单个 minions 进程
+- continuity 绑定 `checkpoint / ledger`，不绑定单个 bunshins 进程
 - workspace / branch / artifact 是 task execution 的正式现场
 
 因此，新版本在这一块主要改变的是：
@@ -43,24 +43,24 @@
 
 - `supervisor` 是 lifecycle manager
 - `Pal` 是 front-control-runtime
-- `minions` 是 execution child
+- `bunshins` 是 execution child
 
 运行关系固定为：
 
-- `supervisor -> pal -> minions`
+- `supervisor -> pal -> bunshins`
 
 其中：
 
 - `supervisor` 负责拉起、监控、重启 `Pal`
-- `Pal` 负责和用户交互、治理任务、观察 minions
-- `minions` 负责执行 task / work order
+- `Pal` 负责和用户交互、治理任务、观察 bunshins
+- `bunshins` 负责执行 task / work order
 
 ## IPC Plane Alignment
 
 旧版本中已经形成的 IPC 分层在新架构中继续保留：
 
 1. `supervisor <-> pal`
-2. `pal <-> minions`
+2. `pal <-> bunshins`
 
 这两条链职责不同，不应混成一条“万能消息总线”。
 
@@ -81,7 +81,7 @@
 - 正常用户回复
 - 普通 turn payload
 
-### `pal <-> minions`
+### `pal <-> bunshins`
 
 这是 execution plane。
 
@@ -98,23 +98,23 @@
 
 ## 核心原则
 
-- `Pal` 负责治理任务，不直接承担 minions 该做的专业执行
-- minions 是 replaceable execution actor，不是主体
+- `Pal` 负责治理任务，不直接承担 bunshins 该做的专业执行
+- bunshins 是 replaceable execution actor，不是主体
 - continuity 绑定 checkpoint / ledger / workspace state，不绑定单个进程
 - `tasking` 的 effect surfaces 必须通过 capability 暴露
-- `Pal` 必须能观察 minions 状态，也必须能终止 minions
+- `Pal` 必须能观察 bunshins 状态，也必须能终止 bunshins
 
 ## Owns
 
 - task lifecycle
 - work order lifecycle
 - planning handoff
-- minions orchestration
+- bunshins orchestration
 - checkpoint continuity
 - ledger
 - workspace / branch governance
-- minions state observation
-- minions termination and replacement
+- bunshins state observation
+- bunshins termination and replacement
 
 ## Does Not Own
 
@@ -131,13 +131,13 @@ flowchart LR
     GOAL["User Goal"] --> PLAN["Plan / Review"]
     PLAN --> WO["Work Order"]
     WO --> CTX["Task Context Pack"]
-    CTX --> W["minions"]
+    CTX --> W["bunshins"]
     W --> CK["Checkpoint"]
     CK --> LED["Ledger"]
     LED --> PAL["Pal Observation / Control"]
     PAL -->|continue| W
-    PAL -->|kill + spawn from checkpoint| W2["New minions"]
-    PAL -->|terminate| STOP["minions Terminated"]
+    PAL -->|kill + spawn from checkpoint| W2["New bunshins"]
+    PAL -->|terminate| STOP["bunshins Terminated"]
 ```
 
 ## Tasking 的核心对象
@@ -153,14 +153,14 @@ flowchart LR
 - plan steps
 - acceptance criteria
 - verify strategy
-- active minions
+- active bunshins
 - current status
 
 `work order` 的旧语义在新架构中直接继承。
 
 ## Task Context Pack
 
-`TaskContextPack` 是 `Pal` 发给 minions 的执行上下文包。
+`TaskContextPack` 是 `Pal` 发给 bunshins 的执行上下文包。
 
 它至少包含：
 
@@ -208,11 +208,11 @@ checkpoint 至少表达：
 
 它用于记录：
 
-- minions accepted
-- minions progress updates
+- bunshins accepted
+- bunshins progress updates
 - checkpoint emission
-- minions kill / respawn
-- minions termination
+- bunshins kill / respawn
+- bunshins termination
 - final closeout
 
 ledger 的作用是：
@@ -241,7 +241,7 @@ approval 的治理入口属于 `Control`，但其任务语义仍然属于 taskin
 这里的“近似沙箱”含义是：
 
 - 不是操作系统级隔离
-- 而是通过 workspace / branch / artifact 边界约束 minions 的改动范围
+- 而是通过 workspace / branch / artifact 边界约束 bunshins 的改动范围
 
 tasking 必须治理：
 
@@ -250,18 +250,18 @@ tasking 必须治理：
 - artifact references
 - repo conflict checks
 
-## minions 是 Replaceable Actor
+## bunshins 是 Replaceable Actor
 
-minions 不是主体，`Pal` 才是主体。
+bunshins 不是主体，`Pal` 才是主体。
 
-minions 必须满足：
+bunshins 必须满足：
 
 - 可启动
 - 可替换
 - 可终止
 - 可由 checkpoint 接棒恢复
 
-continuity 不绑定单个 minions 进程。
+continuity 不绑定单个 bunshins 进程。
 
 ## Failure And Recovery Semantics
 
@@ -271,15 +271,15 @@ continuity 不绑定单个 minions 进程。
 - 新 `Pal` 从 durable state 和当前现场重新观察恢复
 - 不允许盲续旧执行栈
 
-### minions 崩溃
+### bunshins 崩溃
 
-- `Pal` 通过 IPC 或 process exit 感知 minions 退出
+- `Pal` 通过 IPC 或 process exit 感知 bunshins 退出
 - `Pal` 基于 checkpoint / ledger / work order state 决定报告、替换或终止
-- continuity 仍然不绑定单个 minions 进程
+- continuity 仍然不绑定单个 bunshins 进程
 
 ## Tasking Capability Surface
 
-当前 minion subsystem 暴露给 `Pal` 的 capability shape 是：
+当前 bunshin subsystem 暴露给 `Pal` 的 capability shape 是：
 
 - `task_search`
 - `task_read`
@@ -287,32 +287,32 @@ continuity 不绑定单个 minions 进程。
 - `work_order_read`
 - `work_order_draft_search`
 - `work_order_draft_read`
-- `minion_list`
-- `minion_read`
-- `minion_profile_list`
-- `minion_profile_read`
-- `minion_draft_work_order`
-- `minion_promote_work_order_draft`
-- `minion_spawn`
-- `minion_kill`
-- `minion_finalize`
+- `bunshin_list`
+- `bunshin_read`
+- `bunshin_profile_list`
+- `bunshin_profile_read`
+- `bunshin_draft_work_order`
+- `bunshin_promote_work_order_draft`
+- `bunshin_spawn`
+- `bunshin_kill`
+- `bunshin_finalize`
 
 其中：
 
 - `intro_*` 允许 `Pal` 读取任务、work order、draft、profile 和 active runner 状态
-- `minion_spawn` 是唯一启动入口
-- `minion_kill` 是正常治理动作
+- `bunshin_spawn` 是唯一启动入口
+- `bunshin_kill` 是正常治理动作
 - 没有单独的 replace capability；替换就是 `kill` 后用 checkpoint continuity 重新 `spawn`
 
-这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_minion_*`，也不能递归 spawn 新 runner。
+这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_bunshin_*`，也不能递归 spawn 新 runner。
 
 runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`file_read`、`file_edit`、`file_write`、`shell`、`web_search`、`web_read`、只读 `memory_recall`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
 
-## minions Observation Contract
+## bunshins Observation Contract
 
-`Pal` 必须能观察到 minions 的最小状态：
+`Pal` 必须能观察到 bunshins 的最小状态：
 
-- minions id
+- bunshins id
 - bound work order id
 - current status
 - last progress update
@@ -322,14 +322,14 @@ runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，
 - current branch
 - pending approval state
 
-## minions Termination Contract
+## bunshins Termination Contract
 
-`Pal` 必须拥有终止 minions 的能力。
+`Pal` 必须拥有终止 bunshins 的能力。
 
 允许终止的典型原因：
 
 - 用户明确取消
-- runaway / hung minions
+- runaway / hung bunshins
 - approval 被拒绝
 - health check fail
 - maintenance kill / respawn
@@ -353,22 +353,22 @@ runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，
 
 ## 与 Memory 的关系
 
-`Pal` 不应直接把自己的聊天上下文原样交给 minions。
+`Pal` 不应直接把自己的聊天上下文原样交给 bunshins。
 
 正确路径是：
 
 - 从 memory subsystem 取 task-scoped memory
 - 取 relevant system memory
 - 组装成 `TaskContextPack`
-- 交给 minions
+- 交给 bunshins
 
-这样 minions 拿到的是干净、收敛的任务上下文。
+这样 bunshins 拿到的是干净、收敛的任务上下文。
 
 ## 与 Control 的关系
 
-minions approval 请求必须进入 `Control`。
+bunshins approval 请求必须进入 `Control`。
 
-minions 终止和重新 spawn 虽然属于 tasking capability，但仍可能受 control governance 约束，尤其在：
+bunshins 终止和重新 spawn 虽然属于 tasking capability，但仍可能受 control governance 约束，尤其在：
 
 - 用户显式取消
 - 高风险 maintenance
@@ -376,18 +376,18 @@ minions 终止和重新 spawn 虽然属于 tasking capability，但仍可能受 
 
 ## Invariants
 
-- `Pal` 负责治理任务，minions 负责执行任务。
-- minions 是 replaceable actor，不是主体。
+- `Pal` 负责治理任务，bunshins 负责执行任务。
+- bunshins 是 replaceable actor，不是主体。
 - task subsystem 的旧语义默认保留。
 - continuity 绑定 checkpoint / ledger，不绑定单个进程。
 - `tasking` 默认使用 git-based approximate sandbox。
-- `Pal` 必须能观察 minions 状态。
-- `Pal` 必须能终止 minions。
-- 专业性强、可异步、可由 SPEC/work order/milestone 收束，且与用户即时互动弱的任务，可以由 advisor 建议进入 `minion`。
+- `Pal` 必须能观察 bunshins 状态。
+- `Pal` 必须能终止 bunshins。
+- 专业性强、可异步、可由 SPEC/work order/milestone 收束，且与用户即时互动弱的任务，可以由 advisor 建议进入 `bunshin`。
 
 ## Non-Goals
 
 - 不在本文件定义具体 git 命令序列
 - 不在本文件定义 checkpoint 的数据库 schema
-- 不在本文件定义 minions UI
-- 不允许 `Pal` 直接替代 minions 执行长链专业任务
+- 不在本文件定义 bunshins UI
+- 不允许 `Pal` 直接替代 bunshins 执行长链专业任务

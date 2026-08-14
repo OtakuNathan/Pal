@@ -275,7 +275,7 @@ IM channel 默认采用三阶段反馈：
 
 - channel state
 - execution policy
-- minions lifecycle
+- bunshins lifecycle
 - proactive lifecycle
 
 ### Exposes
@@ -304,7 +304,7 @@ IM channel 默认采用三阶段反馈：
 - conversation state
 - durable memory truth
 - control decisions
-- minions planning policy
+- bunshins planning policy
 
 ### Exposes
 
@@ -386,10 +386,10 @@ IM channel 默认采用三阶段反馈：
 - plan review
 - task context pack
 - work order lifecycle
-- minions orchestration
+- bunshins orchestration
 - checkpoint continuity
-- minions lifecycle observation
-- minions termination and replacement
+- bunshins lifecycle observation
+- bunshins termination and replacement
 
 ### Does Not Own
 
@@ -402,8 +402,8 @@ IM channel 默认采用三阶段反馈：
 
 - `TaskingPlugin`
 - work draft and plan contracts
-- minions checkpoint contracts
-- minions observation and termination capabilities
+- bunshins checkpoint contracts
+- bunshins observation and termination capabilities
 
 ## proactive
 
@@ -421,7 +421,7 @@ IM channel 默认采用三阶段反馈：
 - core loop
 - memory ranking
 - plugin routing
-- minions execution policy
+- bunshins execution policy
 
 ### Exposes
 

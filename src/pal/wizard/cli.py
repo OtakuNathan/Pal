@@ -452,16 +452,16 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     service.create_database(registration)
     service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
-    from pal.minion.cutover import cutover_minion_runtime
-    from pal.minion.v2.schema import MINION_V2_SCHEMA_VERSION
+    from pal.bunshin.cutover import cutover_bunshin_runtime
+    from pal.bunshin.v2.schema import BUNSHIN_V2_SCHEMA_VERSION
 
-    minion_cutover = cutover_minion_runtime(runtime_root)
+    bunshin_cutover = cutover_bunshin_runtime(runtime_root)
 
     print(f"\n  Database configured at {db_path}")
-    if minion_cutover.status == "archived_and_initialized":
+    if bunshin_cutover.status == "archived_and_initialized":
         print(
-            f"  Minion runtime archived and initialized at schema v{MINION_V2_SCHEMA_VERSION} "
-            f"(archive: {minion_cutover.archive_root})"
+            f"  Bunshin runtime archived and initialized at schema v{BUNSHIN_V2_SCHEMA_VERSION} "
+            f"(archive: {bunshin_cutover.archive_root})"
         )
 
     # ------------------------------------------------------------------
@@ -497,15 +497,15 @@ def run_setup_upgrade(*, runtime_root: Path) -> int:
             f"{db_path}"
         )
         return 2
-    from pal.minion.cutover import cutover_minion_runtime
-    from pal.minion.v2.schema import MINION_V2_SCHEMA_VERSION
+    from pal.bunshin.cutover import cutover_bunshin_runtime
+    from pal.bunshin.v2.schema import BUNSHIN_V2_SCHEMA_VERSION
     from pal.llm.schema import migrate_llm_endpoint_schema
 
     llm_result = migrate_llm_endpoint_schema(db_path)
-    result = cutover_minion_runtime(resolved_root)
+    result = cutover_bunshin_runtime(resolved_root)
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
-    print(f"  Minion schema: v{MINION_V2_SCHEMA_VERSION} ({result.status})")
+    print(f"  Bunshin schema: v{BUNSHIN_V2_SCHEMA_VERSION} ({result.status})")
     if result.archive_root is not None:
-        print(f"  Previous Minion runtime archive: {result.archive_root}")
+        print(f"  Previous Bunshin runtime archive: {result.archive_root}")
     return 0

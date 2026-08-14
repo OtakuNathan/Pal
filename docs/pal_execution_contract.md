@@ -45,7 +45,7 @@ Current boundaries:
 
 - `Pal Core`
 - `tasking`
-- `minions`
+- `bunshins`
 
 ## Tool
 
@@ -276,7 +276,7 @@ flowchart LR
 新架构中需要维护两套 skill 可见集合：
 
 - `Pal skill set`
-- `minions skill set`
+- `bunshins skill set`
 
 这里的关键不是两种不同格式，而是：
 
@@ -287,12 +287,12 @@ flowchart LR
 其中：
 
 - `Pal` 默认拥有更多 always-on 的 observe / control / introspection / memory manuals
-- minions 只拿 task-scoped、执行相关的 skills
+- bunshins 只拿 task-scoped、执行相关的 skills
 
 也就是说：
 
 - `Pal` 需要“治理系统”和“理解自己”的 manuals
-- minions 需要“完成任务”的 manuals
+- bunshins 需要“完成任务”的 manuals
 
 ## Tool Registration Contract
 
@@ -474,7 +474,7 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 - 注册 skill metadata
 - 声明 always-on 还是 on-demand
-- 声明 minions 可见性和作用域
+- 声明 bunshins 可见性和作用域
 
 ## Discovery-First Rule
 
@@ -484,7 +484,7 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 - prompt 中不默认塞满所有 tools 和 skills
 - builtin 与 external skills 都进入统一 manual registry
-- 需要更多能力信息时，`Pal` 或 minions 通过 discovery surface 拉取
+- 需要更多能力信息时，`Pal` 或 bunshins 通过 discovery surface 拉取
 
 最小 discovery surface 至少包括：
 
@@ -609,7 +609,7 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 - 参数进入 runtime 后必须经过 `Pydantic` 编解码边界。
 - introspection surfaces 必须注册进 `Execution`。
 - 给 `Pal` 暴露的可见能力面必须包含 observe / control / introspection 入口。
-- `Pal` 与 minions 可以共享一套 execution 机制，但不共享同一套可见 skill 集合。
+- `Pal` 与 bunshins 可以共享一套 execution 机制，但不共享同一套可见 skill 集合。
 - 所有外部 handler 调用必须被 try/catch 包裹，不能让 `Pal` 主体崩溃。
 - `MCP` 只是 tool 来源之一，不是独立平级执行哲学层。
 - provider native tool calling 不能绕过本地 `Execution`。

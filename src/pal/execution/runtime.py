@@ -229,7 +229,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         """Advance one host-defined pager/cache retention step in this lifetime.
 
         Resident Pal advances the same backend with semantic user inputs.
-        Autonomous runtimes such as Minion may instead advance it per tool
+        Autonomous runtimes such as Bunshin may instead advance it per tool
         call without changing L1 or coroutine state.
         """
 

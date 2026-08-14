@@ -27,12 +27,12 @@ Continue with the contract for the subsystem you are changing:
 - [pal_control_plane.md](pal_control_plane.md)
 - [pal_introspection_contract.md](pal_introspection_contract.md)
 - [pal_tasking_contract.md](pal_tasking_contract.md)
-- [pal_minion_v1.md](pal_minion_v1.md)
+- [pal_bunshin_v1.md](pal_bunshin_v1.md)
 - [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md)
 - [pal_reviewer_gate_plan.md](pal_reviewer_gate_plan.md)
-- [minion_repair_bill_replay.md](minion_repair_bill_replay.md)
-- [minion_layered_architect_planning.md](minion_layered_architect_planning.md)
-- [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md)
+- [bunshin_repair_bill_replay.md](bunshin_repair_bill_replay.md)
+- [bunshin_layered_architect_planning.md](bunshin_layered_architect_planning.md)
+- [bunshin_v2_contract_orchestration.md](bunshin_v2_contract_orchestration.md)
 - [pal_proactive_contract.md](pal_proactive_contract.md)
 - [pal_memory_contract.md](pal_memory_contract.md)
 - [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
@@ -47,14 +47,14 @@ Continue with the contract for the subsystem you are changing:
 
 ## Document Map
 
-- `what_is_pal.md`: product-level scope, direct turns versus durable Minion
+- `what_is_pal.md`: product-level scope, direct turns versus durable Bunshin
   workflows, runtime ownership, and current platform boundaries.
 - `getting_started.md`: release installation, setup, service registration,
   connection, dependency checks, upgrades, and source builds.
 - `current_implementation_notes.md`: short current-code sync point for prompt assembly, memory projection, artifacts, tool surface, MCP, and live-state boundaries.
 - `pal_architecture_v1.md`: system-level invariants and ownership model.
 - `pal_runtime_stack.md`: module skeleton, owning boundaries, and public interfaces.
-- `pal_bootstrap_and_process.md`: supervisor, Pal process, minions, startup, and runtime composition.
+- `pal_bootstrap_and_process.md`: supervisor, Pal process, bunshins, startup, and runtime composition.
 - `pal_channel_contract.md`: channel provider lifecycle, I/O, normalization, reply routing, interaction realization, and UX acknowledgment.
 - `pal_change_admission.md`: change admission checklist for contract changes, generated code, dogfood, and review risk.
 - `pal_llm_contract.md`: canonical LLM shape, native provider transports, streaming, and model routing.
@@ -63,12 +63,12 @@ Continue with the contract for the subsystem you are changing:
 - `pal_skill_contract.md`: skill learning, sanitization, STAR applicability, storage, and injection contract.
 - `pal_control_plane.md`: explicit control, approval, and governance flows.
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
-- `pal_tasking_contract.md`: tasking, minions, checkpoints, ledgers, and workspace governance.
-- `pal_minion_v1.md`: implemented minion sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
-- `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and minion engineering-quality hardening.
-- `pal_reviewer_gate_plan.md`: historical hardening plan for strict plan and checkpoint reviewer gates; use `pal_minion_v1.md#gate-loop` as the current implementation sync point.
-- `minion_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
-- `minion_layered_architect_planning.md`: planned layered architect flow that separates global architecture sketches, per-module detail fill, and implementation milestone planning.
+- `pal_tasking_contract.md`: tasking, bunshins, checkpoints, ledgers, and workspace governance.
+- `pal_bunshin_v1.md`: implemented bunshin sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
+- `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and bunshin engineering-quality hardening.
+- `pal_reviewer_gate_plan.md`: historical hardening plan for strict plan and checkpoint reviewer gates; use `pal_bunshin_v1.md#gate-loop` as the current implementation sync point.
+- `bunshin_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
+- `bunshin_layered_architect_planning.md`: planned layered architect flow that separates global architecture sketches, per-module detail fill, and implementation milestone planning.
 - `pal_proactive_contract.md`: proactive tasks, schedules, run history, and output-channel constraints.
 - `pal_memory_contract.md`: L1/L2/L3 memory and memory lifecycle.
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.

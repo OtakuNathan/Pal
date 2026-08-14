@@ -44,7 +44,7 @@ Default lifecycle:
 - Refresh amount: `2h`.
 - Hard cap: `24h`.
 - `info`, `read`, `content_search`, and `select` refresh hot state in the
-  writable main runtime. Read-only minions validate the current lease without
+  writable main runtime. Read-only bunshins validate the current lease without
   extending it and report `ttl_refreshed: false` where that field is exposed.
 - `artifact_search` does not refresh every returned candidate.
 - Stable artifact references in L1 project as tombstones after their handler

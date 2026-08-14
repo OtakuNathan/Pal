@@ -152,7 +152,7 @@ class TestChecklistCapabilities:
         assert blueprint.guidance.purpose == "Create or replace Pal's active checklist."
         assert "task-flow guidance" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when
-        assert "minion_start_workflow" not in blueprint.guidance.use_when
+        assert "bunshin_start_workflow" not in blueprint.guidance.use_when
         assert "remember_memory" not in blueprint.guidance.do_not_use_when
 
     def test_upsert_returns_structured_snapshot(self):

@@ -34,7 +34,7 @@ channel.
 ### Durable delegation
 
 When a task needs longer execution, explicit contracts, multiple roles, or a
-human gate, Pal can delegate it to Minion:
+human gate, Pal can delegate it to Bunshin:
 
 ```text
 Pal -> durable Workflow -> Architect/Reviewer -> module DAG
@@ -42,7 +42,7 @@ Pal -> durable Workflow -> Architect/Reviewer -> module DAG
                                             -> human review or delivery
 ```
 
-Minion persists workflow state independently of any single model turn or
+Bunshin persists workflow state independently of any single model turn or
 worker process. Roles work through bounded contracts and durable checklists;
 leases and fencing protect ownership; dependencies control parallel work;
 triage and recovery are explicit states rather than improvised chat replies.
@@ -52,7 +52,7 @@ specializations apply the same workflow machinery to different domains; the
 current built-ins include software engineering, general work, and lifestyle
 workflows.
 
-Pal remains the user-facing agent. Minion workers do not acquire their own
+Pal remains the user-facing agent. Bunshin workers do not acquire their own
 channels or bypass Pal when they need clarification, approval, or delivery.
 
 ## What the Runtime Owns
@@ -81,12 +81,12 @@ calls.
 
 The memory stack separates the current working conversation, recent context,
 and durable long-term recall. Compaction and persistence have explicit owners;
-Minion role sessions also checkpoint the context needed to survive worker
+Bunshin role sessions also checkpoint the context needed to survive worker
 replacement.
 
 ### Lifecycle-owned extensions
 
-Plugins, channel providers, LSP, MCP, Minion, web providers, and their sidecars
+Plugins, channel providers, LSP, MCP, Bunshin, web providers, and their sidecars
 have explicit attach/detach lifecycles. Enabled built-ins mount automatically
 at startup, while an individual plugin can be refreshed without restarting the
 rest of Pal.
@@ -125,16 +125,16 @@ sessions and channels, accumulates personal context, can use governed tools,
 and can delegate substantial work without making the chat transcript the only
 source of truth.
 
-The direct path remains appropriate for small tasks. Durable Minion workflows
+The direct path remains appropriate for small tasks. Durable Bunshin workflows
 are appropriate when the benefit of contracts, dependency-aware parallelism,
 verification, and recovery exceeds their coordination cost. Pal supports both
 because they solve different shapes of work.
 
 ## Current Platform Boundary
 
-- Linux supports the full runtime and bubblewrap-sandboxed Minion workers.
+- Linux supports the full runtime and bubblewrap-sandboxed Bunshin workers.
 - macOS supports the core runtime and LaunchAgent registration; the production
-  Minion sandbox backend is not wired in this build.
+  Bunshin sandbox backend is not wired in this build.
 - Windows is not currently supported.
 
 These are current implementation boundaries, not properties of the runtime
@@ -146,5 +146,5 @@ model itself.
 - [Runtime Stack](pal_runtime_stack.md)
 - [Bootstrap and Process Contract](pal_bootstrap_and_process.md)
 - [Control Plane](pal_control_plane.md)
-- [Minion V2 Contract Orchestration](minion_v2_contract_orchestration.md)
+- [Bunshin V2 Contract Orchestration](bunshin_v2_contract_orchestration.md)
 - [Channel Contract](pal_channel_contract.md)

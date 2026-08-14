@@ -53,7 +53,7 @@ where = ["src"]
 "pal.core" = ["tool_surface.toml"]
 "pal.lsp" = ["server_templates/*.toml"]
 "pal.mcp" = ["templates/*.toml"]
-"pal.minion" = [
+"pal.bunshin" = [
     "architecture_templates/**/*.json",
     "architecture_templates/**/*.j2",
     "architecture_specializations/**/*.json",
@@ -64,7 +64,7 @@ where = ["src"]
 ]
 "pal.plugins_builtin.lsp" = ["plugin.toml"]
 "pal.plugins_builtin.mcp" = ["plugin.toml"]
-"pal.plugins_builtin.minion" = ["plugin.toml"]
+"pal.plugins_builtin.bunshin" = ["plugin.toml"]
 "pal.plugins_builtin.sqlite_vec_l3" = ["plugin.toml"]
 "pal.plugins_builtin.web_fetch" = ["plugin.toml"]
 "pal.plugins_builtin.web_search" = ["plugin.toml"]

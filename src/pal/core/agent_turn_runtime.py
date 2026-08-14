@@ -28,7 +28,7 @@ class AgentTurnGuardHost:
 
 @dataclass
 class AgentTurnRuntime:
-    """Shared prompt/execution kernel used by Pal and Minion.
+    """Shared prompt/execution kernel used by Pal and Bunshin.
 
     Agent hosts supply ports, policy callbacks, and optional request decoration.
     The mechanics of prompt compilation and effect execution stay identical.

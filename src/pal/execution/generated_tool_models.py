@@ -119,7 +119,7 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput = _strict_model(
     {
         'scenario': (str, Field(..., description='Current situation Pal is facing; include the routing uncertainty or risky decision point.')),
         'intent': (str, Field(None, description='Optional intended outcome.')),
-        'turn_kind': (str, Field(None, description='Turn type, such as chat, service, or minion.')),
+        'turn_kind': (str, Field(None, description='Turn type, such as chat, service, or bunshin.')),
         'constraints': (list[str], Field(None)),
         'already_considered': (list[str], Field(None)),
         'top_k': (int, Field(5, ge=0)),
@@ -455,7 +455,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
         'query': (str, Field(None, description="Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Capability namespace. Use inspect to inspect state; use action to perform work.')),
         'family': (str, Field(None, description='Optional family filter such as management, lifecycle, endpoint, or search.')),
-        'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, minion, or web_search.')),
+        'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
         'top_k': (int, Field(None, description='Maximum number of compact hits to return.', ge=1)),
         'limit': (int, Field(None, description='Alias for top_k.', ge=1)),
@@ -728,7 +728,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderRecallInput = _strict_model(
     {
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for the remembered fact, preference, project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here.')),
-        'task_id': (str, Field(None, description='Optional exact task, work order, run, or minion task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
+        'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
         'limit': (int, Field(None, description='Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.', ge=1, le=10)),
         'kind': (Literal['fact', 'case'], Field(None, description='Optional memory type filter. Use fact for stable facts, preferences, project context, or prior decisions. Use case for prior failures, debugging attempts, repair lessons, task experience, or when current work hits an error and prior pitfall/fix experience may exist.')),
         'view': (Literal['summary', 'origin'], Field(None, description='Use summary by default for normal work. Use origin only when provenance, source text, or extra detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from.')),
@@ -752,7 +752,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderWriteInput = _strict_model(
         'summary': (str, Field(..., description='Concise prompt-ready memory text future Pal can read directly.')),
         'search_text': (str, Field(..., description='Retrieval/source text with concrete names, symptoms, decisions, or wording. This can be longer than summary but should not be raw unrelated context.')),
         'topics': (list[str], Field(None, description='Optional short semantic topic tags such as project, subsystem, preference area, or failure domain.')),
-        'task_id': (str, Field(None, description='Optional exact task, work order, run, or minion task id from current context. Providing it binds this memory to that task scope. Do not invent task ids.')),
+        'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task id from current context. Providing it binds this memory to that task scope. Do not invent task ids.')),
         'star': (MemoryCapabilitiesMemoryIntrospectionProviderWriteInputStar, Field(None, description="Required when kind='case'; omit for fact memories. STAR case detail for reusable failures, repairs, or task lessons.")),
     },
 )
@@ -793,8 +793,8 @@ MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput = _strict_mo
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderReadInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderReadInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderReadInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderReadInput',
     {
         'kind': (Literal['all', 'profiles', 'families'], Field('all')),
         'query': (str, Field('')),
@@ -802,8 +802,8 @@ MinionV2CapabilitiesMinionV2PublicProviderReadInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges',
+BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges',
     {
         'display_name': (str | None, Field(None)),
         'identity_fragment': (str | None, Field(None)),
@@ -824,23 +824,23 @@ MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges = _stri
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput',
     {
         'profile': (str, Field(..., description='Semantic profile name, for example software_engineering.v2_coder.')),
-        'changes': (MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges, Field(..., description='Typed merge patch for the profile definition; null removes an optional field.')),
+        'changes': (BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges, Field(..., description='Typed merge patch for the profile definition; null removes an optional field.')),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput',
     {
         'profile': (str, Field(...)),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding',
+BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding',
     {
         'participant': (Literal['profile', 'null'], Field(...)),
         'profile': (str | None, Field(None)),
@@ -848,8 +848,8 @@ MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding = _s
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges',
+BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges',
     {
         'display_name': (str | None, Field(None)),
         'domain': (str | None, Field(None)),
@@ -858,7 +858,7 @@ MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _stric
         'role_bindings': (
             dict[
                 str,
-                MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding
+                BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding
                 | None,
             ]
             | None,
@@ -871,29 +871,29 @@ MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _stric
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput',
     {
         'family': (str, Field(..., description='Semantic family name, for example software_engineering.')),
-        'changes': (MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges, Field(..., description='Typed merge patch for the family definition; null removes an optional field.')),
+        'changes': (BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges, Field(..., description='Typed merge patch for the family definition; null removes an optional field.')),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput',
     {
         'family': (str, Field(...)),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderRefreshInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderRefreshInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput',
     {
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput',
     {
         'name': (str, Field(...)),
         'artifact_type': (str, Field(...)),
@@ -903,8 +903,8 @@ MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderSearchInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSearchInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput',
     {
         'query': (str, Field('')),
         'family': (str, Field(None, description='Optional semantic Family name.')),
@@ -913,31 +913,31 @@ MinionV2CapabilitiesMinionV2PublicProviderSearchInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderStatusInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderStatusInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'view': (Literal['status', 'human_review'], Field('status', description='status returns Task state plus its current workflow and per-module projection; human_review adds the durable pending review without internal ids or tokens.')),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'reason': (str, Field(..., description='Auditable reason the current execution must be discarded and restarted.', min_length=1)),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'subject': (str, Field(None, description='Exact semantic subject reported by workflow status, such as module:ohos_font or phase:architecture. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
@@ -945,16 +945,16 @@ MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'answer': (str, Field(..., min_length=1)),
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'command': (Literal['pause', 'cancel'], Field(...)),
@@ -962,8 +962,8 @@ MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput',
+BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput = _strict_model(
+    'BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'reason': (str, Field(None)),
@@ -1003,7 +1003,7 @@ PluginsL3SqliteVecSQLiteVecL3PluginRecallInput = _strict_model(
     {
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for durable facts, preferences, project context, prior decisions, repair cases, or task experience. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known; do not paste large raw context.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference area, or failure domain. This is semantic narrowing, not the storage scope.')),
-        'task_id': (str, Field(None, description='Optional exact task, work order, run, or minion task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
+        'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
         'limit': (int, Field(None, description='Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.', ge=1, le=10)),
         'kind': (Literal['fact', 'case'], Field(None, description='Optional memory type filter. Use fact for stable facts, preferences, project context, or prior decisions. Use case for prior failures, debugging attempts, repair lessons, or task experience.')),
         'view': (Literal['summary', 'origin'], Field(None, description='Use summary by default for normal work. Use origin only when provenance, source text, or extra detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from.')),
@@ -1076,7 +1076,7 @@ PluginsL3StubsL3ProviderCapabilityMixinRecallInput = _strict_model(
     {
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for durable facts, preferences, project context, prior decisions, repair cases, or task experience. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known; do not paste large raw context.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference area, or failure domain. This is semantic narrowing, not the storage scope.')),
-        'task_id': (str, Field(None, description='Optional exact task, work order, run, or minion task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
+        'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
         'limit': (int, Field(None, description='Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.', ge=1, le=10)),
         'view': (Literal['summary', 'origin'], Field(None, description='Use summary by default for normal work. Use origin only when provenance, source text, or extra detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from.')),
     },
@@ -1450,8 +1450,8 @@ WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput = _strict_mode
     },
 )
 
-MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
-    'MinionScopedExecutionOpMinionArtifactWriteInput',
+BunshinScopedExecutionOpBunshinArtifactWriteInput = _strict_model(
+    'BunshinScopedExecutionOpBunshinArtifactWriteInput',
     {
         'relative_path': (str, Field(...)),
         'content': (Any, Field(...)),
@@ -1460,25 +1460,14 @@ MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
     },
 )
 
-MinionV2CandidateBuilderOpMinionCandidateSubmitInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionCandidateSubmitInput',
+BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput = _strict_model(
+    'BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput',
     {
     },
 )
 
-MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput',
-    {
-        'summary': (str, Field(..., min_length=1)),
-        'source_file': (str, Field(None)),
-        'path': (str, Field(None)),
-        'symbol': (str, Field(None)),
-        'contract_section': (str, Field(None)),
-    },
-)
-
-MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput',
+BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput = _strict_model(
+    'BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput',
     {
         'summary': (str, Field(..., min_length=1)),
         'source_file': (str, Field(None)),
@@ -1488,8 +1477,19 @@ MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput = _strict_model
     },
 )
 
-MinionV2AskQuestionInput = _strict_model(
-    'MinionV2AskQuestionInput',
+BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput = _strict_model(
+    'BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput',
+    {
+        'summary': (str, Field(..., min_length=1)),
+        'source_file': (str, Field(None)),
+        'path': (str, Field(None)),
+        'symbol': (str, Field(None)),
+        'contract_section': (str, Field(None)),
+    },
+)
+
+BunshinV2AskQuestionInput = _strict_model(
+    'BunshinV2AskQuestionInput',
     {
         'title': (str, Field(..., description='Short label for the decision.', min_length=1)),
         'question': (str, Field(..., description='One precise user-facing question.', min_length=1)),
@@ -1499,47 +1499,47 @@ MinionV2AskQuestionInput = _strict_model(
     },
 )
 
-MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput',
+BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput = _strict_model(
+    'BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput',
     {
     },
 )
 
-MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput',
+BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput = _strict_model(
+    'BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput',
     {
     },
 )
 
-MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput',
+BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput = _strict_model(
+    'BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput',
     {
     },
 )
 
-MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput',
+BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput = _strict_model(
+    'BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput',
     {
     },
 )
 
-MinionV2SweVerificationOpMinionVerificationUnknownInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationUnknownInput',
+BunshinV2SweVerificationOpBunshinVerificationUnknownInput = _strict_model(
+    'BunshinV2SweVerificationOpBunshinVerificationUnknownInput',
     {
         'reason': (str, Field(..., description='Unavailable environment or platform evidence and the concrete follow-up verification plan.', min_length=1)),
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput',
+BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput',
     {
         'path': (str, Field(..., description='Safe relative path inside the bound verifier scratch directory.', min_length=1)),
         'content': (str, Field(..., description='Complete replacement text for the scratch file.')),
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput',
+BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput',
     {
         'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
         'file': (str, Field(..., description='Source file to diagnose in the bound workspace.', min_length=1)),
@@ -1547,8 +1547,8 @@ MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput = _strict_model(
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput',
+BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput',
     {
         'name': (str, Field(..., description='Readable semantic name for the unavailable evidence case.', min_length=1)),
         'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe', 'candidate_delta_review'], Field(..., description='Required verification obligation that cannot be exercised.')),
@@ -1557,35 +1557,35 @@ MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput = _strict_m
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput',
+BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput',
     {
         'summary': (str, Field(..., description='Concise current verification conclusion.', min_length=1)),
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput',
+BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput',
     {
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput',
+BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput',
     {
         'name': (str, Field(..., description='Exact semantic name of the recorded case to withdraw.', min_length=1)),
         'reason': (str, Field(..., description='Audit reason why the case itself is invalid or no longer applicable.', min_length=1)),
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationSubmitInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationSubmitInput',
+BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput = _strict_model(
+    'BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput',
     {
     },
 )
 
-MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
-    'MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput',
+BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
+    'BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput',
     {
         'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
         'command': (str, Field(..., description='Complete shell command that exercises this verification case.', min_length=1)),

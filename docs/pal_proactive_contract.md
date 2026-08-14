@@ -12,7 +12,7 @@
 - planned recaps or briefings
 - proactive push work
 
-It is not minion tasking and it is not channel transport. A proactive task may use normal Pal tools or minions during execution, but those remain owned by their modules.
+It is not bunshin tasking and it is not channel transport. A proactive task may use normal Pal tools or bunshins during execution, but those remain owned by their modules.
 
 ## Owns
 
@@ -25,7 +25,7 @@ It is not minion tasking and it is not channel transport. A proactive task may u
 
 - channel adapters or delivery mechanics
 - tool execution runtime
-- minion worker lifecycle
+- bunshin worker lifecycle
 - memory truth
 - governance and approval policy
 

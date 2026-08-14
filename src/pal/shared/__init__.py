@@ -76,8 +76,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ToolInvocationResult": ("pal.shared.tool_protocol", "ToolInvocationResult"),
     "ToolResultIR": ("pal.shared.tool_protocol", "ToolResultIR"),
     "new_tool_call": ("pal.shared.tool_protocol", "new_tool_call"),
-    "MinionApprovalDecision": ("pal.shared.messages", "MinionApprovalDecision"),
-    "MinionInvocationPack": ("pal.shared.messages", "MinionInvocationPack"),
+    "BunshinApprovalDecision": ("pal.shared.messages", "BunshinApprovalDecision"),
+    "BunshinInvocationPack": ("pal.shared.messages", "BunshinInvocationPack"),
     "ProactiveTriggerEvent": ("pal.shared.messages", "ProactiveTriggerEvent"),
     "extract_text_from_payload": ("pal.shared.payloads", "extract_text_from_payload"),
 }

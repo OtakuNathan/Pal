@@ -145,9 +145,9 @@ Current defaults:
 - MCP server request timeout: 300 seconds
 - Pal-to-manager IPC timeout: 300 seconds
 
-## Minion V2
+## Bunshin V2
 
-Minion is a detachable first-party plugin backed by a manager sidecar. PalCore
+Bunshin is a detachable first-party plugin backed by a manager sidecar. PalCore
 sees only the sidecar port, an event source, and control handlers; the manager
 owns Task/workflow persistence, graph execution, role leases, and process-shell
 lifecycle. A Task has one current workflow, addressed publicly by Task name;
@@ -174,13 +174,13 @@ If the current endpoint is unavailable, the manager may use the live socket
 recovery route. No channel receipt or remote business response is required for
 the ACK boundary.
 
-Compaction is shared infrastructure with separate Pal/Minion policies. It
+Compaction is shared infrastructure with separate Pal/Bunshin policies. It
 operates on a frozen L1 snapshot and commits atomically; closed tool protocol
 and external module views remain authoritative. A reset likewise waits for the
 active logical turn to exit. A bounded timeout reports that reset was not
 applied and preserves the active turn rather than clearing live state.
 
-Minion capabilities use the current V2 Task/workflow surface and scoped role
+Bunshin capabilities use the current V2 Task/workflow surface and scoped role
 tools. Legacy work-order/plan-builder/artifact-report APIs are historical and
 must not be inferred from this document. Sandbox policy and capability policy
 remain independent: the process shell is constrained by bwrap where available,

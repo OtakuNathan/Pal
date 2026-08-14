@@ -39,7 +39,7 @@ class PalV2ReadOnlyDatabaseTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             database.initialize([ReadOnlyProbe])
 
-    def test_read_only_minion_memory_can_recall_without_usage_writes(self) -> None:
+    def test_read_only_bunshin_memory_can_recall_without_usage_writes(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal-read-only-recall-"))
         path = root / "pal.sqlite3"
         writable = PalV2Database(path)

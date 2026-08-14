@@ -10,7 +10,7 @@ end.
 - macOS with Homebrew Python
 - Windows is not currently supported
 
-The default Linux configuration fails closed when the Minion sandbox is
+The default Linux configuration fails closed when the Bunshin sandbox is
 unavailable, and the installer runs the dependency doctor before it exits, so
 `bubblewrap` (`bwrap`) is part of the normal Linux installation. Pal's core
 conversation runtime works without Codex CLI or Ollama; those enable specific
@@ -112,7 +112,7 @@ Important results include:
 
 - Python and required Python packages;
 - Git;
-- `bubblewrap` for sandboxed Linux Minion workers;
+- `bubblewrap` for sandboxed Linux Bunshin workers;
 - optional Codex CLI support;
 - optional local Ollama embedding fallback;
 - service-manager availability;
@@ -133,7 +133,7 @@ upgrade path:
 pal setup --upgrade --runtime-root ~/.pal
 ```
 
-This applies the current LLM and Minion schema migrations without reopening the
+This applies the current LLM and Bunshin schema migrations without reopening the
 wizard or replacing user configuration. Restart the service after installing a
 new wheel if it is already running:
 

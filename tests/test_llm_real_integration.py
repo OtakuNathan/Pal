@@ -41,10 +41,10 @@ from pal.llm.ir import WireShape
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, _JSONFrame
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, SecretRef
-from pal.minion.ipc import open_manager_connection
-from pal.minion.runner import MinionRunner, MinionRuntimeBundle, build_slim_minion_runtime
+from pal.bunshin.ipc import open_manager_connection
+from pal.bunshin.runner import BunshinRunner, BunshinRuntimeBundle, build_slim_bunshin_runtime
 from pal.memory import L1TranscriptMessage, MemoryService
-from pal.shared import EventKind, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, MinionInvocationPack
+from pal.shared import EventKind, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, BunshinInvocationPack
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.skill.prompt import SkillPromptFragmentProvider
 from pal.wizard import WizardService
@@ -404,9 +404,9 @@ async def _run_core_until_reply(handle, endpoint: _MemoryEndpoint, *, timeout_se
     raise AssertionError("timed out waiting for real runtime channel reply")
 
 
-async def _read_minion_event(runtime_root: Path, predicate, *, timeout_seconds: float = 180.0) -> dict[str, Any]:
+async def _read_bunshin_event(runtime_root: Path, predicate, *, timeout_seconds: float = 180.0) -> dict[str, Any]:
     reader, writer = await open_manager_connection(runtime_root)
-    request_id = "real-minion-sub"
+    request_id = "real-bunshin-sub"
     writer.write(
         pack_sidecar_message(
             {
@@ -420,7 +420,7 @@ async def _read_minion_event(runtime_root: Path, predicate, *, timeout_seconds: 
     await writer.drain()
     response = await asyncio.wait_for(read_sidecar_message(reader), timeout=5)
     if str(response.get("id") or "") != request_id or not bool(response.get("ok")):
-        raise AssertionError(f"minion event subscription failed: {response}")
+        raise AssertionError(f"bunshin event subscription failed: {response}")
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     seen: list[dict[str, Any]] = []
     try:
@@ -441,7 +441,7 @@ async def _read_minion_event(runtime_root: Path, predicate, *, timeout_seconds: 
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
-    raise AssertionError(f"expected minion event not observed; seen={seen[-20:]}")
+    raise AssertionError(f"expected bunshin event not observed; seen={seen[-20:]}")
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -501,7 +501,7 @@ class _NoToolExecution:
 
     async def execute_tool_async(self, call, **kwargs):
         _ = call, kwargs
-        raise AssertionError("this minion role should not call tools")
+        raise AssertionError("this bunshin role should not call tools")
 
 
 class RealLLMIntegrationTests(unittest.TestCase):

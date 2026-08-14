@@ -24,7 +24,7 @@ Exposes:
 - `L3RepositoryPort`
 
 Interaction rule:
-- Pal and Minion instantiate the same `MemoryService` behavior and
+- Pal and Bunshin instantiate the same `MemoryService` behavior and
   `MemoryPromptFragmentProvider`
 - L1 is the complete working-set truth for the current logical process.
   Recall and L2 heat may be projected into prompts, but compaction never treats

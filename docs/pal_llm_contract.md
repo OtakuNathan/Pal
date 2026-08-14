@@ -61,8 +61,8 @@ Each `llm_endpoints` row declares:
 - ascending fallback priority and enabled state.
 
 `/refresh_llm_endpoint` is the explicit reload boundary. It refreshes the
-resident Core runtime and, when Minion's host broker runtime is already loaded,
-refreshes that independent runtime in the same action. A cold Minion broker
+resident Core runtime and, when Bunshin's host broker runtime is already loaded,
+refreshes that independent runtime in the same action. A cold Bunshin broker
 loads the refreshed registry on its first request. Runtime statistics remain
 separate because the two runtimes have distinct lifecycle and accounting.
 

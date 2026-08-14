@@ -5,8 +5,8 @@ alter Pal's normal runtime paths. If a fix belongs in production code, put it
 there instead of relying on a test-side shim.
 
 Current override:
-  - minion manager orphan guard: when the test process is killed hard (OOM
-    killer, timeout, pkill), the minion manager subprocess it spawned would
+  - bunshin manager orphan guard: when the test process is killed hard (OOM
+    killer, timeout, pkill), the bunshin manager subprocess it spawned would
     otherwise survive forever, leaking ~80MB each and eventually exhausting
     this small machine. We attach PDEATHSIG (Linux prctl) to manager spawns
     made through subprocess.Popen so the kernel terminates the manager the
@@ -40,7 +40,7 @@ def _enable_parent_death_signal() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _minion_manager_orphan_guard(monkeypatch):
+def _bunshin_manager_orphan_guard(monkeypatch):
     if not sys.platform.startswith("linux"):
         return
     original_popen = subprocess.Popen
@@ -48,7 +48,7 @@ def _minion_manager_orphan_guard(monkeypatch):
     def guarded_popen(*args, **kwargs):
         argv = args[0] if args else kwargs.get("args", [])
         if isinstance(argv, (list, tuple)) and any(
-            "pal.minion.manager_main" in str(item) for item in argv
+            "pal.bunshin.manager_main" in str(item) for item in argv
         ):
             kwargs["preexec_fn"] = _enable_parent_death_signal
         return original_popen(*args, **kwargs)

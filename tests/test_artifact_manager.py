@@ -750,7 +750,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 self.root / "does-not-matter.png",
                 scope_key=self.scope_key,
                 turn_id=self.turn_id,
-                source_channel="minion",
+                source_channel="bunshin",
             )
 
     async def test_read_only_content_search_reports_no_ttl_refresh(self) -> None:

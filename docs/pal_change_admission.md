@@ -63,7 +63,7 @@ Pal 可以使用 AI 快速落地实现，但不能把“能生成很多代码”
 - 每阶段必须可运行、可测试、可回滚
 - 每阶段说明代码生成范围
 - 禁止混入无关格式化、重命名、搬目录
-- 如果 diff 过大到无法人工审查，应先改成 plan / draft / minion work order，而不是直接合入
+- 如果 diff 过大到无法人工审查，应先改成 plan / draft / bunshin work order，而不是直接合入
 
 ## Admission Checklist
 
@@ -110,7 +110,7 @@ Pal 的 runtime 改动默认需要 dogfood。
 
 - `pal run --runtime-root <runtime>`
 - `pal client --runtime-root <runtime> --message "..."`
-- manager socket/client（Minion 调度与运行状态）
+- manager socket/client（Bunshin 调度与运行状态）
 - provider reload / rescan / attach / detach
 - service log 中没有重复 crash 或 event-loop lifecycle error
 
