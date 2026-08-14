@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
-from pal.shared.tool_routing import TOOL_ROUTING_SYSTEM_GUIDANCE
+from pal.shared.tool_routing import (
+    TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
+    TOOL_ROUTING_SYSTEM_GUIDANCE,
+)
 
 
 @dataclass
@@ -117,11 +120,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
             PromptFragment(
                 section="tool_efficiency",
                 title="Tool Efficiency",
-                content=(
-                    "- Prefer targeted search -> inspect relevant semantic units -> summarize.\n"
-                    "- Avoid dumping large files or re-reading inspected regions unless necessary.\n"
-                    "- If tool output grows quickly, stop and reassess; use the simplest viable path."
-                ),
+                content=TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
                 priority=93,
             ),
             PromptFragment(

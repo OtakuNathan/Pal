@@ -28,4 +28,18 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
 )
 
 
-__all__ = ["TOOL_ROUTING_SYSTEM_GUIDANCE"]
+TOOL_EFFICIENCY_SYSTEM_GUIDANCE = (
+    "- Batch independent tool calls in one response, including independent reads, searches, "
+    "checks, and already-decided edits to distinct surfaces. Sequence only when a later call's "
+    "arguments, authority, safety, or correctness depend on an earlier result; do not serialize "
+    "every file or field into its own model round.\n"
+    "- Prefer targeted search -> inspect relevant semantic units -> summarize. Stop once the "
+    "available evidence is decisive and act on it.\n"
+    "- Reuse content and passing results already visible in the logical session. If read_file "
+    "reports unchanged content, refer to the earlier result instead of requesting it again.\n"
+    "- Avoid dumping large files or broad result sets. If tool output grows quickly, stop and "
+    "reassess; use the smallest viable path."
+)
+
+
+__all__ = ["TOOL_EFFICIENCY_SYSTEM_GUIDANCE", "TOOL_ROUTING_SYSTEM_GUIDANCE"]

@@ -17,7 +17,10 @@ from pal.shared import (
     BunshinInvocationPack,
 )
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.tool_routing import TOOL_ROUTING_SYSTEM_GUIDANCE
+from pal.shared.tool_routing import (
+    TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
+    TOOL_ROUTING_SYSTEM_GUIDANCE,
+)
 
 
 def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
@@ -63,6 +66,7 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                 )
 
         add("identity", "Bunshin Identity", str(scaffold.get("identity") or ""), 10)
+        add("tool_efficiency", "Tool Efficiency", TOOL_EFFICIENCY_SYSTEM_GUIDANCE, 15)
         add("behavior_guidance", "Role Contract", str(scaffold.get("behavior") or ""), 20)
         add("task_acceptance", "Bound Invocation", _render_bound_invocation(scaffold), 35)
         role_context = str(self.role_context_factory() or "").strip()
@@ -221,7 +225,7 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
         lines.extend(
             [
                 "",
-                "## Tool Efficiency",
+                "## Reference Access Efficiency",
                 "- Before reading a reference, briefly investigate what the supplied path currently contains and choose the appropriate visible tool. Do not assume the path is a file or call read_file on it before establishing that it is the relevant file.",
                 "- When exact read_file_args are already supplied, use that exact file path directly when the reference is needed; do not investigate it again.",
                 "- Keep reference investigation bounded, read only what the current question requires, and reuse what you already learned instead of repeating discovery.",
@@ -259,8 +263,6 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     lines = [
         "- Preserve contract correctness and role boundaries. Efficiency means eliminating duplicate work, never skipping decisive evidence.",
         "- Make one bounded pass over the owned scope and only the evidence needed for this role. Once the next action is clear, act; do not reopen settled questions unless new evidence contradicts them.",
-        "- Request independent reads, searches, or checks together in one response. Sequence only operations whose arguments or safety depend on an earlier result.",
-        "- Reuse content and passing results already visible in this logical session. If read_file reports that content is unchanged, refer to the earlier result and do not request it again.",
         "- Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged. First use the returned error, retry directive, and affordances to change the input or state; if no meaningful change is available, record the blocker or finding and stop. A rejection may be retried only after the relevant input or state actually changes; if the same rejection fingerprint recurs, stop and report the blocker instead of probing around it. retry=safe permits a corrected retry, not an unchanged replay; effect=unknown requires reconciliation before retry.",
         "- Prefer the smallest contract-complete action. Do not add optional abstraction, evidence, or polish after this role's completion conditions are satisfied.",
     ]

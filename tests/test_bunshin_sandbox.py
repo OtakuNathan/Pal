@@ -999,8 +999,6 @@ class BunshinSandboxTests(unittest.TestCase):
                 prompt.index("## Immutable Inputs"),
             )
             self.assertIn("Efficiency means eliminating duplicate work, never skipping decisive evidence", prompt)
-            self.assertIn("Request independent reads, searches, or checks together in one response", prompt)
-            self.assertIn("If read_file reports that content is unchanged", prompt)
             self.assertIn(
                 "Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged",
                 prompt,
@@ -1009,7 +1007,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 "retry=safe permits a corrected retry, not an unchanged replay",
                 prompt,
             )
-            self.assertIn("## Tool Efficiency", prompt)
+            self.assertIn("## Reference Access Efficiency", prompt)
             self.assertIn("investigate what the supplied path currently contains", prompt)
             self.assertIn("Do not assume the path is a file", prompt)
             self.assertIn("use that exact file path directly", prompt)
@@ -1062,7 +1060,7 @@ class BunshinSandboxTests(unittest.TestCase):
             )
             self.assertIn("## Execution Discipline — High Priority", no_reference_prompt)
             self.assertIn("Verification: treat VerificationPolicy", no_reference_prompt)
-            self.assertNotIn("## Tool Efficiency", no_reference_prompt)
+            self.assertNotIn("## Reference Access Efficiency", no_reference_prompt)
 
             result = subprocess.run(
                 argv,

@@ -237,6 +237,8 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
         self.assertNotIn("contract_submit", combined)
         self.assertNotIn("update_checklist", combined)
         self.assertIn("Design a complete contract", request.developer_instructions)
+        self.assertIn("Batch independent tool calls in one response", request.developer_instructions)
+        self.assertIn("do not serialize every file or field", request.developer_instructions)
         self.assertIn(str(self.architect_path), request.user_input)
         self.assertEqual(request.cwd, self.root)
         self.assertEqual(request.work_item_seed[0]["kind"], "phase")

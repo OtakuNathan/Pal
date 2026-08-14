@@ -1343,6 +1343,8 @@ workspace_policy: {}
         # and mechanically enforced rules are no longer duplicated here.
         self.assertIn("immutable task.yaml ledger as product truth", architect)
         self.assertIn("one bounded consistency pass", architect)
+        self.assertIn("Batch settled edits across declaration files", architect)
+        self.assertIn("sequence dependencies", architect)
         self.assertIn("newer text wins only where meanings conflict", architect)
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("request one user clarification through the harness and wait", architect)

@@ -4489,6 +4489,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Replaying a stored result does not refresh", tool_routing.content)
         self.assertIn("digest-based read-before-edit", tool_routing.content)
         self.assertIn("targeted search", tool_efficiency.content)
+        self.assertIn("Batch independent tool calls in one response", tool_efficiency.content)
+        self.assertIn("do not serialize every file or field", tool_efficiency.content)
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)
         self.assertIn('what should be remembered as true or reusable knowledge?', knowledge_storage_boundary.content)

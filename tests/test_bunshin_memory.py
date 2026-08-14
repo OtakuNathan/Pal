@@ -122,6 +122,24 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("point-in-time observations", routing.content)
         self.assertIn("Replaying a stored result does not refresh", routing.content)
 
+    def test_bunshin_puts_shared_tool_efficiency_before_every_role_contract(self) -> None:
+        providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+        prompt_provider = next(
+            provider for provider in providers if isinstance(provider, BunshinPromptFragmentProvider)
+        )
+
+        fragments = prompt_provider.build_prompt_fragments(
+            PromptAssemblyContext(core_mode="bunshin", turn_kind="bunshin")
+        )
+        efficiency = next(fragment for fragment in fragments if fragment.section == "tool_efficiency")
+
+        self.assertEqual(efficiency.title, "Tool Efficiency")
+        self.assertLess(efficiency.priority, 20)
+        self.assertIn("Batch independent tool calls in one response", efficiency.content)
+        self.assertIn("do not serialize every file or field", efficiency.content)
+        self.assertIn("If read_file reports unchanged content", efficiency.content)
+        self.assertIn("Avoid dumping large files", efficiency.content)
+
     def test_bunshin_role_timeout_is_forwarded_to_the_host_llm_request(self) -> None:
         pack = BunshinInvocationPack(
             invocation_id="timeout-invocation",

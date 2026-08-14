@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.shared import BunshinInvocationPack
+from pal.shared.tool_routing import TOOL_EFFICIENCY_SYSTEM_GUIDANCE
 
 
 _PAL_TOOL_TOKENS = (
@@ -86,6 +87,7 @@ def compile_architect_harness_request(
             "handoffs, and end-to-end contract flows. Never implement product "
             "behavior. The Manager owns Git lifecycle, task revisions, "
             "checklist storage, validation, and submission.",
+            "Tool efficiency:\n" + TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
             combined,
             "Use native planning as a compact execution cursor. Preserve the "
             "fixed phase names exactly and update them as work advances. "
