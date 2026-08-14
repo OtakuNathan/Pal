@@ -141,6 +141,13 @@ new wheel if it is already running:
 systemctl --user restart pal
 ```
 
+The packaged release bundle contains the Pal wheel, the runtime plugin overlay,
+and independently installable channel-provider wheels under `providers/`.
+`install-pal.sh` installs those provider wheels through `pal provider install`
+and, on Linux, safely stops and restarts a Pal service that was already active.
+Use `--no-providers` or `--no-service-restart` only when managing those
+lifecycles separately.
+
 Individual detachable plugins can instead be refreshed through their lifecycle
 operation when only that subsystem changed.
 

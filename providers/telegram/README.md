@@ -15,7 +15,7 @@ owned by Bunshin.
 Build and install the provider independently from Pal core:
 
 ```bash
-python -m pip wheel ./providers/telegram --no-deps -w ./dist/providers
+scripts/build_provider_packages.sh
 pal provider install ./dist/providers/pal_channel_provider_telegram-*.whl \
   --runtime-root ~/.pal
 ```

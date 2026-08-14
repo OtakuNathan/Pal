@@ -13,26 +13,6 @@ installer_source="$repo_root/scripts/install_package.sh"
 installer_path="$dist_dir/install-pal.sh"
 install_bundle_dir="$dist_dir/install_bundle"
 install_bundle_path="$dist_dir/pal_v2-install-bundle.tar.gz"
-websocket_provider_source="$repo_root/providers/websocket_bridge"
-websocket_provider_relative="channel/providers/websocket_bridge"
-websocket_provider_files=(
-  "provider.toml"
-  "runtime.py"
-  "sidecar.py"
-  "sidecar_main.py"
-  "protocol.py"
-  "README.md"
-)
-telegram_provider_source="$repo_root/providers/telegram"
-telegram_provider_relative="channel/providers/telegram"
-telegram_provider_files=(
-  "__init__.py"
-  "provider.toml"
-  "runtime.py"
-  "endpoint.py"
-  "interaction_store.py"
-  "README.md"
-)
 codex_harness_source="$repo_root/plugins/codex_architect_harness"
 codex_harness_relative="plugins/community/codex_architect_harness"
 codex_harness_files=(
@@ -52,7 +32,7 @@ rm -rf "$install_bundle_dir"
 rm -f "$install_bundle_path"
 
 "$python_bin" -m pip wheel . --no-deps --no-build-isolation -w "$dist_dir"
-"$python_bin" -m pip wheel "$telegram_provider_source" --no-deps --no-build-isolation -w "$provider_dist_dir"
+PYTHON="$python_bin" "$repo_root/scripts/build_provider_packages.sh" "$provider_dist_dir"
 
 wheel_path="$(ls -t "$dist_dir"/pal_v2-*.whl | head -n 1)"
 if [[ -z "${wheel_path:-}" || ! -f "$wheel_path" ]]; then
@@ -63,6 +43,11 @@ fi
 telegram_provider_wheel_path="$(ls -t "$provider_dist_dir"/pal_channel_provider_telegram-*.whl | head -n 1)"
 if [[ -z "${telegram_provider_wheel_path:-}" || ! -f "$telegram_provider_wheel_path" ]]; then
   echo "No Telegram provider wheel was built" >&2
+  exit 1
+fi
+websocket_provider_wheel_path="$(ls -t "$provider_dist_dir"/pal_channel_provider_websocket_bridge-*.whl | head -n 1)"
+if [[ -z "${websocket_provider_wheel_path:-}" || ! -f "$websocket_provider_wheel_path" ]]; then
+  echo "No WebSocket bridge provider wheel was built" >&2
   exit 1
 fi
 
@@ -460,32 +445,6 @@ print(
 )
 PY
 
-websocket_overlay_dir="$runtime_overlay_dir/$websocket_provider_relative"
-mkdir -p "$websocket_overlay_dir"
-for provider_file in "${websocket_provider_files[@]}"; do
-  install -m 0644 \
-    "$websocket_provider_source/$provider_file" \
-    "$websocket_overlay_dir/$provider_file"
-  if ! cmp -s \
-    "$websocket_provider_source/$provider_file" \
-    "$websocket_overlay_dir/$provider_file"; then
-    echo "Runtime overlay differs from provider source file: $provider_file" >&2
-    exit 1
-  fi
-done
-telegram_overlay_dir="$runtime_overlay_dir/$telegram_provider_relative"
-mkdir -p "$telegram_overlay_dir"
-for provider_file in "${telegram_provider_files[@]}"; do
-  install -m 0644 \
-    "$telegram_provider_source/$provider_file" \
-    "$telegram_overlay_dir/$provider_file"
-  if ! cmp -s \
-    "$telegram_provider_source/$provider_file" \
-    "$telegram_overlay_dir/$provider_file"; then
-    echo "Runtime overlay differs from Telegram provider source file: $provider_file" >&2
-    exit 1
-  fi
-done
 codex_harness_overlay_dir="$runtime_overlay_dir/$codex_harness_relative"
 mkdir -p "$codex_harness_overlay_dir"
 for harness_file in "${codex_harness_files[@]}"; do
@@ -508,13 +467,18 @@ mkdir -p "$install_bundle_dir"
 install -m 0644 "$wheel_path" "$install_bundle_dir/$(basename "$wheel_path")"
 install -m 0644 "$runtime_overlay_path" "$install_bundle_dir/$(basename "$runtime_overlay_path")"
 install -m 0755 "$installer_path" "$install_bundle_dir/$(basename "$installer_path")"
+mkdir -p "$install_bundle_dir/providers"
+for provider_wheel in "$provider_dist_dir"/pal_channel_provider_*.whl; do
+  install -m 0644 "$provider_wheel" "$install_bundle_dir/providers/$(basename "$provider_wheel")"
+done
 tar -czf "$install_bundle_path" -C "$install_bundle_dir" .
 rm -rf "$install_bundle_dir"
 
 echo "Built $wheel_path"
 echo "Built $telegram_provider_wheel_path"
+echo "Built $websocket_provider_wheel_path"
 echo "Built $runtime_overlay_path"
 echo "Built $installer_path"
 echo "Built $install_bundle_path"
 echo "Verified ${#required_wheel_paths[@]} semantic wheel contract files plus all package source/data files"
-echo "Verified runtime overlays at $websocket_provider_relative/, $telegram_provider_relative/, and $codex_harness_relative/"
+echo "Verified provider wheels under providers/ and runtime overlay at $codex_harness_relative/"

@@ -3,18 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pal-channel-provider-telegram"
-version = "0.3.2"
-description = "Telegram channel provider for Pal"
+name = "pal-channel-provider-websocket-bridge"
+version = "0.2.0"
+description = "WebSocket bridge channel provider for Pal"
 requires-python = ">=3.11"
 
 [tool.setuptools]
-packages = ["pal_provider_telegram"]
-package-dir = { pal_provider_telegram = "." }
+packages = ["pal_provider_websocket_bridge"]
+package-dir = { pal_provider_websocket_bridge = "." }
 include-package-data = false
 
 [tool.setuptools.package-data]
-pal_provider_telegram = ["provider.toml", "README.md"]
+pal_provider_websocket_bridge = ["provider.toml", "README.md"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]

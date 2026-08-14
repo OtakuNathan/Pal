@@ -19,6 +19,12 @@ Options:
                        (default: $PAL_BIN_DIR or ~/.local/bin)
   --wheel PATH         Pal wheel to install
   --overlay PATH       Runtime-root overlay archive to extract
+  --providers-dir PATH Directory containing provider wheels
+                       (default: providers/ beside this script, when present)
+  --no-providers       Do not install bundled provider wheels
+  --service-name NAME  systemd user service to restart on Linux
+                       (default: $PAL_SERVICE_NAME or pal.service)
+  --no-service-restart Do not stop or restart a running Pal service
   -h, --help           Show this help
 
 Environment:
@@ -78,6 +84,10 @@ install_root="${PAL_INSTALL_ROOT:-$HOME/.local/share/pal}"
 bin_dir="${PAL_BIN_DIR:-$HOME/.local/bin}"
 wheel_path=""
 overlay_path=""
+providers_dir=""
+install_providers=1
+service_name="${PAL_SERVICE_NAME:-pal.service}"
+restart_service=1
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -106,6 +116,24 @@ while [[ "$#" -gt 0 ]]; do
       overlay_path="$2"
       shift 2
       ;;
+    --providers-dir)
+      [[ "$#" -ge 2 ]] || fail "--providers-dir requires a path"
+      providers_dir="$2"
+      shift 2
+      ;;
+    --no-providers)
+      install_providers=0
+      shift
+      ;;
+    --service-name)
+      [[ "$#" -ge 2 ]] || fail "--service-name requires a name"
+      service_name="$2"
+      shift 2
+      ;;
+    --no-service-restart)
+      restart_service=0
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -124,6 +152,21 @@ if [[ -z "$overlay_path" ]]; then
 fi
 [[ -f "$wheel_path" ]] || fail "wheel does not exist: $wheel_path"
 [[ -f "$overlay_path" ]] || fail "runtime-root overlay does not exist: $overlay_path"
+if [[ -z "$providers_dir" && -d "$script_dir/providers" ]]; then
+  providers_dir="$script_dir/providers"
+fi
+provider_wheels=()
+if [[ "$install_providers" -eq 1 && -n "$providers_dir" ]]; then
+  [[ -d "$providers_dir" ]] || fail "providers directory does not exist: $providers_dir"
+  for candidate in "$providers_dir"/pal_channel_provider_*.whl; do
+    if [[ -f "$candidate" ]]; then
+      provider_wheels+=("$candidate")
+    fi
+  done
+  if [[ "${#provider_wheels[@]}" -eq 0 ]]; then
+    fail "no provider wheels found in $providers_dir"
+  fi
+fi
 existing_runtime=0
 if [[ -f "$runtime_root/pal.sqlite3" ]]; then
   existing_runtime=1
@@ -170,6 +213,29 @@ case "$platform" in
     fail "unsupported operating system: $platform"
     ;;
 esac
+
+service_was_active=0
+service_stopped=0
+restore_service_after_failure() {
+  local status="$?"
+  trap - EXIT
+  if [[ "$status" -ne 0 && "$service_stopped" -eq 1 ]]; then
+    echo "Installation failed; attempting to restart $service_name..." >&2
+    systemctl --user start "$service_name" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap restore_service_after_failure EXIT
+
+if [[ "$platform" == "Linux" && "$restart_service" -eq 1 ]]; then
+  if command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user is-active --quiet "$service_name"; then
+    service_was_active=1
+    echo "Stopping running Pal service $service_name before replacing its virtualenv..."
+    systemctl --user stop "$service_name"
+    service_stopped=1
+  fi
+fi
 
 "$python_bin" - <<'PY'
 from __future__ import annotations
@@ -220,6 +286,14 @@ echo "Installing runtime-root overlay into $runtime_root..."
 mkdir -p "$runtime_root"
 tar -xzf "$overlay_path" -C "$runtime_root"
 
+if [[ "${#provider_wheels[@]}" -gt 0 ]]; then
+  echo "Installing ${#provider_wheels[@]} channel-provider wheel(s)..."
+  "$pal_bin" provider install \
+    "${provider_wheels[@]}" \
+    --runtime-root "$runtime_root" \
+    --force
+fi
+
 mkdir -p "$bin_dir"
 launcher="$bin_dir/pal"
 if [[ -d "$launcher" && ! -L "$launcher" ]]; then
@@ -250,3 +324,25 @@ fi
 echo
 echo "Running Pal dependency doctor..."
 "$pal_bin" doctor
+
+if [[ "$service_was_active" -eq 1 ]]; then
+  echo
+  echo "Starting upgraded Pal service $service_name..."
+  systemctl --user daemon-reload
+  systemctl --user start "$service_name"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if systemctl --user is-active --quiet "$service_name"; then
+      break
+    fi
+    sleep 1
+  done
+  systemctl --user is-active --quiet "$service_name" \
+    || fail "service did not become active after upgrade: $service_name"
+  service_stopped=0
+  echo "Pal service is active."
+elif [[ "$platform" == "Linux" && "$restart_service" -eq 1 ]]; then
+  echo
+  echo "Pal service was not active before installation; leaving it stopped."
+fi
+
+trap - EXIT

@@ -96,6 +96,18 @@ introspection.
 
 ## Usage
 
+Build and install this provider independently from Pal core:
+
+```bash
+scripts/build_provider_packages.sh
+pal provider install \
+  dist/providers/pal_channel_provider_websocket_bridge-*.whl \
+  --runtime-root ~/.pal
+```
+
+The wheel is validated and atomically published under the runtime root. Restart
+Pal, or rescan the channel-provider registry, to activate the new generation.
+
 1. Apply the schema/row patch in `docs/websocket_bridge_endpoint_row.sql` (with
    explicit user approval) so a `channel_endpoints` row of `channel_kind =
    'websocket_bridge'` exists.
