@@ -1407,6 +1407,69 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             self.assertEqual((repo / "src" / "router.py").read_text(), "fixed")
             self.assertIn("assert False", (repo / "tests" / "test_router.py").read_text())
 
+    def test_bound_input_overlay_is_really_read_only_inside_sandbox(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_bunshin_bound_overlay_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            repo = root / "repo"
+            bound_input = repo / "inputs" / "spec" / "docs" / "spec.md"
+            bound_input.parent.mkdir(parents=True)
+            bound_input.write_text("original\n", encoding="utf-8")
+            _prepare_role_endpoint(runtime_root)
+            pack = BunshinInvocationPack(
+                invocation_id="bound-overlay",
+                goal="consume the immutable specification",
+                workspace={
+                    "repo_path": str(repo),
+                    "read_only_overlay_paths": ["inputs/spec/docs/spec.md"],
+                    "reference_paths": [
+                        {
+                            "name": "spec",
+                            "path": str(bound_input),
+                            "include": ["docs/spec.md"],
+                            "mode": "read_only",
+                            "truth_source": True,
+                            "required": True,
+                            "bound_input": True,
+                        }
+                    ],
+                    "workspace_policy": {"mode": "writable_git_branch"},
+                },
+            )
+            with patch.dict(
+                os.environ,
+                {"PAL_BUNSHIN_SANDBOX_SCRATCH_ROOT": str(root / "scratch")},
+            ):
+                pack = with_bunshin_sandbox_metadata(
+                    runtime_root,
+                    pack,
+                    run_id="run_bound_overlay",
+                )
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=[
+                        "/bin/sh",
+                        "-c",
+                        "test -r inputs/spec/docs/spec.md; "
+                        "if printf mutated > inputs/spec/docs/spec.md 2>/dev/null; then exit 42; fi",
+                    ],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+
+            result = subprocess.run(
+                argv,
+                env=env,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(bound_input.read_text(encoding="utf-8"), "original\n")
+
     def test_bunshin_workspace_fails_closed_when_sandbox_is_disabled(self) -> None:
         pack = BunshinInvocationPack(
             invocation_id="scoped-disabled",

@@ -108,3 +108,18 @@ Interaction rule:
   from another channel never changes it; `bunshin_rebind_task_delivery` changes
   only that reply target. A dead target falls back to a connected recovery
   socket, otherwise the durable notification remains pending
+- declared repo-relative input binding is one fail-closed contract in
+  `pal.bunshin.v2.input_binding`. Only reference entries explicitly declared
+  repo-relative (a relative `path`, or any path explicitly marked
+  `repo_relative: true`) are captured once per workflow into an immutable
+  `InputBindingManifest` carrying the source repository HEAD commit and the
+  plain SHA-256 of every input, with content stored durably as
+  `BoundInputArtifact` blobs. Role workspaces without the repository
+  materialize them deterministically at `inputs/<name>/<repo_path>` from the
+  durable content — never from the mutable host repository — and re-verify the
+  same hashes on every retry, restart, or fenced attempt; repository-including
+  workspaces verify the in-repo paths instead. The Manager-owned `inputs`
+  workspace root is excluded from candidate snapshots, tree fingerprints, and
+  deliverables solely by the first-path-component predicate
+  `is_bound_input_path`; worker-authored paths that merely contain an `inputs`
+  component elsewhere are ordinary content and are never excluded

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from pal.foundation import EventEnvelope
@@ -203,10 +204,28 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
                 "access=ordinary file/search tools",
                 f"truth_source={bool(item.get('truth_source'))}",
             ]
-            if not bool(item.get("bound_input")):
+            exact_include = (
+                includes
+                if len(includes) == 1 and not any(character in includes[0] for character in "*?[")
+                else []
+            )
+            if bool(item.get("bound_input")):
+                # A bound input is advertised only at the exact in-workspace
+                # location the binding stage recorded (inputs/<name>/<repo_path>
+                # in an artifact workspace, or the repository-relative path in a
+                # repository-including workspace).  Any other bound entry, such
+                # as a legacy gateway-served storage path, keeps the hidden
+                # rendering so no host path leaks into the prompt.
+                visible_path = (
+                    path
+                    if exact_include and _names_bound_input_location(path, exact_include[0])
+                    else ""
+                )
+            else:
                 visible_path = path or f"/pal/references/{name}"
+            if visible_path:
                 details.append(f"path={visible_path}")
-                if len(includes) == 1 and not any(character in includes[0] for character in "*?["):
+                if exact_include:
                     details.append(
                         "read_file_args="
                         + json.dumps(
@@ -287,6 +306,24 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
             "- Review: perform one breadth-first semantic pass, batch all material findings, and submit once. Do not reopen accepted surfaces unless current evidence contradicts them."
         )
     return lines
+
+
+def _names_bound_input_location(path: str, repo_path: str) -> bool:
+    """Whether a bound-input reference entry's path names its input location.
+
+    The binding stage materializes every declared input at its deterministic
+    in-workspace location (``inputs/<name>/<repo_path>``, or the input's
+    repository-relative path inside a repository-including workspace) and
+    records that location in the entry together with ``include=[repo_path]``.
+    A bound entry whose path ends with its repo path therefore carries the
+    exact workspace location and is advertised verbatim; the renderer derives
+    no location of its own and never substitutes a host path.
+    """
+    parts = PurePosixPath(path).parts
+    repo_parts = PurePosixPath(repo_path).parts
+    if not repo_parts or len(parts) < len(repo_parts):
+        return False
+    return parts[-len(repo_parts):] == repo_parts
 
 
 def prompt_view_from_pack(pack: BunshinInvocationPack) -> dict[str, Any]:

@@ -15,6 +15,7 @@ from pal.lsp.environment import (
     normalize_lsp_language,
 )
 from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.v2.input_binding import BOUND_INPUTS_ROOT, is_bound_input_path
 from pal.bunshin.v2.paths import (
     artifact_epoch_root,
     deliverable_root,
@@ -317,11 +318,33 @@ def artifact_tree_fingerprint(workspace: Path) -> str:
     return _tree_fingerprint(workspace)
 
 
+def _enumerable_workspace_files(workspace: Path) -> list[Path]:
+    """Return the sorted worker-authored files of one artifact workspace.
+
+    Manager-owned surface is never bundle content: ``.pal-candidate``
+    staging trees and the bound-inputs root (``BOUND_INPUTS_ROOT``),
+    which is written only by the Manager-side materializer.  Whether a
+    path lies under the bound-inputs root is decided solely by
+    :func:`pal.bunshin.v2.input_binding.is_bound_input_path`, a
+    first-path-component match, and is never re-implemented here as a
+    component-membership test; paths that merely contain an ``inputs``
+    component elsewhere (``src/inputs/data.py``) remain bundle content.
+    """
+    files: list[Path] = []
+    for item in workspace.rglob("*"):
+        if not item.is_file() or ".pal-candidate" in item.parts:
+            continue
+        if is_bound_input_path(item.relative_to(workspace).as_posix()):
+            continue
+        files.append(item)
+    return sorted(files)
+
+
 def _bundle_files(workspace: Path) -> list[dict[str, Any]]:
     if not workspace.is_dir():
         raise ValueError(f"artifact workspace does not exist: {workspace}")
     result = []
-    for path in sorted(item for item in workspace.rglob("*") if item.is_file() and ".pal-candidate" not in item.parts):
+    for path in _enumerable_workspace_files(workspace):
         relative = path.relative_to(workspace).as_posix()
         content = path.read_bytes()
         result.append(
@@ -348,7 +371,7 @@ def _tree_fingerprint(workspace: Path) -> str:
 
 def _bundle_files_allow_empty(workspace: Path) -> list[dict[str, str]]:
     result = []
-    for path in sorted(item for item in workspace.rglob("*") if item.is_file() and ".pal-candidate" not in item.parts):
+    for path in _enumerable_workspace_files(workspace):
         result.append({"path": path.relative_to(workspace).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     return result
 

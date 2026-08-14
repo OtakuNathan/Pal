@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from pal.bunshin.v2.contract_runtime import ContractArtifactAccess, ResearchMode
@@ -26,6 +26,13 @@ from pal.bunshin.v2.machines import LIVENESS_REQUIRED_STATES
 from pal.bunshin.v2.human_review import (
     human_review_card_is_current,
     task_revision_review_markdown,
+)
+from pal.bunshin.v2.input_binding import (
+    INPUT_BINDING_MANIFEST_ARTIFACT,
+    INPUT_BINDING_SCHEMA_VERSION,
+    BoundInputError,
+    capture_input_binding,
+    declared_inputs_from_references,
 )
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.cycle_protocol import CycleAction
@@ -434,6 +441,16 @@ class BunshinV2WorkflowService:
                     "single-module ContractArtifact"
                 )
         skill_refs = _normalize_skill_refs(data.get("skill_refs"))
+        references = _normalize_references(
+            [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
+        )
+        input_binding_ref = self._capture_input_binding(
+            workflow_id=workflow_id,
+            workspace=workspace,
+            references=references,
+            actor=actor,
+            source_channel=source_channel,
+        )
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,
@@ -448,12 +465,11 @@ class BunshinV2WorkflowService:
             "approved_evidence": list(data.get("approved_evidence") or []),
             **({"skill_refs": skill_refs} if skill_refs else {}),
             "workspace": workspace,
-            "references": _normalize_references(
-                [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
-            ),
+            "references": references,
             "research_mode": research_mode.value,
             "input_artifact_ref": artifact_ref,
             "actor": actor,
+            **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
         }
         request_ref = self.artifacts.put_json(
             request_payload,
@@ -464,6 +480,7 @@ class BunshinV2WorkflowService:
                 (str(family_binding_ref["sha256"]), "family_binding"),
                 *(((str(requirements_ref["sha256"]), "requirements"),) if requirements_ref else ()),
                 *(((str(artifact_ref["sha256"]), "input"),) if artifact_ref else ()),
+                *(((input_binding_ref.sha256, "input_binding"),) if input_binding_ref else ()),
             ),
         )
         result = self.repository.dispatch(
@@ -487,6 +504,7 @@ class BunshinV2WorkflowService:
                     "owner": actor,
                     "desired_state": "ACTIVE",
                     "orchestration_contract_version": "6",
+                    **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
                 },
             )
         )
@@ -505,6 +523,54 @@ class BunshinV2WorkflowService:
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
         }
+
+    def _capture_input_binding(
+        self,
+        *,
+        workflow_id: str,
+        workspace: Mapping[str, Any],
+        references: Sequence[Any],
+        actor: str,
+        source_channel: str,
+    ) -> ArtifactRef | None:
+        """Capture the declared repo-relative input binding before dispatch.
+
+        Validates every participating reference declaration, captures the
+        immutable manifest against the task workspace repository root, and
+        publishes it durably as an ``InputBindingManifestArtifact``.  Returns
+        ``None`` when the workflow declares no repo-relative inputs, leaving
+        intake exactly as before.  Any binding failure raises
+        ``BoundInputError`` (a ``ValueError``) before the workflow request
+        artifact is published or any workflow state exists.
+        """
+        declarations = declared_inputs_from_references(references)
+        if not declarations:
+            return None
+        repo_path = str(workspace.get("repo_path") or "").strip()
+        if not repo_path:
+            raise BoundInputError(
+                "declared repo-relative inputs require a task workspace repository"
+            )
+        manifest = capture_input_binding(
+            repo_root=Path(repo_path),
+            workflow_id=workflow_id,
+            declarations=declarations,
+            artifacts=self.artifacts,
+        )
+        return self.artifacts.put_json(
+            manifest.to_payload(),
+            artifact_type=INPUT_BINDING_MANIFEST_ARTIFACT,
+            schema_version=INPUT_BINDING_SCHEMA_VERSION,
+            provenance={
+                "actor": actor,
+                "source_channel": source_channel,
+                "workflow_id": workflow_id,
+            },
+            child_refs=tuple(
+                (record.content_ref.sha256, f"bound_input:{record.name}")
+                for record in manifest.inputs
+            ),
+        )
 
     def _create_or_reuse_task_for_workflow(self, data: Mapping[str, Any]) -> str:
         goal = str(data.get("goal") or data.get("objective") or "").strip()

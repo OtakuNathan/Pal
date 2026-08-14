@@ -50,6 +50,15 @@ from pal.bunshin.v2.adapters import (
 from pal.bunshin.lsp_prewarm import prewarm_workspace_lsp
 from pal.lsp.ipc import LspManagerClient
 from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.v2.input_binding import (
+    INPUT_BINDING_MANIFEST_ARTIFACT,
+    BoundInputError,
+    InputBindingManifest,
+    bound_input_reference_entries,
+    materialize_bound_inputs,
+    verify_bound_inputs,
+    verify_repo_bound_inputs,
+)
 from pal.bunshin.v2.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
@@ -432,6 +441,74 @@ def _role_uses_bound_durable_workspace(
     if binding not in {"canonical", "ephemeral_artifact"}:
         return False
     return bool(repo_path) and binding == "canonical"
+
+
+def _role_workspace_input_binding_roots(
+    workspace: Mapping[str, Any],
+    *,
+    snapshot: AggregateSnapshot,
+    workspace_source_root: str,
+) -> tuple[Path | None, Path | None]:
+    """Resolve where one role attempt's bound inputs bind.
+
+    Returns ``(repo_root, workspace_root)`` with exactly one side set.  A
+    ``repo_root`` marks a repository-including workspace whose contract
+    already places every declared input at its repository-relative path, so
+    binding only re-verifies those files in place.  A ``workspace_root``
+    marks an artifact-style workspace that never includes the host
+    repository, so the materializer writes the deterministic
+    ``inputs/<name>/<repo_path>`` tree beneath it.
+
+    The decision follows the existing workspace contract: an attempt whose
+    execution adapter provisioned an artifact workspace never includes the
+    repository, a Manager-prepared role workspace includes one exactly when
+    it was cloned or copied from a declared source, and every other
+    resolved workspace root is the bound repository itself (module
+    worktree, architecture or review worktree, or the request repository).
+    """
+
+    resolved_root = str(
+        workspace.get("repo_path") or workspace.get("workspace_path") or ""
+    ).strip()
+    artifact_style = (
+        str(snapshot.payload.get("execution_adapter") or "") == ARTIFACT_BUNDLE_ADAPTER
+        or not resolved_root
+        or (bool(workspace.get("v2_role_workspace")) and not workspace_source_root)
+    )
+    if not artifact_style:
+        return Path(resolved_root), None
+    fallback_root = str(workspace.get("run_dir") or "").strip()
+    if not (resolved_root or fallback_root):
+        raise BoundInputError(
+            "role workspace has no root for bound-input materialization"
+        )
+    return None, Path(resolved_root or fallback_root)
+
+
+def _attach_bound_input_read_only_overlays(
+    workspace: dict[str, Any],
+    entries: list[dict[str, Any]],
+) -> None:
+    """Project verified bound inputs into the sandbox's real read-only overlays."""
+    if not entries:
+        return
+    workspace_root = Path(
+        str(workspace.get("repo_path") or workspace.get("cwd") or "")
+    ).resolve()
+    overlay_paths = [
+        str(item).strip().replace("\\", "/")
+        for item in list(workspace.get("read_only_overlay_paths") or [])
+        if str(item).strip()
+    ]
+    for entry in entries:
+        bound_path = Path(str(entry.get("path") or "")).resolve(strict=True)
+        if not bound_path.is_relative_to(workspace_root):
+            raise BoundInputError(
+                f"bound input path {str(bound_path)!r} is outside role workspace "
+                f"{str(workspace_root)!r}"
+            )
+        overlay_paths.append(bound_path.relative_to(workspace_root).as_posix())
+    workspace["read_only_overlay_paths"] = list(dict.fromkeys(overlay_paths))
 
 
 def _workflow_skill_injections(
@@ -6289,6 +6366,90 @@ class SemanticOrchestrator:
                 await heartbeat
             await self._role_supervisor.release_process_slot()
 
+    def _bind_role_attempt_inputs(
+        self,
+        *,
+        workflow: AggregateSnapshot,
+        request: Mapping[str, Any],
+        workspace: Mapping[str, Any],
+        snapshot: AggregateSnapshot,
+        workspace_source_root: str,
+    ) -> list[dict[str, Any]]:
+        """Bind the workflow's declared inputs into one role attempt workspace.
+
+        Loads the workflow's immutable input-binding manifest from the
+        durable ``input_binding_ref`` record, materializes and verifies the
+        bound inputs for the resolved workspace (or re-verifies them in
+        place for repository-including workspaces), and returns the
+        ``bound_input`` reference entries that advertise the deterministic
+        locations to the worker.  A missing record means the workflow
+        declared no repo-relative inputs and binding is skipped; a present
+        but unreadable record, unavailable durable content, or a hash
+        mismatch raises :class:`BoundInputError` so the attempt fails
+        closed before environment preparation and process spawn.
+
+        The stage is deterministic and idempotent per manifest: retries,
+        restarts, and fenced recovery re-execute it against the same
+        immutable manifest, so every attempt of one assignment consumes
+        byte-identical bound inputs and a stale fenced attempt can only
+        rewrite identical bytes, never re-authorize different ones.
+        """
+
+        ref_value = workflow.payload.get("input_binding_ref") or request.get(
+            "input_binding_ref"
+        )
+        if not ref_value:
+            return []
+        if not isinstance(ref_value, Mapping) or not str(
+            ref_value.get("sha256") or ""
+        ).strip():
+            raise BoundInputError(
+                "workflow input_binding_ref is not a readable artifact reference"
+            )
+        if str(ref_value.get("artifact_type") or "") != INPUT_BINDING_MANIFEST_ARTIFACT:
+            raise BoundInputError(
+                "workflow input_binding_ref does not reference an InputBindingManifestArtifact"
+            )
+        try:
+            manifest = InputBindingManifest.from_payload(
+                self.service.artifacts.read_json(ref_value)
+            )
+        except BoundInputError:
+            raise
+        except Exception as exc:
+            raise BoundInputError(
+                f"workflow input-binding manifest is unreadable: {exc}"
+            ) from exc
+        if manifest.workflow_id != workflow.workflow_id:
+            raise BoundInputError(
+                "workflow input-binding manifest belongs to a different workflow: "
+                f"expected {workflow.workflow_id!r}, got {manifest.workflow_id!r}"
+            )
+        repo_root, workspace_root = _role_workspace_input_binding_roots(
+            workspace,
+            snapshot=snapshot,
+            workspace_source_root=workspace_source_root,
+        )
+        if repo_root is not None:
+            verify_repo_bound_inputs(manifest=manifest, repo_root=repo_root)
+            return bound_input_reference_entries(
+                manifest=manifest,
+                repo_root=repo_root,
+            )
+        materialize_bound_inputs(
+            manifest=manifest,
+            artifacts=self.service.artifacts,
+            destination_root=workspace_root,
+        )
+        verify_bound_inputs(
+            manifest=manifest,
+            destination_root=workspace_root,
+        )
+        return bound_input_reference_entries(
+            manifest=manifest,
+            workspace_root=workspace_root,
+        )
+
     async def _run_profile_inner(
         self,
         *,
@@ -6316,6 +6477,13 @@ class SemanticOrchestrator:
         workspace = dict(workspace_override or request.get("workspace") or {})
         if not workspace:
             workspace = {"kind": "new_project", "project_name": f"workflow-{snapshot.workflow_id}"}
+        # The repository source the Manager-prepared role workspace is
+        # cloned or copied from; captured before preparation because the
+        # prepared workspace always carries a repo_path, even when it was
+        # created empty for a project without a repository.
+        workspace_source_root = str(
+            workspace.get("repo_path") or workspace.get("cwd") or ""
+        ).strip()
         role = activation.role.value
         mode = activation.mode.value
         harness_generation = self.harness_registry.snapshot()
@@ -6359,6 +6527,17 @@ class SemanticOrchestrator:
                 "review_scratch_dir",
             ):
                 Path(str(workspace[key])).mkdir(parents=True, exist_ok=True)
+        # Bound inputs bind before sandbox environment preparation so the
+        # environment scan, the prompt pack, and the spawned process all see
+        # the same verified inputs/ tree; a binding failure fails the
+        # attempt closed with no spawn.
+        bound_input_entries = self._bind_role_attempt_inputs(
+            workflow=workflow,
+            request=request,
+            workspace=workspace,
+            snapshot=snapshot,
+            workspace_source_root=workspace_source_root,
+        )
         contract_authoring = bool(workspace.get("contract_authoring_mode"))
         bound_reference_refs = dict(reference_refs)
         if bool(workspace_policy.get("prepare", False)):
@@ -6474,7 +6653,8 @@ class SemanticOrchestrator:
                     **({"include": includes} if includes else {}),
                 }
             )
-        workspace["reference_paths"] = references
+        workspace["reference_paths"] = [*references, *bound_input_entries]
+        _attach_bound_input_read_only_overlays(workspace, bound_input_entries)
         profile_group, profile_name = canonical_role_profile_parts(profile)
         if contract_authoring and activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
