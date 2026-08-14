@@ -12,9 +12,10 @@ Start here if you want to understand or run Pal:
 1. [what_is_pal.md](what_is_pal.md)
 2. [getting_started.md](getting_started.md)
 3. [current_implementation_notes.md](current_implementation_notes.md)
-4. [pal_architecture_v1.md](pal_architecture_v1.md)
-5. [pal_runtime_stack.md](pal_runtime_stack.md)
-6. [pal_bootstrap_and_process.md](pal_bootstrap_and_process.md)
+4. [public_proof_demo.md](public_proof_demo.md)
+5. [pal_architecture_v1.md](pal_architecture_v1.md)
+6. [pal_runtime_stack.md](pal_runtime_stack.md)
+7. [pal_bootstrap_and_process.md](pal_bootstrap_and_process.md)
 
 Continue with the contract for the subsystem you are changing:
 
@@ -51,6 +52,8 @@ Continue with the contract for the subsystem you are changing:
   workflows, runtime ownership, and current platform boundaries.
 - `getting_started.md`: release installation, setup, service registration,
   connection, dependency checks, upgrades, and source builds.
+- `public_proof_demo.md`: a 3–5 minute evidence-led recording and reproduction
+  script covering channels, delegation, live restart recovery, and delivery.
 - `current_implementation_notes.md`: short current-code sync point for prompt assembly, memory projection, artifacts, tool surface, MCP, and live-state boundaries.
 - `pal_architecture_v1.md`: system-level invariants and ownership model.
 - `pal_runtime_stack.md`: module skeleton, owning boundaries, and public interfaces.

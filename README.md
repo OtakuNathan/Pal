@@ -20,6 +20,7 @@ installer, and one guided setup.
 
 - [What Pal is](./docs/what_is_pal.md)
 - [Install, upgrade, and connect](./docs/getting_started.md)
+- [Watch or reproduce the public proof demo](./docs/public_proof_demo.md)
 
 ### Design Philosophy
 
