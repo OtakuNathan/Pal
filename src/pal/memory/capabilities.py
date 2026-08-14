@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_WRITE,
     INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
@@ -13,8 +14,6 @@ from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
     MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
 )
-from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -288,7 +287,7 @@ class MemoryIntrospectionProvider:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
-        execution=DIRECT_EXTERNAL_READ,
+        execution=DIRECT_LOCAL_WRITE,
         aliases=("recall_memory",),
     )
     def recall(self, call: IntrospectionCall) -> IntrospectionResult:

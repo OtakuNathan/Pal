@@ -217,7 +217,6 @@ class LLMIntrospectionProvider:
     )
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        self.runtime.refresh_runtime_settings()
         status = self.runtime.thinking_status()
         endpoint_id = str(status.get("endpoint_id") or "").strip() or None
         snapshot = LLMThinkLevelSnapshot(
@@ -343,7 +342,6 @@ def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
 
 
 def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
-    provider.runtime.refresh_runtime_settings()
     active = provider.runtime.endpoint_resolver.primary(preferred_endpoint_id=provider.runtime.active_endpoint_id)
     if active is None:
         return LLMActiveModelSnapshot(

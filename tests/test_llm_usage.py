@@ -158,6 +158,26 @@ class LLMUsageNormalizationTests(unittest.TestCase):
 
 
 class LLMUsageLedgerTests(unittest.TestCase):
+    def test_llm_queries_do_not_refresh_or_activate_an_endpoint(self) -> None:
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(_endpoint(),)),
+            settings_repository=_Settings(),
+            endpoint_invoker=_FailingInvoker(),
+            endpoint_retry_attempts=1,
+        )
+        runtime.refresh_runtime_settings = lambda: self.fail(  # type: ignore[method-assign]
+            "read-only LLM query refreshed runtime settings"
+        )
+
+        provider = LLMIntrospectionProvider(runtime=runtime)
+        result = provider.think_level(IntrospectionCall(name="llm_think_level"))
+        active = provider.active(IntrospectionCall(name="llm_active"))
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.structured["endpoint_id"], "primary")
+        self.assertEqual(active.status, "ok")
+        self.assertEqual(active.structured["endpoint_id"], "primary")
+
     def test_runtime_ledger_and_status_expose_cache_statistics(self) -> None:
         outcome = generation_result_from_values(
             text="ok",

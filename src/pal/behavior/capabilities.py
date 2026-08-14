@@ -11,7 +11,7 @@ from pal.execution.generated_tool_models import (
     BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput,
 )
 from pal.execution.tool_facade import ToolGuidance
-from pal.execution.tool_semantics import DIRECT_LOCAL_READ, DIRECT_UNSAFE_LOCAL_WRITE
+from pal.execution.tool_semantics import DIRECT_LOCAL_WRITE, DIRECT_UNSAFE_LOCAL_WRITE
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -101,7 +101,7 @@ class BehaviorIntrospectionProvider:
         ),
         InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput,
         OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput,
-        execution=DIRECT_LOCAL_READ,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"async_required": True},
         aliases=("advise_behavior",),
     )

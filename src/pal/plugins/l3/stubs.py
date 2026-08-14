@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
-
     INDIRECT_CONTROL,
-    INDIRECT_EXTERNAL_READ,
     INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
@@ -173,7 +171,7 @@ class _L3ProviderCapabilityMixin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
         aliases=("memory_provider_recall",),
-        execution=INDIRECT_EXTERNAL_READ,
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_LOCAL_READ,
+    INDIRECT_LOCAL_WRITE,
 )
 from pal.execution.tool_facade import ToolGuidance
 
@@ -277,7 +277,7 @@ class McpManagerPluginProvider:
         ),
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
         aliases=("mcp_image_prepare",),
-        execution=INDIRECT_LOCAL_READ,
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:

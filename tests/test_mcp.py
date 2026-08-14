@@ -521,7 +521,7 @@ class McpPluginSidecarTests(unittest.TestCase):
             image_record = core.context.execution_runtime.registry_generation.indirect_aliases[
                 "mcp_image_prepare"
             ]
-            self.assertEqual(image_record.execution.effect_kind, EffectKind.LOCAL_READ)
+            self.assertEqual(image_record.execution.effect_kind, EffectKind.LOCAL_WRITE)
             self.assertEqual(image_record.execution.idempotency, Idempotency.IDEMPOTENT)
             self.assertEqual(image_record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         finally:

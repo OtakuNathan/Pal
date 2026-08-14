@@ -360,13 +360,14 @@ def _mcp_guidance(purpose: str) -> ToolGuidance:
 def _mcp_tool_execution(annotations: dict[str, Any] | None) -> ToolExecutionSemantics:
     values = dict(annotations or {})
     direct = str(values.get("invocation_mode") or "").strip() == InvocationMode.DIRECT.value
-    read_only = bool(values.get("readOnlyHint"))
-    idempotent = read_only or bool(values.get("idempotentHint"))
     return ToolExecutionSemantics(
         invocation_mode=InvocationMode.DIRECT if direct else InvocationMode.INDIRECT,
-        effect_kind=EffectKind.EXTERNAL_READ if read_only else EffectKind.EXTERNAL_WRITE,
-        idempotency=Idempotency.IDEMPOTENT if idempotent else Idempotency.NON_IDEMPOTENT,
-        retry_policy=RetryPolicy.AUTOMATIC if read_only else RetryPolicy.RECONCILE_FIRST,
+        # MCP annotations are untrusted hints, not execution guarantees. Until
+        # Pal has an explicit trusted-server contract, dynamic tools remain an
+        # exclusive external effect even when a server claims readOnlyHint.
+        effect_kind=EffectKind.EXTERNAL_WRITE,
+        idempotency=Idempotency.NON_IDEMPOTENT,
+        retry_policy=RetryPolicy.RECONCILE_FIRST,
         paging=PagingMode.SUPPORTED,
     )
 

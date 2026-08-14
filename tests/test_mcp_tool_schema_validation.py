@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from pal.core import PalCore
-from pal.execution.tool_facade import CompleteResult, FailedResult, RejectedResult
+from pal.execution.tool_facade import (
+    CompleteResult,
+    EffectKind,
+    FailedResult,
+    Idempotency,
+    RejectedResult,
+    RetryPolicy,
+)
 from pal.mcp.compiler import McpCompiler
 from pal.mcp.model import McpDiscoverySnapshot, McpToolSpec
 
@@ -142,6 +149,10 @@ def test_mcp_defaults_indirect_but_can_declare_direct() -> None:
     assert "mcp_mode_direct" in runtime.registry_generation.provider_specs
     assert "mcp_mode_indirect" not in runtime.registry_generation.provider_specs
     assert "mcp_mode_indirect" in runtime.registry_generation.indirect_aliases
+    direct_record = runtime.registry_generation.direct_aliases["mcp_mode_direct"]
+    assert direct_record.execution.effect_kind is EffectKind.EXTERNAL_WRITE
+    assert direct_record.execution.idempotency is Idempotency.NON_IDEMPOTENT
+    assert direct_record.execution.retry_policy is RetryPolicy.RECONCILE_FIRST
 
 
 @pytest.mark.parametrize(
