@@ -1,50 +1,24 @@
 from __future__ import annotations
 
-import tomllib
-from pathlib import Path
 from typing import Any
 
 from pal.shared import (
     SINGLETON_TARGET,
 )
 
-_CONFIG_PATH = Path(__file__).parent / "tool_surface.toml"
-
 
 class ToolSurface:
+    """Project registry generations into LLM tool contracts and failure surfaces.
+
+    Direct LLM tool exposure is fully determined by capability descriptor
+    ``invocation_mode`` at registry compile time: DIRECT descriptors are
+    compiled into ``provider_specs`` and exposed as function-calling tools,
+    INDIRECT descriptors stay discoverable via tool search. There is no
+    config file and no runtime refresh path for the normal-turn surface.
+    """
+
     def __init__(self, context) -> None:
         self.context = context
-        self._config = self._load_config()
-
-    @staticmethod
-    def _load_config() -> dict[str, Any]:
-        with open(_CONFIG_PATH, "rb") as f:
-            return tomllib.load(f)
-
-    def reload_config(self) -> dict[str, Any]:
-        self._config = self._load_config()
-        singletons = [
-            str(item).strip()
-            for item in list(self._config.get("singletons", {}).get("capabilities", []) or [])
-            if str(item).strip()
-        ]
-        dynamic = [
-            str(item.get("canonical_path") or "").strip()
-            for item in list(self._config.get("dynamic", []) or [])
-            if isinstance(item, dict) and str(item.get("canonical_path") or "").strip()
-        ]
-        resident = [
-            str(contract["function"]["name"])
-            for contract in self.build_llm_tool_contracts()
-            if isinstance(contract.get("function"), dict) and contract["function"].get("name")
-        ]
-        return {
-            "config_path": str(_CONFIG_PATH),
-            "singleton_count": len(singletons),
-            "dynamic_count": len(dynamic),
-            "resident_tool_count": len(resident),
-            "resident_tool_names": resident,
-        }
 
     def build_llm_tool_contracts(self) -> list[dict[str, object]]:
         generation = self.context.execution_runtime.registry_generation
@@ -68,55 +42,6 @@ class ToolSurface:
             if contract is not None:
                 contracts.append(dict(contract))
         return contracts
-
-    def select_llm_descriptors(self) -> list[Any]:
-        execution_runtime = self.context.execution_runtime
-        records = execution_runtime.compiled_capability_index.records
-        by_canonical = execution_runtime.compiled_capability_index.by_canonical
-        llm_descriptors: list[Any] = []
-        seen: set[tuple[str, str]] = set()
-
-        # -- singleton capabilities from config --
-        for canonical_path in self._config.get("singletons", {}).get("capabilities", []):
-            for record_id in by_canonical.get(canonical_path, []):
-                descriptor = records[record_id]
-                if descriptor.target_id != SINGLETON_TARGET:
-                    continue
-                key = (descriptor.canonical_path or descriptor.name, descriptor.target_id or SINGLETON_TARGET)
-                if key in seen:
-                    continue
-                seen.add(key)
-                llm_descriptors.append(descriptor)
-
-        # -- dynamic capabilities from config --
-        for entry in self._config.get("dynamic", []):
-            canonical_path = entry.get("canonical_path", "")
-            if not canonical_path:
-                continue
-            for record_id in by_canonical.get(canonical_path, []):
-                descriptor = records[record_id]
-                if not descriptor.metadata.get("target_argument"):
-                    continue
-                key = (descriptor.canonical_path or descriptor.name, SINGLETON_TARGET)
-                if key in seen:
-                    continue
-                seen.add(key)
-                llm_descriptors.append(descriptor)
-                break
-
-        return llm_descriptors
-
-    def _resolve_dynamic_target(self, provider_setting: str) -> str:
-        if provider_setting == "memory":
-            return self._get_active_l3_provider_id()
-        return self._get_setting(provider_setting)
-
-    def _get_active_l3_provider_id(self) -> str:
-        try:
-            memory_service = self.context.require_port("memory:memory")
-        except KeyError:
-            return ""
-        return str(memory_service.l3_selector.active_provider_id or "").strip()
 
     def _get_setting(self, key: str) -> str:
         try:

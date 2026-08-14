@@ -50,7 +50,6 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"pal.core" = ["tool_surface.toml"]
 "pal.lsp" = ["server_templates/*.toml"]
 "pal.mcp" = ["templates/*.toml"]
 "pal.bunshin" = [

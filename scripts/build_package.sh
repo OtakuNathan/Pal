@@ -52,7 +52,6 @@ if [[ -z "${websocket_provider_wheel_path:-}" || ! -f "$websocket_provider_wheel
 fi
 
 required_wheel_paths=(
-  "pal/core/tool_surface.toml"
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"

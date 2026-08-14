@@ -581,7 +581,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn(old_app_alias, content)
             self.assertNotIn(old_migration_hook, content)
         for relative_path in (
-            "src/pal/core/tool_surface.toml",
             "src/pal/execution/generated_tool_models.py",
             "src/pal/bunshin/profiles.py",
         ):
@@ -2436,6 +2435,26 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertIn("memory_active_provider", [item["alias"] for item in result.structured["hits"]])
         self.assertNotIn("memory_active_provider", tool_names)
+
+    def test_llm_tool_contracts_come_solely_from_direct_descriptors(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        register_memory_with_core(core.context, memory_service)
+        mock_l3 = MockL3Plugin()
+        register_l3_with_core(core.context, mock_l3)
+        memory_service.l3_selector.active_provider_id = mock_l3.provider_id
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("memory")
+        core.publish_module_capabilities(mock_l3.module_id)
+
+        generation = core.context.execution_runtime.registry_generation
+        self.assertTrue(generation.direct_aliases)
+        self.assertTrue(generation.indirect_aliases)
+
+        contract_names = {item["function"]["name"] for item in core.tool_surface.build_llm_tool_contracts()}
+        self.assertEqual(contract_names, set(generation.direct_aliases))
+        self.assertFalse(contract_names & set(generation.indirect_aliases))
 
     def test_tool_result_page_is_resident_llm_tool(self) -> None:
         core = PalCore()

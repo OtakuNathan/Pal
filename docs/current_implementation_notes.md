@@ -62,23 +62,9 @@ Rules:
 
 ## Tool Surface
 
-The direct LLM tool surface is configured by `src/pal/core/tool_surface.toml`.
+The direct LLM tool surface is fully determined by capability descriptor `invocation_mode` at registry compile time: `DIRECT` descriptors are exposed to the LLM as function-calling tools, `INDIRECT` descriptors stay discoverable via `tool_search` and invocable via `tool_call`. There is no tool-surface config file and no `/refresh_tool_surface` command; changing exposure is a descriptor change in the owning module plus a restart.
 
-Resident artifact tools are intentionally limited to:
-
-- `artifact_info`
-- `artifact_read`
-
-Other artifact tools remain discoverable.
-
-Resident file tools are available for ordinary UTF-8 source/text editing:
-
-- `file_read`
-- `file_edit`
-- `file_write`
-- `file_state`
-
-`shell` remains resident, but it is not the default file read/write/edit path. Dedicated Pal capabilities should be preferred for reading, writing, searching, inspecting, or editing files; shell is for commands, tests, builds, scripts, and cases where no dedicated capability is sufficient.
+Dedicated Pal capabilities should be preferred over `shell` for reading, writing, searching, inspecting, or editing files; shell is for commands, tests, builds, scripts, and cases where no dedicated capability is sufficient.
 
 MCP-projected tools and prompt render capabilities are not resident by default.
 
@@ -97,8 +83,6 @@ Telegram command text may arrive with a bot mention suffix, such as `/control@Pa
 - the inline control panel as the `Refresh LLM` button
 
 The inline button uses the generic `control.command.run` interaction action, which dispatches the same command handler as the slash command. Refreshing LLM endpoints changes routing for future turns only; it is not a mid-turn model switch.
-
-`/refresh_tool_surface` is a built-in control command. It bypasses LLM reasoning and asks PalCore to reload `src/pal/core/tool_surface.toml` for future turns. It is exposed in the same places as `/refresh_llm_endpoint`, with the inline control panel label `Refresh Tools`.
 
 Channel endpoints render platform-specific control UX. Telegram owns command menu publication, inline keyboard rendering, callback token mapping, and message editing. PalCore and Control receive typed interaction results, not Telegram callback payloads.
 

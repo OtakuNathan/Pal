@@ -7,7 +7,7 @@ The current runtime uses `Execution` as the Pal-native capability registry, disc
 Current boundaries:
 
 - `Execution` publishes and invokes Pal-native `CapabilityDescriptor` / bound action projections.
-- Direct LLM tool exposure is selected by `src/pal/core/tool_surface.toml`; capability availability remains a live runtime fact.
+- Direct LLM tool exposure is determined by each capability descriptor's `invocation_mode` (`DIRECT` resident, `INDIRECT` discovery-only) at registry compile time; capability availability remains a live runtime fact.
 - MCP does not enter `Execution` as protocol detail. The MCP manager plugin compiles external MCP tools/prompts into Pal-native capabilities and declared skills, then publishes that projection.
 - Artifact capabilities accept `artifact_id`; local artifact paths may appear only as safe metadata for capabilities that explicitly accept paths.
 - External tools, including MCP-projected tools, must still pass through Pal execution, approval, and risk policy.

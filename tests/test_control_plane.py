@@ -402,22 +402,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.target_scope, "runtime")
         self.assertIn("/refresh_llm_endpoint", plane.render_panel_text())
 
-    def test_refresh_tool_surface_slash_command_bypasses_llm(self) -> None:
-        plane = ControlPlane()
-        action = plane.parse_event(
-            ControlEvent(
-                event_kind=EventKind.SLASH_COMMAND,
-                source_kind=SourceKind.CHANNEL,
-                payload={"text": "/refresh_tool_surface"},
-            )
-        )
-
-        self.assertIsNotNone(action)
-        assert action is not None
-        self.assertEqual(action.action_kind, "refresh_tool_surface")
-        self.assertEqual(action.target_scope, "runtime")
-        self.assertIn("/refresh_tool_surface", plane.render_panel_text())
-
     def test_telegram_bot_mention_suffix_is_ignored_for_slash_commands(self) -> None:
         plane = ControlPlane()
         action = plane.parse_event(
@@ -1078,33 +1062,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Unknown enabled model endpoint: missing.", self.endpoint.outbox[-1].text)
         self.assertIn("Available endpoints: stub, backup", self.endpoint.outbox[-1].text)
 
-    async def test_refresh_tool_surface_control_action_updates_runtime_directly(self) -> None:
-        calls = []
-
-        def reload_config() -> dict[str, object]:
-            calls.append("reload")
-            return {
-                "singleton_count": 3,
-                "dynamic_count": 1,
-                "resident_tool_count": 2,
-                "resident_tool_names": ["search_tools", "call_tool"],
-            }
-
-        self.core.tool_surface.reload_config = reload_config  # type: ignore[method-assign]
-
-        await self.core.handle_control_action_async(
-            ControlAction(
-                action_kind="refresh_tool_surface",
-                target_scope="runtime",
-                route=self.route,
-            )
-        )
-
-        self.assertEqual(calls, ["reload"])
-        self.assertIn("Tool surface refreshed.", self.endpoint.outbox[-1].text)
-        self.assertIn("Resident tools for future turns: 2", self.endpoint.outbox[-1].text)
-        self.assertIn("search_tools, call_tool", self.endpoint.outbox[-1].text)
-
     async def test_slash_command_with_telegram_bot_suffix_runs_end_to_end(self) -> None:
         self.core.bind_async_wakeup_sources()
         self.endpoint.accept_raw(
@@ -1297,7 +1254,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.get("command") == "control" for item in commands))
         self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
-        self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
     async def test_generic_channel_endpoint_handles_interaction_buttons_without_telegram(self) -> None:
         spec = InteractionMessageSpec(
@@ -1362,7 +1318,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         commands = list(catalog_statuses[-1][1].get("commands") or [])
         self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
-        self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
     async def test_channel_replace_replays_cached_control_catalog_when_started(self) -> None:
         await self.channel_runtime.start_async()
@@ -1380,7 +1335,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         commands = list(catalog_statuses[-1][1].get("commands") or [])
         self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
-        self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
     async def test_channel_replace_transfers_pending_reply_ownership(self) -> None:
         handle = self.endpoint.build_response_handle(
@@ -1663,14 +1617,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 button.label == "Refresh LLM"
                 and button.action_key == "control.command.run"
                 and button.action_args == {"command_name": "refresh_llm_endpoint"}
-                for button in flattened
-            )
-        )
-        self.assertTrue(
-            any(
-                button.label == "Refresh Tools"
-                and button.action_key == "control.command.run"
-                and button.action_args == {"command_name": "refresh_tool_surface"}
                 for button in flattened
             )
         )

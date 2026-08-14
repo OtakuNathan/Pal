@@ -472,19 +472,6 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
-                name="refresh_tool_surface",
-                handler=self._handle_refresh_tool_surface,
-                aliases=("tool_surface_refresh", "refresh_tools"),
-                description="Reload resident LLM tool surface config from disk for future turns.",
-                usage="/refresh_tool_surface",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Refresh Tools",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
                 name="reset",
                 handler=self._handle_reset,
                 description="Open memory reset confirmation for this scope.",
@@ -617,13 +604,6 @@ class ControlPlane(ControlPlanePort):
     def _handle_refresh_llm_endpoint(self, invocation: ControlCommandInvocation) -> ControlAction:
         return ControlAction(
             action_kind="refresh_llm_endpoint",
-            target_scope="runtime",
-            route=invocation.route,
-        )
-
-    def _handle_refresh_tool_surface(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="refresh_tool_surface",
             target_scope="runtime",
             route=invocation.route,
         )

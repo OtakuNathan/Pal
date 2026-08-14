@@ -5,7 +5,6 @@ from importlib import resources
 
 def test_required_runtime_package_data_is_available() -> None:
     required_files = (
-        ("pal.core", "tool_surface.toml"),
         ("pal.lsp", "server_templates/clangd.toml"),
         ("pal.lsp", "server_templates/csharp.toml"),
         ("pal.lsp", "server_templates/css.toml"),

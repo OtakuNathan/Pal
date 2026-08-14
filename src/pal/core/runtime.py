@@ -874,9 +874,6 @@ class PalCore:
             if action.action_kind == "refresh_llm_endpoint":
                 await self._handle_refresh_llm_endpoint_async(action)
                 return
-            if action.action_kind == "refresh_tool_surface":
-                await self._handle_refresh_tool_surface_async(action)
-                return
             if action.action_kind == "route_reply":
                 await self._handle_route_reply_async(action)
                 return
@@ -1178,30 +1175,6 @@ class PalCore:
         if endpoint_id and label != endpoint_id:
             return f"{label} ({endpoint_id})"
         return label or endpoint_id
-
-    async def _handle_refresh_tool_surface_async(self, action: ControlAction) -> None:
-        refresh = getattr(self.tool_surface, "reload_config", None)
-        if not callable(refresh):
-            await self._complete_action_reply_async(action, "Tool surface refresh is unavailable.")
-            return
-        try:
-            payload = refresh()
-        except Exception as exc:
-            await self._complete_action_reply_async(action, f"Tool surface refresh failed: {exc}")
-            return
-
-        resident_names = [str(item).strip() for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
-        preview = ", ".join(resident_names[:12]) if resident_names else "-"
-        if len(resident_names) > 12:
-            preview = f"{preview}, ..."
-        lines = [
-            "Tool surface refreshed.",
-            f"Resident tools for future turns: {payload.get('resident_tool_count', len(resident_names))}",
-            f"Singleton config entries: {payload.get('singleton_count', '-')}",
-            f"Dynamic config entries: {payload.get('dynamic_count', '-')}",
-            f"Tools: {preview}",
-        ]
-        await self._complete_action_reply_async(action, "\n".join(lines))
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         normalized = str(turn_id or "").strip()
@@ -1821,9 +1794,6 @@ class PalCore:
 
     def _build_tool_contracts_from_descriptors(self, descriptors: list[Any]) -> list[dict[str, object]]:
         return self.tool_surface.build_tool_contracts_from_descriptors(descriptors)
-
-    def _select_llm_descriptors(self) -> list:
-        return self.tool_surface.select_llm_descriptors()
 
     def _select_failure_descriptors(self, signal: FailureSignal) -> list[Any]:
         return self.tool_surface.select_failure_descriptors(signal)
