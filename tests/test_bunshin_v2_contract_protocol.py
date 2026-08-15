@@ -170,6 +170,172 @@ class ContractProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot depend on itself"):
             validate_contract_payload(payload, definition=definition)
 
+    def test_contract_graph_reports_all_independent_cycles_at_once(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile("general.v1")
+        payload = copy.deepcopy(definition.example)
+        template = payload["modules"]["report"]
+        for name in ("alpha", "beta", "gamma", "delta"):
+            module = copy.deepcopy(template)
+            module["responsibility"] = f"Own {name}."
+            module["provides"] = [f"{name}_output"]
+            module["dependencies"] = {}
+            payload["modules"][name] = module
+        payload["modules"]["alpha"]["dependencies"] = {
+            "beta": {
+                "consumes": ["beta_output"],
+                "purpose": "first cycle",
+                "handoff": "beta to alpha",
+            }
+        }
+        payload["modules"]["beta"]["dependencies"] = {
+            "alpha": {
+                "consumes": ["alpha_output"],
+                "purpose": "first cycle",
+                "handoff": "alpha to beta",
+            }
+        }
+        payload["modules"]["gamma"]["dependencies"] = {
+            "delta": {
+                "consumes": ["delta_output"],
+                "purpose": "second cycle",
+                "handoff": "delta to gamma",
+            }
+        }
+        payload["modules"]["delta"]["dependencies"] = {
+            "gamma": {
+                "consumes": ["gamma_output"],
+                "purpose": "second cycle",
+                "handoff": "gamma to delta",
+            }
+        }
+        payload["modules"]["report"]["dependencies"] = {
+            "alpha": {
+                "consumes": ["alpha_output"],
+                "purpose": "deliver first component",
+                "handoff": "alpha to report",
+            },
+            "gamma": {
+                "consumes": ["gamma_output"],
+                "purpose": "deliver second component",
+                "handoff": "gamma to report",
+            },
+        }
+        payload["scenarios"]["deliver"]["modules"] = [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "report",
+        ]
+
+        with self.assertRaises(ValueError) as raised:
+            validate_contract_payload(payload, definition=definition)
+
+        detail = str(raised.exception)
+        self.assertIn(
+            "contract module dependency cycle includes: alpha, beta",
+            detail,
+        )
+        self.assertIn(
+            "contract module dependency cycle includes: delta, gamma",
+            detail,
+        )
+
+    def test_contract_graph_reports_all_scenario_structure_errors_at_once(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        payload["modules"]["frame_shape"] = {
+            "responsibility": "Declare the immutable frame shape.",
+            "execution": "contract_only",
+            "provides": ["frame_shape"],
+            "dependencies": {},
+            "definition": {
+                "behavior_kind": "stateless",
+                "contract": {
+                    "inputs": {},
+                    "outputs": {
+                        "frame_shape": {
+                            "interface": "Frame",
+                            "semantics": "Immutable decoded frame value.",
+                        }
+                    },
+                    "errors": [],
+                    "invariants": ["Frame values own their bytes."],
+                },
+                "ownership": ["Frame values own their bytes."],
+                "lifecycle": {
+                    "creation": "Constructed from decoded bytes.",
+                    "operation": "Read-only value access.",
+                    "shutdown": "No explicit shutdown.",
+                    "failure": "Construction rejects invalid bytes.",
+                    "cleanup": "Owned bytes are released.",
+                },
+                "state_machine": None,
+                "paths": {
+                    "contract_mode": "file_frozen",
+                    "contract_paths": ["include/frame.hpp"],
+                    "implementation_scopes": [],
+                    "reference_only": [],
+                },
+            },
+        }
+        first = payload["scenarios"]["decode_one_frame"]
+        first["modules"] = ["delivery", "frame_shape"]
+        payload["scenarios"]["decode_another_frame"] = {
+            **copy.deepcopy(first),
+            "modules": ["delivery"],
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            validate_contract_payload(payload, definition=definition)
+
+        detail = str(raised.exception)
+        self.assertIn("contract graph validation failed with 3 error(s)", detail)
+        self.assertIn(
+            "scenario decode_one_frame references non-produced modules: frame_shape",
+            detail,
+        )
+        self.assertIn(
+            "scenario decode_one_frame omits produced dependencies: decoder",
+            detail,
+        )
+        self.assertIn(
+            "scenario decode_another_frame omits produced dependencies: decoder",
+            detail,
+        )
+
+    def test_scenario_reports_full_transitive_dependency_closure(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        source = copy.deepcopy(payload["modules"]["decoder"])
+        source["responsibility"] = "Own the encoded input source."
+        source["provides"] = ["encoded_chunks"]
+        source["definition"]["contract"]["outputs"] = {
+            "encoded_chunks": {
+                "interface": "Source::read",
+                "semantics": "Encoded chunks in stream order.",
+            }
+        }
+        payload["modules"]["source"] = source
+        payload["modules"]["decoder"]["dependencies"] = {
+            "source": {
+                "consumes": ["encoded_chunks"],
+                "purpose": "Decode bytes supplied by the source.",
+                "handoff": "Consume ordered chunks through Source::read.",
+            }
+        }
+        payload["scenarios"]["decode_one_frame"]["modules"] = ["delivery"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario decode_one_frame omits produced dependencies: decoder, source",
+        ):
+            validate_contract_payload(payload, definition=definition)
+
     def test_yaml_loader_rejects_aliases_and_duplicate_keys(self) -> None:
         definition = ArchitectureTemplateCompiler().compile("general.v1")
         aliased = self.root / "aliased.yaml"

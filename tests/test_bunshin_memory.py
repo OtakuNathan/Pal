@@ -135,6 +135,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         self.assertEqual(efficiency.title, "Tool Efficiency")
         self.assertLess(efficiency.priority, 20)
+        self.assertIn("govern which work to do, not whether independent tool RPCs", efficiency.content)
         self.assertIn("Batch independent tool calls in one response", efficiency.content)
         self.assertIn("do not serialize every file or field", efficiency.content)
         self.assertIn("If read_file reports unchanged content", efficiency.content)
@@ -775,6 +776,49 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             )
         )
         self.assertEqual(state.llm_round_count, 2)
+
+    def test_completed_round_reports_current_tool_batch_size(self) -> None:
+        events: list[dict[str, object]] = []
+
+        async def capture_event(event: dict[str, object]) -> None:
+            events.append(event)
+
+        runner = self._runner()
+        runner.write_event = capture_event
+        service, _provider = self._memory_service()
+        state = BunshinAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=service,
+            memory_candidate_sink=SimpleNamespace(),
+            llm_round_count=3,
+            tool_call_count=17,
+        )
+
+        asyncio.run(
+            runner._postprocess_bunshin_llm_round(
+                state,
+                EffectResult(
+                    status=RuntimeStatus.OK,
+                    payload=generation_result_from_values(
+                        tool_calls=[
+                            new_tool_call(name="read_file", args={"file_path": "a.py"}),
+                            new_tool_call(name="read_file", args={"file_path": "b.py"}),
+                        ],
+                        finish_reason="tool_calls",
+                    ),
+                ),
+            )
+        )
+
+        completed = [
+            event
+            for event in events
+            if event["event_kind"] == "progress"
+            and event["payload"]["phase"] == "llm_round_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["payload"]["tool_call_count"], 2)
+        self.assertEqual(state.tool_call_count, 17)
 
     def test_truncated_bunshin_round_is_discarded_and_retried_with_bounded_tool_note(self) -> None:
         runner = self._runner()

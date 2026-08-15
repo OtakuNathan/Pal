@@ -907,6 +907,8 @@ class BunshinManager:
                     state.status = "exiting"
             state.last_event = item
             state.last_event_at = str(item.get("created_at") or utc_now())
+        kind = str(item.get("event_kind") or "")
+        event_payload = dict(item.get("payload") or {})
         debug_enabled = (
             bool(dict(state.pack.metadata or {}).get("prompt_log_enabled"))
             if state is not None
@@ -914,9 +916,29 @@ class BunshinManager:
         )
         if debug_enabled:
             self.v2_service.repository.record_worker_event(item)
-        kind = str(item.get("event_kind") or "")
+        elif (
+            kind == "progress"
+            and str(event_payload.get("phase") or "")
+            == "llm_round_completed"
+        ):
+            # Efficiency accounting is ordinary operational telemetry, not
+            # prompt logging. Persist only the non-content round fields when
+            # debug history is disabled so batching metrics remain available
+            # without retaining prompts, previews, tool arguments, or routes.
+            self.v2_service.repository.record_worker_event(
+                {
+                    **item,
+                    "payload": {
+                        "phase": "llm_round_completed",
+                        "round": max(0, int(event_payload.get("round") or 0)),
+                        "tool_call_count": max(
+                            0,
+                            int(event_payload.get("tool_call_count") or 0),
+                        ),
+                    },
+                }
+            )
         if kind in {"approval_requested", "clarification_requested", "terminal"}:
-            event_payload = dict(item.get("payload") or {})
             self._queue_task_delivery_event(
                 item,
                 dedup_key="|".join(

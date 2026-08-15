@@ -999,6 +999,8 @@ class BunshinSandboxTests(unittest.TestCase):
                 prompt.index("## Immutable Inputs"),
             )
             self.assertIn("Efficiency means eliminating duplicate work, never skipping decisive evidence", prompt)
+            self.assertIn("Use the role playbook as the required checklist spine", prompt)
+            self.assertIn("initialize the smallest task-specific checklist", prompt)
             self.assertIn(
                 "Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged",
                 prompt,

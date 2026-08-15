@@ -1667,7 +1667,7 @@ class BunshinRunner:
             ),
             cost=max(0.0, float(getattr(outcome, "cost", 0.0) or 0.0)),
             usage_reported=bool(getattr(outcome, "usage_reported", False)),
-            tool_call_count=state.tool_call_count,
+            tool_call_count=len(list(getattr(outcome, "tool_calls", []) or [])),
             tool_calls=[_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
             text_preview=_preview_text(str(getattr(outcome, "text", "") or "")),
         )

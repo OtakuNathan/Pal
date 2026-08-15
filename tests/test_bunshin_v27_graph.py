@@ -381,13 +381,17 @@ class GraphCompilerTests(unittest.TestCase):
         payload["modules"]["unused"] = copy.deepcopy(
             payload["modules"]["report"]
         )
-        document = validate_contract_payload(payload, definition=definition)
+        with self.assertRaisesRegex(
+            ValueError,
+            "every executable module must reach",
+        ):
+            validate_contract_payload(payload, definition=definition)
         with self.assertRaisesRegex(
             GraphCompilationError,
             "every executable node must reach",
         ):
             GraphCompiler().compile(
-                document,
+                payload,
                 graph_id="report",
                 generation=1,
                 bindings=_bindings("artifact_bundle.v2"),

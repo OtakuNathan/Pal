@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
 import subprocess
 
 from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
+from pal.bunshin.v2.contract_protocol import software_contract_projection
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.v2.graph_protocol import graph_ir_from_mapping
 from pal.bunshin.v2.git_scope import scoped_role_git_read_command
@@ -511,6 +513,114 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             expect_build_authority=False,
         )
 
+    def test_software_contract_submit_rejects_workspace_errors_before_receipt(
+        self,
+    ) -> None:
+        binding_ref = self.service.catalog.publish_family_binding(
+            "software_engineering.v2_architect"
+        )
+        assignment, attempt, token, fence, resource = (
+            self._create_architect_assignment(binding_ref.sha256)
+        )
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        context = {
+            "workflow_id": "workflow-router",
+            "invocation_id": attempt,
+            "lease_resource_key": resource,
+            "fencing_token": fence,
+            "role": "architect",
+            "mode": "author",
+            "draft_kind": "contract",
+            "input_fingerprint": "architecture-input",
+            "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+        }
+
+        def architect_call(method: str, **params):
+            return self.gateway.call(
+                method,
+                {"access_token": token, **params},
+            )
+
+        architect_call("draft_read", context=context, seed={})
+        submission = {
+            "source": "architect.yaml",
+            "architecture": definition.example,
+        }
+        projected = software_contract_projection(definition.example)
+        contract_path = str(
+            next(iter(projected["modules"].values()))["paths"][
+                "contract_paths"
+            ][0]
+        )
+        contract_file = self.workspace / contract_path
+        original_contract = contract_file.read_text(encoding="utf-8")
+        contract_file.unlink()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "contract (entrypoint|path) does not exist",
+        ):
+            architect_call(
+                "draft_submit",
+                context=context,
+                expected_version=0,
+                submission=submission,
+            )
+        self.assertEqual(
+            self.service.repository.read_role_assignment(assignment)["state"],
+            "running",
+        )
+        self.assertEqual(
+            architect_call("draft_read", context=context, seed={})["snapshot"][
+                "status"
+            ],
+            "active",
+        )
+
+        contract_file.write_text(original_contract, encoding="utf-8")
+        duplicate_owner = copy.deepcopy(definition.example)
+        duplicate_owner["modules"]["delivery"]["definition"]["paths"][
+            "contract_paths"
+        ] = [contract_path]
+        with self.assertRaisesRegex(
+            ValueError,
+            "contract path .* is owned by both",
+        ):
+            architect_call(
+                "draft_submit",
+                context=context,
+                expected_version=0,
+                submission={
+                    "source": "architect.yaml",
+                    "architecture": duplicate_owner,
+                },
+            )
+
+        private_file = self.workspace / "src" / "architect_private.py"
+        private_file.write_text("PRIVATE = True\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValueError,
+            "outside declared contract or implementation scopes",
+        ):
+            architect_call(
+                "draft_submit",
+                context=context,
+                expected_version=0,
+                submission=submission,
+            )
+        self.assertEqual(
+            self.service.repository.read_role_assignment(assignment)["state"],
+            "running",
+        )
+        self.assertEqual(
+            architect_call("draft_read", context=context, seed={})["snapshot"][
+                "status"
+            ],
+            "active",
+        )
+
     def _assert_manager_compiles_architecture_generation(
         self,
         *,
@@ -881,6 +991,56 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         self,
         family_binding_sha: str,
     ) -> tuple[str, str, str, int, str]:
+        # Mirror the real Manager hand-off: a software Architect starts from a
+        # pinned Git base plus immutable workspace/task snapshot references.
+        software_example = software_contract_projection(
+            ArchitectureTemplateCompiler().compile(
+                "software_engineering.v1"
+            ).example
+        )
+        for module in dict(software_example.get("modules") or {}).values():
+            paths = dict(dict(module).get("paths") or {})
+            for relative in [
+                *list(paths.get("contract_paths") or []),
+                *list(paths.get("reference_only") or []),
+            ]:
+                target = self.workspace / str(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    target.write_text("// architecture contract\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=self.workspace,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.workspace,
+            check=True,
+        )
+        subprocess.run(["git", "add", "-A"], cwd=self.workspace, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "architecture base"],
+            cwd=self.workspace,
+            check=True,
+        )
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        requirements_ref = self.service.task_ledger.publish(
+            title="Gateway architecture",
+            task_spec={"objective": "Compile the architecture"},
+            actor="test",
+            source_channel="test",
+        )
+        workspace_snapshot_ref = self.service.artifacts.put_json(
+            {"original_head": base_sha},
+            artifact_type="WorkspaceSnapshotArtifact",
+        )
         architecture_revision_id = "architecture-router-revision-2"
         self.service.repository.dispatch(
             ActionEnvelope(
@@ -890,7 +1050,13 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 aggregate_id=architecture_revision_id,
                 actor="test",
                 expected_version=0,
-                payload={"revision_number": 2},
+                payload={
+                    "revision_number": 2,
+                    "architecture_workspace_path": str(self.workspace),
+                    "architecture_base_sha": base_sha,
+                    "requirements_ref": requirements_ref.to_dict(),
+                    "workspace_snapshot_ref": workspace_snapshot_ref.to_dict(),
+                },
             )
         )
         session_id = "session-architect"

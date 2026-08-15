@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
+from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, BunshinRoleGatewayClient
 from pal.bunshin.v2.architecture_templates import (
     compiled_architecture_definition_from_mapping,
@@ -16,6 +17,7 @@ from pal.bunshin.v2.artifacts import ArtifactRef
 from pal.bunshin.v2.contracts import AggregateType
 from pal.bunshin.v2.contract_protocol import (
     ARCHITECT_FILENAME,
+    software_contract_projection,
     validate_contract_payload,
 )
 from pal.bunshin.v2.graph_compiler import (
@@ -26,8 +28,13 @@ from pal.bunshin.v2.graph_compiler import (
 from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.v2.graph_protocol import GraphSourceMap, RoleBinding
 from pal.bunshin.v2.git_scope import scoped_role_git_read_command
-from pal.bunshin.v2.role_contracts import validate_family_binding_payload
+from pal.bunshin.v2.role_contracts import (
+    family_execution_adapter,
+    validate_family_binding_payload,
+)
 from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.v2.skeleton import preflight_architecture_workspace_submission
+from pal.bunshin.v2.task_ledger import validate_task_ledger
 from pal.bunshin.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftSnapshot,
@@ -546,6 +553,56 @@ class RoleAssignmentGateway:
             dict(architecture),
             definition=definition,
         )
+
+        if (
+            family_execution_adapter(binding.get("execution_adapter"))
+            == SOFTWARE_GIT_ADAPTER
+        ):
+            revision = self.repository.read_snapshot(
+                AggregateType.ARCHITECTURE_REVISION,
+                str(assignment["aggregate_id"]),
+            )
+            if revision is None:
+                raise ValueError("architecture revision is unavailable")
+            workspace_root = Path(
+                str(revision.payload.get("architecture_workspace_path") or "")
+            )
+            base_sha = str(
+                revision.payload.get("architecture_base_sha") or ""
+            ).strip()
+            requirements_ref = dict(revision.payload.get("requirements_ref") or {})
+            workspace_snapshot_ref = dict(
+                revision.payload.get("workspace_snapshot_ref") or {}
+            )
+            if (
+                not workspace_root.is_dir()
+                or not base_sha
+                or not requirements_ref.get("sha256")
+                or not workspace_snapshot_ref.get("sha256")
+            ):
+                raise ValueError(
+                    "architecture workspace preflight state is incomplete"
+                )
+            requirements = validate_task_ledger(
+                self.service.artifacts.read_json(requirements_ref)
+            )
+            workspace_snapshot = self.service.artifacts.read_json(
+                workspace_snapshot_ref
+            )
+            validation, _ = (
+                preflight_architecture_workspace_submission(
+                    software_contract_projection(
+                        document.model_dump(mode="python")
+                    ),
+                    requirements_payload=requirements,
+                    workspace_root=workspace_root,
+                    base_sha=base_sha,
+                    original_head=str(
+                        dict(workspace_snapshot).get("original_head") or ""
+                    ),
+                )
+            )
+            validation.raise_for_errors()
 
         prompt_pack = self._authenticated_prompt_pack(authenticated)
         workspace = {

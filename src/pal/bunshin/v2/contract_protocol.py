@@ -371,20 +371,19 @@ def _validate_contract_graph(
     *,
     specialization_id: str,
 ) -> None:
+    errors: list[str] = []
     if not document.requirements:
-        raise ValueError("contract requires at least one requirement")
+        errors.append("contract requires at least one requirement")
     if not document.modules:
-        raise ValueError("contract requires at least one module")
+        errors.append("contract requires at least one module")
     if not document.scenarios:
-        raise ValueError("contract requires at least one scenario")
+        errors.append("contract requires at least one scenario")
     module_names = set(document.modules)
     requirement_names = set(document.requirements)
     if document.graph.sink not in module_names:
-        raise ValueError(
-            f"graph sink is unknown: {document.graph.sink}"
-        )
-    if document.modules[document.graph.sink].execution != "produce":
-        raise ValueError("graph sink must be a produced module")
+        errors.append(f"graph sink is unknown: {document.graph.sink}")
+    elif document.modules[document.graph.sink].execution != "produce":
+        errors.append("graph sink must be a produced module")
     for collection_name, names in (
         ("requirement", requirement_names),
         ("module", module_names),
@@ -392,101 +391,190 @@ def _validate_contract_graph(
     ):
         invalid = sorted(name for name in names if not _SEMANTIC_NAME.fullmatch(name))
         if invalid:
-            raise ValueError(
+            errors.append(
                 f"{collection_name} names must be snake_case: "
                 + ", ".join(invalid)
             )
     for name, requirement in document.requirements.items():
         if requirement.owner not in module_names:
-            raise ValueError(
+            errors.append(
                 f"requirement {name} owner is unknown: {requirement.owner}"
             )
     dependencies: dict[str, set[str]] = {}
     for name, module in document.modules.items():
         if module.execution not in {"produce", "contract_only"}:
-            raise ValueError(
+            errors.append(
                 f"module {name} execution must be produce or contract_only"
             )
         if len(set(module.provides)) != len(module.provides):
-            raise ValueError(f"module {name} provides duplicate outputs")
+            errors.append(f"module {name} provides duplicate outputs")
         dependencies[name] = set(module.dependencies)
         for provider, dependency in module.dependencies.items():
             if provider not in module_names:
-                raise ValueError(
+                errors.append(
                     f"module {name} depends on unknown module {provider}"
                 )
+                continue
             if provider == name:
-                raise ValueError(f"module {name} cannot depend on itself")
+                errors.append(f"module {name} cannot depend on itself")
+                continue
             unknown_outputs = set(dependency.consumes) - set(
                 document.modules[provider].provides
             )
             if unknown_outputs:
-                raise ValueError(
+                errors.append(
                     f"module {name} consumes undeclared outputs from {provider}: "
                     + ", ".join(sorted(unknown_outputs))
                 )
         if specialization_id == "software_engineering.v1":
-            _validate_software_module(name, module)
-    _assert_acyclic(dependencies)
+            errors.extend(_software_module_errors(name, module))
+    valid_dependencies = {
+        name: {
+            provider
+            for provider in providers
+            if provider in module_names and provider != name
+        }
+        for name, providers in dependencies.items()
+    }
+    errors.extend(_dependency_cycle_errors(valid_dependencies))
+
+    produced_names = {
+        name
+        for name, module in document.modules.items()
+        if module.execution == "produce"
+    }
+    produced_dependencies = {
+        name: {
+            provider
+            for provider in valid_dependencies.get(name, set())
+            if provider in produced_names
+        }
+        for name in produced_names
+    }
+    sink = document.graph.sink
+    if sink in produced_names:
+        sink_consumers = sorted(
+            name
+            for name, providers in produced_dependencies.items()
+            if sink in providers
+        )
+        if sink_consumers:
+            errors.append(
+                "the declared sink cannot feed another executable module: "
+                + ", ".join(sink_consumers)
+            )
+        consumers: dict[str, set[str]] = {
+            name: set() for name in produced_names
+        }
+        for consumer, providers in produced_dependencies.items():
+            for provider in providers:
+                consumers[provider].add(consumer)
+
+        def reaches_sink(start: str) -> bool:
+            pending = [start]
+            visited: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current == sink:
+                    return True
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(consumers.get(current, set()) - visited)
+            return False
+
+        unreachable = sorted(
+            name
+            for name in produced_names
+            if name != sink and not reaches_sink(name)
+        )
+        if unreachable:
+            errors.append(
+                "every executable module must reach the declared sink; "
+                "unconnected modules: " + ", ".join(unreachable)
+            )
+
     covered_requirements: set[str] = set()
     for name, scenario in document.scenarios.items():
         unknown_modules = set(scenario.modules) - module_names
         if unknown_modules:
-            raise ValueError(
+            errors.append(
                 f"scenario {name} references unknown modules: "
                 + ", ".join(sorted(unknown_modules))
+            )
+        non_produced_modules = {
+            module_name
+            for module_name in scenario.modules
+            if module_name in module_names and module_name not in produced_names
+        }
+        if non_produced_modules:
+            errors.append(
+                f"scenario {name} references non-produced modules: "
+                + ", ".join(sorted(non_produced_modules))
             )
         unknown_requirements = (
             set(scenario.requirement_refs) - requirement_names
         )
         if unknown_requirements:
-            raise ValueError(
+            errors.append(
                 f"scenario {name} references unknown requirements: "
                 + ", ".join(sorted(unknown_requirements))
             )
         covered_requirements.update(scenario.requirement_refs)
         if scenario.entrypoint.module not in scenario.modules:
-            raise ValueError(
+            errors.append(
                 f"scenario {name} entrypoint module must be in scenario.modules"
             )
-        selected = set(scenario.modules)
-        for module_name in selected:
-            missing = {
-                provider
-                for provider in dependencies[module_name]
-                if (
-                    document.modules[provider].execution == "produce"
-                    and provider not in selected
-                )
-            }
-            if missing:
-                raise ValueError(
-                    f"scenario {name} omits produced dependencies of "
-                    f"{module_name}: " + ", ".join(sorted(missing))
-                )
+        elif scenario.entrypoint.module not in produced_names:
+            errors.append(
+                f"scenario {name} entrypoint module must be produced"
+            )
+        selected = set(scenario.modules) & produced_names
+        required = set(selected)
+        pending = list(selected)
+        while pending:
+            module_name = pending.pop()
+            for provider in produced_dependencies.get(module_name, set()):
+                if provider in required:
+                    continue
+                required.add(provider)
+                pending.append(provider)
+        missing = sorted(required - selected)
+        if missing:
+            errors.append(
+                f"scenario {name} omits produced dependencies: "
+                + ", ".join(missing)
+            )
     uncovered = requirement_names - covered_requirements
     if uncovered:
-        raise ValueError(
+        errors.append(
             "contract requirements are not covered by any scenario: "
             + ", ".join(sorted(uncovered))
         )
+    unique_errors = list(dict.fromkeys(errors))
+    if unique_errors:
+        raise ValueError(
+            f"contract graph validation failed with {len(unique_errors)} error(s):\n- "
+            + "\n- ".join(unique_errors)
+        )
 
 
-def _validate_software_module(
+def _software_module_errors(
     name: str,
     module: ContractModule,
-) -> None:
+) -> tuple[str, ...]:
+    errors: list[str] = []
     definition = dict(module.definition)
     contract = dict(definition.get("contract") or {})
     outputs = set(dict(contract.get("outputs") or {}))
     if outputs != set(module.provides):
-        raise ValueError(
+        errors.append(
             f"module {name} provides must exactly match definition.contract.outputs"
         )
     behavior_kind = str(definition.get("behavior_kind") or "")
     state_machine = definition.get("state_machine")
     if behavior_kind == "stateless" and state_machine is not None:
-        raise ValueError(
+        errors.append(
             f"stateless module {name} must use state_machine: null"
         )
     if isinstance(state_machine, Mapping):
@@ -496,58 +584,93 @@ def _validate_software_module(
             for key, value in dict(state_machine.get("states") or {}).items()
         }
         if initial not in states:
-            raise ValueError(
+            errors.append(
                 f"module {name} state_machine initial state is undeclared"
             )
-        reachable = {initial}
-        frontier = [initial]
+        reachable = {initial} if initial in states else set()
+        frontier = [initial] if initial in states else []
         while frontier:
             state_name = frontier.pop()
             transitions = dict(states[state_name].get("transitions") or {})
             for transition in transitions.values():
                 target = str(dict(transition or {}).get("to") or "")
                 if target not in states:
-                    raise ValueError(
+                    errors.append(
                         f"module {name} state transition targets undeclared state {target}"
                     )
+                    continue
                 if target not in reachable:
                     reachable.add(target)
                     frontier.append(target)
-        unreachable = set(states) - reachable
+        unreachable = set(states) - reachable if initial in states else set()
         if unreachable:
-            raise ValueError(
+            errors.append(
                 f"module {name} has unreachable states: "
                 + ", ".join(sorted(unreachable))
             )
     paths = dict(definition.get("paths") or {})
     if module.execution == "contract_only":
         if str(paths.get("contract_mode") or "") != "file_frozen":
-            raise ValueError(
+            errors.append(
                 f"contract_only module {name} must use file_frozen"
             )
         if list(paths.get("implementation_scopes") or []):
-            raise ValueError(
+            errors.append(
                 f"contract_only module {name} cannot declare implementation scopes"
             )
+    return tuple(errors)
 
 
-def _assert_acyclic(graph: Mapping[str, set[str]]) -> None:
-    temporary: set[str] = set()
-    permanent: set[str] = set()
+def _dependency_cycle_errors(
+    graph: Mapping[str, set[str]],
+) -> tuple[str, ...]:
+    """Return one deterministic error for every cyclic dependency component."""
 
-    def visit(node: str) -> None:
-        if node in permanent:
+    next_index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    cyclic_components: list[tuple[str, ...]] = []
+
+    def connect(node: str) -> None:
+        nonlocal next_index
+        indices[node] = next_index
+        lowlinks[node] = next_index
+        next_index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for dependency in sorted(graph.get(node, set())):
+            if dependency not in graph:
+                continue
+            if dependency not in indices:
+                connect(dependency)
+                lowlinks[node] = min(lowlinks[node], lowlinks[dependency])
+            elif dependency in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[dependency])
+
+        if lowlinks[node] != indices[node]:
             return
-        if node in temporary:
-            raise ValueError(f"contract module dependency cycle includes {node}")
-        temporary.add(node)
-        for dependency in graph[node]:
-            visit(dependency)
-        temporary.remove(node)
-        permanent.add(node)
+        component: list[str] = []
+        while stack:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        normalized = tuple(sorted(component))
+        if len(normalized) > 1 or node in graph.get(node, set()):
+            cyclic_components.append(normalized)
 
     for node in sorted(graph):
-        visit(node)
+        if node not in indices:
+            connect(node)
+
+    return tuple(
+        "contract module dependency cycle includes: " + ", ".join(component)
+        for component in sorted(cyclic_components)
+    )
 
 
 class _ContractYamlLoader(yaml.SafeLoader):

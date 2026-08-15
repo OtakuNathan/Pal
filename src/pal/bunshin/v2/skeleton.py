@@ -597,6 +597,63 @@ def validate_architecture_submission(
     return dict(result.normalized_submission)
 
 
+def preflight_architecture_workspace_submission(
+    submission: Mapping[str, Any],
+    *,
+    requirements_payload: Mapping[str, Any],
+    workspace_root: Path,
+    base_sha: str,
+    original_head: str = "",
+    reference_roots: Mapping[str, Path] | None = None,
+    evidence_catalog: Mapping[str, Any] | None = None,
+) -> tuple[ArchitectureValidationResult, tuple[str, ...]]:
+    """Validate all Architect-correctable state before accepting a submission.
+
+    The Manager calls this once while the Architect can still edit and repeats
+    it after quiescing.  The latter remains necessary for TOCTOU protection;
+    it must not be the first time ordinary path or ownership errors are found.
+    """
+
+    validation = analyze_architecture_submission(
+        submission,
+        requirements_payload=requirements_payload,
+        workspace_root=workspace_root,
+        reference_roots=reference_roots,
+        evidence_catalog=evidence_catalog,
+    )
+    normalized = dict(validation.normalized_submission)
+    changed_paths = tuple(
+        path
+        for path in _git_changed_paths(Path(workspace_root), str(base_sha))
+        if not repository_path_targets_control_plane(path)
+    )
+    private_changes = _architect_private_implementation_changes(
+        Path(workspace_root),
+        changed_paths=changed_paths,
+        submission=normalized,
+        base_sha=str(base_sha),
+        original_head=str(original_head),
+    )
+    issues = list(validation.issues)
+    if private_changes:
+        issues.append(
+            ValidationIssue(
+                "error",
+                "architecture_workspace",
+                "Architect changed product/build/test paths outside declared "
+                "contract or implementation scopes: "
+                + ", ".join(private_changes)
+                + ". Restore them or declare the owning module's narrow product "
+                "implementation scope; build and test work remains with the "
+                "Coder/Verifier.",
+            )
+        )
+    return (
+        ArchitectureValidationResult(normalized, tuple(issues)),
+        changed_paths,
+    )
+
+
 def validate_architecture_module_definition(
     name: str,
     module: Mapping[str, Any],
@@ -1057,37 +1114,17 @@ class GitBackedSkeletonService:
         submitted = dict(submission)
         requirements = validate_task_ledger(self.artifacts.read_json(requirements_ref))
         evidence_catalog = self.artifacts.read_json(evidence_catalog_ref) if evidence_catalog_ref else None
-        validation = analyze_architecture_submission(
+        validation, changed_paths = preflight_architecture_workspace_submission(
             submitted,
             requirements_payload=requirements,
             workspace_root=architecture_workspace.worktree,
+            base_sha=architecture_workspace.base_sha,
+            original_head=architecture_workspace.original_head,
             reference_roots=reference_roots,
             evidence_catalog=evidence_catalog,
         )
         validation.raise_for_errors()
         normalized = dict(validation.normalized_submission)
-        changed_paths = [
-            path
-            for path in _git_changed_paths(
-                architecture_workspace.worktree,
-                architecture_workspace.base_sha,
-            )
-            if not repository_path_targets_control_plane(path)
-        ]
-        private_changes = _architect_private_implementation_changes(
-            architecture_workspace.worktree,
-            changed_paths=changed_paths,
-            submission=normalized,
-            base_sha=architecture_workspace.base_sha,
-            original_head=architecture_workspace.original_head,
-        )
-        if private_changes:
-            raise ValueError(
-                "Architect changed private implementation/build/test paths outside declared "
-                "contract files: "
-                + ", ".join(private_changes)
-                + ". Restore them and leave their implementation to the owning Coder/Verifier."
-            )
         if changed_paths:
             # architect.yaml is the live hand-off for the whole Architecture
             # cycle.  It participates in workspace freezing and recovery, but
@@ -1756,12 +1793,14 @@ def _architect_private_implementation_changes(
     base_sha: str = "",
     original_head: str = "",
 ) -> list[str]:
-    """Reject product implementation authored by the Architecture role.
+    """Reject Architect writes outside final module-owned product scopes.
 
-    Contract paths are the Architect's code-level declaration surface. Other
-    paths belong to Coders/Verifiers or the Manager-owned build metadata. A
-    revision may still restore a leaked private path to the immutable original
-    workspace snapshot, which keeps human-edit recovery possible.
+    Contract paths are authoritative declarations. Declared implementation
+    scopes may also carry a non-authoritative draft that the owning Coder can
+    replace. Build/test paths and every undeclared product path remain outside
+    Architect authority. A revision may still restore a leaked path to the
+    immutable original workspace snapshot, which keeps human-edit recovery
+    possible.
     """
 
     modules = tuple(dict(module) for module in dict(submission.get("modules") or {}).values())
@@ -1771,23 +1810,46 @@ def _architect_private_implementation_changes(
         for path in list(dict(module.get("paths") or {}).get("contract_paths") or [])
         if str(path).strip()
     }
+    implementation_scopes = tuple(
+        PathScope(
+            str(dict(raw_scope or {}).get("kind") or ""),
+            _normalized_repo_path(
+                str(dict(raw_scope or {}).get("path") or "")
+            ).rstrip("/"),
+        )
+        for module in modules
+        for raw_scope in list(
+            dict(module.get("paths") or {}).get("implementation_scopes") or []
+        )
+        if isinstance(raw_scope, Mapping)
+        and str(dict(raw_scope).get("kind") or "") in {"file", "directory"}
+        and str(dict(raw_scope).get("path") or "").strip()
+    )
+    candidate_paths = tuple(
+        path
+        for path in (
+            str(raw_path).replace("\\", "/").strip().lstrip("./")
+            for raw_path in changed_paths
+        )
+        if path
+    )
+    changed_from_original: set[str] | None = None
+    if original_head and candidate_paths:
+        if base_sha and original_head == base_sha:
+            changed_from_original = set(candidate_paths)
+        else:
+            changed_from_original = {
+                str(path).replace("\\", "/").strip().lstrip("./")
+                for path in _git_changed_paths(worktree, original_head)
+            }
+
     violations: list[str] = []
-    for raw_path in changed_paths:
-        path = str(raw_path).replace("\\", "/").strip().lstrip("./")
-        if not path:
-            continue
-        restored_to_original = False
-        if original_head:
-            restored = subprocess.run(
-                ["git", "-C", str(worktree), "diff", "--quiet", original_head, "--", path],
-                capture_output=True,
-                check=False,
-            )
-            if restored.returncode == 0:
-                restored_to_original = True
-        if restored_to_original:
+    for path in candidate_paths:
+        if changed_from_original is not None and path not in changed_from_original:
             continue
         if path in contract_paths:
+            continue
+        if any(scope.matches(path) for scope in implementation_scopes):
             continue
         violations.append(path)
     return sorted(set(violations))

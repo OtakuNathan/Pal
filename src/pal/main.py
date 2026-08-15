@@ -84,6 +84,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tools_eval_parser.add_argument("--manifest", type=Path, default=None)
     tools_eval_parser.add_argument("--output", type=Path, default=None)
 
+    # -- bunshin --------------------------------------------------------------
+    from pal.bunshin.efficiency_cli import register_bunshin_subparser
+
+    register_bunshin_subparser(subparsers)
+
     return parser
 
 
@@ -153,6 +158,12 @@ def main() -> int:
             manifest_path=args.manifest or DEFAULT_TOOLS_BENCHMARK,
             output_path=args.output,
         )
+    if args.command == "bunshin" and args.bunshin_command == "efficiency":
+        import sys
+
+        from pal.bunshin.efficiency_cli import run_efficiency_command
+
+        return run_efficiency_command(args, stdout=sys.stdout, stderr=sys.stderr)
     return asyncio.run(_run_async(args))
 
 

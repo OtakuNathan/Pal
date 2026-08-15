@@ -29,6 +29,8 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
 
 
 TOOL_EFFICIENCY_SYSTEM_GUIDANCE = (
+    "- Semantic work order, role scope, checklist phases, and depth- or breadth-first strategy "
+    "govern which work to do, not whether independent tool RPCs may share one assistant response.\n"
     "- Batch independent tool calls in one response, including independent reads, searches, "
     "checks, and already-decided edits to distinct surfaces. Sequence only when a later call's "
     "arguments, authority, safety, or correctness depend on an earlier result; do not serialize "

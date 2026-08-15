@@ -34,7 +34,7 @@ CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
             "known schema or graph defect."
         ),
         "failure_next_steps": (
-            "Correct only the reported checklist, schema, graph, or bound-file defect in "
+            "Correct all reported checklist, schema, graph, and bound-file defects in "
             "place, then retry once the submitted contract is mechanically valid."
         ),
     },
@@ -120,7 +120,7 @@ def contract_submit_tool_result(
         text = f"{exc.__class__.__name__}: {exc}"
         llm_text = (
             text
-            + " Correct only the reported contract/checklist defect and retry."
+            + " Correct all reported contract/checklist defects before retrying."
         )
         return ToolExecutionResult(
             name=call.name,

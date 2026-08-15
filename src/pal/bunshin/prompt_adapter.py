@@ -281,7 +281,7 @@ def _initial_skill_reminders(pack: BunshinInvocationPack) -> list[str]:
 def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     lines = [
         "- Preserve contract correctness and role boundaries. Efficiency means eliminating duplicate work, never skipping decisive evidence.",
-        "- Make one bounded pass over the owned scope and only the evidence needed for this role. Once the next action is clear, act; do not reopen settled questions unless new evidence contradicts them.",
+        "- Use the role playbook as the required checklist spine. After one bounded orientation pass, initialize the smallest task-specific checklist, append only concrete work, and drive execution from its current item. Once the next action is clear, act; do not reopen settled questions unless new evidence contradicts them.",
         "- Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged. First use the returned error, retry directive, and affordances to change the input or state; if no meaningful change is available, record the blocker or finding and stop. A rejection may be retried only after the relevant input or state actually changes; if the same rejection fingerprint recurs, stop and report the blocker instead of probing around it. retry=safe permits a corrected retry, not an unchanged replay; effect=unknown requires reconciliation before retry.",
         "- Prefer the smallest contract-complete action. Do not add optional abstraction, evidence, or polish after this role's completion conditions are satisfied.",
     ]

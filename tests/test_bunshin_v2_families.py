@@ -1174,6 +1174,18 @@ workspace_policy: {}
             "Do not pass an unclassified bound reference path",
             reviewer_overrides["op_file_read"]["do_not_use_when"],
         )
+        self.assertIn(
+            "leaves a cross-owner public handoff ambiguous",
+            reviewer_overrides["op_bunshin_add_finding"]["use_when"],
+        )
+        self.assertIn(
+            "wholly owned by one module",
+            reviewer_overrides["op_bunshin_add_finding"]["do_not_use_when"],
+        )
+        self.assertIn(
+            "report the missing ownership boundary once",
+            reviewer_overrides["op_bunshin_add_finding"]["do_not_use_when"],
+        )
 
         binding_ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
             "software_engineering.v2_coder"
@@ -1359,6 +1371,7 @@ workspace_policy: {}
         self.assertIn("every state, worker, object, and resource has exactly one owner", architect)
         self.assertIn("lifecycle transitions and composition joins close", architect)
         self.assertIn("private implementation is explicitly deferred", architect)
+        self.assertIn("non-authoritative draft", architect)
         self.assertIn("one acyclic Contract Dependency Graph", architect)
         self.assertIn("A composition root or runtime entrypoint is a product module", architect)
         self.assertIn("Build commands, manifests, test runners", architect)
@@ -1375,15 +1388,23 @@ workspace_policy: {}
         self.assertIn("never tests or another module's corpus", architect)
         self.assertIn("Manager derives both test corpora", architect)
         self.assertIn("no speculative extension seam", architect)
+        self.assertIn("batch independent evidence reads/checks", architect_playbook)
+        self.assertIn("Batch independent declaration writes", architect_playbook)
+        self.assertIn("batch independent reconciliation reads", architect_playbook)
         self.assertIn("Defer optional capability costs until use", architect_playbook)
         self.assertIn("genuinely irreversible transition", architect_playbook)
         self.assertIn("object-address side table", architecture_review)
         self.assertIn("Audit requirement coverage", architecture_review)
         self.assertIn("Review semantic composition, not private implementation", architecture_review)
+        self.assertIn("non-authoritative Coder draft", architecture_review)
         self.assertIn("never to prove that requested work is not implemented yet", architecture_review)
         self.assertIn("expected Coder work, not an architecture finding", architecture_review)
         self.assertIn("Every state, worker, object, and resource needs one owner", architecture_review)
         self.assertIn("Perform an ambiguity audit", architecture_review)
+        self.assertIn("observable and cross-owner boundaries", architecture_review)
+        self.assertIn("Choices wholly contained by one owner are Coder work", architecture_review)
+        self.assertIn("report the missing ownership boundary once", architecture_review)
+        self.assertIn("Optional local improvements are advisory p2", architecture_review)
         self.assertIn("partial output followed by error", architecture_review)
         self.assertIn("copy/move/share/reset/reuse", architecture_review)
         self.assertIn("Compilation and LSP support", architecture_review)
@@ -1407,8 +1428,11 @@ workspace_policy: {}
         self.assertIn("speculative seam without one", architecture_review)
         self.assertIn("real scenario from entrypoint", reviewer_playbook)
         self.assertIn("deferred optional costs", reviewer_playbook)
+        self.assertIn("fewest real ownership boundaries", architect_playbook)
+        self.assertIn("Keep coupled private storage, query, encoding, and lifecycle under one owner", architect_playbook)
 
         self.assertIn("Accepted Skeleton declarations", coder)
+        self.assertIn("non-authoritative draft", coder)
         self.assertIn("public declaration/code shape", coder)
         self.assertIn("visible private dependency body is not authority", coder)
         self.assertIn("Work depth-first inside the owned module", coder)
@@ -1428,6 +1452,9 @@ workspace_policy: {}
         self.assertIn("Make code self-documenting", coder)
         self.assertIn("owned public facade inward", coder_playbook)
         self.assertIn("deferred optional costs", coder_playbook)
+        self.assertIn("batching independent reads and searches", coder_playbook)
+        self.assertIn("batch independent settled edits and checks", coder_playbook)
+        self.assertIn("Batch independent focused build/test checks", coder_playbook)
 
         self.assertIn("complete adjudication scope", verifier)
         self.assertIn("public declaration/code shape", verifier)

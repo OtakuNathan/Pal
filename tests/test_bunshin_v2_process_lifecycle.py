@@ -278,6 +278,50 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             ["inv-logged"],
         )
 
+    async def test_quiet_round_completion_persists_only_efficiency_fields(
+        self,
+    ) -> None:
+        recorded: list[dict[str, object]] = []
+        self.manager.v2_service.repository.record_worker_event = (
+            lambda event: recorded.append(dict(event))
+        )
+        self.manager.events.queue_event = lambda _event: None
+        state = BunshinRunState(
+            bunshin_id="inv-quiet-round",
+            run_id="run-quiet-round",
+            pack=BunshinInvocationPack(
+                invocation_id="inv-quiet-round",
+                metadata={"prompt_log_enabled": False},
+            ),
+        )
+        self.manager.runs[state.run_id] = state
+
+        await self.manager._publish_v2_worker_event(
+            {
+                "event_kind": "progress",
+                "run_id": state.run_id,
+                "invocation_id": state.bunshin_id,
+                "payload": {
+                    "phase": "llm_round_completed",
+                    "round": 7,
+                    "tool_call_count": 3,
+                    "text_preview": "must not persist",
+                    "tool_calls": [{"tool_name": "read_file"}],
+                    "control_route": {"endpoint_id": "private"},
+                },
+            }
+        )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(
+            recorded[0]["payload"],
+            {
+                "phase": "llm_round_completed",
+                "round": 7,
+                "tool_call_count": 3,
+            },
+        )
+
     async def test_late_terminal_receipt_after_reap_preserves_terminal_status(self) -> None:
         process = SimpleNamespace(pid=124, returncode=0)
         state = BunshinRunState(

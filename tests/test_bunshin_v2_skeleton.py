@@ -206,6 +206,44 @@ class SoftwareContractAdapterTests(unittest.TestCase):
 
         self.assertEqual(violations, ["src/decoder.cpp"])
 
+        owned_private_draft = _architect_private_implementation_changes(
+            self.repo,
+            changed_paths=("include/decoder.hpp", "src/decoder.cpp"),
+            submission={
+                "modules": {
+                    "decoder": {
+                        "paths": {
+                            "contract_paths": ["include/decoder.hpp"],
+                            "implementation_scopes": [
+                                {"kind": "file", "path": "src/decoder.cpp"}
+                            ],
+                        }
+                    }
+                }
+            },
+            base_sha=original,
+            original_head=original,
+        )
+        self.assertEqual(owned_private_draft, [])
+
+        owned_directory_draft = _architect_private_implementation_changes(
+            self.repo,
+            changed_paths=("src/decoder/private/helper.cpp",),
+            submission={
+                "modules": {
+                    "decoder": {
+                        "paths": {
+                            "contract_paths": ["include/decoder.hpp"],
+                            "implementation_scopes": [
+                                {"kind": "directory", "path": "src/decoder"}
+                            ],
+                        }
+                    }
+                }
+            },
+        )
+        self.assertEqual(owned_directory_draft, [])
+
         co_located_contract = _architect_private_implementation_changes(
             self.repo,
             changed_paths=("src/decoder.cpp",),
@@ -228,6 +266,28 @@ class SoftwareContractAdapterTests(unittest.TestCase):
         # contract edit contains declaration semantics or product behavior is
         # an architecture-review judgment, not a textual heuristic.
         self.assertEqual(co_located_contract, [])
+
+        untracked_private = self.repo / "src" / "untracked_private.py"
+        untracked_private.write_text("PRIVATE = True\n", encoding="utf-8")
+        self.assertEqual(
+            _architect_private_implementation_changes(
+                self.repo,
+                changed_paths=("src/untracked_private.py",),
+                submission={"modules": {}},
+                original_head=original,
+            ),
+            ["src/untracked_private.py"],
+        )
+        untracked_private.unlink()
+        self.assertEqual(
+            _architect_private_implementation_changes(
+                self.repo,
+                changed_paths=("src/restored_absence.py",),
+                submission={"modules": {}},
+                original_head=original,
+            ),
+            [],
+        )
 
     def test_module_paths_cannot_claim_repository_control_state(self) -> None:
         for path in (".git/config", "third_party/lib/.git/config"):

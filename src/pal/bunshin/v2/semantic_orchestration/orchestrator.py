@@ -6658,8 +6658,8 @@ class SemanticOrchestrator:
         profile_group, profile_name = canonical_role_profile_parts(profile)
         if contract_authoring and activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
-                "Write only the declaration-level code skeleton in the bound architecture worktree; never compile, build, test, link, or execute it.",
-                "Finish only when boundaries and responsibilities, unique state/resource owners, contracts, and closed lifecycle/joins are declared and implementation details are explicitly deferred.",
+                "Spend architecture work on the declaration-level skeleton; never compile, build, test, link, or execute product behavior. Any private product code incidentally authored must stay inside its final owning module's implementation_scopes, has no contract authority, and may be replaced by the Coder.",
+                "Finish only when boundaries and responsibilities, unique state/resource owners, contracts, and closed lifecycle/joins are declared independently of any private product draft.",
                 "Use update_checklist as the fixed durable phase cursor: settle requirements and the complete semantic module graph first; then write only declaration skeletons; only then fill the Manager-preseeded architect.yaml, reconcile both projections, complete the checklist, and call contract_submit with no arguments. Never work ahead of the current phase.",
             ]
         elif (
@@ -6671,7 +6671,7 @@ class SemanticOrchestrator:
             invocation_acceptance = [
                 "This is architecture review, not product verification. Judge whether a future Coder can implement the task from the declarations and semantic DAG; never inspect or execute private bodies merely to show that requested behavior is not implemented yet.",
                 "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
-                "Read the skeleton diff first. Product control flow, private implementation bodies, or complete tests introduced by the Architect are implementation leakage and must be rejected even when they make requested behavior work.",
+                "Read the skeleton diff first. Ignore private product bodies inside their owning module's declared implementation_scopes: they are non-authoritative Coder drafts and cannot prove or invalidate the architecture. Reject tests, build machinery, cross-module or undeclared writes, and any contract whose feasibility depends on private draft behavior.",
                 "This logical Reviewer persists across Candidates, but no verdict does. For every new Candidate, first regress all prior findings and touched accepted invariants; then inspect the current skeleton diff and affected semantic neighborhood for new defects. Reuse unchanged investigation instead of rereading it.",
                 "Review the bound task.yaml ledger in order, code contracts, semantic dependencies, and scenarios; reconcile every exact Manager-recorded question and answer.",
                 "Treat the Manager-derived tests/<module_name>/developer and tests/<module_name>/verifier corpora as implementation and verification infrastructure: they are intentionally absent from Architect-declared paths and scenarios, so their absence is not a defect.",
@@ -6707,6 +6707,7 @@ class SemanticOrchestrator:
             if self._execution_adapter(snapshot) == SOFTWARE_GIT_ADAPTER:
                 invocation_acceptance = [
                     "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verifier read-only.",
+                    "Treat private product code inherited from the Architect as a non-authoritative draft: inspect it as workspace evidence, then keep, modify, delete, or replace it as needed; you own and must validate the final implementation.",
                     "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient self-check with ordinary shell or LSP tools, then call candidate_submit with no arguments.",
                 ]
             else:
