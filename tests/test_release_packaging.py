@@ -35,6 +35,11 @@ def test_first_party_provider_projects_match_runtime_manifests() -> None:
         assert manifest["provider_id"] == provider_id
         assert project["version"] == manifest["version"]
         assert project["name"].startswith("pal-channel-provider-")
+        assert project["authors"] == [{"name": "Nathan Wu (OtakuNathan)"}]
+        assert project["license"] == {"file": "LICENSE"}
+        assert project["readme"] == "README.md"
+        assert "License :: OSI Approved :: MIT License" in project["classifiers"]
+        assert (provider_root / "LICENSE").is_file()
         assert filenames <= {path.name for path in provider_root.iterdir() if path.is_file()}
         assert tomllib.loads(
             (provider_root / "pyproject.toml").read_text(encoding="utf-8")

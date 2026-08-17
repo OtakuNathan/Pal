@@ -6,7 +6,20 @@ build-backend = "setuptools.build_meta"
 name = "pal-channel-provider-telegram"
 version = "0.3.2"
 description = "Telegram channel provider for Pal"
+readme = "README.md"
+authors = [{ name = "Nathan Wu (OtakuNathan)" }]
+license = { file = "LICENSE" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
 requires-python = ">=3.11"
+
+[project.urls]
+Repository = "https://github.com/OtakuNathan/Pal"
 
 [tool.setuptools]
 packages = ["pal_provider_telegram"]
@@ -14,7 +27,7 @@ package-dir = { pal_provider_telegram = "." }
 include-package-data = false
 
 [tool.setuptools.package-data]
-pal_provider_telegram = ["provider.toml", "README.md"]
+pal_provider_telegram = ["provider.toml", "README.md", "LICENSE"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]

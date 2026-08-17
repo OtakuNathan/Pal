@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use Pal in published work, please cite it using this metadata."
+title: "Pal"
+type: software
+authors:
+  - family-names: "Wu"
+    given-names: "Nathan"
+    alias: "OtakuNathan"
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/OtakuNathan/Pal"
+url: "https://github.com/OtakuNathan/Pal"

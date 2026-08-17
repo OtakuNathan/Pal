@@ -11,6 +11,15 @@ class PromptFragmentRegistry:
     by_module: dict[str, list[str]] = field(default_factory=dict)
 
     def register(self, provider: PromptFragmentProvider) -> None:
+        existing = self.providers.get(provider.provider_id)
+        if existing is provider:
+            return
+        if existing is not None:
+            raise ValueError(
+                "prompt fragment provider already registered: "
+                f"{provider.provider_id} (owner={existing.module_id}, "
+                f"candidate={provider.module_id})"
+            )
         self.providers[provider.provider_id] = provider
         bucket = self.by_module.setdefault(provider.module_id, [])
         if provider.provider_id not in bucket:

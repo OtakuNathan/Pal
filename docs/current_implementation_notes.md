@@ -7,16 +7,25 @@ This file is a short sync point for the current codebase when older design notes
 Current system block order:
 
 ```text
-Identity -> System Map -> Source of Truth -> Prompt Context Policy -> Operating Rules -> Priority -> Task Flow -> Tool Efficiency -> Mutation Policy -> Memory Guide -> Behavior Guidance Guide -> Skill Guide -> Knowledge Storage Boundary -> Resident Affordances -> Memory Context -> Runtime Overlay
+Identity -> System Map -> Source of Truth -> Prompt Context Policy -> Operating Rules -> Priority -> Task Flow -> Tool Routing -> Tool Efficiency -> Mutation Policy -> Memory Guide -> Behavior Guidance -> Behavior Guidance Guide -> Requirements -> Task Acceptance -> Output Contract -> Skill Guide -> Knowledge Storage Boundary -> Resident Affordances -> Memory Context -> Runtime Overlay
 ```
+
+The compiler omits blocks that have no registered fragment for the current
+runtime or role. Fragment section names are a closed protocol: an unknown
+section fails prompt construction instead of silently dropping instructions.
 
 Ownership:
 
 - Identity comes from the identity provider.
-- System Map, Source of Truth, Prompt Context Policy, Operating Rules, Priority, Tool Efficiency, Mutation Policy, and Knowledge Storage Boundary come from core prompt fragments.
-- Task Flow, Behavior Guidance Guide, Resident Affordances, and temporary behavior guidance come from behavior providers.
+- System Map, Source of Truth, Prompt Context Policy, Operating Rules, Priority, Tool Routing, Tool Efficiency, Mutation Policy, and Knowledge Storage Boundary come from core prompt fragments.
+- Task Flow comes from the checklist provider. Behavior Guidance Guide,
+  Resident Affordances, and temporary behavior guidance come from behavior
+  providers.
 - Memory Guide and memory context projection come from memory providers.
 - Skill Guide comes from skill providers.
+- Role runtimes such as Bunshin may add Requirements, Task Acceptance, and
+  Output Contract fragments. Output Contract owns terminal response and
+  structured-submission instructions; it is not ordinary chat guidance.
 
 Prompt context blocks are XML-style tags. Current dynamic user-context tags include:
 

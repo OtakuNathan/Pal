@@ -8,6 +8,8 @@
 
 > Pal #0 — the original. Yes, that's the official face: a robot caught eating cookies. 🍪
 
+Created and maintained by **Nathan Wu (OtakuNathan)**.
+
 Pal is an event-driven agent runtime built for a single user. It runs as a
 service on your machine, talks through local and messaging channels, remembers
 what matters, and acts through a governed capability system. Ordinary requests
@@ -200,7 +202,7 @@ Tools are the **only** execution primitive. Built-in: `shell.exec`, `tool.search
 
 PalCore gathers prompt fragments from registered providers (identity, rules, behavior, memory, etc.) and assembles them into a single system prompt. The priority hierarchy is explicit:
 
-> **User's explicit instructions > behavior advice > affordances. Operating Rules and capability policy are always active.**
+> **Safety/capability policy and source-of-truth, verification, and mutation rules stay active. Within those boundaries: current user instruction > active task constraints > activated skills > memory > behavior guidance > default style.**
 
 ### Turn Flow
 
@@ -400,4 +402,4 @@ These are the lines that don't get crossed:
 
 ## License
 
-Pal is currently source-available with all rights reserved unless a separate license is granted; see [LICENSE](./LICENSE).
+Pal is open source under the [MIT License](./LICENSE).

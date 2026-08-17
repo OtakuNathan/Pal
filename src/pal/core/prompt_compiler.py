@@ -279,6 +279,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "output_contract":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="output_contract",
+                        title=str(fragment.title or "Output Contract"),
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "knowledge_storage_boundary":
                 system_blocks.append(
                     PromptIRBlock(
@@ -556,6 +565,7 @@ class PromptCompiler:
             "source_of_truth",
             "prompt_context_policy",
             "operating_rules",
+            "operating_guidance",
             "priority",
             "task_flow",
             "tool_routing",
@@ -571,11 +581,12 @@ class PromptCompiler:
             "requirements_policy",
             "task_acceptance",
             "task_acceptance_policy",
+            "output_contract",
         }:
             return lowered
         if lowered in {"control", "observation", "finalization"}:
             return "runtime"
-        return lowered
+        raise ValueError(f"unknown prompt fragment section: {section!r}")
 
     @staticmethod
     def _preserve_empty_protocol_fragment(fragment: PromptFragment) -> bool:
@@ -665,6 +676,7 @@ class PromptCompiler:
         requirements_policy_blocks = [block for block in blocks if block.block_id == "requirements_policy"]
         task_acceptance_blocks = [block for block in blocks if block.block_id == "task_acceptance"]
         task_acceptance_policy_blocks = [block for block in blocks if block.block_id == "task_acceptance_policy"]
+        output_contract_blocks = [block for block in blocks if block.block_id == "output_contract"]
         skill_guide_blocks = [block for block in blocks if block.block_id == "skill_guide"]
         knowledge_storage_boundary_blocks = [block for block in blocks if block.block_id == "knowledge_storage_boundary"]
         resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
@@ -690,6 +702,7 @@ class PromptCompiler:
             *requirements_policy_blocks,
             *task_acceptance_blocks,
             *task_acceptance_policy_blocks,
+            *output_contract_blocks,
             *skill_guide_blocks,
             *knowledge_storage_boundary_blocks,
             *resident_blocks,

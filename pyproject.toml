@@ -1,8 +1,25 @@
 [project]
 name = "pal-v2"
 version = "0.1.0"
-description = "Independent Pal Architecture V1/V2 rebuild lane"
+description = "A personal, long-running agent runtime with governed tools, durable memory, and reviewable workflows"
+readme = "README.md"
+authors = [
+    { name = "Nathan Wu (OtakuNathan)" },
+]
 license = { file = "LICENSE" }
+keywords = ["agent", "ai", "automation", "memory", "orchestration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=47.0,<48",
@@ -38,6 +55,11 @@ test = [
 
 [project.scripts]
 pal = "pal.main:main"
+
+[project.urls]
+Homepage = "https://github.com/OtakuNathan/Pal"
+Repository = "https://github.com/OtakuNathan/Pal"
+Issues = "https://github.com/OtakuNathan/Pal/issues"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
