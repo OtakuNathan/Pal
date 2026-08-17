@@ -874,18 +874,19 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     }
                 ],
             },
-            metadata={
-                "manager_only": "discard me",
-                "sandbox": {"backend": "bwrap"},
-            },
+            metadata={"manager_only": "discard me"},
         )
 
-        first_attempt = _bind_role_attempt_sandbox(
-            self.runtime_root,
-            fresh,
-            run_id="run_retry_projection",
-            durable_prompt_reused=False,
-        )
+        with patch(
+            "pal.bunshin.sandbox.sandbox_supported_backend",
+            return_value="bwrap",
+        ):
+            first_attempt = _bind_role_attempt_sandbox(
+                self.runtime_root,
+                fresh,
+                run_id="run_retry_projection",
+                durable_prompt_reused=False,
+            )
         current_attempt = BunshinInvocationPack.from_dict(
             {
                 **fresh.to_dict(),
@@ -905,12 +906,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             first_attempt,
             current_attempt,
         )
-        retry_attempt = _bind_role_attempt_sandbox(
-            self.runtime_root,
-            refreshed,
-            run_id="run_retry_projection",
-            durable_prompt_reused=True,
-        )
+        with patch(
+            "pal.bunshin.sandbox.sandbox_supported_backend",
+            return_value="bwrap",
+        ):
+            retry_attempt = _bind_role_attempt_sandbox(
+                self.runtime_root,
+                refreshed,
+                run_id="run_retry_projection",
+                durable_prompt_reused=True,
+            )
 
         self.assertEqual(
             retry_attempt.workspace["reference_paths"][0]["path"],
@@ -5027,7 +5032,6 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             invocation_id="inv-skill-reminder",
             instruction="Implement the bound module.",
             metadata={
-                "sandbox": {"backend": "bwrap"},
                 "initial_skill_injections": [
                     {"skill_id": "channel-manual", "system_reminder": reminder},
                     {"skill_id": "channel-manual", "system_reminder": reminder},
@@ -5036,12 +5040,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         first_prompt = render_bunshin_task_prompt(pack)
-        runner_pack = _bind_role_attempt_sandbox(
-            self.runtime_root,
-            pack,
-            run_id="run-skill-reminder",
-            durable_prompt_reused=False,
-        )
+        with patch(
+            "pal.bunshin.sandbox.sandbox_supported_backend",
+            return_value="bwrap",
+        ):
+            runner_pack = _bind_role_attempt_sandbox(
+                self.runtime_root,
+                pack,
+                run_id="run-skill-reminder",
+                durable_prompt_reused=False,
+            )
         reconstructed_prompt = render_bunshin_task_prompt(
             BunshinInvocationPack.from_dict(runner_pack.to_dict())
         )
