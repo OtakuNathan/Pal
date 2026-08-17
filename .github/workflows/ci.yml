@@ -28,12 +28,6 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-
       - name: Install Pal and test dependencies
         run: |
           python -m pip install --upgrade pip

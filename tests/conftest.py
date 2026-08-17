@@ -27,12 +27,19 @@ import pytest
 
 _PR_SET_PDEATHSIG = 1
 # Load libc once before any fork so preexec_fn never triggers a loader lock.
-_LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+_LIBC = (
+    ctypes.CDLL("libc.so.6", use_errno=True)
+    if sys.platform.startswith("linux")
+    else None
+)
 
 
 def _enable_parent_death_signal() -> None:
     """Run inside the forked child before exec: die when the parent dies."""
-    _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+    libc = _LIBC
+    if libc is None:
+        return
+    libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
     # prctl is racy: if the parent died between fork() and prctl(), no signal
     # will ever arrive. Detect that window and exit immediately.
     if os.getppid() == 1:

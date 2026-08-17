@@ -34,7 +34,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         self.workspace = self.runtime_root / "workspace"
         self.workspace.mkdir()
         subprocess.run(
-            ["git", "init"],
+            ["git", "init", "-b", "main"],
             cwd=self.workspace,
             capture_output=True,
             text=True,
