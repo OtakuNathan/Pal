@@ -58,7 +58,10 @@ class ProviderInstallTests(unittest.TestCase):
 
             self.assertEqual(wheel.provider_id, "example")
             self.assertEqual(wheel.provider_version, "1.2.3")
-            self.assertEqual(result.target_dir, runtime_root / "channel" / "providers" / "example")
+            self.assertEqual(
+                result.target_dir,
+                runtime_root.resolve() / "channel" / "providers" / "example",
+            )
             self.assertEqual((result.target_dir / "helper.py").read_text(), "VALUE = 1\n")
             receipt = json.loads((result.target_dir / ".pal-provider-install.json").read_text())
             self.assertEqual(receipt["provider_id"], "example")

@@ -164,6 +164,10 @@ def prepare_workspace_lsp_environment(
     context_root: Path | None,
     workspace: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    if workspace_root is not None:
+        workspace_root = workspace_root.expanduser().resolve()
+    if context_root is not None:
+        context_root = context_root.expanduser().resolve()
     primary = normalize_lsp_language(primary_language)
     requested_languages = _dedupe(
         [

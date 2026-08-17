@@ -874,7 +874,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     }
                 ],
             },
-            metadata={"manager_only": "discard me"},
+            metadata={
+                "manager_only": "discard me",
+                "sandbox": {"backend": "bwrap"},
+            },
         )
 
         first_attempt = _bind_role_attempt_sandbox(
@@ -5024,6 +5027,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             invocation_id="inv-skill-reminder",
             instruction="Implement the bound module.",
             metadata={
+                "sandbox": {"backend": "bwrap"},
                 "initial_skill_injections": [
                     {"skill_id": "channel-manual", "system_reminder": reminder},
                     {"skill_id": "channel-manual", "system_reminder": reminder},

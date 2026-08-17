@@ -410,7 +410,7 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("missing", endpoint._startup_error)
 
     async def test_start_async_spawns_and_stop_async_terminates(self) -> None:
-        runtime_root = Path(tempfile.mkdtemp(prefix="pal_wsb_spawn_"))
+        runtime_root = Path(tempfile.mkdtemp(prefix="pw_spawn_", dir="/tmp"))
         endpoint = _make_endpoint(runtime_root)
         endpoint.startup_probe_seconds = 0.4
         # A long-lived placeholder process stands in for the sidecar.
@@ -439,7 +439,7 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(process.poll())
 
     async def test_health_reflects_dead_sidecar(self) -> None:
-        runtime_root = Path(tempfile.mkdtemp(prefix="pal_wsb_dead_"))
+        runtime_root = Path(tempfile.mkdtemp(prefix="pw_dead_", dir="/tmp"))
         endpoint = _make_endpoint(runtime_root)
         endpoint.startup_probe_seconds = 0.4
         endpoint._sidecar_command_override = (
@@ -455,7 +455,7 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health["last_error"])
 
     async def test_health_reflects_live_sidecar_via_manager_socket(self) -> None:
-        runtime_root = Path(tempfile.mkdtemp(prefix="pal_wsb_live_"))
+        runtime_root = Path(tempfile.mkdtemp(prefix="pw_live_", dir="/tmp"))
         endpoint = _make_endpoint(runtime_root)
         endpoint._sidecar_command_override = (sys.executable, "-c", _FAKE_SIDECAR_BOOTSTRAP)
 

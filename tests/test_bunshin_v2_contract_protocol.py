@@ -487,7 +487,7 @@ class ContractProtocolTests(unittest.TestCase):
         )
 
         path = architect_path(workspace)
-        self.assertEqual(path, role_workspace / "architect.yaml")
+        self.assertEqual(path, role_workspace.resolve() / "architect.yaml")
         self.assertTrue(path.is_file())
         self.assertFalse((artifact_stage / "architect.yaml").exists())
 

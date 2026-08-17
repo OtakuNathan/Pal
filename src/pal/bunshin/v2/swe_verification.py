@@ -798,7 +798,7 @@ def _verification_case_files(workspace: Mapping[str, Any]) -> list[str]:
             if root.is_dir()
             else []
         )
-    root = Path(str(workspace.get("repo_path") or ""))
+    root = Path(str(workspace.get("repo_path") or "")).resolve()
     if not root.is_dir():
         return []
     files: list[str] = []

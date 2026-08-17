@@ -577,7 +577,7 @@ language_ids = ["foo"]
         self.assertEqual(restarted_status["status"], "ok")
         self.assertTrue(restarted_status["workspace"]["primary_probe_ready"])
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(observed_args, [(f"--compile-commands-dir={context}",)])
+        self.assertEqual(observed_args, [(f"--compile-commands-dir={context.resolve()}",)])
 
     async def test_workspace_status_does_not_fall_back_to_another_worktree(self) -> None:
         prepared = self.root / "prepared"

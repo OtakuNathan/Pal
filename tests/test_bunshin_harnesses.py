@@ -240,7 +240,7 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
         self.assertIn("Batch independent tool calls in one response", request.developer_instructions)
         self.assertIn("do not serialize every file or field", request.developer_instructions)
         self.assertIn(str(self.architect_path), request.user_input)
-        self.assertEqual(request.cwd, self.root)
+        self.assertEqual(request.cwd, self.root.resolve())
         self.assertEqual(request.work_item_seed[0]["kind"], "phase")
         self.assertEqual(
             architect_harness_assignment_fingerprint(self.pack()),

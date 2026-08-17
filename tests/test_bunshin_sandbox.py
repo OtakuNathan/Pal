@@ -385,6 +385,8 @@ class BunshinSandboxTests(unittest.TestCase):
             )
 
     def test_runner_invocation_fails_closed_without_unix_role_gateway(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
         with tempfile.TemporaryDirectory(prefix="pal_bunshin_missing_uds_") as tmp:
             root = Path(tmp)
             repo = root / "repo"

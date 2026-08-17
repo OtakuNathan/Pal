@@ -134,6 +134,8 @@ class ArtifactCandidateInputExclusionAdversarialTests(unittest.TestCase):
         workspace = self.root / "workspace"
         workspace.mkdir()
         (workspace / "inputs").write_text("root-level bound input file\n", encoding="utf-8")
+        if (workspace / "Inputs").exists():
+            self.skipTest("requires a case-sensitive filesystem")
         for near_miss in ("Inputs", "inputsx", "input", "inputs_"):
             (workspace / near_miss).mkdir()
             (workspace / near_miss / "keep.txt").write_text("keep\n", encoding="utf-8")
