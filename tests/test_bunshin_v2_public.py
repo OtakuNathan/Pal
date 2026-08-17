@@ -936,11 +936,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         role_socket = self.runtime_root / "data" / "bunshin-role" / "role.sock"
         role_socket.parent.mkdir(parents=True, exist_ok=True)
         role_socket.write_text("test endpoint", encoding="utf-8")
-        argv, _ = build_sandboxed_runner_invocation(
-            runtime_root=self.runtime_root,
-            pack=retry_attempt,
-            argv=["/bin/true"],
-        )
+        with patch("pal.bunshin.sandbox.shutil.which", return_value="/usr/bin/bwrap"):
+            argv, _ = build_sandboxed_runner_invocation(
+                runtime_root=self.runtime_root,
+                pack=retry_attempt,
+                argv=["/bin/true"],
+            )
         self.assertIn(str(task), argv)
         self.assertIn(str(retry_preparation), argv)
         self.assertNotIn(str(first_preparation), argv)
