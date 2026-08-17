@@ -8,6 +8,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_main_test_extra_includes_its_test_runner() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        project = dict(tomllib.load(stream).get("project") or {})
+
+    test_dependencies = list(
+        dict(project.get("optional-dependencies") or {}).get("test") or []
+    )
+
+    assert any(requirement.startswith("pytest>=") for requirement in test_dependencies)
+
+
 def test_first_party_provider_projects_match_runtime_manifests() -> None:
     required_files = {
         "telegram": {

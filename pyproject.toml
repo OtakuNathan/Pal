@@ -51,6 +51,7 @@ local-embeddings = [
 test = [
     "hypothesis>=6.100,<7",
     "hypothesis-jsonschema>=0.23,<1",
+    "pytest>=8,<9",
 ]
 
 [project.scripts]
