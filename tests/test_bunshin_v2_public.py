@@ -942,9 +942,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 pack=retry_attempt,
                 argv=["/bin/true"],
             )
-        self.assertIn(str(task), argv)
-        self.assertIn(str(retry_preparation), argv)
-        self.assertNotIn(str(first_preparation), argv)
+        self.assertIn(str(task.resolve()), argv)
+        self.assertIn(str(retry_preparation.resolve()), argv)
+        self.assertNotIn(str(first_preparation.resolve()), argv)
 
     def test_workspace_tooling_uses_explicit_accepted_language_context(self) -> None:
         self.assertEqual(
