@@ -81,6 +81,13 @@ TransportCompleted ==
 
 ConsumerCancelled ==
     /\ state \in {"invoking", "provider_started"}
+    /\ state' = "cancel_requested"
+    /\ leaseHeld' = TRUE
+    /\ UNCHANGED <<authorityGranted, specFresh, upstreamCount,
+                    providerStarted, refreshCount, receiptCount>>
+
+TransportQuiescedAfterCancel ==
+    /\ state = "cancel_requested"
     /\ state' = "cancelled"
     /\ leaseHeld' = FALSE
     /\ UNCHANGED <<authorityGranted, specFresh, upstreamCount,
@@ -110,6 +117,7 @@ Next == RejectUnauthorized
      \/ ProviderAccepted
      \/ TransportCompleted
      \/ ConsumerCancelled
+     \/ TransportQuiescedAfterCancel
      \/ RecordUsageReceipt
      \/ ReplayUsageReceipt
      \/ Closed
@@ -117,7 +125,7 @@ Next == RejectUnauthorized
 TypeOK ==
     /\ state \in {"idle", "stale", "authorized", "invoking",
                     "provider_started", "transport_terminal", "rejected",
-                    "cancelled", "receipt_recorded"}
+                    "cancel_requested", "cancelled", "receipt_recorded"}
     /\ authorityGranted \in BOOLEAN
     /\ specFresh \in BOOLEAN
     /\ upstreamCount \in 0..1
@@ -130,10 +138,19 @@ RejectedNeverInvokes == state = "rejected" => upstreamCount = 0
 StaleNeverInvokes == state = "stale" => upstreamCount = 0
 AtMostOneUpstream == upstreamCount <= 1
 ProviderStartRequiresUpstream == providerStarted => upstreamCount = 1
-LeaseHasSingleOwner == leaseHeld => state \in {"invoking", "provider_started"}
+LeaseHasSingleOwner ==
+    leaseHeld => state \in {"invoking", "provider_started", "cancel_requested"}
+CancellationRetainsLease == state = "cancel_requested" => leaseHeld
 CancellationReleasesLease == state = "cancelled" => ~leaseHeld
 ReceiptIsTerminalAndIdempotent ==
     receiptCount = 1 => state = "receipt_recorded" /\ ~leaseHeld
 ProviderStartUsesFreshSpec == providerStarted => specFresh
+CancellationEventuallyReleases ==
+    state = "cancel_requested" ~> state = "cancelled"
+
+Spec ==
+    /\ Init
+    /\ [][Next]_vars
+    /\ WF_vars(TransportQuiescedAfterCancel)
 
 =============================================================================

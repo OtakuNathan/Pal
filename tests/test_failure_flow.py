@@ -93,6 +93,31 @@ def _unknown_effect_failure_program(draft, *, allowed_tools):
 
 
 class FailureFlowTests(unittest.TestCase):
+    def test_persistence_failure_stops_without_invoking_safe_mode_llm(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        llm = _RecordingFailureLLM()
+        core.context.port_registry["llm:llm"] = llm
+
+        result = asyncio.run(
+            core.handle_failure_async(
+                FailureSignal(
+                    subsystem="persistence",
+                    component="runtime_database",
+                    failure_kind="local_state",
+                    severity="high",
+                    primary_blocker="file is not a database",
+                    evidence={"error_type": "DatabaseError"},
+                ),
+                origin="llm_request",
+            )
+        )
+
+        self.assertEqual(result.verification.status, FAILURE_VERIFICATION_FAILED)
+        self.assertEqual(llm.requests, [])
+        self.assertEqual(result.user_feedback.blocker, "file is not a database")
+        self.assertIn("back up the runtime database", result.user_feedback.next_step)
+
     def test_failure_flow_uses_isolated_safe_mode_prompt(self) -> None:
         core = PalCore()
         register_core_with_core(core)

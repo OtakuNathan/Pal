@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
+import signal
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -61,23 +63,25 @@ class AsyncStdioMcpConnector:
     _stderr_task: asyncio.Task[None] | None = None
     _closed: bool = False
     _stderr_lines: list[str] = field(default_factory=list)
+    _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def initialize(self) -> None:
-        await self._start()
-        result = await self._request(
-            "initialize",
-            {
-                "protocolVersion": self.config.protocol_version,
-                "capabilities": {},
-                "clientInfo": {"name": "Pal", "version": "0.1.0"},
-            },
-            timeout_ms=self.config.startup_timeout_ms,
-        )
-        self.server_info = dict(result.get("serverInfo") or {})
-        self.server_capabilities = dict(result.get("capabilities") or {})
-        if result.get("protocolVersion") is None:
-            raise McpProtocolError("initialize response missing protocolVersion")
-        await self._notify("notifications/initialized")
+        async with self._lifecycle_lock:
+            await self._start()
+            result = await self._request(
+                "initialize",
+                {
+                    "protocolVersion": self.config.protocol_version,
+                    "capabilities": {},
+                    "clientInfo": {"name": "Pal", "version": "0.1.0"},
+                },
+                timeout_ms=self.config.startup_timeout_ms,
+            )
+            self.server_info = dict(result.get("serverInfo") or {})
+            self.server_capabilities = dict(result.get("capabilities") or {})
+            if result.get("protocolVersion") is None:
+                raise McpProtocolError("initialize response missing protocolVersion")
+            await self._notify("notifications/initialized")
 
     async def list_tools_all(self) -> tuple[McpToolSpec, ...]:
         tools: list[McpToolSpec] = []
@@ -114,33 +118,36 @@ class AsyncStdioMcpConnector:
         return await self._request("prompts/get", {"name": prompt_name, "arguments": dict(arguments or {})})
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for task in (self._reader_task, self._stderr_task):
-            if task is not None:
-                task.cancel()
-        for task in (self._reader_task, self._stderr_task):
-            if task is not None:
-                with _suppress_all():
-                    await task
-        for request_id, future in list(self._pending.items()):
-            if not future.done():
-                future.set_exception(McpProtocolError("MCP connector closed"))
-            self._pending.pop(request_id, None)
-        process = self.process
-        if process is None:
-            return
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=max(self.config.shutdown_timeout_ms, 1) / 1000.0)
-            except Exception:
-                if self.config.kill_on_close and process.returncode is None:
-                    process.kill()
+        async with self._lifecycle_lock:
+            if self._closed and self.process is None:
+                return
+            self._closed = True
+            process = self.process
+            # Withdraw the only discoverable process authority before cleanup.
+            self.process = None
+            tasks = (self._reader_task, self._stderr_task)
+            self._reader_task = None
+            self._stderr_task = None
+            for task in tasks:
+                if task is not None:
+                    task.cancel()
+            for task in tasks:
+                if task is not None:
                     with _suppress_all():
-                        await process.wait()
-        self.process = None
+                        await task
+            self._fail_pending(McpProtocolError("MCP connector closed"))
+            if process is None:
+                return
+            _terminate_async_process_once(process, force=self.config.kill_on_close)
+            try:
+                await asyncio.wait_for(
+                    process.wait(),
+                    timeout=max(self.config.shutdown_timeout_ms, 1) / 1000.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise McpProtocolError(
+                    "MCP process did not exit after its one-shot termination; replacement is fenced"
+                ) from exc
 
     async def _start(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -162,6 +169,7 @@ class AsyncStdioMcpConnector:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
         self._reader_task = asyncio.create_task(self._read_stdout_loop(), name=f"mcp-{self.config.server_id}-stdout")
         self._stderr_task = asyncio.create_task(self._drain_stderr_loop(), name=f"mcp-{self.config.server_id}-stderr")
@@ -259,3 +267,17 @@ class _suppress_all:
 
     def __exit__(self, exc_type, exc, tb):
         return True
+
+
+def _terminate_async_process_once(
+    process: asyncio.subprocess.Process,
+    *,
+    force: bool,
+) -> None:
+    if process.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        if os.name == "nt":
+            process.kill() if force else process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)

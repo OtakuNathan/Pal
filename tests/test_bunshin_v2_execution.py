@@ -31,7 +31,6 @@ from pal.bunshin.v2.execution import (
     prepare_node_dependency_baseline,
     prepare_node_verification_baseline,
     format_workspace_process_holders,
-    terminate_process_group,
     workspace_process_holders,
     workspace_content_fingerprint,
     _validate_skeleton_candidate_paths,
@@ -191,28 +190,6 @@ class BunshinV2ExecutionTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
-
-    def test_persisted_process_group_is_killed_after_leader_exits(self) -> None:
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import subprocess; subprocess.Popen(['sleep', '60'])",
-            ],
-            start_new_session=True,
-        )
-        process.wait(timeout=5)
-        process_group = process.pid
-        try:
-            os.killpg(process_group, 0)
-            self.assertTrue(asyncio.run(terminate_process_group(process_group, timeout_seconds=1.0)))
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(process_group, 0)
-        finally:
-            try:
-                os.killpg(process_group, 9)
-            except ProcessLookupError:
-                pass
 
     def test_workspace_process_holders_report_read_and_write_access(self) -> None:
         if not Path("/proc").is_dir():

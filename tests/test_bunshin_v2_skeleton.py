@@ -343,7 +343,7 @@ class SoftwareContractAdapterTests(unittest.TestCase):
 
         self.assertFalse(missing_repo.exists())
 
-    def test_clean_git_snapshot_without_github_remote_uses_local_delivery(self) -> None:
+    def test_clean_git_snapshot_always_uses_patch_and_records_pr_eligibility(self) -> None:
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.repo, check=True)
         subprocess.run(
             ["git", "config", "user.name", "Test"], cwd=self.repo, check=True
@@ -364,9 +364,10 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             snapshot_ref="refs/bunshin/snapshots/no-remote",
         )
         self.assertTrue(no_remote["source_clean"])
-        self.assertEqual(no_remote["delivery_mode"], "local_only")
+        self.assertEqual(no_remote["delivery_mode"], "patch")
+        self.assertFalse(no_remote["pull_request_eligible"])
         self.assertEqual(
-            no_remote["delivery_fallback_reason"],
+            no_remote["pull_request_ineligible_reason"],
             "source Git repository has no configured push remote",
         )
 
@@ -377,14 +378,15 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             cwd=self.repo,
             check=True,
         )
-        local_only = self.skeleton._create_synthetic_snapshot(
+        local_remote_snapshot = self.skeleton._create_synthetic_snapshot(
             self.runtime_root / "local-remote.git",
             self.repo,
             snapshot_ref="refs/bunshin/snapshots/local-remote",
         )
-        self.assertEqual(local_only["delivery_mode"], "local_only")
+        self.assertEqual(local_remote_snapshot["delivery_mode"], "patch")
+        self.assertFalse(local_remote_snapshot["pull_request_eligible"])
         self.assertEqual(
-            local_only["delivery_fallback_reason"],
+            local_remote_snapshot["pull_request_ineligible_reason"],
             "source push target does not support GitHub pull requests",
         )
 

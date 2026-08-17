@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping
+from typing import AsyncIterator, Awaitable, Callable, Mapping
 
-from pal.bunshin.v2.execution import WorkspaceLockRegistry, terminate_process_group
+from pal.bunshin.v2.execution import WorkspaceLockRegistry
 from pal.bunshin.v2.coroutine_runtime import (
     CoroutineRunPermit,
     CoroutineRunSemaphore,
@@ -13,7 +16,7 @@ from pal.bunshin.v2.coroutine_runtime import (
 
 
 class WorkerProcessReapError(RuntimeError):
-    """The worker owner could not prove that its complete process group exited."""
+    """The worker owner could not terminate and reap its direct child."""
 
 
 WorkerOwnerCallback = Callable[["WorkerProcessOwner"], None]
@@ -22,11 +25,11 @@ WorkerHeartbeatFactory = Callable[[], Awaitable[None]]
 
 @dataclass
 class WorkerProcessOwner:
-    """RAII owner for one worker process group and its worktree occupancy.
+    """Owner for one currently reachable worker and its worktree occupancy.
 
-    Registration, lease heartbeats, the process group, and the worktree lock
-    have one lifetime.  A leader exit is not a worker exit: the owner remains
-    registered until every process in the group has been reaped.
+    The private process reference is the only destructive authority.  A PID is
+    derived from that object only for the synchronous group-kill handoff and is
+    never persisted or retried after the reference is withdrawn.
     """
 
     argv: tuple[str, ...]
@@ -40,17 +43,19 @@ class WorkerProcessOwner:
     on_unregistered: WorkerOwnerCallback
     heartbeat_factories: tuple[WorkerHeartbeatFactory, ...] = ()
     reap_timeout_seconds: float = 5.0
-    process: asyncio.subprocess.Process | None = field(default=None, init=False)
-    process_group_id: int = field(default=0, init=False)
+    _process: asyncio.subprocess.Process | None = field(default=None, init=False, repr=False)
     lock_path: Path | None = field(default=None, init=False)
     stderr: bytes = field(default=b"", init=False)
     process_group_reaped: bool = field(default=False, init=False)
     _registered: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
+    _returncode: int | None = field(default=None, init=False, repr=False)
+    _termination_sent: bool = field(default=False, init=False, repr=False)
+    _stdin: asyncio.StreamWriter | None = field(default=None, init=False, repr=False)
+    _stdout: asyncio.StreamReader | None = field(default=None, init=False, repr=False)
     _heartbeat_tasks: list[asyncio.Task[None]] = field(default_factory=list, init=False)
     _stderr_task: asyncio.Task[bytes] | None = field(default=None, init=False)
     _leader_exit_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _reap_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     @property
@@ -66,14 +71,44 @@ class WorkerProcessOwner:
         return (
             self._closed
             and not self._registered
-            and (
-                self.process is None
-                or self.process_group_reaped
-            )
+            and self._process is None
+            and self.process_group_reaped
         )
 
+    @property
+    def pid(self) -> int:
+        process = self._process
+        return int(process.pid) if process is not None else 0
+
+    @property
+    def returncode(self) -> int | None:
+        process = self._process
+        if process is not None and process.returncode is not None:
+            self._record_exit(process, int(process.returncode))
+        return self._returncode
+
+    async def wait(self) -> int:
+        process = self._process
+        if process is not None:
+            self._record_exit(process, int(await process.wait()))
+        elif self._leader_exit_task is not None:
+            await asyncio.shield(self._leader_exit_task)
+        if self._returncode is None:
+            raise WorkerProcessReapError("worker exited without a return code")
+        return self._returncode
+
+    async def stdout_lines(self) -> AsyncIterator[bytes]:
+        stdout = self._stdout
+        if stdout is None:
+            raise WorkerProcessReapError("worker process has no stdout pipe")
+        while True:
+            line = await stdout.readline()
+            if not line:
+                return
+            yield line
+
     async def __aenter__(self) -> "WorkerProcessOwner":
-        if self.process is not None:
+        if self._closed or self._process is not None:
             raise RuntimeError("worker process owner cannot be entered twice")
         if self.workspace is not None:
             self.lock_path = self.workspace_locks.acquire(
@@ -81,7 +116,7 @@ class WorkerProcessOwner:
                 self.workspace,
             )
         try:
-            self.process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *self.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -89,7 +124,9 @@ class WorkerProcessOwner:
                 env=dict(self.env),
                 start_new_session=True,
             )
-            self.process_group_id = int(self.process.pid)
+            self._process = process
+            self._stdin = process.stdin
+            self._stdout = process.stdout
             self.on_started(self)
             # Mark registration before invoking the callback so a partially
             # completed callback is always paired with an unregister attempt.
@@ -99,10 +136,10 @@ class WorkerProcessOwner:
                 asyncio.create_task(factory())
                 for factory in self.heartbeat_factories
             ]
-            if self.process.stderr is not None:
-                self._stderr_task = asyncio.create_task(self.process.stderr.read())
+            if process.stderr is not None:
+                self._stderr_task = asyncio.create_task(process.stderr.read())
             self._leader_exit_task = asyncio.create_task(
-                self._reap_after_leader_exit(),
+                self._reap_after_leader_exit(process),
                 name=f"bunshin-worker-owner-{self.invocation_id}",
             )
             return self
@@ -123,44 +160,67 @@ class WorkerProcessOwner:
             await close_task
             raise
 
-    async def _reap_after_leader_exit(self) -> None:
-        process = self._require_process()
-        await process.wait()
-        await self._ensure_process_group_reaped()
+    async def _reap_after_leader_exit(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        self._record_exit(process, int(await process.wait()))
 
-    async def _ensure_process_group_reaped(self) -> None:
-        async with self._reap_lock:
-            if self.process_group_reaped:
-                return
-            process = self._require_process()
-            group_reap = asyncio.create_task(
-                terminate_process_group(
-                    self.process_group_id,
-                    timeout_seconds=self.reap_timeout_seconds,
-                )
-            )
-            leader_wait = asyncio.create_task(process.wait())
-            reaped, _returncode = await asyncio.gather(group_reap, leader_wait)
-            if not reaped:
-                raise WorkerProcessReapError(
-                    "worker process group could not be reaped; "
-                    "run registration and worktree ownership remain held"
-                )
-            self.process_group_reaped = True
+    def _record_exit(
+        self,
+        process: asyncio.subprocess.Process,
+        returncode: int,
+    ) -> None:
+        self._returncode = int(returncode)
+        if self._process is process:
+            self._process = None
+        self.process_group_reaped = True
 
     async def close(self) -> None:
         async with self._close_lock:
             if self._closed:
                 return
-            if self.process is not None:
-                await self._ensure_process_group_reaped()
-                if self._leader_exit_task is not None:
-                    await self._leader_exit_task
-                if self._stderr_task is not None:
-                    self.stderr = await self._stderr_task
+            process = self._process
+            # Withdraw the only published authority before signalling.  The
+            # local reference below exists solely to issue one terminal signal
+            # and reap the direct child.
+            self._process = None
+            if process is not None and process.returncode is None and not self._termination_sent:
+                self._termination_sent = True
+                with contextlib.suppress(ProcessLookupError):
+                    if os.name == "nt":
+                        process.kill()
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
+            if process is not None:
+                try:
+                    returncode = await asyncio.wait_for(
+                        asyncio.shield(process.wait()),
+                        timeout=self.reap_timeout_seconds,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise WorkerProcessReapError(
+                        "worker leader did not exit after its one-shot termination; "
+                        "registration and worktree ownership remain fenced"
+                    ) from exc
+                self._record_exit(process, int(returncode))
+            elif self._leader_exit_task is None:
+                self.process_group_reaped = True
 
-            # Leases remain live until process-group cleanup succeeds.  Only
-            # then may Manager accounting say that the worker has exited.
+            if self._leader_exit_task is not None:
+                await asyncio.shield(self._leader_exit_task)
+            if self._stderr_task is not None:
+                self.stderr = await self._stderr_task
+            stdin = self._stdin
+            if stdin is not None and not stdin.is_closing():
+                stdin.close()
+                with contextlib.suppress(Exception):
+                    await stdin.wait_closed()
+            self._stdin = None
+            self._stdout = None
+
+            # Manager accounting and workspace ownership remain live until the
+            # direct child and its parent-owned pipes are finished.
             for task in self._heartbeat_tasks:
                 task.cancel()
             if self._heartbeat_tasks:
@@ -178,12 +238,12 @@ class WorkerProcessOwner:
             self._closed = True
 
     def _require_process(self) -> asyncio.subprocess.Process:
-        if self.process is None:
+        if self._process is None:
             raise RuntimeError("worker process has not started")
-        return self.process
+        return self._process
 
     async def write_control(self, message: bytes) -> bool:
-        process = self.process
+        process = self._process
         if (
             process is None
             or process.returncode is not None
@@ -204,9 +264,10 @@ class RoleProcessShell:
     """Bind one materialized worker to exactly one coroutine-run permit.
 
     The permit is deliberately outside ``WorkerProcessOwner``: process
-    ownership proves OS cleanup, while the semaphore accounts logical worker
-    incarnations.  Release is legal only after the owner proves its process
-    group, broker registration, heartbeats, and workspace lock are closed.
+    ownership proves direct-child cleanup, while the semaphore accounts
+    logical worker incarnations. Release is legal only after the owner closes
+    its process reference, broker registration, heartbeats, and workspace
+    lock.
     """
 
     owner: WorkerProcessOwner

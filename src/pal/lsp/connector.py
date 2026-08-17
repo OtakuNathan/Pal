@@ -37,59 +37,65 @@ class AsyncLspConnector:
     _stderr_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stderr_tail: str = field(default="", init=False, repr=False)
     _stderr_tail_limit: int = field(default=4000, init=False, repr=False)
+    _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _closing: bool = field(default=False, init=False, repr=False)
 
     async def initialize(self) -> None:
-        if self.initialized and self.process is not None and self.process.returncode is None:
-            return
-        await self.close()
-        self.process = await asyncio.create_subprocess_exec(
-            *self.config.command,
-            *self.config.args,
-            *self.extra_args,
-            cwd=str(self.workspace_root),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        self._stderr_tail = ""
-        self._pending.clear()
-        self._reader_task = asyncio.create_task(self._reader_loop(), name=f"lsp-{self.config.server_id}-reader")
-        self._stderr_task = asyncio.create_task(self._drain_stderr(), name=f"lsp-{self.config.server_id}-stderr")
-        result = await asyncio.wait_for(
-            self.request(
-                "initialize",
-                {
-                    "processId": None,
-                    "rootUri": self.workspace_root.resolve().as_uri(),
-                    "capabilities": {},
-                    "workspaceFolders": [{"uri": self.workspace_root.resolve().as_uri(), "name": self.workspace_root.name}],
-                },
-            ),
-            timeout=max(0.1, self.config.startup_timeout_ms / 1000),
-        )
-        self.server_info = dict(result.get("serverInfo") or result.get("server_info") or {})
-        self.server_capabilities = dict(result.get("capabilities") or {})
-        await self.notify("initialized", {})
-        self.initialized = True
+        async with self._lifecycle_lock:
+            if self.initialized and self.process is not None and self.process.returncode is None:
+                return
+            await self._close_locked()
+            self._closing = False
+            self.process = await asyncio.create_subprocess_exec(
+                *self.config.command,
+                *self.config.args,
+                *self.extra_args,
+                cwd=str(self.workspace_root),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            self._stderr_tail = ""
+            self._pending.clear()
+            self._reader_task = asyncio.create_task(self._reader_loop(), name=f"lsp-{self.config.server_id}-reader")
+            self._stderr_task = asyncio.create_task(self._drain_stderr(), name=f"lsp-{self.config.server_id}-stderr")
+            result = await asyncio.wait_for(
+                self.request(
+                    "initialize",
+                    {
+                        "processId": None,
+                        "rootUri": self.workspace_root.resolve().as_uri(),
+                        "capabilities": {},
+                        "workspaceFolders": [{"uri": self.workspace_root.resolve().as_uri(), "name": self.workspace_root.name}],
+                    },
+                ),
+                timeout=max(0.1, self.config.startup_timeout_ms / 1000),
+            )
+            self.server_info = dict(result.get("serverInfo") or result.get("server_info") or {})
+            self.server_capabilities = dict(result.get("capabilities") or {})
+            await self.notify("initialized", {})
+            self.initialized = True
 
     async def close(self) -> None:
+        async with self._lifecycle_lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
         process = self.process
         reader_task = self._reader_task
         stderr_task = self._stderr_task
         self._reader_task = None
         self._stderr_task = None
         self.initialized = False
+        self._closing = process is not None
         if process is None:
             await self._cancel_reader_task(reader_task)
             await self._cancel_stderr_task(stderr_task)
             self._clear_document_state()
+            self._closing = False
             return
-        try:
-            process_group = os.getpgid(process.pid)
-        except (OSError, ProcessLookupError):
-            process_group = 0
-        owns_process_group = process_group == process.pid
+        cleanup_error: LspProtocolError | None = None
         if process.returncode is None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.request("shutdown", {}), timeout=1.0)
@@ -98,29 +104,35 @@ class AsyncLspConnector:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), timeout=1.0)
         if process.returncode is None:
+            # Withdraw the process before the one destructive signal. New I/O
+            # cannot discover it while this lifecycle lock finishes cleanup.
+            self.process = None
             with contextlib.suppress(ProcessLookupError):
-                if owns_process_group:
-                    os.killpg(process_group, signal.SIGKILL)
-                else:
+                if os.name == "nt":
                     process.kill()
-            with contextlib.suppress(Exception):
-                await process.wait()
-        elif owns_process_group:
-            # A language server may leave helper processes behind after its
-            # leader exits. New sessions make the server PID its process-group
-            # ID, so the complete workspace-owning tree can be reaped.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process_group, signal.SIGKILL)
-        self.process = None
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                cleanup_error = LspProtocolError(
+                    "language server did not exit after its one-shot termination; replacement is fenced"
+                )
+        else:
+            self.process = None
         self._fail_pending(LspProtocolError("language server closed"))
         await self._cancel_reader_task(reader_task)
         await self._cancel_stderr_task(stderr_task)
         self._clear_document_state()
+        self._closing = False
+        if cleanup_error is not None:
+            raise cleanup_error
 
     @property
     def healthy(self) -> bool:
         return bool(
             self.initialized
+            and not self._closing
             and self.process is not None
             and self.process.returncode is None
             and self._reader_task is not None

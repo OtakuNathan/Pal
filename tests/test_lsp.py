@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+from pal.foundation.fd_lease import FdCloseOutcome
 from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
 from pal.lsp.connector import AsyncLspConnector, LspProtocolError
 from pal.lsp.environment import prepare_workspace_lsp_environment
@@ -514,8 +515,8 @@ language_ids = ["foo"]
                     "diagnostics_state": "fresh",
                 }
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -654,8 +655,8 @@ language_ids = ["foo"]
                     "diagnostics_state": "fresh",
                 }
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -740,8 +741,8 @@ language_ids = ["foo"]
                     "diagnostics_state": "fresh",
                 }
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -816,8 +817,9 @@ language_ids = ["foo"]
                     "diagnostics_state": "fresh",
                 }
 
-            async def close(self) -> None:
+            async def close(self) -> FdCloseOutcome:
                 closed.append(self.extra_args)
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -888,8 +890,8 @@ language_ids = ["foo"]
             async def initialize(self) -> None:
                 return None
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -990,8 +992,8 @@ language_ids = ["foo"]
                     ],
                 }
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -1169,8 +1171,9 @@ language_ids = ["foo"]
                     ]
                 }
 
-            async def close(self) -> None:
+            async def close(self) -> FdCloseOutcome:
                 closed.append(self.workspace_root)
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -1242,8 +1245,9 @@ language_ids = ["foo"]
                 _ = method
                 return {"value": [{"workspace_root": str(self.workspace_root), "query": str(params.get("query") or "")}]}
 
-            async def close(self) -> None:
+            async def close(self) -> FdCloseOutcome:
                 closed.append(self.workspace_root)
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -1299,8 +1303,8 @@ language_ids = ["foo"]
                 attempts.append(self.workspace_root)
                 raise TimeoutError("startup timed out")
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -1352,8 +1356,9 @@ language_ids = ["foo"]
                     raise LspProtocolError("server stdout closed")
                 return {"value": [{"name": "route"}]}
 
-            async def close(self) -> None:
+            async def close(self) -> FdCloseOutcome:
                 closed.append(self.index)
+                return FdCloseOutcome.detached()
 
         state = LspServerState(
             file_config=LspServerFileConfig(
@@ -1420,8 +1425,8 @@ language_ids = ["foo"]
                     return {"value": [{"to": {"name": "dependency"}, "fromRanges": [{"start": {"line": 1, "character": 11}}]}]}
                 raise AssertionError(f"unexpected LSP method: {method}")
 
-            async def close(self) -> None:
-                return None
+            async def close(self) -> FdCloseOutcome:
+                return FdCloseOutcome.detached()
 
         connector = FakeConnector(self.root)
         state = LspServerState(

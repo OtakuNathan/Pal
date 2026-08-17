@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import time
-from contextlib import suppress
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
@@ -10,6 +9,14 @@ from typing import Any, Protocol
 
 import httpx
 
+from pal.foundation.fd_lease import (
+    FdCancellationControl,
+    FdCapability,
+    FdCloseOutcome,
+    FdLease,
+    FdLeaseCancelledError,
+    FdLeaseInvariantError,
+)
 from pal.llm.ir import WireShape
 from pal.llm.models import LLMEndpointModel
 from pal.llm.shapes.base import _JSONFrame
@@ -20,8 +27,56 @@ class LLMTransportError(RuntimeError):
     pass
 
 
-class LLMStreamCancelledError(LLMTransportError):
-    pass
+LLMStreamCancelledError = FdLeaseCancelledError
+
+
+@dataclass
+class LLMStreamControl:
+    """LLM telemetry plus an fd capability cancellation/revocation gate."""
+
+    started_at: float = field(default_factory=time.monotonic)
+    _fd: FdCancellationControl = field(default_factory=FdCancellationControl, repr=False)
+    _provider_started: bool = field(default=False, init=False, repr=False)
+    _last_network_activity_at: float = field(default=0.0, init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._fd.cancelled
+
+    @property
+    def cancel_reason(self) -> str:
+        return self._fd.cancel_reason
+
+    @property
+    def provider_started(self) -> bool:
+        with self._lock:
+            return self._provider_started
+
+    @property
+    def last_network_activity_at(self) -> float:
+        with self._lock:
+            return max(self.started_at, self._last_network_activity_at)
+
+    def bind(self, capability: FdCapability[Any]) -> None:
+        self._fd.bind(capability)
+
+    def unbind(self, capability: FdCapability[Any]) -> None:
+        self._fd.unbind(capability)
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        self._fd.cancel(reason)
+
+    def raise_if_cancelled(self) -> None:
+        self._fd.raise_if_cancelled()
+
+    def mark_provider_started(self) -> None:
+        with self._lock:
+            self._provider_started = True
+            self._last_network_activity_at = time.monotonic()
+
+    def touch_network(self) -> None:
+        self.mark_provider_started()
 
 
 class LLMEndpointSpecStaleError(LLMTransportError):
@@ -42,7 +97,7 @@ class EncodedTransportRequest:
     payload: Mapping[str, Any]
     stream: bool
     extra_body: Mapping[str, Any] = field(default_factory=dict)
-    stream_control: "StreamControl | None" = None
+    stream_control: "LLMStreamControl | None" = None
 
 
 class LLMJSONTransportPort(Protocol):
@@ -54,93 +109,6 @@ class LLMJSONTransportPort(Protocol):
         request: EncodedTransportRequest,
     ) -> Iterator[_JSONFrame]:
         ...
-
-
-@dataclass
-class StreamControl:
-    """Per-invocation cancellation and raw-network liveness ownership."""
-
-    started_at: float = field(default_factory=time.monotonic)
-    _last_network_activity_at: float = field(init=False, repr=False)
-    _provider_started: bool = field(default=False, init=False, repr=False)
-    _cancelled: bool = field(default=False, init=False, repr=False)
-    _cancel_reason: str = field(default="", init=False, repr=False)
-    _client: Any = field(default=None, init=False, repr=False)
-    _response: Any = field(default=None, init=False, repr=False)
-    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._last_network_activity_at = self.started_at
-
-    @property
-    def provider_started(self) -> bool:
-        with self._lock:
-            return self._provider_started
-
-    @property
-    def cancelled(self) -> bool:
-        with self._lock:
-            return self._cancelled
-
-    @property
-    def cancel_reason(self) -> str:
-        with self._lock:
-            return self._cancel_reason
-
-    @property
-    def last_network_activity_at(self) -> float:
-        with self._lock:
-            return self._last_network_activity_at
-
-    def bind_client(self, client: Any) -> None:
-        close_now = False
-        with self._lock:
-            self._client = client
-            close_now = self._cancelled
-        if close_now:
-            _close_client(client)
-
-    def bind_response(self, response: Any) -> None:
-        close_now = False
-        with self._lock:
-            self._response = response
-            self._provider_started = True
-            self._last_network_activity_at = time.monotonic()
-            close_now = self._cancelled
-        _observe_raw_response_stream(response, self.touch_network)
-        if close_now:
-            _close_stream_response(response)
-
-    def touch_network(self) -> None:
-        with self._lock:
-            self._provider_started = True
-            self._last_network_activity_at = time.monotonic()
-
-    def release(self, *, client: Any, response: Any = None) -> None:
-        with self._lock:
-            if self._client is client:
-                self._client = None
-            if response is not None and self._response is response:
-                self._response = None
-
-    def cancel(self, reason: str = "cancelled") -> None:
-        with self._lock:
-            if self._cancelled:
-                return
-            self._cancelled = True
-            self._cancel_reason = str(reason or "cancelled")
-            response = self._response
-            client = self._client
-        if response is not None:
-            _close_stream_response(response)
-        if client is not None:
-            _close_client(client)
-
-    def raise_if_cancelled(self) -> None:
-        if self.cancelled:
-            raise LLMStreamCancelledError(
-                f"LLM stream cancelled: {self.cancel_reason or 'cancelled'}"
-            )
 
 
 class _ObservedSyncByteStream(httpx.SyncByteStream):
@@ -194,6 +162,7 @@ class DefaultSDKClientFactory:
 
 @dataclass(frozen=True)
 class SDKTransportRequest:
+    request_id: str
     endpoint_id: str
     wire_shape: WireShape
     api_key: str
@@ -202,7 +171,7 @@ class SDKTransportRequest:
     payload: Mapping[str, Any]
     stream: bool
     extra_body: Mapping[str, Any] = field(default_factory=dict)
-    stream_control: StreamControl | None = None
+    stream_control: LLMStreamControl | None = None
 
 
 @dataclass
@@ -226,6 +195,7 @@ class DirectSDKTransport:
             )
         yield from self.sdk_transport.frames(
             SDKTransportRequest(
+                request_id=request.request_id,
                 endpoint_id=str(endpoint.endpoint_id),
                 wire_shape=request.wire_shape,
                 api_key=api_key,
@@ -277,78 +247,80 @@ class SDKJSONTransport:
         payload["stream"] = bool(request.stream)
         if request.stream and request.wire_shape == WireShape.OPENAI_COMPLETION:
             payload.setdefault("stream_options", {"include_usage": True})
-        key, entry = self._acquire(request)
-        response: Any = None
+        key, entry, capability = self._acquire(request)
         control = request.stream_control
+        succeeded = False
         if control is not None:
-            control.bind_client(entry.client)
+            control.bind(capability)
         try:
             if control is not None:
                 control.raise_if_cancelled()
-            operation = self._operation(entry.client, request)
-            response = operation(**payload)
+            capability.call_sync(
+                lambda graph: _open_sdk_response(graph, request, payload)
+            )
             if control is not None:
-                control.bind_response(response)
+                control.mark_provider_started()
+                capability.call_sync(
+                    lambda graph: _observe_sdk_graph_stream(
+                        graph,
+                        control.touch_network,
+                    )
+                )
                 control.raise_if_cancelled()
-            yield from _iter_json_frames(response)
+            while True:
+                if control is not None:
+                    control.raise_if_cancelled()
+                try:
+                    frame = capability.call_sync(_next_sdk_frame)
+                except StopIteration:
+                    break
+                yield frame
             if control is not None:
                 control.raise_if_cancelled()
+            succeeded = capability.call_sync(_close_active_sdk_response)
         except Exception as exc:
-            if isinstance(exc, LLMTransportError):
+            if isinstance(exc, (LLMTransportError, FdLeaseCancelledError)):
                 raise
             raise LLMTransportError(f"{request.wire_shape.value} request failed: {exc}") from exc
         finally:
-            retire_entry = False
+            capability.release_sync(reuse=succeeded)
             if control is not None:
-                control.release(client=entry.client, response=response)
-                retire_entry = control.cancelled
-            if response is not None and request.stream:
-                _close_stream_response(response)
-            self._release(key, entry, retire=retire_entry)
+                control.unbind(capability)
+            self._settle(key, entry)
 
     def activate_endpoint(self, endpoint_id: str) -> None:
         normalized = str(endpoint_id or "").strip()
-        retired: list[Any] = []
+        closing: list[_ClientEntry] = []
         with self._lock:
             if normalized == self._active_endpoint_id:
                 return
             self._active_endpoint_id = normalized
-            for key, entries in tuple(self._clients.items()):
+            for key, entries in self._clients.items():
                 if key[0] == normalized:
                     continue
                 for entry in entries:
-                    entry.retired = True
-                    if entry.leases == 0:
-                        retired.append(entry.client)
-                remaining = [entry for entry in entries if entry.leases > 0]
-                if remaining:
-                    self._clients[key] = remaining
-                else:
-                    self._clients.pop(key, None)
-        for client in retired:
-            _close_client(client)
+                    if entry.owner.request_retire("endpoint_deactivated"):
+                        closing.append(entry)
+        for entry in closing:
+            self._close_idle_entry(entry)
+        self._discard_closed_entries()
 
     def close(self) -> None:
-        clients: list[Any] = []
+        closing: list[_ClientEntry] = []
         with self._lock:
-            for key, entries in tuple(self._clients.items()):
+            for entries in self._clients.values():
                 for entry in entries:
-                    entry.retired = True
-                    if entry.leases == 0:
-                        clients.append(entry.client)
-                remaining = [entry for entry in entries if entry.leases > 0]
-                if remaining:
-                    self._clients[key] = remaining
-                else:
-                    self._clients.pop(key, None)
+                    if entry.owner.request_retire("transport_close"):
+                        closing.append(entry)
             self._active_endpoint_id = ""
-        for client in clients:
-            _close_client(client)
+        for entry in closing:
+            self._close_idle_entry(entry)
+        self._discard_closed_entries()
 
     def _acquire(
         self,
         request: SDKTransportRequest,
-    ) -> tuple[tuple[str, ...], "_ClientEntry"]:
+    ) -> tuple[tuple[str, ...], "_ClientEntry", FdCapability["_SDKClientGraph"]]:
         key = _client_key(request)
         with self._lock:
             entries = self._clients.setdefault(key, [])
@@ -356,7 +328,7 @@ class SDKJSONTransport:
                 (
                     candidate
                     for candidate in entries
-                    if not candidate.retired and candidate.leases == 0
+                    if candidate.owner.reusable
                 ),
                 None,
             )
@@ -374,47 +346,61 @@ class SDKJSONTransport:
                         timeout=request.timeout_seconds,
                     )
                 )
-                entry = _ClientEntry(client=client)
+                entry = _ClientEntry(
+                    owner=FdLease(
+                        resource_kind=f"llm.sdk_client:{request.endpoint_id}",
+                        _resource=_SDKClientGraph(client=client),
+                        capacity=1,
+                        closer_sync=_close_sdk_graph,
+                        hard_closer_sync=_close_sdk_graph,
+                    ),
+                )
                 entries.append(entry)
-            entry.leases += 1
-            return key, entry
+            lease = entry.owner.acquire(operation_id=request.request_id)
+            return key, entry, lease
 
-    def _release(
+    def _settle(
         self,
         key: tuple[str, ...],
-        leased_entry: "_ClientEntry",
-        *,
-        retire: bool = False,
+        entry: "_ClientEntry",
     ) -> None:
-        client = None
         with self._lock:
-            if retire:
-                leased_entry.retired = True
-            leased_entry.leases = max(0, leased_entry.leases - 1)
-            if leased_entry.retired and leased_entry.leases == 0:
-                entries = self._clients.get(key, [])
-                if leased_entry in entries:
-                    entries.remove(leased_entry)
-                    if not entries:
-                        self._clients.pop(key, None)
-                client = leased_entry.client
-        if client is not None:
-            _close_client(client)
+            if not (entry.owner.closed or entry.owner.quarantined):
+                return
+            entries = self._clients.get(key, [])
+            if entry in entries:
+                entries.remove(entry)
+            if not entries:
+                self._clients.pop(key, None)
 
-    @staticmethod
-    def _operation(client: Any, request: SDKTransportRequest) -> Callable[..., Any]:
-        if request.wire_shape == WireShape.ANTHROPIC_MESSAGES:
-            return client.messages.create
-        if request.wire_shape == WireShape.OPENAI_RESPONSE:
-            return client.responses.create
-        return client.chat.completions.create
+    def _close_idle_entry(self, entry: "_ClientEntry") -> None:
+        entry.owner.close_sync()
 
+    def _discard_closed_entries(self) -> None:
+        with self._lock:
+            for key, entries in tuple(self._clients.items()):
+                remaining = [
+                    entry
+                    for entry in entries
+                    if not (entry.owner.closed or entry.owner.quarantined)
+                ]
+                if remaining:
+                    self._clients[key] = remaining
+                else:
+                    self._clients.pop(key, None)
 
 @dataclass
 class _ClientEntry:
+    owner: FdLease["_SDKClientGraph"]
+
+
+@dataclass
+class _SDKClientGraph:
     client: Any
-    leases: int = 0
-    retired: bool = False
+    response: Any = None
+    frames: Iterator[_JSONFrame] | None = None
+    close_errors: list[str] = field(default_factory=list)
+    response_close_attempted: bool = False
 
 
 def _client_key(request: SDKTransportRequest) -> tuple[str, ...]:
@@ -430,24 +416,103 @@ def _client_key(request: SDKTransportRequest) -> tuple[str, ...]:
     )
 
 
-def _close_client(client: Any) -> None:
+def _open_sdk_response(
+    graph: _SDKClientGraph,
+    request: SDKTransportRequest,
+    payload: dict[str, Any],
+) -> None:
+    if graph.response is not None or graph.frames is not None:
+        raise FdLeaseInvariantError("SDK client graph already has an active response")
+    if request.wire_shape == WireShape.ANTHROPIC_MESSAGES:
+        operation = graph.client.messages.create
+    elif request.wire_shape == WireShape.OPENAI_RESPONSE:
+        operation = graph.client.responses.create
+    else:
+        operation = graph.client.chat.completions.create
+    response = operation(**payload)
+    graph.response = response
+    graph.frames = iter(_iter_json_frames(response))
+    graph.response_close_attempted = False
+
+
+def _observe_sdk_graph_stream(
+    graph: _SDKClientGraph,
+    on_chunk: Callable[[], None],
+) -> None:
+    if graph.response is None:
+        raise FdLeaseInvariantError("SDK client graph has no active response")
+    _observe_raw_response_stream(graph.response, on_chunk)
+
+
+def _next_sdk_frame(graph: _SDKClientGraph) -> _JSONFrame:
+    frames = graph.frames
+    if frames is None:
+        raise FdLeaseInvariantError("SDK client graph has no active frame iterator")
+    return next(frames)
+
+
+def _close_active_sdk_response(graph: _SDKClientGraph) -> bool:
+    response = graph.response
+    if response is None:
+        graph.frames = None
+        return True
+    if graph.response_close_attempted:
+        return False
+    graph.response_close_attempted = True
+    try:
+        _close_stream_response_or_raise(response)
+    except BaseException as exc:
+        graph.close_errors.append(f"response:{type(exc).__name__}:{exc}")
+        # An uncertain close keeps the response and iterator strongly bound to
+        # the quarantined graph. Never manufacture detachment by clearing them.
+        return False
+    graph.response = None
+    graph.frames = None
+    graph.response_close_attempted = False
+    return True
+
+
+def _close_sdk_graph(graph: _SDKClientGraph) -> FdCloseOutcome:
+    errors = list(graph.close_errors)
+    response = graph.response
+    if response is not None and not graph.response_close_attempted:
+        graph.response_close_attempted = True
+        try:
+            _close_stream_response_or_raise(response)
+        except BaseException as exc:
+            errors.append(f"response:{type(exc).__name__}:{exc}")
+        else:
+            graph.response = None
+            graph.frames = None
+            graph.response_close_attempted = False
+    try:
+        _close_client_or_raise(graph.client)
+    except BaseException as exc:
+        errors.append(f"client:{type(exc).__name__}:{exc}")
+    if errors:
+        graph.close_errors = errors
+        return FdCloseOutcome.uncertain("; ".join(errors))
+    graph.close_errors.clear()
+    return FdCloseOutcome.detached()
+
+
+def _close_client_or_raise(client: Any) -> None:
     close = getattr(client, "close", None)
-    if callable(close):
-        with suppress(Exception):
-            close()
+    if not callable(close):
+        return
+    close()
 
 
-def _close_stream_response(response: Any) -> None:
+def _close_stream_response_or_raise(response: Any) -> None:
     close = getattr(response, "close", None)
     if callable(close):
-        with suppress(Exception):
-            close()
+        close()
         return
     raw = _raw_http_response(response)
     close = getattr(raw, "close", None)
-    if callable(close):
-        with suppress(Exception):
-            close()
+    if not callable(close):
+        return
+    close()
 
 
 def _raw_http_response(response: Any) -> Any:

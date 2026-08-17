@@ -2538,41 +2538,6 @@ class BunshinV2Repository:
             )
         return token
 
-    def update_role_attempt_process_group(
-        self,
-        *,
-        assignment_id: str,
-        attempt_id_value: str,
-        fencing_token: int,
-        process_group_id: int,
-    ) -> None:
-        self.ensure_schema()
-        with self._transaction() as connection:
-            _assignment, attempt = self._role_assignment_attempt_locked(
-                connection,
-                assignment_id=assignment_id,
-                attempt_id_value=attempt_id_value,
-            )
-            self._assert_lease_locked(
-                connection,
-                str(attempt["lease_resource_key"]),
-                str(attempt_id_value),
-                int(fencing_token),
-            )
-            connection.execute(
-                """
-                UPDATE bunshin_v2_role_attempts
-                SET process_group_id = ?, updated_at = ?
-                WHERE attempt_id = ? AND status = ?
-                """,
-                (
-                    max(0, int(process_group_id)),
-                    utc_now(),
-                    str(attempt_id_value),
-                    RoleAttemptState.RUNNING.value,
-                ),
-            )
-
     def authenticate_role_attempt(self, access_token: str) -> dict[str, Any]:
         token = str(access_token or "").strip()
         if not token:

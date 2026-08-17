@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,10 @@ class McpManager:
         attached = [state for state in self.states.values() if state.attached]
         return {
             "ok": True,
+            "health_source": "mcp_manager",
+            "lifecycle_protocol": "plugin_raii.v1",
+            "manager_pid": os.getpid(),
+            "shutdown_requested": self._shutdown_event.is_set(),
             "started_at": self.started_at,
             "last_rescan_at": self.last_rescan_at,
             "last_error": self.last_error,

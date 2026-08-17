@@ -62,6 +62,7 @@ def build_runtime_debug_snapshot(
         "runtime_app": _redact(app_snapshot or {}),
         "asyncio": _asyncio_snapshot(),
         "core": _core_snapshot(core),
+        "llm": _llm_snapshot(core),
         "channel": _channel_snapshot(channel_runtime),
         "proactive": _proactive_snapshot(proactive_manager, proactive_repository),
     }
@@ -151,6 +152,25 @@ def _core_snapshot(core: Any) -> dict[str, Any]:
         "event_sources": sorted(str(key) for key in getattr(event_sources, "keys", lambda: [])()),
         "event_handlers": {str(key): len(value or []) for key, value in getattr(handlers, "items", lambda: [])()},
         "state": _core_state_snapshot(state),
+    }
+
+
+def _llm_snapshot(core: Any) -> dict[str, Any]:
+    from pal.foundation.fd_lease import fd_lease_snapshot
+
+    context = getattr(core, "context", None)
+    registry = getattr(context, "port_registry", {}) or {}
+    runtime = getattr(registry, "get", lambda _key: None)("llm:llm")
+    return {
+        "available": runtime is not None,
+        "active_endpoint_id": str(
+            getattr(runtime, "active_endpoint_id", "") or ""
+        ),
+        "last_endpoint_id": str(getattr(runtime, "last_endpoint_id", "") or ""),
+        "detached_stream_task_count": _safe_len(
+            getattr(runtime, "_detached_stream_tasks", ())
+        ),
+        "fd_leases": fd_lease_snapshot(),
     }
 
 

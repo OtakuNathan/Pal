@@ -2667,7 +2667,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.assertEqual(self.artifacts.read_json(constraints), [])
         self.assertEqual(self.artifacts.read_json(gates), [])
 
-    def test_startup_recovery_reaps_expired_lease_before_new_fencing_token(self) -> None:
+    def test_startup_recovery_clears_expired_lease_without_process_authority(self) -> None:
         first = self.repository.claim_lease(
             "worktree:recover",
             "dead_worker",
@@ -2679,86 +2679,6 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.assertIn("worktree:recover", result["recovered_leases"])
         second = self.repository.claim_lease("worktree:recover", "new_worker", ttl_seconds=60)
         self.assertGreater(second.fencing_token, first.fencing_token)
-
-    def test_recovery_uses_attempt_process_group_when_lease_metadata_is_incomplete(self) -> None:
-        prompt_ref = self.artifacts.put_json(
-            {"instruction": "recover process"},
-            artifact_type="RolePromptPackArtifact",
-        )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="workflow-process-recovery",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id="node-process-recovery",
-                actor="test",
-                expected_version=0,
-                payload={
-                    "epoch_id": "epoch-process-recovery",
-                    "module_name": "process_recovery",
-                    "unit_contract_ref": {"sha256": "contract"},
-                },
-            )
-        )
-        self.repository.ensure_role_session(
-            session_id="session-process-recovery",
-            workflow_id="workflow-process-recovery",
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node-process-recovery",
-            role="implementation",
-            mode="produce",
-            role_profile_id="software_engineering.v2_coder",
-            family_binding_sha="binding",
-            scope_kind=AggregateType.DAG_NODE_RUN.value,
-            subject_key="node-process-recovery",
-        )
-        assignment = self.repository.create_role_assignment(
-            RoleAssignmentRequest(
-                assignment_key="process-recovery",
-                session_id="session-process-recovery",
-                workflow_id="workflow-process-recovery",
-                aggregate_type=AggregateType.DAG_NODE_RUN.value,
-                aggregate_id="node-process-recovery",
-                role="implementation",
-                mode="produce",
-                role_profile_id="software_engineering.v2_coder",
-                family_binding_sha="binding",
-                input_fingerprint="process-input",
-                required_inputs=(),
-                input_refs={},
-                execution_spec={"effect_type": "run_implementation_role"},
-                submission_kind="candidate",
-            )
-        )
-        attempt = self.repository.claim_role_assignment(assignment["assignment_id"])
-        resource = f"assignment:{assignment['assignment_id']}"
-        lease = self.repository.claim_lease(
-            resource,
-            attempt["attempt_id"],
-            ttl_seconds=1,
-            metadata={"workflow_id": "workflow-process-recovery"},
-        )
-        self.repository.start_role_attempt(
-            assignment_id=assignment["assignment_id"],
-            attempt_id_value=attempt["attempt_id"],
-            lease_resource_key=resource,
-            fencing_token=lease.fencing_token,
-            prompt_pack_ref=prompt_ref.to_dict(),
-        )
-        self.repository.update_role_attempt_process_group(
-            assignment_id=assignment["assignment_id"],
-            attempt_id_value=attempt["attempt_id"],
-            fencing_token=lease.fencing_token,
-            process_group_id=777777,
-        )
-        time.sleep(1.05)
-
-        with patch.object(BunshinV2Recovery, "_kill_and_reap", return_value=True) as reap:
-            result = BunshinV2Recovery(BunshinV2WorkflowService(self.runtime_root)).recover()
-
-        reap.assert_any_call(777777)
-        self.assertIn(resource, result["recovered_leases"])
-
 
 if __name__ == "__main__":
     unittest.main()

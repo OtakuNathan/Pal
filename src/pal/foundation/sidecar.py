@@ -14,6 +14,13 @@ from uuid import uuid4
 
 import msgpack
 
+from pal.foundation.fd_lease import (
+    FdCancellationControl,
+    FdCloseOutcome,
+    FdLease,
+    FdLeaseCancelledError,
+)
+
 
 MAX_SIDECAR_FRAME_BYTES = 16 * 1024 * 1024
 SIDECAR_READ_CHUNK_BYTES = 64 * 1024
@@ -143,23 +150,36 @@ class SidecarRpcClient:
             )
         else:
             reader, writer = await open_sidecar_connection(self.endpoint)
+        resource = _AsyncSidecarResource(reader=reader, writer=writer)
+        owner = FdLease(
+            resource_kind=f"sidecar.async_stream:{self.endpoint.name}",
+            _resource=resource,
+            capacity=1,
+            closer_async=_close_async_sidecar,
+            hard_closer_async=_close_async_sidecar,
+        )
+        capability = owner.acquire(operation_id=request_id)
         try:
-            writer.write(
-                pack_sidecar_message(
-                    {
-                        "type": "request",
-                        "id": request_id,
-                        "method": method,
-                        "params": dict(params or {}),
-                        "stream": True,
-                    }
+            await capability.call_async(
+                lambda held: _write_async_sidecar(
+                    held,
+                    pack_sidecar_message(
+                        {
+                            "type": "request",
+                            "id": request_id,
+                            "method": method,
+                            "params": dict(params or {}),
+                            "stream": True,
+                        }
+                    ),
                 )
             )
-            await writer.drain()
             while True:
                 try:
                     response = await asyncio.wait_for(
-                        read_sidecar_message(reader),
+                        capability.call_async(
+                            lambda held: read_sidecar_message(held.reader)
+                        ),
                         timeout=timeout,
                     )
                 except TimeoutError as exc:
@@ -188,9 +208,7 @@ class SidecarRpcClient:
                     payload=response,
                 )
         finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            await capability.release_async(reuse=False)
 
     async def _request_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = str(uuid4())
@@ -201,22 +219,34 @@ class SidecarRpcClient:
             )
         else:
             reader, writer = await open_sidecar_connection(self.endpoint)
+        resource = _AsyncSidecarResource(reader=reader, writer=writer)
+        owner = FdLease(
+            resource_kind=f"sidecar.async_request:{self.endpoint.name}",
+            _resource=resource,
+            capacity=1,
+            closer_async=_close_async_sidecar,
+            hard_closer_async=_close_async_sidecar,
+        )
+        capability = owner.acquire(operation_id=request_id)
         try:
-            writer.write(
-                pack_sidecar_message(
-                    {
-                        "type": "request",
-                        "id": request_id,
-                        "method": method,
-                        "params": dict(params or {}),
-                    }
+            await capability.call_async(
+                lambda held: _write_async_sidecar(
+                    held,
+                    pack_sidecar_message(
+                        {
+                            "type": "request",
+                            "id": request_id,
+                            "method": method,
+                            "params": dict(params or {}),
+                        }
+                    ),
                 )
             )
-            await writer.drain()
-            response = await read_sidecar_message(reader)
+            response = await capability.call_async(
+                lambda held: read_sidecar_message(held.reader)
+            )
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await capability.release_async(reuse=False)
         if str(response.get("id") or "") != request_id:
             raise SidecarRpcError("sidecar returned mismatched request id", payload=response)
         if not bool(response.get("ok")):
@@ -255,22 +285,48 @@ class SidecarSyncStream:
     ) -> None:
         self._request_id = str(uuid4())
         self._method = str(method)
-        self._socket = _open_sidecar_socket_sync(endpoint, unix_only=unix_only)
-        self._socket.settimeout(max(float(timeout_seconds), 0.001))
-        self._stream = self._socket.makefile("rb")
-        self._closed = False
-        self._lock = threading.RLock()
-        self._socket.sendall(
-            pack_sidecar_message(
-                {
-                    "type": "request",
-                    "id": self._request_id,
-                    "method": self._method,
-                    "params": dict(params),
-                    "stream": True,
-                }
-            )
+        sock = _open_sidecar_socket_sync(endpoint, unix_only=unix_only)
+        sock.settimeout(max(float(timeout_seconds), 0.001))
+        try:
+            stream = sock.makefile("rb")
+        except BaseException:
+            sock.close()
+            raise
+        resource = _SyncSidecarResource(socket=sock, stream=stream)
+        self._owner = FdLease(
+            resource_kind=f"sidecar.sync_stream:{endpoint.name}",
+            _resource=resource,
+            capacity=1,
+            closer_sync=_close_sync_sidecar,
+            hard_closer_sync=_close_sync_sidecar,
         )
+        self._capability = self._owner.acquire(
+            operation_id=self._request_id,
+            interrupt=_interrupt_sync_sidecar,
+        )
+        self._control = FdCancellationControl()
+        self._control.bind(self._capability)
+        self._closed = False
+        self._close_requested = False
+        self._lock = threading.RLock()
+        try:
+            self._capability.call_sync(
+                lambda held: held.socket.sendall(
+                    pack_sidecar_message(
+                        {
+                            "type": "request",
+                            "id": self._request_id,
+                            "method": self._method,
+                            "params": dict(params),
+                            "stream": True,
+                        }
+                    )
+                )
+            )
+        except BaseException:
+            self._capability.release_sync(reuse=False)
+            self._control.unbind(self._capability)
+            raise
 
     def __iter__(self) -> "SidecarSyncStream":
         return self
@@ -279,9 +335,19 @@ class SidecarSyncStream:
         with self._lock:
             if self._closed:
                 raise StopIteration
-            stream = self._stream
+            if self._close_requested:
+                self._settle_on_owner_thread()
+                raise StopIteration
         try:
-            response = read_sidecar_message_sync(stream)
+            response = self._capability.call_sync(
+                lambda held: read_sidecar_message_sync(held.stream)
+            )
+        except FdLeaseCancelledError:
+            # Cross-thread close may win the narrow race between the local
+            # close-request check and BEGIN_CALL.  No I/O was admitted, so the
+            # owner only has to release its tombstoned capability.
+            self._settle_on_owner_thread()
+            raise StopIteration
         except (EOFError, OSError, ValueError, socket.timeout) as exc:
             self.close()
             raise SidecarRpcError(
@@ -313,18 +379,73 @@ class SidecarSyncStream:
         )
 
     def close(self) -> None:
+        if threading.get_ident() != self._capability.owner_thread_id:
+            with self._lock:
+                if self._closed:
+                    return
+                self._close_requested = True
+            self._control.cancel("sidecar_stream_close")
+            # Cross-thread close cannot release the capability on behalf of
+            # its owner. Revoke it instead: the interrupt wakes a blocked
+            # read, FdLease waits for that admitted call to leave, and only
+            # then may the socket graph be physically closed.
+            self._control.force_revoke_sync("sidecar_stream_close")
+            with self._lock:
+                self._closed = True
+            self._control.unbind(self._capability)
+            return
+        self._settle_on_owner_thread()
+
+    def interrupt(self) -> None:
+        """Wake a blocking owner without releasing or closing its descriptor."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._close_requested = True
+        self._control.cancel("sidecar_stream_interrupt")
+
+    def _settle_on_owner_thread(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            stream = self._stream
-            sock = self._socket
-        with contextlib.suppress(Exception):
-            sock.shutdown(socket.SHUT_RDWR)
-        with contextlib.suppress(Exception):
-            stream.close()
-        with contextlib.suppress(Exception):
-            sock.close()
+        self._capability.release_sync(reuse=False)
+        self._control.unbind(self._capability)
+
+
+@dataclass
+class _SyncSidecarResource:
+    socket: socket.socket
+    stream: Any
+
+
+@dataclass
+class _AsyncSidecarResource:
+    reader: Any
+    writer: Any
+
+
+def _interrupt_sync_sidecar(resource: _SyncSidecarResource, _reason: str) -> None:
+    with contextlib.suppress(OSError):
+        resource.socket.shutdown(socket.SHUT_RDWR)
+
+
+def _close_sync_sidecar(resource: _SyncSidecarResource) -> FdCloseOutcome:
+    resource.stream.close()
+    resource.socket.close()
+    return FdCloseOutcome.detached()
+
+
+async def _close_async_sidecar(resource: _AsyncSidecarResource) -> FdCloseOutcome:
+    resource.writer.close()
+    await asyncio.wait_for(resource.writer.wait_closed(), timeout=1.0)
+    return FdCloseOutcome.detached()
+
+
+async def _write_async_sidecar(resource: _AsyncSidecarResource, payload: bytes) -> None:
+    resource.writer.write(payload)
+    await resource.writer.drain()
 
 
 def _sidecar_error_from_response(response: dict[str, Any]) -> SidecarRpcError:
@@ -354,21 +475,22 @@ def _open_sidecar_socket_sync(
     *,
     unix_only: bool = False,
 ) -> socket.socket:
-    if not unix_only and endpoint.port_path.exists():
-        port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
-        return socket.create_connection(("127.0.0.1", int(port_text)))
-    if not hasattr(socket, "AF_UNIX"):
+    if hasattr(socket, "AF_UNIX"):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(str(endpoint.socket_path))
+            return sock
+        except OSError:
+            sock.close()
+            if unix_only or not endpoint.port_path.exists():
+                raise
+    elif unix_only:
         raise SidecarRpcError(
             "Unix sidecar transport is unavailable",
             kind="transport",
         )
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(str(endpoint.socket_path))
-    except Exception:
-        sock.close()
-        raise
-    return sock
+    port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
+    return socket.create_connection(("127.0.0.1", int(port_text)))
 
 
 async def open_sidecar_connection(
@@ -376,24 +498,19 @@ async def open_sidecar_connection(
     *,
     unix_only: bool = False,
 ):
-    if unix_only:
-        if not hasattr(asyncio, "open_unix_connection"):
-            raise SidecarRpcError(
-                "Unix sidecar transport is unavailable",
-                kind="transport",
-            )
-        return await asyncio.open_unix_connection(str(endpoint.socket_path))
-    if endpoint.port_path.exists():
-        port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
-        return await asyncio.open_connection("127.0.0.1", int(port_text))
     if hasattr(asyncio, "open_unix_connection"):
         try:
             return await asyncio.open_unix_connection(str(endpoint.socket_path))
         except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError):
-            if not endpoint.port_path.exists():
+            if unix_only or not endpoint.port_path.exists():
                 raise
             port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
             return await asyncio.open_connection("127.0.0.1", int(port_text))
+    if unix_only:
+        raise SidecarRpcError(
+            "Unix sidecar transport is unavailable",
+            kind="transport",
+        )
     port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
     return await asyncio.open_connection("127.0.0.1", int(port_text))
 
@@ -402,11 +519,16 @@ async def start_sidecar_server(endpoint: SidecarEndpoint, handler):
     endpoint.runtime_dir.mkdir(parents=True, exist_ok=True)
     if hasattr(asyncio, "start_unix_server"):
         path = endpoint.socket_path
+        server = None
         try:
             await prepare_unix_socket(path)
             server = await asyncio.start_unix_server(handler, path=str(path))
+            endpoint.port_path.unlink(missing_ok=True)
             return server, {"transport": "unix", "socket_path": str(path)}
         except (PermissionError, OSError):
+            if server is not None:
+                server.close()
+                await server.wait_closed()
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
             return await _start_tcp_sidecar_server(endpoint, handler)
@@ -416,7 +538,12 @@ async def start_sidecar_server(endpoint: SidecarEndpoint, handler):
 async def _start_tcp_sidecar_server(endpoint: SidecarEndpoint, handler):
     port = choose_loopback_port()
     server = await asyncio.start_server(handler, host="127.0.0.1", port=port)
-    endpoint.port_path.write_text(str(port), encoding="utf-8")
+    try:
+        endpoint.port_path.write_text(str(port), encoding="utf-8")
+    except BaseException:
+        server.close()
+        await server.wait_closed()
+        raise
     return server, {"transport": "tcp_loopback", "host": "127.0.0.1", "port": port}
 
 
@@ -496,21 +623,34 @@ def _node_bin_sort_key(path: Path) -> tuple[int, ...]:
 
 
 async def handle_sidecar_client(reader, writer, dispatch: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]) -> None:
+    resource = _AsyncSidecarResource(reader=reader, writer=writer)
+    owner = FdLease(
+        resource_kind="sidecar.server_connection",
+        _resource=resource,
+        capacity=1,
+        closer_async=_close_async_sidecar,
+        hard_closer_async=_close_async_sidecar,
+    )
+    capability = owner.acquire(operation_id=str(uuid4()))
     try:
         while True:
             try:
-                request = await read_sidecar_message(reader)
+                request = await capability.call_async(
+                    lambda held: read_sidecar_message(held.reader)
+                )
             except asyncio.IncompleteReadError:
                 return
             response = await dispatch(request)
-            writer.write(pack_sidecar_message(response))
-            await writer.drain()
+            await capability.call_async(
+                lambda held: _write_async_sidecar(
+                    held,
+                    pack_sidecar_message(response),
+                )
+            )
     except (ConnectionError, OSError, ValueError):
         return
     finally:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+        await capability.release_async(reuse=False)
 
 
 async def dispatch_sidecar_request(

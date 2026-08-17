@@ -71,6 +71,39 @@ class FailureOrchestrator:
             for module_name in signal.related_modules:
                 failure_runtime.record_document_checked(draft, f"module:{module_name}")
         context_payload = dict(conversation_context or {})
+        if signal.subsystem == "persistence":
+            verification = VerificationResult(
+                status=FAILURE_VERIFICATION_FAILED,
+                reason=(
+                    "Local runtime state is unavailable; inline repair was stopped "
+                    "to avoid compounding possible database damage."
+                ),
+                evidence={"origin": origin, **context_payload},
+            )
+            failure_runtime.record_verification(draft, verification)
+            report = failure_runtime.build_report(
+                draft,
+                verification=verification,
+                enriched_fields={
+                    "why_blocked": verification.reason,
+                    "current_blocker": draft.primary_blocker,
+                    "impact": "Durable runtime state cannot be read safely.",
+                    "recommended_next_step": (
+                        "Stop Pal, back up the runtime database, and verify or "
+                        "restore it before retrying."
+                    ),
+                },
+            )
+            feedback = failure_runtime.render_user_feedback(
+                draft,
+                verification=verification,
+                report=report,
+            )
+            return FailureHandlingResult(
+                verification=verification,
+                user_feedback=feedback,
+                report=report,
+            )
         if signal.subsystem == "llm":
             verification = VerificationResult(
                 status=FAILURE_VERIFICATION_FAILED,

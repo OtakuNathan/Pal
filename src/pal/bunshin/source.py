@@ -134,7 +134,10 @@ class BunshinControlEventHandler(EventHandler):
                         ),
                     )
                 )
-        if event.event_kind == EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING:
+        if event.event_kind in {
+            EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING,
+            EventKind.BUNSHIN_TERMINAL,
+        }:
             for index, attachment in enumerate(list(payload.get("attachments") or [])):
                 item = dict(attachment or {})
                 if not str(item.get("path") or "").strip():
@@ -152,7 +155,7 @@ class BunshinControlEventHandler(EventHandler):
                                 route=route,
                                 payload=item,
                             ),
-                            notes="bunshin V2 human review attachment",
+                            notes="bunshin V2 durable attachment",
                         ),
                     )
                 )

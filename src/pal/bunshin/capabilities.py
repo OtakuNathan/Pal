@@ -55,7 +55,7 @@ class BunshinManagerProvider:
     context: MainContext | None = None
     harness_registry: BunshinHarnessRegistry | None = None
     runtime_db_path: Path | None = None
-    process: subprocess.Popen[bytes] | None = None
+    process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     last_health: dict[str, Any] = field(default_factory=dict)
     last_error: str = ""
     event_notify: Callable[[], None] | None = None
@@ -91,6 +91,15 @@ class BunshinManagerProvider:
                     self._on_harness_registry_generation
                 )
             )
+
+    def _process_status(self) -> tuple[int, int | None] | None:
+        process = self.process
+        if process is None:
+            return None
+        returncode = process.poll()
+        if returncode is not None and self.process is process:
+            self.process = None
+        return int(process.pid), returncode
 
     def attach_manager(self) -> dict[str, Any]:
         with self._lifecycle_lock:
@@ -132,7 +141,7 @@ class BunshinManagerProvider:
 
     def detach_manager(self) -> None:
         with self._lifecycle_lock:
-            if not self._attached and self.process is None and self._event_thread is None:
+            if not self._attached and self._process_status() is None and self._event_thread is None:
                 return
             self._attached = False
             try:
@@ -486,7 +495,8 @@ class BunshinManagerProvider:
         return ""
 
     def _start_manager(self) -> dict[str, Any]:
-        if self.process is not None and self.process.poll() is None:
+        status = self._process_status()
+        if status is not None and status[1] is None:
             try:
                 owned_health = self._lifecycle_client.health_sync()
             except Exception:
@@ -494,21 +504,21 @@ class BunshinManagerProvider:
             else:
                 try:
                     health = self._validate_health(owned_health)
-                    if self._pid_from_health(health) != self.process.pid:
+                    if self._pid_from_health(health) != status[0]:
                         raise RuntimeError("bunshin manager endpoint is not owned by this plugin attachment")
                     return health
                 except Exception:
                     self._stop_process_only(kill_process_group=True)
                     self._retire_existing_manager(owned_health)
-        elif self.process is not None:
+        elif status is not None:
             self._stop_process_only()
         try:
             existing_health = self._lifecycle_client.health_sync()
         except Exception:
             existing_health = None
         if existing_health is not None:
-            # A manager not represented by self.process is not owned by this
-            # plugin attachment. Retire it instead of silently adopting it.
+            # A manager not represented by the local process reference is not owned by
+            # this plugin attachment. Retire it instead of silently adopting it.
             self._retire_existing_manager(existing_health)
         self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
@@ -523,22 +533,25 @@ class BunshinManagerProvider:
         if self.runtime_db_path is not None:
             argv.extend(("--runtime-db-path", str(self.runtime_db_path)))
             child_env[BUNSHIN_RUNTIME_DB_PATH_ENV] = str(self.runtime_db_path)
-        self.process = subprocess.Popen(
+        process = subprocess.Popen(
             argv,
             env=child_env,
             start_new_session=True,
         )
+        self.process = process
         for _ in range(150):
-            if self.process.poll() is not None:
+            current = self._process_status()
+            if current is None or current[1] is not None:
                 self._stop_process_only()
                 raise RuntimeError("bunshin manager exited during startup")
             try:
                 health = self._validate_health(self._lifecycle_client.health_sync())
-                if self._pid_from_health(health) != self.process.pid:
+                if self._pid_from_health(health) != current[0]:
                     raise RuntimeError("bunshin manager endpoint is not owned by this plugin attachment")
                 return health
             except Exception:
                 time.sleep(0.2)
+        self._stop_process_only(kill_process_group=True)
         raise RuntimeError("bunshin manager failed to start")
 
     def _stop_manager(self, *, force: bool = False) -> None:
@@ -547,27 +560,18 @@ class BunshinManagerProvider:
 
     def _stop_manager_locked(self) -> None:
         self._event_stop.set()
-        manager_pid = self._manager_pid()
         graceful_requested = self._request_graceful_shutdown()
-        process = self.process
-        if process is not None and graceful_requested:
+        process_status = self._process_status()
+        if process_status is not None and process_status[1] is None and graceful_requested:
             with contextlib.suppress(Exception):
-                process.wait(timeout=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0)
-        if graceful_requested:
-            self._wait_for_pid_exit(
-                manager_pid,
-                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
-            )
-        if self._pid_is_running(manager_pid):
-            self._terminate_manager(manager_pid)
+                self._wait_local_process(
+                    timeout=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0
+                )
         self._stop_process_only(kill_process_group=True)
-        self._wait_for_pid_exit(manager_pid, timeout_seconds=1.5)
         thread = self._event_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
         self._event_thread = None
-        if self._pid_is_running(manager_pid):
-            raise RuntimeError("bunshin manager process did not stop during detach")
         if self._manager_is_responding():
             raise RuntimeError("bunshin manager did not stop during detach")
         self._cleanup_stale_endpoint()
@@ -581,21 +585,25 @@ class BunshinManagerProvider:
         process = self.process
         if process is None:
             return
-        if process.poll() is None:
-            with contextlib.suppress(Exception):
-                if kill_process_group:
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
-                    process.terminate()
-                process.wait(timeout=1.0)
-        if process.poll() is None:
-            with contextlib.suppress(Exception):
-                if kill_process_group:
-                    os.killpg(process.pid, signal.SIGKILL)
-                else:
-                    process.kill()
-                process.wait(timeout=1.0)
         self.process = None
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                if os.name == "nt" or not kill_process_group:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Bunshin manager did not exit after its one-shot termination; replacement remains fenced"
+            ) from exc
+
+    def _wait_local_process(self, *, timeout: float) -> int | None:
+        process = self.process
+        if process is None:
+            return None
+        return process.wait(timeout=timeout)
 
     def _require_manager(self) -> dict[str, Any]:
         with self._lifecycle_lock:
@@ -616,22 +624,17 @@ class BunshinManagerProvider:
         return dict(health)
 
     def _retire_existing_manager(self, health: dict[str, Any] | None = None) -> None:
-        payload = dict(health or {})
-        manager_pid = self._pid_from_health(payload)
+        if health is not None:
+            self._validate_health(dict(health))
         graceful_requested = self._request_graceful_shutdown()
         if graceful_requested:
-            self._wait_for_pid_exit(
-                manager_pid,
+            self._wait_for_manager_exit(
                 timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
             )
-        if self._pid_is_running(manager_pid):
-            self._terminate_manager(manager_pid)
-            self._wait_for_pid_exit(manager_pid, timeout_seconds=1.5)
-        self._wait_for_manager_exit(timeout_seconds=0.5)
-        if self._pid_is_running(manager_pid):
-            raise RuntimeError("existing bunshin manager process did not stop")
         if self._manager_is_responding():
-            raise RuntimeError("existing bunshin manager did not stop")
+            raise RuntimeError(
+                "existing bunshin manager did not stop; replacement remains fenced"
+            )
         self._cleanup_stale_endpoint()
 
     def _request_graceful_shutdown(self) -> bool:
@@ -643,13 +646,6 @@ class BunshinManagerProvider:
         except Exception:
             return False
         return bool(result.get("ok"))
-
-    def _manager_pid(self) -> int | None:
-        health = dict(self.last_health or {})
-        if not health:
-            with contextlib.suppress(Exception):
-                health = self._validate_health(self._lifecycle_client.health_sync())
-        return self._pid_from_health(health)
 
     @staticmethod
     def _pid_from_health(health: dict[str, Any]) -> int | None:
@@ -669,58 +665,6 @@ class BunshinManagerProvider:
     def _wait_for_manager_exit(self, *, timeout_seconds: float) -> None:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         while self._manager_is_responding() and time.monotonic() < deadline:
-            time.sleep(0.05)
-
-    @classmethod
-    def _wait_for_pid_exit(cls, manager_pid: int | None, *, timeout_seconds: float) -> bool:
-        deadline = time.monotonic() + max(0.0, timeout_seconds)
-        while cls._pid_is_running(manager_pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        return not cls._pid_is_running(manager_pid)
-
-    @staticmethod
-    def _pid_is_running(manager_pid: int | None) -> bool:
-        if manager_pid is None:
-            return False
-        proc_stat = Path(f"/proc/{manager_pid}/stat")
-        if proc_stat.exists():
-            with contextlib.suppress(OSError, IndexError):
-                if proc_stat.read_text(encoding="utf-8").split()[2] == "Z":
-                    return False
-        try:
-            os.kill(manager_pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-
-    @classmethod
-    def _terminate_manager(cls, manager_pid: int | None) -> None:
-        if manager_pid is None:
-            return
-        process_group: int | None = None
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            candidate = os.getpgid(manager_pid)
-            if candidate != os.getpgrp():
-                process_group = candidate
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            if process_group is not None:
-                os.killpg(process_group, signal.SIGTERM)
-            else:
-                os.kill(manager_pid, signal.SIGTERM)
-        for _ in range(20):
-            if not cls._pid_is_running(manager_pid):
-                return
-            time.sleep(0.05)
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            if process_group is not None:
-                os.killpg(process_group, signal.SIGKILL)
-            else:
-                os.kill(manager_pid, signal.SIGKILL)
-        for _ in range(20):
-            if not cls._pid_is_running(manager_pid):
-                return
             time.sleep(0.05)
 
     def _cleanup_stale_endpoint(self) -> None:

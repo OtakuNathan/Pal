@@ -33,7 +33,7 @@ class CoroutineRunSemaphore:
 
     Durable sessions and READY/SUSPENDED/WAITING states consume no capacity.
     The permit is acquired immediately before process materialization and may
-    be released only after checkpoint/completion and process-group reap.
+    be released only after checkpoint/completion and owned-process cleanup.
     """
 
     capacity: int

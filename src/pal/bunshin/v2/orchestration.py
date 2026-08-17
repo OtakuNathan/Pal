@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from pal.bunshin.v2.artifacts import ArtifactRef
@@ -14,6 +15,7 @@ from pal.bunshin.v2.contracts import (
     DeferredEffectError,
     PermanentEffectError,
 )
+from pal.bunshin.v2.delivery import DeliveryReceipt
 from pal.bunshin.v2.execution import DagScheduler, ExecutionCompiler
 from pal.bunshin.v2.machine_dsl import ControlDisposition, ControlIntent
 from pal.bunshin.v2.human_review import (
@@ -857,6 +859,49 @@ class BunshinV2OutboxProcessor:
         }:
             return
         normalized_status = workflow.state.lower()
+        result_artifact_ref = dict(
+            workflow.payload.get("result_artifact_ref") or {}
+        )
+        summary = f"Bunshin workflow {normalized_status}."
+        attachments: list[dict[str, str]] = []
+        result_sha = str(result_artifact_ref.get("sha256") or "")
+        if normalized_status == "completed" and result_sha:
+            record = self.repository.read_artifact_record(result_sha)
+            if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
+                delivery_receipt = DeliveryReceipt.model_validate(
+                    self.service.artifacts.read_json(result_artifact_ref)
+                )
+                patch_bytes = self.service.artifacts.read_bytes(delivery_receipt.patch_ref)
+                if (
+                    hashlib.sha256(patch_bytes).hexdigest()
+                    != delivery_receipt.patch_content_sha256
+                ):
+                    raise IOError("delivery patch content hash does not match its receipt")
+                patch_record = self.repository.read_artifact_record(
+                    str(delivery_receipt.patch_ref.get("sha256") or "")
+                )
+                if (
+                    patch_record is None
+                    or str(patch_record.get("artifact_type") or "")
+                    != "GitFormatPatchArtifact"
+                ):
+                    raise ValueError("delivery patch artifact metadata is unavailable")
+                patch_path = Path(str(patch_record.get("storage_path") or ""))
+                if not patch_path.is_file():
+                    raise FileNotFoundError("delivery patch artifact file is unavailable")
+                friendly_name = Path(delivery_receipt.patch_path).name
+                summary = "Bunshin workflow completed. Verified Git patch attached."
+                attachments.append(
+                    {
+                        "path": str(patch_path),
+                        "file_name": friendly_name,
+                        "mime_type": "text/x-patch",
+                        "caption": (
+                            "Bunshin verified patch for commit "
+                            f"{delivery_receipt.commit_sha[:12]}"
+                        ),
+                    }
+                )
         revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
         resolved_interactions = (
             [
@@ -868,18 +913,17 @@ class BunshinV2OutboxProcessor:
             if revision_id
             else []
         )
-        self.publish_workflow_event(
-            {
-                "workflow_id": normalized_workflow_id,
-                "status": normalized_status,
-                "summary": f"Bunshin workflow {normalized_status}.",
-                "terminal_at": workflow.updated_at,
-                "resolved_interactions": resolved_interactions,
-                "result_artifact_ref": dict(
-                    workflow.payload.get("result_artifact_ref") or {}
-                ),
-            }
-        )
+        event = {
+            "workflow_id": normalized_workflow_id,
+            "status": normalized_status,
+            "summary": summary,
+            "terminal_at": workflow.updated_at,
+            "resolved_interactions": resolved_interactions,
+            "result_artifact_ref": result_artifact_ref,
+        }
+        if attachments:
+            event["attachments"] = attachments
+        self.publish_workflow_event(event)
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")

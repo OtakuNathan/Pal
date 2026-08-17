@@ -5,7 +5,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import shutil
 import tempfile
@@ -2934,34 +2933,6 @@ def _proc_fd_access(process_entry: Path, fd_name: str) -> str:
     if mode == os.O_RDONLY:
         return "read"
     return "unknown"
-
-
-async def terminate_process_group(process_group: int, *, timeout_seconds: float = 5.0) -> bool:
-    """Stop a persisted worker process group, including children after its leader exits."""
-    if process_group <= 0:
-        return True
-    try:
-        os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    if await _wait_for_process_group_exit(process_group, timeout_seconds):
-        return True
-    try:
-        os.killpg(process_group, signal.SIGKILL)
-    except ProcessLookupError:
-        return True
-    return await _wait_for_process_group_exit(process_group, timeout_seconds)
-
-
-async def _wait_for_process_group_exit(process_group: int, timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + max(0.1, timeout_seconds)
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            return True
-        await asyncio.sleep(0.05)
-    return False
 
 
 def git_changed_paths(worktree: Path, base_sha: str) -> list[str]:

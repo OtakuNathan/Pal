@@ -16,8 +16,11 @@ from pal.execution.generated_tool_models import (
 import base64
 import contextlib
 import mimetypes
+import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +48,7 @@ from pal.skill.contracts import SkillDescriptor
 
 
 _STARTUP_RESCAN_TIMEOUT_SECONDS = 30.0
+_MANAGER_RETIRE_TIMEOUT_SECONDS = 5.0
 
 
 class _McpManagerInvoker:
@@ -89,13 +93,25 @@ class McpManagerPluginProvider:
     refresh_capabilities: Callable[[], None] | None = None
     client: McpManagerClient = field(init=False)
     compiler: McpCompiler = field(default_factory=McpCompiler)
-    process: subprocess.Popen | None = None
+    process: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _lifecycle_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
     projection: McpCompiledProjection | None = None
     last_error: str = ""
     last_health: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.client = McpManagerClient(runtime_root=self.runtime_root)
+
+    def _process_status(self) -> tuple[int, int | None] | None:
+        process = self.process
+        if process is None:
+            return None
+        returncode = process.poll()
+        if returncode is not None and self.process is process:
+            self.process = None
+        return int(process.pid), returncode
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
@@ -311,60 +327,130 @@ class McpManagerPluginProvider:
         return tuple(self.projection.skills)
 
     def _ensure_manager_started(self) -> None:
-        if self.process is not None and self.process.poll() is None:
+        with self._lifecycle_lock:
+            self._ensure_manager_started_locked()
+
+    def _ensure_manager_started_locked(self) -> None:
+        status = self._process_status()
+        if status is not None and status[1] is None:
             try:
-                self.last_health = self.client.health_sync()
+                health = self._validate_health(self.client.health_sync())
+                if self._pid_from_health(health) != status[0]:
+                    raise RuntimeError("mcp manager endpoint is not owned by this plugin attachment")
+                if bool(health.get("shutdown_requested")):
+                    raise RuntimeError("mcp manager is shutting down")
+                self.last_health = health
                 return
             except Exception:
                 self._stop_process_only()
-        self._cleanup_stale_socket()
+        elif status is not None:
+            self._stop_process_only()
+        try:
+            existing_health = self.client.health_sync()
+        except Exception:
+            existing_health = None
+        if existing_health is not None:
+            self._retire_existing_manager(existing_health)
+        self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        self.process = subprocess.Popen(
+        process = subprocess.Popen(
             [sys.executable, "-m", "pal.mcp.manager_main", "--runtime-root", str(self.runtime_root)],
             env=python_subprocess_env(),
+            start_new_session=os.name != "nt",
         )
+        self.process = process
         for _ in range(150):
-            if self.process.poll() is not None:
+            current = self._process_status()
+            if current is None or current[1] is not None:
+                self._stop_process_only()
                 raise RuntimeError("mcp manager exited during startup")
             try:
-                self.last_health = self.client.health_sync()
+                health = self._validate_health(self.client.health_sync())
+                if self._pid_from_health(health) != current[0]:
+                    raise RuntimeError("mcp manager endpoint is not owned by this plugin attachment")
+                if bool(health.get("shutdown_requested")):
+                    raise RuntimeError("mcp manager is shutting down")
+                self.last_health = health
                 return
             except Exception:
                 time.sleep(0.2)
+        self._stop_process_only()
         raise RuntimeError("mcp manager failed to start")
 
     def _stop_manager(self) -> None:
-        process = self.process
-        if process is not None and process.poll() is None:
-            with contextlib.suppress(Exception):
-                self.client.shutdown_sync()
-            with contextlib.suppress(Exception):
-                process.wait(timeout=2.0)
-        self._stop_process_only()
+        with self._lifecycle_lock:
+            self._stop_manager_locked()
+
+    def _stop_manager_locked(self) -> None:
+        try:
+            health = self.client.health_sync()
+        except Exception:
+            health = None
+        try:
+            if health is not None:
+                self._retire_existing_manager(health)
+        finally:
+            self._stop_process_only()
+        self._cleanup_stale_endpoint()
         self.last_health = {}
 
-    def _cleanup_stale_socket(self) -> None:
-        socket_path = self.client.socket_path
-        if not socket_path.exists():
-            return
+    @staticmethod
+    def _validate_health(health: dict[str, Any]) -> dict[str, Any]:
+        if not bool(health.get("ok")) or str(health.get("health_source") or "") != "mcp_manager":
+            raise RuntimeError("mcp manager health check failed")
+        if str(health.get("lifecycle_protocol") or "") != "plugin_raii.v1":
+            raise RuntimeError("mcp manager lifecycle protocol is incompatible")
+        return dict(health)
+
+    @staticmethod
+    def _pid_from_health(health: dict[str, Any]) -> int | None:
         try:
-            self.client.health_sync()
+            pid = int(health.get("manager_pid") or 0)
+        except (TypeError, ValueError):
+            return None
+        return pid if pid > 1 and pid != os.getpid() else None
+
+    def _retire_existing_manager(self, health: dict[str, Any]) -> None:
+        self._validate_health(health)
+        with contextlib.suppress(Exception):
+            self.client.shutdown_sync()
+        deadline = time.monotonic() + _MANAGER_RETIRE_TIMEOUT_SECONDS
+        while self._manager_is_responding() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self._manager_is_responding():
+            raise RuntimeError("existing mcp manager did not stop")
+        self._cleanup_stale_endpoint()
+
+    def _manager_is_responding(self) -> bool:
+        try:
+            health = self.client.health_sync()
         except Exception:
+            return False
+        return bool(health.get("ok")) and str(health.get("health_source") or "") == "mcp_manager"
+
+    def _cleanup_stale_endpoint(self) -> None:
+        for path in (self.client.socket_path, self.client.port_path):
             with contextlib.suppress(FileNotFoundError):
-                socket_path.unlink()
+                path.unlink()
 
     def _stop_process_only(self) -> None:
-        process = self.process
-        if process is None:
-            return
-        try:
+        with self._lifecycle_lock:
+            process = self.process
+            if process is None:
+                return
+            self.process = None
             if process.poll() is None:
-                process.terminate()
+                with contextlib.suppress(ProcessLookupError):
+                    if os.name == "nt":
+                        process.kill()
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
+            try:
                 process.wait(timeout=1.0)
-        except Exception:
-            with contextlib.suppress(Exception):
-                process.kill()
-        self.process = None
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "MCP manager did not exit after its one-shot termination; replacement remains fenced"
+                ) from exc
 
     def _refresh_projection(self) -> None:
         payload = self.client.snapshot_sync()
@@ -388,7 +474,8 @@ class McpManagerPluginProvider:
             return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
 
     def _status_payload(self) -> dict[str, Any]:
-        running = self.process is not None and self.process.poll() is None
+        status = self._process_status()
+        running = status is not None and status[1] is None
         payload = {
             "module_id": "mcp",
             "manager_running": running,

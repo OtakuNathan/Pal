@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.v2.contracts import LeaseConflict
@@ -46,8 +48,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         def unregistered(owner: WorkerProcessOwner) -> None:
             self.assertTrue(owner.process_group_reaped)
             self.assertTrue(self.locks.is_held(owner.lock_key))
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(owner.process_group_id, 0)
+            self.assertEqual(owner.pid, 0)
             events.append("unregistered")
 
         return WorkerProcessOwner(
@@ -63,31 +64,21 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
             reap_timeout_seconds=1.0,
         )
 
-    async def test_normal_leader_exit_reaps_descendants_before_unregister(self) -> None:
-        child_pid_path = self.root / "child.pid"
-        script = (
-            "import pathlib, subprocess; "
-            "child=subprocess.Popen(['sleep','60'], stdout=subprocess.DEVNULL, "
-            "stderr=subprocess.DEVNULL); "
-            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))"
-        )
+    async def test_normal_leader_exit_clears_process_authority_before_unregister(self) -> None:
         events: list[str] = []
         owner = self.owner(
             invocation_id="normal-exit",
-            script=script,
+            script="pass",
             events=events,
         )
 
         async with owner:
-            process = owner.process
-            self.assertIsNotNone(process)
-            await process.wait()
+            self.assertGreater(owner.pid, 0)
+            self.assertEqual(await owner.wait(), 0)
+            self.assertEqual(owner.pid, 0)
 
         self.assertEqual(events, ["started", "registered", "unregistered"])
         self.assertFalse(self.locks.is_held(owner.lock_key))
-        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        with self.assertRaises(ProcessLookupError):
-            os.kill(child_pid, 0)
 
     async def test_worktree_cannot_be_reassigned_until_owner_closes(self) -> None:
         first_events: list[str] = []
@@ -115,9 +106,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
             events=replacement_events,
         )
         async with replacement:
-            process = replacement.process
-            self.assertIsNotNone(process)
-            await process.wait()
+            self.assertEqual(await replacement.wait(), 0)
         self.assertEqual(
             replacement_events,
             ["started", "registered", "unregistered"],
@@ -161,9 +150,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
 
         async with shell as running:
             self.assertEqual(semaphore.active_run_ids, frozenset({"run-shell"}))
-            process = running.process
-            self.assertIsNotNone(process)
-            await process.wait()
+            self.assertEqual(await running.wait(), 0)
 
         self.assertTrue(owner.resources_released)
         self.assertEqual(semaphore.active_count, 0)
@@ -190,13 +177,38 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
                 semaphore.active_run_ids,
                 frozenset({"admitted-attempt"}),
             )
-            process = running.process
-            self.assertIsNotNone(process)
-            await process.wait()
+            self.assertEqual(await running.wait(), 0)
 
         self.assertTrue(permit.released)
         self.assertEqual(semaphore.active_count, 0)
         self.assertEqual(events, ["started", "registered", "unregistered"])
+
+    async def test_cancel_signals_current_group_once_and_never_reuses_pid(self) -> None:
+        events: list[str] = []
+        owner = self.owner(
+            invocation_id="cancel-once",
+            script="import time; time.sleep(60)",
+            events=events,
+        )
+        await owner.__aenter__()
+        pid = owner.pid
+        calls: list[tuple[int, int]] = []
+        original_killpg = os.killpg
+
+        def killpg(process_group: int, signal_number: int) -> None:
+            calls.append((process_group, signal_number))
+            original_killpg(process_group, signal_number)
+
+        with patch(
+            "pal.bunshin.v2.process_lifecycle.os.killpg",
+            side_effect=killpg,
+        ):
+            await owner.close()
+            await owner.close()
+
+        self.assertEqual(calls, [(pid, signal.SIGKILL)])
+        self.assertEqual(owner.pid, 0)
+        self.assertTrue(owner.resources_released)
 
 
 class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
@@ -207,7 +219,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
-    async def test_terminal_event_stays_active_until_process_group_reap(self) -> None:
+    async def test_terminal_event_stays_active_until_process_owner_cleanup(self) -> None:
         process = SimpleNamespace(pid=123, returncode=0)
         state = BunshinRunState(
             bunshin_id="inv-owner",
@@ -230,7 +242,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "exiting")
         self.assertTrue(state.summary()["run_active"])
         self.assertEqual(state.pending_terminal_status, "completed")
-        with self.assertRaisesRegex(RuntimeError, "before its process group"):
+        with self.assertRaisesRegex(RuntimeError, "process owner completes cleanup"):
             self.manager._unregister_v2_broker_run(state.run_id, False)
 
         self.manager._unregister_v2_broker_run(state.run_id, True)
@@ -364,7 +376,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
                 worker_label="owned worker",
             )
 
-    async def test_close_all_delegates_process_shutdown_to_raii_owner(self) -> None:
+    async def test_close_all_delegates_process_shutdown_to_process_owner(self) -> None:
         class Leader:
             returncode: int | None = None
 

@@ -5,6 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 import asyncio
 import contextlib
 from copy import deepcopy
+import hashlib
 import json
 import os
 import sqlite3
@@ -2720,6 +2721,118 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             ],
         )
 
+    def test_completed_workflow_projects_patch_receipt_into_terminal_attachment(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        patch_bytes = b"From canonical patch\n"
+        patch_ref = service.artifacts.put_bytes(
+            patch_bytes,
+            artifact_type="GitFormatPatchArtifact",
+            schema_version="1",
+            media_type="application/vnd.git-format-patch",
+        )
+        patch_path = self.runtime_root / "deliveries" / "result.patch"
+        patch_path.parent.mkdir(parents=True)
+        patch_path.write_text("tampered projection\n", encoding="utf-8")
+        receipt_ref = service.artifacts.put_json(
+            {
+                "schema_version": "3",
+                "kind": "patch",
+                "base_commit_sha": "a" * 40,
+                "commit_sha": "b" * 40,
+                "commit_ref": "refs/bunshin/deliveries/test",
+                "patch_path": str(patch_path),
+                "patch_content_sha256": hashlib.sha256(patch_bytes).hexdigest(),
+                "patch_ref": patch_ref.to_dict(),
+                "apply_mode": "git_am",
+                "apply_hint": "git am --3way --empty=keep result.patch",
+                "verification_ref": {"sha256": "verification"},
+            },
+            artifact_type="DeliveryReceiptArtifact",
+            schema_version="3",
+        )
+        canonical_record = service.repository.read_artifact_record(patch_ref.sha256)
+        assert canonical_record is not None
+        published: list[dict[str, object]] = []
+        processor = BunshinV2OutboxProcessor(
+            service,
+            semantic_effects=_NoopSemanticEffects(),
+            publish_workflow_event=lambda event: published.append(dict(event)),
+        )
+        workflow = AggregateSnapshot(
+            aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id="wf-terminal-patch",
+            workflow_id="wf-terminal-patch",
+            state="COMPLETED",
+            version=4,
+            payload={"result_artifact_ref": receipt_ref.to_dict()},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        processor.repository.read_snapshot = lambda *_args, **_kwargs: workflow
+
+        processor._publish_terminal_workflow_if_any(workflow.workflow_id)
+
+        self.assertEqual(
+            published[0]["summary"],
+            "Bunshin workflow completed. Verified Git patch attached.",
+        )
+        self.assertEqual(
+            published[0]["attachments"],
+            [
+                {
+                    "path": str(canonical_record["storage_path"]),
+                    "file_name": "result.patch",
+                    "mime_type": "text/x-patch",
+                    "caption": "Bunshin verified patch for commit bbbbbbbbbbbb",
+                }
+            ],
+        )
+
+    def test_completed_workflow_rejects_patch_whose_raw_hash_disagrees_with_receipt(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        patch_ref = service.artifacts.put_bytes(
+            b"From canonical patch\n",
+            artifact_type="GitFormatPatchArtifact",
+            schema_version="1",
+            media_type="application/vnd.git-format-patch",
+        )
+        receipt_ref = service.artifacts.put_json(
+            {
+                "schema_version": "3",
+                "kind": "patch",
+                "base_commit_sha": "a" * 40,
+                "commit_sha": "b" * 40,
+                "commit_ref": "refs/bunshin/deliveries/test",
+                "patch_path": str(self.runtime_root / "result.patch"),
+                "patch_content_sha256": "c" * 64,
+                "patch_ref": patch_ref.to_dict(),
+                "apply_mode": "git_am",
+                "apply_hint": "git am --3way --empty=keep result.patch",
+                "verification_ref": {"sha256": "verification"},
+            },
+            artifact_type="DeliveryReceiptArtifact",
+            schema_version="3",
+        )
+        processor = BunshinV2OutboxProcessor(
+            service,
+            semantic_effects=_NoopSemanticEffects(),
+            publish_workflow_event=lambda _event: self.fail("corrupt patch was published"),
+        )
+        workflow = AggregateSnapshot(
+            aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id="wf-terminal-corrupt-patch",
+            workflow_id="wf-terminal-corrupt-patch",
+            state="COMPLETED",
+            version=4,
+            payload={"result_artifact_ref": receipt_ref.to_dict()},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        processor.repository.read_snapshot = lambda *_args, **_kwargs: workflow
+
+        with self.assertRaisesRegex(IOError, "does not match its receipt"):
+            processor._publish_terminal_workflow_if_any(workflow.workflow_id)
+
     def test_runner_checkpoint_uses_manager_selected_paths_and_ignores_stale_files(self) -> None:
         async def scenario() -> None:
             run_dir = self.runtime_root / "agent-session"
@@ -3880,7 +3993,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertTrue(reused)
         self.assertEqual(renewals, [("node:review:fresh", "inv-fresh", 4, 120)])
 
-    def test_live_unmanaged_worker_is_reaped_and_rebound_with_new_fence(self) -> None:
+    def test_legacy_process_group_metadata_is_ignored_without_a_live_owner(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "review-restart"
         workspace.mkdir()
@@ -3912,47 +4025,24 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         }
         worker.repository.assert_fencing_token = lambda *_args: None
         worker.repository.read_lease = lambda _key: dict(lease)
-        released: list[int] = []
+        renewals: list[tuple[str, str, int, int]] = []
+        worker.repository.renew_lease = lambda resource, owner, token, *, ttl_seconds: renewals.append(
+            (resource, owner, token, ttl_seconds)
+        )
 
-        def release(_resource, _owner, token):
-            released.append(token)
-            lease["owner_id"] = ""
-
-        worker.repository.release_lease = release
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=7)
-        captured: list[ActionEnvelope] = []
-
-        def dispatch(action):
-            captured.append(action)
-            return SimpleNamespace(
-                snapshot=SimpleNamespace(
-                    workflow_id=node.workflow_id,
-                    aggregate_id=node.aggregate_id,
-                    aggregate_type=node.aggregate_type,
-                    state=node.state,
-                    version=node.version + 1,
-                    payload={**node.payload, **action.payload},
-                )
+        rebound = asyncio.run(
+            worker._ensure_node_effect_lease(
+                node,
+                action_type="REBIND_REVIEWER",
+                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
             )
+        )
 
-        worker.repository.dispatch = dispatch
-
-        async def reaped(_process_group, *, timeout_seconds):
-            self.assertEqual(timeout_seconds, 5.0)
-            return True
-
-        with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.terminate_process_group", side_effect=reaped):
-            rebound = asyncio.run(
-                worker._ensure_node_effect_lease(
-                    node,
-                    action_type="REBIND_REVIEWER",
-                    activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
-                )
-            )
-
-        self.assertEqual(released, [6])
-        self.assertEqual(captured[0].action_type, "REBIND_REVIEWER")
-        self.assertEqual(rebound.payload["fencing_token"], 7)
+        self.assertIs(rebound, node)
+        self.assertEqual(
+            renewals,
+            [("node:node-review-restart:review", verifier_id, 6, 120)],
+        )
 
     def test_architect_quiesce_releases_managed_lsp_before_holder_check(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
@@ -4643,15 +4733,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual(health["lifecycle_protocol"], "plugin_raii.v1")
             self.assertGreater(int(health["manager_pid"]), 1)
             manager_pid = int(health["manager_pid"])
-            self.assertIsNotNone(provider.process)
-            self.assertEqual(provider.process.pid, manager_pid)
+            self.assertEqual(provider._process_status(), (manager_pid, None))
             self.assertTrue(inspect_bunshin(provider).manager_running)
             self.assertTrue(bunshin_socket_path(self.runtime_root).exists() or bunshin_port_path(self.runtime_root).exists())
         finally:
             provider.detach_manager()
 
-        self.assertFalse(provider._pid_is_running(manager_pid))
-        self.assertIsNone(provider.process)
+        self.assertIsNone(provider._process_status())
         self.assertFalse(bunshin_socket_path(self.runtime_root).exists())
         self.assertFalse(bunshin_port_path(self.runtime_root).exists())
         self.assertTrue(inspect_bunshin(provider).degraded)
@@ -4675,23 +4763,29 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             health = provider._start_manager()
 
         retire.assert_called_once_with(existing_health)
-        self.assertIs(provider.process, fake_process)
+        self.assertEqual(provider._process_status(), (fake_process.pid, None))
         self.assertEqual(health["manager_pid"], 222)
 
-    def test_manager_detach_fences_an_unresponsive_but_live_process(self) -> None:
+    def test_manager_never_signals_an_unresponsive_unowned_process(self) -> None:
         provider = BunshinManagerProvider(self.runtime_root)
-        provider.last_health = {"manager_pid": 333}
+        health = {
+            "ok": True,
+            "health_source": "bunshin_v2_manager",
+            "lifecycle_protocol": "plugin_raii.v1",
+            "manager_pid": 333,
+            "shutdown_requested": False,
+        }
 
         with (
-            patch.object(provider._lifecycle_client, "shutdown_sync"),
-            patch.object(provider, "_wait_for_pid_exit", return_value=False),
-            patch.object(provider, "_pid_is_running", side_effect=[True, False]),
-            patch.object(provider, "_terminate_manager") as terminate,
-            patch.object(provider, "_manager_is_responding", return_value=False),
+            patch.object(provider._lifecycle_client, "shutdown_sync", return_value={"ok": False}),
+            patch.object(provider, "_manager_is_responding", return_value=True),
+            patch("pal.bunshin.capabilities.os.killpg") as killpg,
         ):
-            provider._stop_manager_locked()
+            with self.assertRaisesRegex(RuntimeError, "replacement remains fenced"):
+                provider._retire_existing_manager(health)
 
-        terminate.assert_called_once_with(333)
+        killpg.assert_not_called()
+        self.assertIsNone(provider.process)
 
     def test_manager_rejects_pre_raii_sidecar_health(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "protocol is incompatible"):

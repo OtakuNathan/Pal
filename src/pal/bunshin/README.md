@@ -44,9 +44,9 @@ Interaction rule:
   only when the contract and incoming edges are also unchanged
 - logical role sessions are durable data, not resident processes. A
   `RoleProcessShell` materializes an OS process only after acquiring capacity;
-  capacity is released only after the process group is reaped, registration and
-  heartbeats close, and worktree occupancy is released. Sleeping or queued
-  logical sessions consume no capacity
+  capacity is released only after the process owner has terminated and reaped
+  its direct child, closed registration and heartbeats, and released worktree
+  occupancy. Sleeping or queued logical sessions consume no capacity
 - Pal and Bunshin use the shared `core.AgentTurnRuntime`; Bunshin supplies only
   host ports, prompt fragments, tool observation hooks, and compaction policy
 - `pal.compaction.bunshin.v3` records only `technical_route`, `active_work`,
@@ -108,6 +108,15 @@ Interaction rule:
   from another channel never changes it; `bunshin_rebind_task_delivery` changes
   only that reply target. A dead target falls back to a connected recovery
   socket, otherwise the durable notification remains pending
+- verified software delivery has one authority and one portable projection:
+  Manager pins the accepted sink commit under `refs/bunshin/deliveries/*`, emits
+  a content-addressed `git format-patch` from the captured source-snapshot
+  commit, replays clean-Git patches with `git am --3way` and synthetic-snapshot
+  patches with `git apply` in a temporary checkout, and requires
+  the replayed tree to equal the verified tree. The patch is the default user
+  delivery and terminal attachment. Workflow worktrees still retire; PRs and
+  long-lived local checkouts are optional later publication/debug actions, not
+  automatic completion side effects
 - declared repo-relative input binding is one fail-closed contract in
   `pal.bunshin.v2.input_binding`. Only reference entries explicitly declared
   repo-relative (a relative `path`, or any path explicitly marked

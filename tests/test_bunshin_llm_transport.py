@@ -28,7 +28,7 @@ from pal.llm.transport import (
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
     LLMStreamCancelledError,
-    StreamControl,
+    LLMStreamControl,
 )
 from pal.bunshin.ipc import cleanup_manager_endpoint, start_manager_server
 from pal.bunshin.llm_transport import ManagerProxyTransport
@@ -138,6 +138,91 @@ def _params(endpoint, *, request_id: str = "request-1") -> dict:
 
 
 class BunshinLLMTransportTests(unittest.TestCase):
+    def test_manager_owner_worker_preserves_frame_backpressure(self) -> None:
+        class _BackpressureTransport:
+            def __init__(self) -> None:
+                self.produced = 0
+                self.closed = threading.Event()
+
+            def frames(self, _endpoint, request):
+                request.stream_control.touch_network()
+                try:
+                    for sequence in range(100):
+                        self.produced += 1
+                        yield JSONFrame(sequence, {"sequence": sequence})
+                finally:
+                    self.closed.set()
+
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal-bunshin-backpressure-"))
+            database, manager = _manager(root)
+            endpoint = _register_endpoint()
+            manager.runs["run-1"] = BunshinRunState(
+                bunshin_id="bunshin-1",
+                run_id="run-1",
+                pack=BunshinInvocationPack(invocation_id="bunshin-1"),
+            )
+            transport = _BackpressureTransport()
+            manager._llm_json_transport = transport  # type: ignore[assignment]
+            stream = manager.llm_transport_stream_frames(
+                _params(endpoint, request_id="backpressure")
+            )
+
+            item = await anext(stream)
+            while "frame" not in item:
+                item = await anext(stream)
+            await asyncio.sleep(0.1)
+            self.assertEqual(transport.produced, 1)
+
+            await stream.aclose()
+            self.assertTrue(await asyncio.to_thread(transport.closed.wait, 1.0))
+            database.close()
+
+        asyncio.run(scenario())
+
+    def test_manager_consumes_and_closes_each_transport_on_one_owner_thread(self) -> None:
+        class _ThreadRecordingTransport:
+            def __init__(self) -> None:
+                self.frame_thread_ids: list[int] = []
+                self.close_thread_ids: list[int] = []
+
+            def frames(self, _endpoint, request):
+                request.stream_control.touch_network()
+                try:
+                    for sequence in range(3):
+                        self.frame_thread_ids.append(threading.get_ident())
+                        yield JSONFrame(sequence, {"sequence": sequence})
+                finally:
+                    self.close_thread_ids.append(threading.get_ident())
+
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal-bunshin-owner-thread-"))
+            database, manager = _manager(root)
+            endpoint = _register_endpoint()
+            manager.runs["run-1"] = BunshinRunState(
+                bunshin_id="bunshin-1",
+                run_id="run-1",
+                pack=BunshinInvocationPack(invocation_id="bunshin-1"),
+            )
+            transport = _ThreadRecordingTransport()
+            manager._llm_json_transport = transport  # type: ignore[assignment]
+            event_loop_thread = threading.get_ident()
+
+            frames = [
+                item
+                async for item in manager.llm_transport_stream_frames(
+                    _params(endpoint, request_id="stable-owner")
+                )
+            ]
+
+            self.assertEqual(len([item for item in frames if "frame" in item]), 3)
+            self.assertEqual(len(set(transport.frame_thread_ids)), 1)
+            self.assertEqual(transport.close_thread_ids, transport.frame_thread_ids[:1])
+            self.assertNotEqual(transport.frame_thread_ids[0], event_loop_thread)
+            database.close()
+
+        asyncio.run(scenario())
+
     def test_manager_process_bootstrap_binds_endpoint_database_read_only(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal-bunshin-manager-database-"))
         writable = PalV2Database(db_path=root / "pal.sqlite3")
@@ -474,7 +559,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
-                control = StreamControl()
+                control = LLMStreamControl()
                 iterator = proxy.frames(
                     endpoint,
                     EncodedTransportRequest(
@@ -525,7 +610,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
-                control = StreamControl()
+                control = LLMStreamControl()
                 control.cancel("test_pre_cancel")
                 request = EncodedTransportRequest(
                     request_id="pre-cancelled-request",

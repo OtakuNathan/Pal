@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 from pal.shared import IntrospectionCall, RuntimeStatus
@@ -71,7 +72,8 @@ def test_browser_manager_sends_bounded_layout_request(tmp_path) -> None:
     calls = []
     manager._ensure_started = lambda **_kwargs: None  # type: ignore[method-assign]
 
-    def request_json(method, path, payload, *, timeout_seconds):
+    def request_json(method, path, payload, *, timeout_seconds, resource=None):
+        _ = resource
         calls.append((method, path, payload, timeout_seconds))
         return {
             "ok": True,
@@ -100,6 +102,73 @@ def test_browser_manager_sends_bounded_layout_request(tmp_path) -> None:
     assert calls[0][2]["viewport_width"] == 4096
     assert calls[0][2]["viewport_height"] == 4096
     assert calls[0][2]["selector"] == ".bubble li"
+
+
+def test_browser_stop_serializes_generation_replacement(tmp_path) -> None:
+    manager = BrowserServiceManager(runtime_root=tmp_path)
+
+    class Process:
+        pid = 900_100
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            _ = timeout
+            self.returncode = self.returncode if self.returncode is not None else 0
+            return self.returncode
+
+    old_resource = SimpleNamespace(process=Process(), host="127.0.0.1", port=1, token="old")
+    new_resource = SimpleNamespace(process=Process(), host="127.0.0.1", port=2, token="new")
+    manager._process = old_resource
+    shutdown_started = threading.Event()
+    release_shutdown = threading.Event()
+    replacement_attempted = threading.Event()
+    observed_resources = []
+
+    manager._process_running = lambda resource=None: True  # type: ignore[method-assign]
+
+    def request_json(
+        _method,
+        _path,
+        _payload,
+        *,
+        timeout_seconds,
+        resource=None,
+    ):
+        _ = timeout_seconds
+        observed_resources.append(resource)
+        shutdown_started.set()
+        assert release_shutdown.wait(timeout=2.0)
+        return {"ok": True}
+
+    manager._request_json = request_json  # type: ignore[method-assign]
+    stop_thread = threading.Thread(target=manager.stop_sync)
+
+    def replace_generation() -> None:
+        replacement_attempted.set()
+        with manager._start_lock:
+            manager._process = new_resource
+
+    replace_thread = threading.Thread(target=replace_generation)
+    stop_thread.start()
+    assert shutdown_started.wait(timeout=1.0)
+    replace_thread.start()
+    assert replacement_attempted.wait(timeout=1.0)
+    assert manager._process is old_resource
+
+    release_shutdown.set()
+    stop_thread.join(timeout=2.0)
+    replace_thread.join(timeout=2.0)
+
+    assert not stop_thread.is_alive()
+    assert not replace_thread.is_alive()
+    assert observed_resources == [old_resource]
+    assert manager._process is new_resource
 
 
 def test_service_skips_text_provider_and_reports_browser_fallback(tmp_path) -> None:

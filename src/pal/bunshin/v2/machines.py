@@ -623,8 +623,10 @@ def _role_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> 
 
 def _quiesce_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     _lease_guard(_payload, action)
+    # Legacy wire key: this records completion of the in-memory process owner,
+    # not recovery or proof of a persisted numeric process group.
     if action.payload.get("process_group_reaped") is not True:
-        raise TransitionGuardError("worker process group has not been reaped")
+        raise TransitionGuardError("worker process owner cleanup is incomplete")
     if action.payload.get("exclusive_workspace_lock") is not True:
         raise TransitionGuardError("exclusive worktree lock is required")
     if not str(action.payload.get("workspace_fingerprint") or ""):

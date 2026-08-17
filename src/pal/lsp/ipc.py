@@ -24,6 +24,14 @@ def lsp_config_root(runtime_root: Path) -> Path:
     return Path(runtime_root) / "plugins" / "lsp" / "servers"
 
 
+def lsp_socket_path(runtime_root: Path) -> Path:
+    return _lsp_endpoint(runtime_root).socket_path
+
+
+def lsp_port_path(runtime_root: Path) -> Path:
+    return _lsp_endpoint(runtime_root).port_path
+
+
 class LspManagerRpcError(SidecarRpcError):
     pass
 
@@ -43,7 +51,11 @@ class LspManagerClient:
 
     @property
     def socket_path(self) -> Path:
-        return _lsp_endpoint(self.runtime_root).socket_path
+        return lsp_socket_path(self.runtime_root)
+
+    @property
+    def port_path(self) -> Path:
+        return lsp_port_path(self.runtime_root)
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:

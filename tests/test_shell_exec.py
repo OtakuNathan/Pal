@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
@@ -105,34 +106,18 @@ class ShellExecToolTests(unittest.TestCase):
             self.assertFalse(result.structured["timed_out"])
             self.assertIn("EOFError", result.structured["stderr"])
 
-    def test_shell_exit_does_not_wait_for_or_leak_background_descendants(self) -> None:
-        if os.name == "nt":
-            self.skipTest("POSIX process-group behavior")
+    def test_normal_shell_exit_does_not_signal_a_retired_process_group(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_shell_test_") as tmp:
-            root = Path(tmp)
-            pid_path = root / "background.pid"
-            output_root = root / "output"
-            source = "import time; time.sleep(60)"
-
-            started = time.monotonic()
-            result = ShellExecTool(output_root=output_root).invoke(
-                {
-                    "cmd": (
-                        f"{_python_command(source)} & "
-                        f"child_pid=$!; printf '%s' \"$child_pid\" > {shlex.quote(str(pid_path))}"
-                    ),
-                    "timeout_ms": 5_000,
-                }
-            )
-            elapsed = time.monotonic() - started
-
-            _wait_for_file(pid_path)
-            child_pid = int(pid_path.read_text(encoding="utf-8"))
-            _wait_for_process_exit(child_pid)
+            output_root = Path(tmp) / "output"
+            with patch("pal.execution.shell_exec.os.killpg") as killpg:
+                result = ShellExecTool(output_root=output_root).invoke(
+                    {"cmd": "printf done", "timeout_ms": 5_000}
+                )
             self.assertEqual(result.status, "ok")
-            self.assertLess(elapsed, 4)
-            self.assertTrue(result.structured["descendants_terminated"])
-            self.assertIn(result.structured["termination_signal"], {"SIGTERM", "SIGKILL"})
+            self.assertEqual(result.structured["stdout"], "done")
+            self.assertFalse(result.structured["descendants_terminated"])
+            self.assertEqual(result.structured["termination_signal"], "")
+            killpg.assert_not_called()
             self.assertEqual(list(output_root.glob("shell-*")), [])
 
     def test_timeout_is_capped_even_for_direct_tool_use(self) -> None:

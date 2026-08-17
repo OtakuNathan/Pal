@@ -339,19 +339,38 @@ class TurnExecutor:
             and effect.assembly_context.turn_kind != "failure"
             and outcome.finish_reason == LLMFinishReason.ERROR
         ):
+            failure_metadata = dict(outcome.response.message.metadata)
+            failure_subsystem = str(
+                failure_metadata.get("failure_subsystem") or "llm"
+            )
+            local_state_failure = failure_subsystem == "persistence"
             failure_result = await self._handle_failure_async(
                 FailureSignal(
-                    subsystem="llm",
-                    component=continuation.preferred_llm_endpoint_id
-                    or str(getattr(llm_runtime, "last_endpoint_id", "") or "")
-                    or "llm_runtime",
-                    failure_kind="provider_failure",
+                    subsystem=failure_subsystem,
+                    component=(
+                        "runtime_database"
+                        if local_state_failure
+                        else continuation.preferred_llm_endpoint_id
+                        or str(getattr(llm_runtime, "last_endpoint_id", "") or "")
+                        or "llm_runtime"
+                    ),
+                    failure_kind=(
+                        str(failure_metadata.get("failure_kind") or "local_state")
+                        if local_state_failure
+                        else "provider_failure"
+                    ),
                     severity="high",
                     primary_blocker=str(outcome.text or "LLM generation failed."),
-                    evidence={"llm_text": outcome.text, "preferred_model_id": continuation.preferred_llm_model_id},
+                    evidence={
+                        "llm_text": outcome.text,
+                        "preferred_model_id": continuation.preferred_llm_model_id,
+                        **failure_metadata,
+                    },
                     related_ids={"turn_id": continuation.turn_id},
                     safe_to_retry=False,
-                    repair_domain="llm:core",
+                    repair_domain=(
+                        "core:persistence" if local_state_failure else "llm:core"
+                    ),
                 ),
                 origin="llm_request",
                 conversation_context={"turn_id": continuation.turn_id},

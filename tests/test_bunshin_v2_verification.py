@@ -4450,7 +4450,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
-    def test_local_delivery_is_an_independent_checkout_with_a_receipt(self) -> None:
+    def test_git_delivery_publishes_verified_patch_and_durable_commit_ref(self) -> None:
         (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
         self._git("add", "delivered.txt")
         self._git("commit", "-qm", "verified delivery")
@@ -4460,37 +4460,233 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             artifact_type="VerificationArtifact",
         )
 
-        receipt_ref = DeliveryService(
+        service = DeliveryService(
             self.runtime_root,
             self.store,
-        ).publish(
+        )
+        receipt_ref = service.publish(
             workflow_id="wf-delivery",
             workflow_key="delivery-workflow",
-            task_title="Local delivery",
+            task_title="Patch delivery",
             repository=self.repo,
             commit_sha=commit_sha,
-            source_snapshot={"delivery_mode": "local_only"},
+            source_snapshot={
+                "delivery_mode": "patch",
+                "snapshot_commit_sha": self.base,
+                "original_head": self.base,
+                "source_clean": True,
+            },
             verification_ref=verification_ref,
         )
 
         receipt = self.store.read_json(receipt_ref)
-        delivery = Path(receipt["local_path"])
-        self.assertEqual(receipt["kind"], "local_checkout")
+        patch_path = Path(receipt["patch_path"])
+        self.assertEqual(receipt["kind"], "patch")
+        self.assertEqual(receipt["base_commit_sha"], self.base)
         self.assertEqual(receipt["commit_sha"], commit_sha)
+        self.assertEqual(receipt["schema_version"], "3")
+        self.assertEqual(receipt["apply_mode"], "git_am")
         self.assertEqual(
-            subprocess.check_output(
-                ["git", "-C", str(delivery), "rev-parse", "HEAD"],
-                text=True,
-            ).strip(),
+            receipt["apply_hint"],
+            f"git am --3way --empty=keep {patch_path.name}",
+        )
+        self.assertEqual(
+            self._git("rev-parse", receipt["commit_ref"]).strip(),
             commit_sha,
         )
-        shutil.rmtree(self.repo)
+        patch_bytes = patch_path.read_bytes()
+        self.assertIn(b"Subject: [PATCH] Bunshin verified delivery", patch_bytes)
         self.assertEqual(
-            (delivery / "delivered.txt").read_text(encoding="utf-8"),
-            "ready\n",
+            self.store.read_bytes(receipt["patch_ref"]),
+            patch_bytes,
         )
 
-    def test_local_delivery_bounds_user_title_directory_name(self) -> None:
+        patch_path.write_bytes(b"tampered projection\n")
+        with self.assertRaisesRegex(FileExistsError, "different content"):
+            service.publish(
+                workflow_id="wf-delivery",
+                workflow_key="delivery-workflow",
+                task_title="Patch delivery",
+                repository=self.repo,
+                commit_sha=commit_sha,
+                source_snapshot={
+                    "delivery_mode": "patch",
+                    "snapshot_commit_sha": self.base,
+                    "original_head": self.base,
+                    "source_clean": True,
+                },
+                verification_ref=verification_ref,
+            )
+
+    def test_patch_projection_uses_full_workflow_identity_and_content_digest(self) -> None:
+        service = DeliveryService(self.runtime_root, self.store)
+        first = service._publish_patch_file(
+            workflow_id="wf_same-prefix-one",
+            workflow_key="same",
+            task_title="Same title",
+            commit_sha="a" * 40,
+            patch=b"first patch",
+        )
+        second = service._publish_patch_file(
+            workflow_id="wf_same-prefix-two",
+            workflow_key="same",
+            task_title="Same title",
+            commit_sha="a" * 40,
+            patch=b"second patch",
+        )
+
+        self.assertNotEqual(first.parent, second.parent)
+        self.assertIn(hashlib.sha256(b"first patch").hexdigest(), first.name)
+        self.assertIn(hashlib.sha256(b"second patch").hexdigest(), second.name)
+
+    def test_dirty_git_snapshot_delivery_uses_workspace_patch_that_applies(self) -> None:
+        (self.repo / "base.txt").write_text("dirty source\n", encoding="utf-8")
+        seed = self.runtime_root / "synthetic-seed"
+        seed.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=seed, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=seed, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=seed, check=True
+        )
+        shutil.copy2(self.repo / "base.txt", seed / "base.txt")
+        subprocess.run(["git", "add", "."], cwd=seed, check=True)
+        subprocess.run(["git", "commit", "-qm", "synthetic snapshot"], cwd=seed, check=True)
+        synthetic_base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=seed, text=True
+        ).strip()
+
+        delivery_repo = self.runtime_root / "dirty-delivery"
+        subprocess.run(["git", "clone", "-q", str(seed), str(delivery_repo)], check=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=delivery_repo, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=delivery_repo,
+            check=True,
+        )
+        (delivery_repo / "base.txt").write_text("verified result\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=delivery_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "verified result"], cwd=delivery_repo, check=True)
+        commit_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=delivery_repo, text=True
+        ).strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"}, artifact_type="VerificationArtifact"
+        )
+
+        receipt_ref = DeliveryService(self.runtime_root, self.store).publish(
+            workflow_id="wf-dirty-source",
+            workflow_key="dirty-source",
+            task_title="Dirty source",
+            repository=delivery_repo,
+            commit_sha=commit_sha,
+            source_snapshot={
+                "snapshot_commit_sha": synthetic_base,
+                "original_head": self.base,
+                "source_clean": False,
+            },
+            verification_ref=verification_ref,
+        )
+        receipt = self.store.read_json(receipt_ref)
+        patch_path = Path(receipt["patch_path"])
+
+        self.assertEqual(receipt["apply_mode"], "git_apply")
+        self.assertEqual(
+            receipt["apply_hint"],
+            f"git apply --binary --allow-empty {patch_path.name}",
+        )
+        failed_am = subprocess.run(
+            ["git", "am", "--3way", "--empty=keep", str(patch_path)],
+            cwd=self.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(failed_am.returncode, 0)
+        subprocess.run(
+            ["git", "am", "--abort"],
+            cwd=self.repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "apply", "--binary", "--allow-empty", str(patch_path)],
+            cwd=self.repo,
+            check=True,
+        )
+        self.assertEqual(
+            (self.repo / "base.txt").read_text(encoding="utf-8"),
+            "verified result\n",
+        )
+
+    def test_non_git_snapshot_delivery_applies_without_initializing_a_repository(self) -> None:
+        source = self.runtime_root / "plain-source"
+        source.mkdir()
+        (source / "base.txt").write_text("plain source\n", encoding="utf-8")
+        seed = self.runtime_root / "plain-seed"
+        shutil.copytree(source, seed)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=seed, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=seed, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=seed, check=True
+        )
+        subprocess.run(["git", "add", "."], cwd=seed, check=True)
+        subprocess.run(["git", "commit", "-qm", "synthetic snapshot"], cwd=seed, check=True)
+        synthetic_base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=seed, text=True
+        ).strip()
+
+        delivery_repo = self.runtime_root / "plain-delivery"
+        subprocess.run(["git", "clone", "-q", str(seed), str(delivery_repo)], check=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=delivery_repo, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=delivery_repo,
+            check=True,
+        )
+        (delivery_repo / "base.txt").write_text("verified plain result\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=delivery_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "verified result"], cwd=delivery_repo, check=True)
+        commit_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=delivery_repo, text=True
+        ).strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"}, artifact_type="VerificationArtifact"
+        )
+
+        receipt_ref = DeliveryService(self.runtime_root, self.store).publish(
+            workflow_id="wf-plain-source",
+            workflow_key="plain-source",
+            task_title="Plain source",
+            repository=delivery_repo,
+            commit_sha=commit_sha,
+            source_snapshot={
+                "snapshot_commit_sha": synthetic_base,
+                "original_head": "",
+                "source_clean": False,
+            },
+            verification_ref=verification_ref,
+        )
+        receipt = self.store.read_json(receipt_ref)
+        patch_path = Path(receipt["patch_path"])
+
+        self.assertEqual(receipt["apply_mode"], "git_apply")
+        subprocess.run(
+            ["git", "apply", "--binary", "--allow-empty", str(patch_path)],
+            cwd=source,
+            check=True,
+        )
+        self.assertFalse((source / ".git").exists())
+        self.assertEqual(
+            (source / "base.txt").read_text(encoding="utf-8"),
+            "verified plain result\n",
+        )
+
+    def test_patch_delivery_bounds_user_title_directory_name(self) -> None:
         (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
         self._git("add", "delivered.txt")
         self._git("commit", "-qm", "verified delivery")
@@ -4509,21 +4705,15 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             task_title=("Implement and verify " + "a very long task title " * 40),
             repository=self.repo,
             commit_sha=commit_sha,
-            source_snapshot={"delivery_mode": "local_only"},
+            source_snapshot={"snapshot_commit_sha": self.base},
             verification_ref=verification_ref,
         )
 
-        delivery = Path(self.store.read_json(receipt_ref)["local_path"])
-        self.assertLess(len(delivery.name), 255)
-        self.assertEqual(
-            subprocess.check_output(
-                ["git", "-C", str(delivery), "rev-parse", "HEAD"],
-                text=True,
-            ).strip(),
-            commit_sha,
-        )
+        patch_path = Path(self.store.read_json(receipt_ref)["patch_path"])
+        self.assertLess(len(patch_path.parent.name), 255)
+        self.assertTrue(patch_path.is_file())
 
-    def test_clean_git_delivery_pushes_verified_head_and_creates_pull_request(self) -> None:
+    def test_patch_delivery_does_not_push_or_create_a_pull_request(self) -> None:
         remote = self.runtime_root / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         self._git("remote", "add", "origin", str(remote))
@@ -4565,29 +4755,33 @@ class BunshinV2DeliveryTests(unittest.TestCase):
                 commit_sha=commit_sha,
                 source_snapshot={
                     "source_clean": True,
-                    "delivery_mode": "pull_request_preferred",
+                    "delivery_mode": "patch",
                     "source_branch": "main",
                     "source_repo_path": str(self.repo),
                     "source_remote_name": "origin",
                     "original_head": self.base,
+                    "snapshot_commit_sha": self.base,
                 },
                 verification_ref=verification_ref,
             )
 
         receipt = self.store.read_json(receipt_ref)
-        self.assertEqual(receipt["kind"], "pull_request")
-        self.assertEqual(receipt["pr_url"], "https://example.invalid/pull/17")
+        self.assertEqual(receipt["kind"], "patch")
         self.assertEqual(receipt["commit_sha"], commit_sha)
-        remote_sha = subprocess.check_output(
+        remote_branch = subprocess.run(
             [
                 "git",
                 "ls-remote",
+                "--exit-code",
                 str(remote),
                 "refs/heads/pal/bunshin/pr-delivery",
             ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-        ).split()[0]
-        self.assertEqual(remote_sha, commit_sha)
+            check=False,
+        )
+        self.assertEqual(remote_branch.returncode, 2)
 
     def test_github_pr_remote_detection_rejects_local_and_other_provider_urls(self) -> None:
         self.assertTrue(
@@ -4601,7 +4795,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             is_github_pull_request_remote("git@gitlab.com:openai/example.git")
         )
 
-    def test_github_preflight_failure_falls_back_before_push_with_safe_detail(self) -> None:
+    def test_patch_delivery_does_not_preflight_github(self) -> None:
         remote = self.runtime_root / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         self._git("remote", "add", "origin", str(remote))
@@ -4643,7 +4837,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
                 commit_sha=commit_sha,
                 source_snapshot={
                     "source_clean": True,
-                    "delivery_mode": "pull_request_preferred",
+                    "delivery_mode": "patch",
                     "source_branch": "main",
                     "source_repo_path": str(self.repo),
                     "source_remote_name": "origin",
@@ -4653,10 +4847,8 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             )
 
         receipt = self.store.read_json(receipt_ref)
-        self.assertEqual(receipt["kind"], "local_checkout")
-        self.assertIn("GitHub PR delivery preflight failed (exit 4)", receipt["fallback_reason"])
-        self.assertIn("[REDACTED]", receipt["fallback_reason"])
-        self.assertNotIn("ghp_secretvalue", receipt["fallback_reason"])
+        self.assertEqual(receipt["kind"], "patch")
+        self.assertNotIn("fallback_reason", receipt)
         remote_branch = subprocess.run(
             [
                 "git",
@@ -4672,7 +4864,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
         )
         self.assertEqual(remote_branch.returncode, 2)
 
-    def test_pr_creation_failure_preserves_safe_detail_after_push(self) -> None:
+    def test_patch_delivery_never_pushes_even_when_pr_metadata_is_available(self) -> None:
         remote = self.runtime_root / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         self._git("remote", "add", "origin", str(remote))
@@ -4716,7 +4908,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
                 commit_sha=commit_sha,
                 source_snapshot={
                     "source_clean": True,
-                    "delivery_mode": "pull_request_preferred",
+                    "delivery_mode": "patch",
                     "source_branch": "main",
                     "source_repo_path": str(self.repo),
                     "source_remote_name": "origin",
@@ -4726,22 +4918,135 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             )
 
         receipt = self.store.read_json(receipt_ref)
-        self.assertEqual(receipt["kind"], "local_checkout")
-        self.assertIn(
-            "delivery branch was pushed but PR creation failed (exit 1)",
-            receipt["fallback_reason"],
-        )
-        self.assertIn("GraphQL: authentication expired", receipt["fallback_reason"])
-        remote_sha = subprocess.check_output(
+        self.assertEqual(receipt["kind"], "patch")
+        remote_branch = subprocess.run(
             [
                 "git",
                 "ls-remote",
+                "--exit-code",
                 str(remote),
                 "refs/heads/pal/bunshin/pr-create-fallback",
             ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-        ).split()[0]
-        self.assertEqual(remote_sha, commit_sha)
+            check=False,
+        )
+        self.assertEqual(remote_branch.returncode, 2)
+
+    def test_patch_delivery_squashes_merge_history_to_the_verified_tree(self) -> None:
+        main_branch = self._git("branch", "--show-current").strip()
+        self._git("checkout", "-qb", "feature")
+        (self.repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+        self._git("add", "feature.txt")
+        self._git("commit", "-qm", "feature")
+        self._git("checkout", "-q", main_branch)
+        (self.repo / "main.txt").write_text("main\n", encoding="utf-8")
+        self._git("add", "main.txt")
+        self._git("commit", "-qm", "main")
+        self._git("merge", "--no-ff", "-qm", "merge feature", "feature")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+
+        receipt_ref = DeliveryService(self.runtime_root, self.store).publish(
+            workflow_id="wf-merge",
+            workflow_key="merge",
+            task_title="Merge delivery",
+            repository=self.repo,
+            commit_sha=commit_sha,
+            source_snapshot={"snapshot_commit_sha": self.base},
+            verification_ref=verification_ref,
+        )
+
+        receipt = self.store.read_json(receipt_ref)
+        patch_bytes = Path(receipt["patch_path"]).read_bytes()
+        self.assertEqual(
+            patch_bytes.count(b"Subject: [PATCH] Bunshin verified delivery"),
+            1,
+        )
+
+    def test_no_change_delivery_emits_an_applicable_empty_commit_patch(self) -> None:
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+
+        receipt_ref = DeliveryService(self.runtime_root, self.store).publish(
+            workflow_id="wf-no-change",
+            workflow_key="no-change",
+            task_title="No change",
+            repository=self.repo,
+            commit_sha=self.base,
+            source_snapshot={"snapshot_commit_sha": self.base},
+            verification_ref=verification_ref,
+        )
+
+        patch_bytes = Path(
+            self.store.read_json(receipt_ref)["patch_path"]
+        ).read_bytes()
+        self.assertIn(b"Subject: [PATCH] Bunshin verified delivery", patch_bytes)
+
+    def test_delivery_commit_ref_is_immutable_for_one_workflow(self) -> None:
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        service = DeliveryService(self.runtime_root, self.store)
+        service.publish(
+            workflow_id="wf-immutable",
+            workflow_key="immutable",
+            task_title="Immutable",
+            repository=self.repo,
+            commit_sha=self.base,
+            source_snapshot={"snapshot_commit_sha": self.base},
+            verification_ref=verification_ref,
+        )
+        (self.repo / "later.txt").write_text("later\n", encoding="utf-8")
+        self._git("add", "later.txt")
+        self._git("commit", "-qm", "later result")
+        later = self._git("rev-parse", "HEAD").strip()
+
+        with self.assertRaisesRegex(RuntimeError, "already points to a different result"):
+            service.publish(
+                workflow_id="wf-immutable",
+                workflow_key="immutable",
+                task_title="Immutable",
+                repository=self.repo,
+                commit_sha=later,
+                source_snapshot={"snapshot_commit_sha": self.base},
+                verification_ref=verification_ref,
+            )
+
+    def test_patch_delivery_rejects_a_base_outside_verified_ancestry(self) -> None:
+        self._git("checkout", "-q", "--orphan", "other-root")
+        self._git("rm", "-q", "-rf", ".")
+        (self.repo / "other.txt").write_text("other\n", encoding="utf-8")
+        self._git("add", ".")
+        self._git("commit", "-qm", "unrelated base")
+        unrelated = self._git("rev-parse", "HEAD").strip()
+        self._git("checkout", "-q", "--detach", self.base)
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+
+        with self.assertRaisesRegex(ValueError, "does not preserve source snapshot ancestry"):
+            DeliveryService(self.runtime_root, self.store).publish(
+                workflow_id="wf-bad-base",
+                workflow_key="bad-base",
+                task_title="Bad base",
+                repository=self.repo,
+                commit_sha=commit_sha,
+                source_snapshot={"snapshot_commit_sha": unrelated},
+                verification_ref=verification_ref,
+            )
 
     def _git(self, *args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=self.repo, text=True)

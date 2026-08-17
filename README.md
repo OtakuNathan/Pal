@@ -299,11 +299,16 @@ on a 6-module DAG); modules that depend on others queue behind their acceptances
   expected to read the whole tree. The contract, not prose, is what the Verifier
   checks against. This is "Explicit beats implicit" applied to delegation.
 - **Scoped workspaces and explicit delivery.** Git-backed engineering flows use
-  bounded role workspaces and isolated delivery branches/worktrees when the Git
-  context supports them. Artifact-family flows (lifestyle, etc.) use isolated
-  role workspaces where the Architect authors directly. When remote delivery is
-  unavailable, the workflow records an explicit local-checkout result instead of
-  pretending a push or PR succeeded.
+  bounded role workspaces while running. After sink verification, Manager pins
+  the accepted commit under a durable ref and emits one content-addressed
+  `git format-patch` relative to the captured source snapshot. It mechanically
+  replays clean-Git patches with `git am` and synthetic-snapshot patches with
+  `git apply`, then compares the resulting tree
+  before publication. Terminal worktrees can then retire without losing the
+  authoritative commit or portable patch. Pushing a branch or opening a PR is a
+  separate downstream action rather than a workflow side effect.
+  Artifact-family flows (lifestyle, etc.) continue to publish their native
+  content-addressed deliverables.
 - **Immutable task ledger.** Each task owns an append-only `task.yaml` ledger;
   revisions are append-only too. The ledger is the source of truth for what was
   asked, what changed, and why.

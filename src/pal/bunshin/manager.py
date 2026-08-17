@@ -7,12 +7,13 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from pal.execution import CapabilityCall
 from pal.foundation import utc_now
@@ -26,8 +27,9 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.llm.transport import (
     DirectSDKTransport,
     EncodedTransportRequest,
-    StreamControl,
+    LLMStreamControl,
 )
+from pal.foundation.fd_lease import fd_lease_snapshot
 from pal.llm.usage import LLMUsageLedger
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.config import effective_bunshin_runtime_config
@@ -87,18 +89,35 @@ class _LLMTransportRequestState:
     receipt_fingerprint: str = ""
 
 
-def _next_transport_frame(iterator: Iterator[Any]) -> tuple[bool, Any]:
+@dataclass(frozen=True)
+class _TransportWorkerResult:
+    error: BaseException | None = None
+    close_error: Exception | None = None
+
+
+def _consume_transport_iterator(
+    iterator: Iterator[Any],
+    publish: Callable[[str, Any], bool],
+) -> _TransportWorkerResult:
+    """Consume and close one provider iterator on one stable owner thread."""
+
+    error: BaseException | None = None
+    close_error: Exception | None = None
     try:
-        return True, next(iterator)
-    except StopIteration:
-        return False, None
-
-
-def _close_transport_iterator(iterator: Iterator[Any]) -> None:
+        for frame in iterator:
+            if not publish("frame", frame):
+                break
+    except BaseException as exc:
+        error = exc
     close = getattr(iterator, "close", None)
     if callable(close):
-        with contextlib.suppress(Exception):
+        try:
             close()
+        except Exception as exc:
+            close_error = exc
+    result = _TransportWorkerResult(error=error, close_error=close_error)
+    publish("terminal", result)
+    return result
 
 
 def _bounded_transport_timeout(value: Any) -> float:
@@ -225,7 +244,7 @@ class BunshinRunState:
     bunshin_id: str
     run_id: str
     pack: BunshinInvocationPack
-    process: asyncio.subprocess.Process | None = None
+    process: "ProcessStatusView | None" = None
     status: str = "running"
     started_at: str = field(default_factory=utc_now)
     ended_at: str = ""
@@ -264,6 +283,15 @@ class BunshinRunState:
         return {**self.summary(), "task_context_pack": self.pack.to_dict()}
 
 
+class ProcessStatusView(Protocol):
+    """Read-only scalar process projection; carries no I/O authority."""
+
+    @property
+    def pid(self) -> int: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
 @dataclass
 class BunshinManager:
     runtime_root: Path
@@ -293,6 +321,11 @@ class BunshinManager:
     )
     _llm_transport_requests: OrderedDict[str, _LLMTransportRequestState] = field(
         default_factory=OrderedDict,
+        init=False,
+        repr=False,
+    )
+    _llm_transport_workers: set[asyncio.Task[_TransportWorkerResult]] = field(
+        default_factory=set,
         init=False,
         repr=False,
     )
@@ -895,8 +928,9 @@ class BunshinManager:
                 state.pending_approval = {}
                 state.pending_clarification = {}
                 # A terminal IPC receipt means the worker has finished its
-                # logical work, not that its process group is gone.  Keep the
-                # run active until the RAII process owner confirms reap.
+                # logical work, not that its process owner has finished
+                # cleanup. Keep the run active until the owner confirms its
+                # direct child has been reaped.
                 terminal_status = str(payload.get("status") or "completed")
                 if state.process_group_reaped:
                     state.status = terminal_status
@@ -1040,7 +1074,7 @@ class BunshinManager:
         run_id: str,
         bunshin_id: str,
         pack: BunshinInvocationPack,
-        process: asyncio.subprocess.Process,
+        process: ProcessStatusView,
     ) -> None:
         self.runs[run_id] = BunshinRunState(bunshin_id=bunshin_id, run_id=run_id, pack=pack, process=process)
 
@@ -1049,9 +1083,12 @@ class BunshinManager:
         run_id: str,
         process_group_reaped: bool,
     ) -> None:
+        # ``process_group_reaped`` is a legacy event/state key. It now means
+        # that the in-memory process owner completed direct-child cleanup; no
+        # numeric process-group identity is persisted or recovered.
         if not process_group_reaped:
             raise RuntimeError(
-                "cannot unregister worker before its process group is reaped"
+                "cannot unregister worker before its process owner completes cleanup"
             )
         state = self.runs.get(run_id)
         if state is not None:
@@ -1301,7 +1338,7 @@ class BunshinManager:
             provider=str(endpoint.provider),
         )
         self._llm_transport_requests[request_id] = record
-        control = StreamControl()
+        control = LLMStreamControl()
         iterator = self._manager_llm_json_transport().frames(
             endpoint,
             EncodedTransportRequest(
@@ -1316,33 +1353,86 @@ class BunshinManager:
         )
         provider_announced = False
         completed = False
-        next_frame: asyncio.Task[tuple[bool, Any]] | None = None
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[tuple[str, Any, threading.Event | None]] = asyncio.Queue()
+
+        def publish(kind: str, value: Any) -> bool:
+            if kind == "frame" and control.cancelled:
+                return False
+            acknowledged = threading.Event() if kind == "frame" else None
+            try:
+                loop.call_soon_threadsafe(
+                    events.put_nowait,
+                    (kind, value, acknowledged),
+                )
+            except RuntimeError:
+                return False
+            if acknowledged is not None:
+                while not acknowledged.wait(0.05):
+                    if control.cancelled:
+                        return False
+            return True
+
+        worker = asyncio.create_task(
+            asyncio.to_thread(_consume_transport_iterator, iterator, publish),
+            name=f"bunshin-llm-transport:{request_id}",
+        )
+        self._llm_transport_workers.add(worker)
+
+        def worker_finished(task: asyncio.Task[_TransportWorkerResult]) -> None:
+            self._llm_transport_workers.discard(task)
+            if task.cancelled():
+                return
+            with contextlib.suppress(BaseException):
+                task.result()
+                record.provider_started = bool(
+                    record.provider_started or control.provider_started
+                )
+                record.transport_terminal = True
+
+        worker.add_done_callback(worker_finished)
+        pending_acknowledgement: threading.Event | None = None
         try:
             while True:
-                next_frame = asyncio.create_task(
-                    asyncio.to_thread(_next_transport_frame, iterator)
-                )
-                while not next_frame.done():
-                    await asyncio.wait({next_frame}, timeout=0.05)
+                try:
+                    kind, value, acknowledgement = await asyncio.wait_for(
+                        events.get(),
+                        timeout=0.05,
+                    )
+                except TimeoutError:
                     if control.provider_started and not provider_announced:
                         provider_announced = True
                         record.provider_started = True
                         yield {"event": "provider_started"}
-                has_frame, frame = await next_frame
+                    continue
                 if control.provider_started and not provider_announced:
                     provider_announced = True
                     record.provider_started = True
                     yield {"event": "provider_started"}
-                if not has_frame:
+                if kind == "terminal":
+                    result = value
+                    if not isinstance(result, _TransportWorkerResult):
+                        raise RuntimeError("LLM transport worker emitted an invalid terminal result")
                     completed = True
+                    await asyncio.shield(worker)
+                    if result.error is not None:
+                        raise result.error
+                    if result.close_error is not None:
+                        raise result.close_error
                     return
-                yield {
-                    "frame": {
-                        "sequence": int(frame.sequence),
-                        "payload": thaw_json(frame.payload),
+                frame = value
+                pending_acknowledgement = acknowledgement
+                try:
+                    yield {
+                        "frame": {
+                            "sequence": int(frame.sequence),
+                            "payload": thaw_json(frame.payload),
+                        }
                     }
-                }
-                next_frame = None
+                finally:
+                    if acknowledgement is not None:
+                        acknowledgement.set()
+                    pending_acknowledgement = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1354,28 +1444,18 @@ class BunshinManager:
                 provider_started=record.provider_started,
             ) from exc
         finally:
+            if pending_acknowledgement is not None:
+                pending_acknowledgement.set()
             if not completed:
                 control.cancel("proxy_consumer_closed")
-            close_later = False
-            if next_frame is not None and not next_frame.done():
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(next_frame),
-                        timeout=1.0,
-                    )
-                except TimeoutError:
-                    close_later = True
-                    next_frame.add_done_callback(
-                        lambda _future: _close_transport_iterator(iterator)
-                    )
-                except Exception:
-                    pass
-            if not close_later:
-                await asyncio.to_thread(_close_transport_iterator, iterator)
+            if not worker.done():
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(worker), timeout=1.0)
             record.provider_started = bool(
                 record.provider_started or control.provider_started
             )
-            record.transport_terminal = True
+            if worker.done() and not worker.cancelled():
+                record.transport_terminal = True
 
     async def llm_usage_receipt(self, params: dict[str, Any]) -> dict[str, Any]:
         state = self._require_broker_run(params)
@@ -1632,6 +1712,8 @@ class BunshinManager:
             "prompt_log_enabled": self.prompt_log_enabled,
             "pending_event_count": len(self.event_queue),
             "llm_transport_request_count": len(self._llm_transport_requests),
+            "llm_transport_worker_count": len(self._llm_transport_workers),
+            "fd_leases": fd_lease_snapshot(resource_kind=None),
             "llm_usage_unreported_count": usage_unreported,
             "llm_usage": self._llm_usage_ledger.snapshot(),
             "event_subscriber_count": len(self.event_subscribers),
@@ -1747,8 +1829,8 @@ class BunshinManager:
 
     async def close_all(self) -> None:
         # The semantic orchestrator owns worker processes.  Cancelling its
-        # logical tasks enters each process owner's RAII close path, which
-        # reaps the complete process group before unregistering the run.
+        # logical tasks enters each process owner's close path, which withdraws
+        # process authority, signals once when needed, and reaps the child.
         await self.v2_semantic_orchestrator.stop_background_workers(
             timeout_seconds=self.graceful_shutdown_timeout_seconds,
         )

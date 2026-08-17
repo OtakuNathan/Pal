@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turn_executor import TurnExecutor
@@ -30,7 +32,7 @@ from pal.llm.transport import (
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
     LLMStreamCancelledError,
-    StreamControl,
+    LLMStreamControl,
 )
 
 
@@ -182,6 +184,59 @@ class _StartedFailingShapeInvoker(ShapeEndpointInvoker):
 
 
 class LLMRuntimeIRTests(unittest.TestCase):
+    def test_local_database_failure_is_not_reported_as_provider_failure(self) -> None:
+        class DatabaseFailingInvoker:
+            def invoke(self, endpoint, request, **kwargs):
+                _ = endpoint, request, kwargs
+                raise sqlite3.DatabaseError("file is not a database")
+
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(_endpoint(),)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=DatabaseFailingInvoker(),
+            config=RuntimeConfig(
+                runtime_root=Path(tempfile.mkdtemp()),
+                llm_endpoint_retry_attempts=3,
+            ),
+        )
+
+        result = runtime.generate(_request())
+
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(
+            result.response.message.metadata.get("failure_subsystem"),
+            "persistence",
+        )
+        self.assertEqual(
+            result.response.message.metadata.get("failure_kind"),
+            "local_state",
+        )
+
+    def test_endpoint_resolution_database_failure_keeps_local_provenance(self) -> None:
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(_endpoint(),)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=_Invoker(),
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+
+        with patch.object(
+            runtime,
+            "_enabled_endpoints",
+            side_effect=sqlite3.DatabaseError("file is not a database"),
+        ):
+            generated = runtime.generate(_request())
+            streamed = list(runtime._iter_stream_updates(_request()))
+
+        self.assertEqual(
+            generated.response.message.metadata.get("failure_subsystem"),
+            "persistence",
+        )
+        self.assertEqual(
+            streamed[-1].response.message.metadata.get("failure_subsystem"),
+            "persistence",
+        )
+
     def test_stale_endpoint_snapshot_refreshes_once_before_nonstream_invocation(self) -> None:
         invoker = _StaleOnceInvoker()
         runtime = LLMRuntime(
@@ -287,7 +342,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         updates = list(
             runtime._iter_stream_updates(
                 _request(),
-                stream_control=StreamControl(),
+                stream_control=LLMStreamControl(),
             )
         )
 

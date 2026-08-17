@@ -12,7 +12,13 @@ if [[ -z "${tla_jar}" || ! -f "${tla_jar}" ]]; then
 fi
 
 cd "${repo_root}"
-for model in L1TurnLifecycle EndpointInvocationLifecycle ItemCommitLifecycle BrokerTransportLifecycle; do
+
+for model in \
+    L1TurnLifecycle \
+    EndpointInvocationLifecycle \
+    ItemCommitLifecycle \
+    BrokerTransportLifecycle
+do
     echo "==> TLC ${model}"
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" \

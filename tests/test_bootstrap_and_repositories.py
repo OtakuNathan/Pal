@@ -2434,7 +2434,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(health.status, "ok")
-        self.assertIsNone(service.browser_manager.process)
+        self.assertIsNone(service.browser_manager._process)
         self.assertFalse(health.structured["service_running"])
 
         class FakeBrowserManager:
@@ -2768,7 +2768,12 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
             [
                 {"type": "text_delta", "request_id": "req-1", "text": "Checklist: inspected"},
                 {"type": "text_delta", "request_id": "req-1", "text": "canonical final"},
-                {"type": "llm_done", "request_id": "req-1", "finish_reason": "stop"},
+                {
+                    "type": "llm_done",
+                    "request_id": "req-1",
+                    "final_text": "canonical final",
+                    "finish_reason": "stop",
+                },
             ],
         )
         self.assertFalse(endpoint._stream_sessions)

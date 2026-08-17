@@ -20,8 +20,8 @@ from pal.llm.transport import (
     DirectSDKTransport,
     EncodedTransportRequest,
     LLMJSONTransportPort,
+    LLMStreamControl,
     SDKJSONTransport,
-    StreamControl,
 )
 from pal.shared import LLMFinishReason
 
@@ -122,7 +122,7 @@ class ShapeEndpointInvoker:
         request: LLMRequestIR,
         *,
         timeout_seconds: float = 600.0,
-        stream_control: StreamControl | None = None,
+        stream_control: LLMStreamControl | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         shape = WireShape(str(endpoint.wire_shape))
         context = ShapeContext(

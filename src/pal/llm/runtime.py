@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import sqlite3
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -57,8 +58,8 @@ from pal.llm.transport import (
     DirectSDKTransport,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
+    LLMStreamControl,
     LLMStreamCancelledError,
-    StreamControl,
 )
 from pal.shared import LLMPreflightStatus
 from pal.shared.json_values import thaw_json
@@ -171,7 +172,7 @@ class LLMEndpointInvokerPort(Protocol):
         request: LLMRequestIR,
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-        stream_control: StreamControl | None = None,
+        stream_control: LLMStreamControl | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         ...
 
@@ -209,6 +210,11 @@ class LLMRuntime(LLMRuntimePort):
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
     model_hooks: ModelHookRegistry = field(init=False)
     provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
+    _detached_stream_tasks: set[asyncio.Task[Any]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
@@ -444,7 +450,11 @@ class LLMRuntime(LLMRuntimePort):
         allow_stale_refresh: bool,
     ) -> LLMGenerationResult:
         self.last_request = request
-        endpoints = self._enabled_endpoints(request)
+        try:
+            endpoints = self._enabled_endpoints(request)
+        except Exception as exc:
+            self.usage_ledger.record_failed_request()
+            return _failure_result(str(exc), exc=exc)
         if not endpoints:
             return _failure_result("no enabled endpoints are available")
         last_error: Exception | None = None
@@ -531,7 +541,10 @@ class LLMRuntime(LLMRuntimePort):
         self.usage_ledger.record_failed_request(
             endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
         )
-        return _failure_result(_public_failure_text(last_error))
+        return _failure_result(
+            _public_failure_text(last_error),
+            exc=last_error,
+        )
 
     async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
         return await asyncio.to_thread(self.generate, request)
@@ -540,11 +553,20 @@ class LLMRuntime(LLMRuntimePort):
         self,
         request: LLMRequestIR,
         *,
-        stream_control: StreamControl | None = None,
+        stream_control: LLMStreamControl | None = None,
         allow_stale_refresh: bool = True,
     ) -> Iterator[LLMResponseUpdate]:
         self.last_request = request
-        endpoints = self._enabled_endpoints(request)
+        try:
+            endpoints = self._enabled_endpoints(request)
+        except Exception as exc:
+            self.usage_ledger.record_failed_request()
+            response = _failure_result(str(exc), exc=exc).response
+            yield LLMResponseUpdate(
+                response,
+                delta_kind=LLMResponseDeltaKind.STATE,
+            )
+            return
         if not endpoints:
             response = _failure_result("no enabled endpoints are available").response
             yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
@@ -662,7 +684,10 @@ class LLMRuntime(LLMRuntimePort):
                                 LLMFinishReason.ERROR,
                             )
                         )
-                        error_response = replace(partial, finish_reason=LLMFinishReason.ERROR)
+                        error_response = _response_with_failure(
+                            partial,
+                            exc,
+                        )
                         self.usage_ledger.record_failed_request(
                             endpoint_id=endpoint.endpoint_id
                         )
@@ -683,16 +708,28 @@ class LLMRuntime(LLMRuntimePort):
         self.usage_ledger.record_failed_request(
             endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
         )
-        response = _failure_result(str(last_error or "LLM stream failed")).response
+        response = _failure_result(
+            str(last_error or "LLM stream failed"),
+            exc=last_error,
+        ).response
         yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
 
     async def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
         done = object()
-        stream_control = StreamControl()
+        stream_control = LLMStreamControl()
         wall_timeout = self._stream_wall_timeout_seconds(request)
         cleanup_timeout = self._stream_cleanup_timeout_seconds()
+
+        def enqueue(item: object) -> None:
+            # A cooperatively cancelled SDK worker can outlive its consumer
+            # until the provider read timeout expires.  The resident loop is
+            # normally still present, but shutdown may close it first.
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+            except RuntimeError:
+                pass
 
         def worker() -> None:
             try:
@@ -700,11 +737,11 @@ class LLMRuntime(LLMRuntimePort):
                     request,
                     stream_control=stream_control,
                 ):
-                    loop.call_soon_threadsafe(queue.put_nowait, update)
+                    enqueue(update)
             except BaseException as exc:  # noqa: BLE001
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
+                enqueue(exc)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, done)
+                enqueue(done)
 
         task = asyncio.create_task(asyncio.to_thread(worker))
         deadline = loop.time() + wall_timeout
@@ -742,7 +779,15 @@ class LLMRuntime(LLMRuntimePort):
                         timeout=cleanup_timeout,
                     )
                 except asyncio.TimeoutError:
-                    task.cancel()
+                    # The SDK owns its hidden socket and must close the active
+                    # response on the worker thread after its network timeout.
+                    # Cancellation fences every later capability admission;
+                    # tracking keeps the worker alive until its finally block
+                    # releases the last hazard and closes the client graph.
+                    self._track_detached_stream_task(task)
+                except asyncio.CancelledError:
+                    self._track_detached_stream_task(task)
+                    raise
                 except LLMStreamCancelledError:
                     pass
             elif not task.cancelled():
@@ -750,6 +795,17 @@ class LLMRuntime(LLMRuntimePort):
                     task.result()
                 except LLMStreamCancelledError:
                     pass
+
+    def _track_detached_stream_task(self, task: asyncio.Task[Any]) -> None:
+        if task in self._detached_stream_tasks:
+            return
+        self._detached_stream_tasks.add(task)
+        task.add_done_callback(self._retire_detached_stream_task)
+
+    def _retire_detached_stream_task(self, task: asyncio.Task[Any]) -> None:
+        self._detached_stream_tasks.discard(task)
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
 
     def usage_snapshot(self) -> dict[str, Any]:
         snapshot = self.usage_ledger.snapshot()
@@ -1132,23 +1188,65 @@ class LLMRuntime(LLMRuntimePort):
         return self.endpoint_invoker
 
 
-def _text_response(text: str, reason: LLMFinishReason) -> LLMResponseIR:
+def _text_response(
+    text: str,
+    reason: LLMFinishReason,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> LLMResponseIR:
     return LLMResponseIR(
         message=LLMMessageIR(
             role=MessageRole.ASSISTANT,
             parts=(TextPartIR(str(text)),) if str(text) else (),
             state=MessageState.COMPLETE,
+            metadata=dict(metadata or {}),
         ),
         finish_reason=reason,
         provider_response_count=0 if reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED} else 1,
     )
 
 
-def _failure_result(text: str) -> LLMGenerationResult:
-    return LLMGenerationResult(response=_text_response(text, LLMFinishReason.ERROR))
+def _failure_result(
+    text: str,
+    *,
+    exc: Exception | None = None,
+) -> LLMGenerationResult:
+    return LLMGenerationResult(
+        response=_text_response(
+            text,
+            LLMFinishReason.ERROR,
+            metadata=_failure_metadata(exc),
+        )
+    )
+
+
+def _response_with_failure(
+    response: LLMResponseIR,
+    exc: Exception,
+) -> LLMResponseIR:
+    metadata = dict(response.message.metadata)
+    metadata.update(_failure_metadata(exc))
+    return replace(
+        response,
+        message=replace(response.message, metadata=metadata),
+        finish_reason=LLMFinishReason.ERROR,
+    )
+
+
+def _failure_metadata(exc: Exception | None) -> dict[str, str]:
+    error_kind = _classify_retry_error(exc) if exc is not None else "unknown"
+    return {
+        "failure_subsystem": (
+            "persistence" if error_kind == "local_state" else "llm"
+        ),
+        "failure_kind": error_kind,
+        "error_type": type(exc).__name__ if exc is not None else "UnknownError",
+    }
 
 
 def _classify_retry_error(exc: Exception) -> str:
+    if any(isinstance(item, sqlite3.DatabaseError) for item in _exception_chain(exc)):
+        return "local_state"
     if isinstance(exc, LLMEndpointSpecStaleError):
         return "endpoint_spec_stale"
     if isinstance(exc, LLMProviderStartedError):
@@ -1190,6 +1288,17 @@ def _classify_retry_error(exc: Exception) -> str:
     if any(marker in message for marker in ("500", "502", "503", "504", "529", "overload")):
         return "server"
     return "unknown"
+
+
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return tuple(chain)
 
 
 def _retryable_error_kind(error_kind: str) -> bool:

@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -115,8 +114,6 @@ class _ShellProcessSupervisor:
                         # Synchronize with an interrupt-side terminator before
                         # snapshotting termination metadata below.
                         self._terminate_current_process(proc)
-                    else:
-                        self._cleanup_normal_exit_descendants(proc)
                 finally:
                     with contextlib.suppress(Exception):
                         proc.wait(timeout=self.termination_grace_seconds + 1.0)
@@ -143,16 +140,10 @@ class _ShellProcessSupervisor:
         self._cancel_requested.set()
         self._terminate_current_process()
 
-    def _cleanup_normal_exit_descendants(self, proc: subprocess.Popen[bytes]) -> None:
-        if os.name == "nt":
-            return
-        if not _posix_process_group_exists(proc.pid):
-            return
-        self._descendants_terminated = True
-        self._terminate_current_process(proc)
-
     def _terminate_current_process(self, expected: subprocess.Popen[bytes] | None = None) -> None:
         with self._termination_lock:
+            if self._termination_signal:
+                return
             with self._state_lock:
                 proc = self._proc
             if proc is None or (expected is not None and proc is not expected):
@@ -160,10 +151,7 @@ class _ShellProcessSupervisor:
             if os.name == "nt":
                 termination_signal = _terminate_windows_process_tree(proc)
             else:
-                termination_signal = _terminate_posix_process_group(
-                    proc,
-                    grace_seconds=self.termination_grace_seconds,
-                )
+                termination_signal = _terminate_posix_process_group_once(proc)
             if termination_signal:
                 self._termination_signal = termination_signal
                 # The termination target is the whole POSIX process group or
@@ -171,47 +159,20 @@ class _ShellProcessSupervisor:
                 self._descendants_terminated = True
 
 
-def _terminate_posix_process_group(
-    proc: subprocess.Popen[bytes],
-    *,
-    grace_seconds: float,
-) -> str:
-    process_group = proc.pid
-    if not _posix_process_group_exists(process_group):
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=0)
+def _terminate_posix_process_group_once(proc: subprocess.Popen[bytes]) -> str:
+    """Terminate the group owned by the currently published process once.
+
+    The numeric group id is derived from the live ``Popen`` and is never kept
+    as authority or retried after this call.
+    """
+
+    if proc.poll() is not None:
         return ""
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process_group, signal.SIGTERM)
-    if _wait_for_posix_process_group_exit(process_group, timeout=grace_seconds):
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=0)
-        return "SIGTERM"
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process_group, signal.SIGKILL)
-    _wait_for_posix_process_group_exit(process_group, timeout=grace_seconds)
-    with contextlib.suppress(Exception):
-        proc.wait(timeout=grace_seconds)
-    return "SIGKILL"
-
-
-def _posix_process_group_exists(process_group: int) -> bool:
     try:
-        os.killpg(process_group, 0)
+        os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _wait_for_posix_process_group_exit(process_group: int, *, timeout: float) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout)
-    while _posix_process_group_exists(process_group):
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
+        return ""
+    return "SIGKILL"
 
 
 def _terminate_windows_process_tree(proc: subprocess.Popen[bytes]) -> str:

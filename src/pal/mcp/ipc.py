@@ -51,6 +51,10 @@ class McpManagerClient:
     def socket_path(self) -> Path:
         return mcp_socket_path(self.runtime_root)
 
+    @property
+    def port_path(self) -> Path:
+        return mcp_port_path(self.runtime_root)
+
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             return await self._client.request(method, params)

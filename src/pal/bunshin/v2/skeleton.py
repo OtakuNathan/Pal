@@ -1404,15 +1404,15 @@ class GitBackedSkeletonService:
                     common_git_dir, "rev-parse", f"{original_head}^{{tree}}"
                 ).strip()
                 files = list(_workspace_snapshot_paths(source))
-                delivery_fallback_reason = ""
+                pull_request_ineligible_reason = ""
                 if not source_branch:
-                    delivery_fallback_reason = "source Git branch is detached"
+                    pull_request_ineligible_reason = "source Git branch is detached"
                 elif not source_remote_name or not source_remote_url:
-                    delivery_fallback_reason = (
+                    pull_request_ineligible_reason = (
                         "source Git repository has no configured push remote"
                     )
                 elif not is_github_pull_request_remote(source_remote_url):
-                    delivery_fallback_reason = (
+                    pull_request_ineligible_reason = (
                         "source push target does not support GitHub pull requests"
                     )
                 return {
@@ -1426,12 +1426,9 @@ class GitBackedSkeletonService:
                     "source_branch": source_branch,
                     "source_remote_name": source_remote_name,
                     "source_clean": True,
-                    "delivery_mode": (
-                        "local_only"
-                        if delivery_fallback_reason
-                        else "pull_request_preferred"
-                    ),
-                    "delivery_fallback_reason": delivery_fallback_reason,
+                    "delivery_mode": "patch",
+                    "pull_request_eligible": not bool(pull_request_ineligible_reason),
+                    "pull_request_ineligible_reason": pull_request_ineligible_reason,
                 }
         with tempfile.TemporaryDirectory(prefix="pal-workspace-snapshot-") as temporary:
             seed = Path(temporary) / "seed"
@@ -1498,7 +1495,11 @@ class GitBackedSkeletonService:
             "source_branch": source_branch,
             "source_remote_name": source_remote_name,
             "source_clean": source_clean,
-            "delivery_mode": "local_only",
+            "delivery_mode": "patch",
+            "pull_request_eligible": False,
+            "pull_request_ineligible_reason": (
+                "source workspace was dirty, non-Git, or synthesized"
+            ),
         }
 
 def _normalize_module_paths(

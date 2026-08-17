@@ -22,9 +22,9 @@ from pal.llm.runtime import EndpointResolver, LLMRuntime
 from pal.llm.secret_store import InMemorySecretStore
 from pal.llm.transport import (
     DefaultSDKClientFactory,
+    LLMStreamControl,
     SDKJSONTransport,
     SDKTransportRequest,
-    StreamControl,
 )
 
 
@@ -90,10 +90,12 @@ class _FakeClient:
         self.response = response
         self.payloads: list[dict] = []
         self.close_count = 0
+        self.close_thread_ids: list[int] = []
         self.chat = _Chat(self)
 
     def close(self) -> None:
         self.close_count += 1
+        self.close_thread_ids.append(threading.get_ident())
 
 
 class _Factory:
@@ -116,9 +118,10 @@ def _transport_request(
     *,
     api_key: str = "key",
     stream: bool = False,
-    stream_control: StreamControl | None = None,
+    stream_control: LLMStreamControl | None = None,
 ) -> SDKTransportRequest:
     return SDKTransportRequest(
+        request_id="test-request",
         endpoint_id=endpoint_id,
         wire_shape=WireShape.OPENAI_COMPLETION,
         api_key=api_key,
@@ -234,30 +237,77 @@ class LLMTransportLifecycleTests(unittest.TestCase):
         self.assertEqual(len(factory.clients), 2)
         first.close()
 
-    def test_stream_control_closes_the_bound_response_and_client(self) -> None:
-        class _BlockingResponse:
+    def test_response_close_failure_quarantines_client_and_removes_it_from_pool(self) -> None:
+        class _FailingCloseStream:
             def __init__(self) -> None:
-                self.iterating = threading.Event()
-                self.closed = threading.Event()
                 self.close_count = 0
 
             def __iter__(self):
+                yield {"chunk": "done"}
+
+            def close(self) -> None:
+                self.close_count += 1
+                raise OSError("response close failed")
+
+        response = _FailingCloseStream()
+        factory = _Factory([response])
+        transport = SDKJSONTransport(client_factory=factory)
+        frames = transport.frames(_transport_request(stream=True))
+        self.assertEqual(next(frames), JSONFrame(0, {"chunk": "done"}))
+        entry = next(iter(next(iter(transport._clients.values()))))
+        self.assertEqual(list(frames), [])
+        self.assertEqual(transport._clients, {})
+        self.assertEqual(factory.clients[0].close_count, 1)
+        self.assertTrue(entry.owner.quarantined)
+        self.assertIs(entry.owner._resource.response, response)
+        self.assertIsNotNone(entry.owner._resource.frames)
+        self.assertEqual(response.close_count, 1)
+
+    def test_client_close_failure_quarantines_root_instead_of_reusing_it(self) -> None:
+        response = {"choices": [{"message": {"content": "ok"}}]}
+        factory = _Factory([response, response])
+        transport = SDKJSONTransport(client_factory=factory)
+
+        list(transport.frames(_transport_request()))
+
+        def fail_close() -> None:
+            raise OSError("client close failed")
+
+        factory.clients[0].close = fail_close  # type: ignore[method-assign]
+        transport.activate_endpoint("two")
+        self.assertEqual(transport._clients, {})
+
+        list(transport.frames(_transport_request()))
+        self.assertEqual(len(factory.clients), 2)
+
+    def test_stream_control_leaves_response_and_client_close_to_worker(self) -> None:
+        class _BlockingResponse:
+            def __init__(self, control: LLMStreamControl) -> None:
+                self.control = control
+                self.iterating = threading.Event()
+                self.close_count = 0
+                self.close_thread_ids: list[int] = []
+
+            def __iter__(self):
                 self.iterating.set()
-                self.closed.wait(timeout=2.0)
+                while not self.control.cancelled:
+                    time.sleep(0.005)
                 if False:
                     yield {}
 
             def close(self) -> None:
                 self.close_count += 1
-                self.closed.set()
+                self.close_thread_ids.append(threading.get_ident())
 
-        response = _BlockingResponse()
+        control = LLMStreamControl()
+        response = _BlockingResponse(control)
         factory = _Factory([response])
         transport = SDKJSONTransport(client_factory=factory)
-        control = StreamControl()
         errors: list[BaseException] = []
+        worker_thread_ids: list[int] = []
 
         def consume() -> None:
+            worker_thread_ids.append(threading.get_ident())
             try:
                 list(
                     transport.frames(
@@ -273,11 +323,15 @@ class LLMTransportLifecycleTests(unittest.TestCase):
         self.assertTrue(control.provider_started)
 
         control.cancel("interrupted")
+        self.assertEqual(response.close_count, 0)
+        self.assertEqual(factory.clients[0].close_count, 0)
         thread.join(timeout=1.0)
 
         self.assertFalse(thread.is_alive())
         self.assertGreaterEqual(response.close_count, 1)
         self.assertGreaterEqual(factory.clients[0].close_count, 1)
+        self.assertEqual(response.close_thread_ids, worker_thread_ids)
+        self.assertEqual(factory.clients[0].close_thread_ids, worker_thread_ids)
         self.assertTrue(errors)
 
     def test_stream_control_observes_raw_keepalive_bytes_hidden_by_the_sdk(self) -> None:
@@ -289,18 +343,26 @@ class LLMTransportLifecycleTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.response = httpx.Response(200, stream=_RawStream())
 
+            def __iter__(self):
+                _ = b"".join(self.response.iter_bytes())
+                yield {"chunk": "done"}
+
             def close(self) -> None:
                 self.response.close()
 
         stream = _SDKStream()
-        control = StreamControl()
-        control.bind_response(stream)
+        control = LLMStreamControl()
         before = control.last_network_activity_at
         time.sleep(0.005)
+        transport = SDKJSONTransport(client_factory=_Factory([stream]))
 
         self.assertEqual(
-            b"".join(stream.response.iter_bytes()),
-            b": OPENROUTER PROCESSING\n\n",
+            list(
+                transport.frames(
+                    _transport_request(stream=True, stream_control=control)
+                )
+            ),
+            [JSONFrame(0, {"chunk": "done"})],
         )
 
         self.assertGreater(control.last_network_activity_at, before)

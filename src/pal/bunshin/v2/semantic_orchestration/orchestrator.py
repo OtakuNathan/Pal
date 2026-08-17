@@ -89,7 +89,6 @@ from pal.bunshin.v2.execution import (
     git_changed_paths,
     provision_module_verification_workspace,
     format_workspace_process_holders,
-    terminate_process_group,
     workspace_content_fingerprint,
     workspace_process_holders,
 )
@@ -243,7 +242,7 @@ def _charged_role_failure_attempt_count(
 HumanReviewPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 WorkerEventPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 WorkflowEventPublisher = Callable[[Mapping[str, Any]], None]
-BrokerRunRegistrar = Callable[[str, str, BunshinInvocationPack, asyncio.subprocess.Process], None]
+BrokerRunRegistrar = Callable[[str, str, BunshinInvocationPack, WorkerProcessOwner], None]
 BrokerRunUnregistrar = Callable[[str, bool], None]
 SkillInjector = Callable[[str], Mapping[str, str]]
 
@@ -891,7 +890,6 @@ class SemanticOrchestrator:
     unregister_broker_run: BrokerRunUnregistrar | None = None
     inject_skill: SkillInjector | None = None
     prompt_log_enabled: bool = False
-    _processes: dict[str, asyncio.subprocess.Process] = field(default_factory=dict, init=False)
     _process_owners: dict[str, WorkerProcessOwner] = field(default_factory=dict, init=False)
     _run_to_invocation: dict[str, str] = field(default_factory=dict, init=False)
     _worktree_locks: WorkspaceLockRegistry = field(default_factory=WorkspaceLockRegistry, init=False)
@@ -961,9 +959,8 @@ class SemanticOrchestrator:
                 await asyncio.gather(*pending, return_exceptions=True)
         for effect_key, _task in tracked:
             self._queue_interrupted_assignment_retry(effect_key)
-        # A process owner is removed only after its complete process group has
-        # exited and broker accounting has been finalized.  This also retries a
-        # cleanup that was interrupted after the leader exited.
+        # A process owner is removed only after its direct child and parent
+        # pipes finish and broker accounting is finalized.
         owners = tuple(self._process_owners.values())
         if owners:
             results = await asyncio.gather(
@@ -977,9 +974,9 @@ class SemanticOrchestrator:
             ]
             if failures:
                 raise RuntimeError(
-                    "worker supervisor stopped before every process group was reaped"
+                    "worker supervisor stopped before every owned process was cleaned up"
                 ) from failures[0]
-        if self._process_owners or self._processes or self._run_to_invocation:
+        if self._process_owners or self._run_to_invocation:
             raise RuntimeError("worker supervisor retained live process accounting")
 
     async def _release_managed_lsp_workspace(self, workspace: Path) -> Mapping[str, Any]:
@@ -2495,9 +2492,6 @@ class SemanticOrchestrator:
         previous = self.repository.read_lease(lease_resource)
         if previous is not None and str(previous.get("owner_id") or "") and _lease_is_live(previous):
             raise LeaseConflict(f"node effect lease is active under {previous.get('owner_id')}")
-        process_group = int(dict((previous or {}).get("metadata") or {}).get("process_group_id") or 0)
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("expired node worker process group could not be reaped before rebind")
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         if writer_role:
             await self._release_managed_lsp_workspace(workspace)
@@ -2901,13 +2895,8 @@ class SemanticOrchestrator:
         lease = self.repository.read_lease(lease_resource)
         if lease is None:
             raise RuntimeError("writer lease disappeared before quiescing")
-        metadata = dict(lease.get("metadata") or {})
-        process = self._processes.get(invocation_id)
-        process_group = int(metadata.get("process_group_id") or (process.pid if process is not None else 0))
         await self._close_owned_process(
             invocation_id,
-            process_group=process_group,
-            worker_label="node worker",
         )
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         await self._release_managed_lsp_workspace(workspace)
@@ -3462,16 +3451,10 @@ class SemanticOrchestrator:
             fencing_token = rebound.fencing_token
             claimed_rebind = True
         self._revoked_tokens.add((invocation_id, fencing_token))
-        lease = self.repository.read_lease(lease_resource)
-        process_group = int(
-            dict((lease or {}).get("metadata") or {}).get("process_group_id") or 0
-        )
         review_workspace = Path(str(pending.get("review_workspace") or ""))
         try:
             await self._close_owned_process(
                 invocation_id,
-                process_group=process_group,
-                worker_label="verifier",
             )
             await self._release_managed_lsp_workspace(review_workspace)
             _raise_if_workspace_held(
@@ -3940,13 +3923,8 @@ class SemanticOrchestrator:
         node = self._effect_snapshot(effect)
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
-        lease = self.repository.read_lease(lease_resource) if lease_resource else None
-        process = self._processes.get(invocation_id)
-        process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or (process.pid if process else 0))
         await self._close_owned_process(
             invocation_id,
-            process_group=process_group,
-            worker_label="node worker",
         )
         worktree_text = str(node.payload.get("workspace_path") or "")
         if worktree_text:
@@ -4033,13 +4011,8 @@ class SemanticOrchestrator:
         snapshot = self._effect_snapshot(effect)
         invocation_id = str(snapshot.payload.get("active_worker_id") or "")
         lease_resource = str(snapshot.payload.get("lease_resource_key") or "")
-        lease = self.repository.read_lease(lease_resource) if lease_resource else None
-        process = self._processes.get(invocation_id)
-        process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or (process.pid if process else 0))
         await self._close_owned_process(
             invocation_id,
-            process_group=process_group,
-            worker_label="aggregate worker",
         )
         architecture_workspace_text = str(snapshot.payload.get("architecture_workspace_path") or "")
         if architecture_workspace_text:
@@ -4309,7 +4282,7 @@ class SemanticOrchestrator:
                 self.service.artifacts.read_json(_ref_from_mapping(snapshot_value))
             )
         else:
-            source_snapshot = {"delivery_mode": "local_only"}
+            raise ValueError("patch delivery requires workspace snapshot metadata")
         workflow = self.repository.read_snapshot(
             AggregateType.WORKFLOW, epoch.workflow_id
         )
@@ -4529,9 +4502,6 @@ class SemanticOrchestrator:
         previous = self.repository.read_lease(lease_resource)
         if previous is not None and str(previous.get("owner_id") or "") and _lease_is_live(previous):
             raise LeaseConflict(f"standalone review lease is active under {previous.get('owner_id')}")
-        process_group = int(dict((previous or {}).get("metadata") or {}).get("process_group_id") or 0)
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("expired standalone reviewer process group could not be reaped before rebind")
         lease = self.repository.claim_lease(
             lease_resource,
             invocation_id,
@@ -5242,7 +5212,7 @@ class SemanticOrchestrator:
             # ARCHITECT_SUBMITTED transfers the live writer lease to the
             # quiesce/snapshot effects. Releasing it here makes a normal
             # submission look like expired-worker recovery and races the
-            # worker process-group teardown.
+            # worker process teardown.
             handed_off_to_quiescer = True
             return {"provider_request_id": invocation_id, "result_artifact_ref": submission_ref.to_dict()}
         finally:
@@ -5291,10 +5261,6 @@ class SemanticOrchestrator:
         previous = self.repository.read_lease(lease_resource)
         if previous is not None and str(previous.get("owner_id") or "") and _lease_is_live(previous):
             raise LeaseConflict(f"architecture effect lease is active under {previous.get('owner_id')}")
-        metadata = dict((previous or {}).get("metadata") or {})
-        process_group = int(metadata.get("process_group_id") or 0)
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("expired architect process group could not be reaped")
         workspace = Path(str(revision.payload.get("architecture_workspace_path") or ""))
         await self._release_managed_lsp_workspace(workspace)
         _raise_if_workspace_held(workspace, "expired architect still holds the architecture worktree")
@@ -5360,14 +5326,8 @@ class SemanticOrchestrator:
         lease_resource = str(revision.payload.get("lease_resource_key") or "")
         self.repository.assert_fencing_token(lease_resource, invocation_id, fencing_token)
         self._revoked_tokens.add((invocation_id, fencing_token))
-        lease = self.repository.read_lease(lease_resource)
-        metadata = dict((lease or {}).get("metadata") or {})
-        process = self._processes.get(invocation_id)
-        process_group = int(metadata.get("process_group_id") or (process.pid if process else 0))
         await self._close_owned_process(
             invocation_id,
-            process_group=process_group,
-            worker_label="architect",
         )
         workspace = Path(str(revision.payload.get("architecture_workspace_path") or ""))
         await self._release_managed_lsp_workspace(workspace)
@@ -7563,23 +7523,13 @@ class SemanticOrchestrator:
             env = runner_env
 
         def process_started(owner: WorkerProcessOwner) -> None:
-            process = owner.process
-            if process is None:
-                raise RuntimeError("worker process owner started without a process")
             process_metadata = {
                 "workflow_id": snapshot.workflow_id,
                 "aggregate_type": snapshot.aggregate_type.value,
                 "aggregate_id": snapshot.aggregate_id,
-                "process_group_id": owner.process_group_id,
                 "workspace_path": str(pack.workspace.get("repo_path") or ""),
                 "run_id": run_id,
             }
-            self.repository.update_role_attempt_process_group(
-                assignment_id=str(assignment["assignment_id"]),
-                attempt_id_value=str(attempt["attempt_id"]),
-                fencing_token=assignment_lease.fencing_token,
-                process_group_id=owner.process_group_id,
-            )
             self.repository.update_lease_metadata(
                 assignment_lease_resource,
                 str(attempt["attempt_id"]),
@@ -7594,39 +7544,34 @@ class SemanticOrchestrator:
             )
 
         def register_process(owner: WorkerProcessOwner) -> None:
-            process = owner.process
-            if process is None:
-                raise RuntimeError("worker process owner registered without a process")
             if invocation_id in self._process_owners or run_id in self._run_to_invocation:
                 raise RuntimeError(
                     f"logical worker {invocation_id} already owns a process"
                 )
             self._process_owners[invocation_id] = owner
-            self._processes[invocation_id] = process
             self._run_to_invocation[run_id] = invocation_id
             if self.register_broker_run is not None:
-                self.register_broker_run(run_id, invocation_id, pack, process)
+                self.register_broker_run(run_id, invocation_id, pack, owner)
 
         def unregister_process(owner: WorkerProcessOwner) -> None:
             if not owner.process_group_reaped:
                 raise RuntimeError(
-                    "worker process accounting cannot close before process-group reap"
+                    "worker process accounting cannot close before child cleanup"
                 )
             owns_registration = self._process_owners.get(invocation_id) is owner
             if owns_registration and self.unregister_broker_run is not None:
                 self.unregister_broker_run(run_id, True)
             if owns_registration:
                 self._process_owners.pop(invocation_id, None)
-                self._processes.pop(invocation_id, None)
             if (
                 owns_registration
                 and self._run_to_invocation.get(run_id) == invocation_id
             ):
                 self._run_to_invocation.pop(run_id, None)
             # The assignment fence belongs to this concrete native-process
-            # attempt.  Once the complete process group is reaped there can be
-            # no legitimate late role-gateway call, so close the lease at the
-            # same RAII boundary as the process permit.
+            # attempt. Once the owned child is retired there can be no
+            # legitimate late role-gateway call, so close the lease at the
+            # same lifecycle boundary as the process permit.
             with contextlib.suppress(LeaseConflict, StaleFencingToken):
                 self.repository.release_lease(
                     assignment_lease_resource,
@@ -7666,13 +7611,7 @@ class SemanticOrchestrator:
             run_id=run_id,
         )
         async with shell:
-            process = owner.process
-            if process is None or process.stdout is None:
-                raise RuntimeError("worker process has no stdout pipe")
-            while True:
-                raw_line = await process.stdout.readline()
-                if not raw_line:
-                    break
+            async for raw_line in owner.stdout_lines():
                 try:
                     item = json.loads(raw_line.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
@@ -7689,10 +7628,7 @@ class SemanticOrchestrator:
                         await self.publish_worker_event(event)
                 elif str(item.get("kind") or "") == "worker_error":
                     worker_error = str(item.get("error") or "")
-            await process.wait()
-        process = owner.process
-        if process is None:
-            raise RuntimeError("worker process owner lost its process")
+            await owner.wait()
         stderr = owner.stderr
         assignment_after_process = self.repository.read_role_assignment(
             str(assignment["assignment_id"])
@@ -7700,7 +7636,7 @@ class SemanticOrchestrator:
         has_submission_receipt = bool(
             dict((assignment_after_process or {}).get("submission_artifact_ref") or {})
         )
-        if process.returncode != 0 and not has_submission_receipt:
+        if owner.returncode != 0 and not has_submission_receipt:
             error_tail = _meaningful_stderr_tail(stderr.decode("utf-8", errors="replace"))
             terminal_error_kind, terminal_error, retry_directive = (
                 _worker_terminal_failure(events)
@@ -7744,7 +7680,7 @@ class SemanticOrchestrator:
                 )
             if permanent:
                 raise PermanentEffectError(details)
-            raise RuntimeError(f"V2 worker exited {process.returncode}: {details}")
+            raise RuntimeError(f"V2 worker exited {owner.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
         if terminal is None and has_submission_receipt:
             terminal = self._terminal_from_assignment_receipt(
@@ -8246,21 +8182,10 @@ class SemanticOrchestrator:
     async def _close_owned_process(
         self,
         invocation_id: str,
-        *,
-        process_group: int,
-        worker_label: str,
     ) -> None:
         owner = self._process_owners.get(str(invocation_id))
         if owner is not None:
             await owner.close()
-            return
-        if process_group and not await terminate_process_group(
-            process_group,
-            timeout_seconds=5.0,
-        ):
-            raise RuntimeError(
-                f"{worker_label} process group could not be reaped"
-            )
 
     async def _reuse_or_retire_effect_lease(
         self,
@@ -8274,27 +8199,20 @@ class SemanticOrchestrator:
 
         try:
             self.repository.assert_fencing_token(resource_key, owner_id, fencing_token)
-            # Ownership ends when the RAII owner unregisters, never when only
-            # its leader process happens to acquire a return code.
+            # Ownership ends when the in-memory owner unregisters, never from
+            # durable numeric process metadata.
             if owner_id in self._process_owners:
                 raise LeaseConflict(f"{worker_label} is already active in this manager")
-            lease = self.repository.read_lease(resource_key)
-            process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or 0)
-            if process_group <= 0:
-                # Admission and process spawn are separate effects. Refresh the
-                # lease here so a delayed outbox claim still gets a full TTL
-                # before the first heartbeat.
-                self.repository.renew_lease(
-                    resource_key,
-                    owner_id,
-                    fencing_token,
-                    ttl_seconds=120,
-                )
-                return True
-            if not await terminate_process_group(process_group, timeout_seconds=5.0):
-                raise RuntimeError(f"prior {worker_label} process group could not be reaped before rebind")
-            self.repository.release_lease(resource_key, owner_id, fencing_token)
-            return False
+            # Admission and process spawn are separate effects. A manager that
+            # has no in-memory owner has no process authority to recover. Keep
+            # the logical lease and let workspace-holder checks fence effects.
+            self.repository.renew_lease(
+                resource_key,
+                owner_id,
+                fencing_token,
+                ttl_seconds=120,
+            )
+            return True
         except StaleFencingToken:
             return False
 

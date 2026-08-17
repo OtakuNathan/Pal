@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import signal
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,17 +25,8 @@ class BunshinV2Recovery:
         triaged: list[str] = []
         for lease in self.repository.expired_leases():
             metadata = dict(lease.get("metadata") or {})
-            process_group = int(metadata.get("process_group_id") or 0)
-            if process_group <= 0 and str(lease.get("resource_key") or "").startswith(
-                "assignment:"
-            ):
-                attempt = self.repository.read_role_attempt(
-                    str(lease.get("owner_id") or "")
-                )
-                process_group = int(dict(attempt or {}).get("process_group_id") or 0)
             worktree = Path(str(metadata.get("workspace_path") or "")) if metadata.get("workspace_path") else None
-            reaped = self._kill_and_reap(process_group)
-            if reaped and worktree is not None:
+            if worktree is not None:
                 try:
                     LspManagerClient(
                         self.service.runtime_root,
@@ -48,7 +36,7 @@ class BunshinV2Recovery:
                     pass
             holders = workspace_process_holders(worktree) if worktree is not None else ()
             clean_worktree = not holders
-            if reaped and clean_worktree:
+            if clean_worktree:
                 if self.repository.clear_expired_lease(
                     str(lease["resource_key"]),
                     int(lease["fencing_token"]),
@@ -63,9 +51,9 @@ class BunshinV2Recovery:
                 if snapshot is not None and "ENTER_TRIAGE" in self.repository.engine.legal_actions(aggregate_type, snapshot.state):
                     failure_ref = self.service.artifacts.put_json(
                         {
-                            "reason": "expired worker could not be safely reaped",
+                            "reason": "expired worker still has observable workspace holders",
                             "lease": lease,
-                            "process_group_reaped": reaped,
+                            "process_group_reaped": False,
                             "worktree_clean": clean_worktree,
                             "workspace_holders": [item.to_dict() for item in holders],
                         },
@@ -282,31 +270,3 @@ class BunshinV2Recovery:
                     },
                 )
         return [entries[digest] for digest in sorted(entries)]
-
-    @staticmethod
-    def _kill_and_reap(process_group: int, *, timeout_seconds: float = 2.0) -> bool:
-        if process_group <= 0:
-            return True
-        try:
-            os.killpg(process_group, signal.SIGTERM)
-        except ProcessLookupError:
-            return True
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(process_group, 0)
-            except ProcessLookupError:
-                return True
-            time.sleep(0.05)
-        try:
-            os.killpg(process_group, signal.SIGKILL)
-        except ProcessLookupError:
-            return True
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(process_group, 0)
-            except ProcessLookupError:
-                return True
-            time.sleep(0.05)
-        return False

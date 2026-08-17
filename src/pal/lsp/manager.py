@@ -140,6 +140,10 @@ class LspManager:
     def health(self) -> dict[str, Any]:
         return {
             "ok": True,
+            "health_source": "lsp_manager",
+            "lifecycle_protocol": "plugin_raii.v1",
+            "manager_pid": os.getpid(),
+            "shutdown_requested": self._shutdown_event.is_set(),
             "started_at": self.started_at,
             "last_rescan_at": self.last_rescan_at,
             "last_error": self.last_error,
@@ -790,16 +794,18 @@ class LspManager:
         released: list[dict[str, Any]] = []
         for state in list(self.states.values()):
             async with state.lock:
-                session = state.sessions.pop(key, None)
+                session = state.sessions.get(key)
                 if session is None:
                     continue
-                if state.connector is session.connector:
-                    state.connector = None
                 if not any(
                     candidate.connector is session.connector
-                    for candidate in state.sessions.values()
+                    for candidate_key, candidate in state.sessions.items()
+                    if candidate_key != key
                 ):
-                    await session.connector.close()
+                    await self._close_connector_or_fence(state, session.connector)
+                state.sessions.pop(key, None)
+                if state.connector is session.connector:
+                    state.connector = None
                 released.append(
                     {
                         "server_id": state.server_id,
@@ -828,10 +834,10 @@ class LspManager:
                 for key, session in list(state.sessions.items()):
                     if current - session.last_used_at < timeout:
                         continue
+                    await self._close_connector_or_fence(state, session.connector)
                     state.sessions.pop(key, None)
                     if state.connector is session.connector:
                         state.connector = None
-                    await session.connector.close()
                     evicted.append(
                         {
                             "server_id": state.server_id,
@@ -934,16 +940,19 @@ class LspManager:
         workspace_root: Path,
     ) -> None:
         key = _workspace_session_key(workspace_root)
-        session = state.sessions.pop(key, None)
+        session = state.sessions.get(key)
         connector = session.connector if session is not None else None
         if connector is None and state.connector is not None and state.connector.workspace_root == workspace_root:
             connector = state.connector
+        if connector is not None and not any(
+            candidate.connector is connector
+            for candidate_key, candidate in state.sessions.items()
+            if candidate_key != key
+        ):
+            await self._close_connector_or_fence(state, connector)
+        state.sessions.pop(key, None)
         if connector is not None and state.connector is connector:
             state.connector = None
-        if connector is not None and not any(
-            candidate.connector is connector for candidate in state.sessions.values()
-        ):
-            await connector.close()
         _refresh_state_attachment(state)
 
     async def _detach_state(self, state: LspServerState) -> None:
@@ -953,12 +962,19 @@ class LspManager:
                 connectors.append(session.connector)
         if state.connector is not None and all(state.connector is not existing for existing in connectors):
             connectors.append(state.connector)
+        for connector in connectors:
+            await self._close_connector_or_fence(state, connector)
         state.sessions.clear()
         state.connector = None
         state.attached = False
-        for connector in connectors:
-            await connector.close()
 
+    async def _close_connector_or_fence(
+        self,
+        state: LspServerState,
+        connector: AsyncLspConnector,
+    ) -> None:
+        _ = state
+        await connector.close()
     def _connector_for_workspace(self, state: LspServerState, workspace_root: Path) -> AsyncLspConnector | None:
         session = state.sessions.get(_workspace_session_key(workspace_root))
         if session is not None:

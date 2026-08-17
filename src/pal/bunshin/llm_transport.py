@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from pal.foundation.fd_lease import FdCloseOutcome, FdLease
 from pal.foundation.sidecar import SidecarRpcError
 from pal.llm.endpoint_spec import endpoint_spec_fingerprint
 from pal.llm.ir import LLMUsageIR
@@ -16,6 +17,7 @@ from pal.llm.transport import (
     EncodedTransportRequest,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
+    LLMStreamControl,
     LLMTransportError,
 )
 from pal.bunshin.ipc import (
@@ -35,7 +37,11 @@ class ManagerProxyTransport:
     request_timeout_seconds: float = 3900.0
     receipt_timeout_seconds: float = 2.0
     last_receipt_error: str = field(default="", init=False)
-    _active_streams: set[Any] = field(default_factory=set, init=False, repr=False)
+    _active_connections: dict[str, LLMStreamControl] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     @property
@@ -67,9 +73,8 @@ class ManagerProxyTransport:
         endpoint: LLMEndpointModel,
         request: EncodedTransportRequest,
     ) -> Iterator[_JSONFrame]:
-        control = request.stream_control
-        if control is not None:
-            control.raise_if_cancelled()
+        control = request.stream_control or LLMStreamControl()
+        control.raise_if_cancelled()
         params = {
             "run_id": self.run_id,
             "request_id": request.request_id,
@@ -81,21 +86,42 @@ class ManagerProxyTransport:
             "payload": thaw_json(request.payload),
             "extra_body": thaw_json(request.extra_body),
         }
-        stream = self._client.stream_sync("llm_transport_stream", params)
+        stream_resource = _ProxyStreamResource()
+        owner = FdLease(
+            resource_kind=f"llm.manager_proxy:{endpoint.endpoint_id}",
+            _resource=stream_resource,
+            capacity=1,
+            closer_sync=_close_proxy_stream,
+            hard_closer_sync=_close_proxy_stream,
+        )
+        capability = owner.acquire(
+            operation_id=request.request_id,
+            interrupt=_interrupt_proxy_stream,
+        )
+        control.bind(capability)
         with self._lock:
-            self._active_streams.add(stream)
-        if control is not None:
-            control.bind_client(stream)
-            control.raise_if_cancelled()
-        expected_sequence = 0
+            self._active_connections[owner.owner_id] = control
+        succeeded = False
         provider_started = False
         try:
-            for item in stream:
+            control.raise_if_cancelled()
+            capability.call_sync(
+                lambda resource: _open_proxy_stream(
+                    resource,
+                    self._client,
+                    params,
+                )
+            )
+            expected_sequence = 0
+            while True:
+                try:
+                    item = capability.call_sync(_next_proxy_stream_item)
+                except StopIteration:
+                    break
                 event = str(item.get("event") or "")
                 if event == "provider_started":
                     provider_started = True
-                    if control is not None:
-                        control.touch_network()
+                    control.mark_provider_started()
                     continue
                 frame_payload = item.get("frame")
                 if not isinstance(frame_payload, Mapping):
@@ -108,20 +134,21 @@ class ManagerProxyTransport:
                     )
                 if not isinstance(payload, Mapping):
                     raise LLMTransportError("manager proxy raw frame payload is not an object")
-                if control is not None:
-                    control.touch_network()
-                    control.raise_if_cancelled()
+                control.touch_network()
+                control.raise_if_cancelled()
                 yield _JSONFrame(sequence, dict(payload))
                 expected_sequence += 1
+            control.raise_if_cancelled()
+            succeeded = True
         except SidecarRpcError as exc:
-            if control is not None and control.cancelled:
+            if control.cancelled:
                 control.raise_if_cancelled()
             provider_started = bool(
                 provider_started
                 or dict(exc.payload or {}).get("provider_started")
-                or (control is not None and control.provider_started)
+                or control.provider_started
             )
-            if provider_started and control is not None:
+            if provider_started:
                 control.touch_network()
             if exc.kind == "endpoint_spec_stale" and not provider_started:
                 raise LLMEndpointSpecStaleError(str(exc)) from exc
@@ -129,11 +156,10 @@ class ManagerProxyTransport:
                 raise LLMProviderStartedError(str(exc)) from exc
             raise LLMTransportError(str(exc)) from exc
         finally:
-            if control is not None:
-                control.release(client=stream)
+            capability.release_sync(reuse=False)
+            control.unbind(capability)
             with self._lock:
-                self._active_streams.discard(stream)
-            stream.close()
+                self._active_connections.pop(owner.owner_id, None)
 
     def report_usage(
         self,
@@ -173,7 +199,42 @@ class ManagerProxyTransport:
 
     def close(self) -> None:
         with self._lock:
-            streams = tuple(self._active_streams)
-            self._active_streams.clear()
-        for stream in streams:
-            stream.close()
+            controls = tuple(self._active_connections.values())
+        for control in controls:
+            control.cancel("proxy_transport_close")
+
+
+@dataclass
+class _ProxyStreamResource:
+    stream: Any = None
+
+
+def _interrupt_proxy_stream(resource: _ProxyStreamResource, _reason: str) -> None:
+    stream = resource.stream
+    interrupt = getattr(stream, "interrupt", None)
+    if callable(interrupt):
+        interrupt()
+
+
+def _close_proxy_stream(resource: _ProxyStreamResource) -> FdCloseOutcome:
+    stream = resource.stream
+    if stream is None:
+        return FdCloseOutcome.detached()
+    stream.close()
+    return FdCloseOutcome.detached()
+
+
+def _open_proxy_stream(
+    resource: _ProxyStreamResource,
+    client: BunshinManagerClient | BunshinRoleGatewayClient,
+    params: dict[str, Any],
+) -> None:
+    if resource.stream is not None:
+        raise RuntimeError("manager proxy stream is already open")
+    resource.stream = client.stream_sync("llm_transport_stream", params)
+
+
+def _next_proxy_stream_item(resource: _ProxyStreamResource) -> dict[str, Any]:
+    if resource.stream is None:
+        raise RuntimeError("manager proxy stream is not open")
+    return next(resource.stream)

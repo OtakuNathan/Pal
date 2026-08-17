@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 import base64
 import secrets
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -685,7 +687,7 @@ def run_browser_service_cli(
                     _json_response(self, 400, {"ok": False, "error": "selector exceeds 500 characters"})
                     return
                 try:
-                    result = worker.inspect_layout(
+                    layout_result = worker.inspect_layout(
                         url,
                         selector=selector,
                         timeout_ms=min(120000, max(1000, int(payload.get("timeout_ms") or 15000))),
@@ -697,10 +699,10 @@ def run_browser_service_cli(
                 except Exception as exc:
                     _json_response(self, 500, {"ok": False, "error": str(exc)})
                     return
-                _json_response(self, 200, {"ok": True, "result": result})
+                _json_response(self, 200, {"ok": True, "result": layout_result})
                 return
             try:
-                result = worker.fetch(
+                document = worker.fetch(
                     url,
                     timeout_ms=max(1000, int(payload.get("timeout_ms") or 15000)),
                     max_chars=max(1000, int(payload.get("max_chars") or 12000)),
@@ -711,7 +713,7 @@ def run_browser_service_cli(
             except Exception as exc:
                 _json_response(self, 500, {"ok": False, "error": str(exc)})
                 return
-            _json_response(self, 200, {"ok": True, "result": result.to_dict()})
+            _json_response(self, 200, {"ok": True, "result": document.to_dict()})
 
     server = ThreadingHTTPServer((host, int(port)), BrowserHandler)
 
@@ -731,14 +733,34 @@ def run_browser_service_cli(
     return 0
 
 
+@dataclass(frozen=True)
+class _BrowserServiceProcess:
+    process: subprocess.Popen[bytes]
+    host: str
+    port: int
+    token: str
+
+
 @dataclass
 class BrowserServiceManager:
     runtime_root: Path
-    process: subprocess.Popen[bytes] | None = None
     host: str = "127.0.0.1"
     port: int | None = None
     token: str = ""
     last_error: str = ""
+    _process: _BrowserServiceProcess | None = field(default=None, init=False, repr=False)
+    _start_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
+
+    def _process_status(
+        self,
+        resource: _BrowserServiceProcess | None = None,
+    ) -> tuple[int, int | None] | None:
+        resource = resource or self._process
+        if resource is None:
+            return None
+        return int(resource.process.pid), resource.process.poll()
 
     def fetch(
         self,
@@ -751,7 +773,7 @@ class BrowserServiceManager:
         user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
         settings: dict[str, Any] | None = None,
     ) -> WebFetchDocument:
-        self._ensure_started(settings=settings)
+        resource = self._ensure_started(settings=settings)
         payload = self._request_json(
             "POST",
             "/fetch",
@@ -764,6 +786,7 @@ class BrowserServiceManager:
                 "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
             },
             timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
+            resource=resource,
         )
         if not bool(payload.get("ok")):
             raise RuntimeError(str(payload.get("error") or "browser fetch failed"))
@@ -784,7 +807,7 @@ class BrowserServiceManager:
         user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
         settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._ensure_started(settings=settings)
+        resource = self._ensure_started(settings=settings)
         payload = self._request_json(
             "POST",
             "/screenshot",
@@ -797,6 +820,7 @@ class BrowserServiceManager:
                 "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
             },
             timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
+            resource=resource,
         )
         if not bool(payload.get("ok")):
             raise RuntimeError(str(payload.get("error") or "browser screenshot failed"))
@@ -818,7 +842,7 @@ class BrowserServiceManager:
         user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
         settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._ensure_started(settings=settings)
+        resource = self._ensure_started(settings=settings)
         payload = self._request_json(
             "POST",
             "/inspect",
@@ -832,6 +856,7 @@ class BrowserServiceManager:
                 "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
             },
             timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
+            resource=resource,
         )
         if not bool(payload.get("ok")):
             raise RuntimeError(str(payload.get("error") or "browser layout inspection failed"))
@@ -842,7 +867,8 @@ class BrowserServiceManager:
         return result
 
     def health(self, *, settings: dict[str, Any] | None = None) -> dict[str, Any]:
-        running = self._process_running()
+        resource = self._process
+        running = self._process_running(resource)
         payload = {
             "service_running": running,
             "playwright_available": playwright_python_available(),
@@ -857,7 +883,13 @@ class BrowserServiceManager:
             payload["reason"] = "idle" if payload["playwright_available"] else "playwright_missing"
             return payload
         try:
-            health = self._request_json("GET", "/health", None, timeout_seconds=0.5)
+            health = self._request_json(
+                "GET",
+                "/health",
+                None,
+                timeout_seconds=0.5,
+                resource=resource,
+            )
             payload["healthy"] = bool(health.get("ok"))
             payload["in_flight"] = int(health.get("in_flight") or 0)
             payload["reason"] = "running"
@@ -870,106 +902,150 @@ class BrowserServiceManager:
         return payload
 
     def stop_sync(self) -> None:
-        process = self.process
-        if process is None:
-            return
-        try:
-            if self._process_running():
-                try:
-                    self._request_json("POST", "/shutdown", {}, timeout_seconds=0.5)
-                except Exception:
-                    pass
-                process.wait(timeout=1.0)
-        except Exception:
+        with self._start_lock:
+            resource = self._process
+            if resource is None:
+                return
             try:
-                process.terminate()
-                process.wait(timeout=1.0)
-            except Exception:
+                if self._process_running(resource):
+                    try:
+                        self._request_json(
+                            "POST",
+                            "/shutdown",
+                            {},
+                            timeout_seconds=0.5,
+                            resource=resource,
+                        )
+                    except Exception:
+                        pass
+            finally:
+                if self._process is resource:
+                    self._process = None
+                process = resource.process
+                if process.poll() is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        if os.name == "nt":
+                            process.kill()
+                        else:
+                            os.killpg(process.pid, signal.SIGKILL)
                 try:
-                    process.kill()
-                except Exception:
-                    pass
-        finally:
-            self.process = None
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        "browser service did not exit after its one-shot termination; replacement remains fenced"
+                    ) from exc
 
     async def shutdown_async(self) -> None:
         self.stop_sync()
 
-    def _ensure_started(self, *, settings: dict[str, Any] | None = None) -> None:
-        if self._process_running():
-            return
-        if not playwright_python_available():
-            raise RuntimeError("playwright package is not available")
-        self.stop_sync()
-        self.port = self._choose_port()
-        self.token = secrets.token_urlsafe(24)
-        idle_timeout_seconds = max(5, int((settings or {}).get("idle_timeout_seconds") or 60))
-        max_concurrency = max(1, int((settings or {}).get("max_concurrency") or 2))
-        command = [
-            sys.executable,
-            "-m",
-            "pal.main",
-            "browser-service",
-            "--runtime-root",
-            str(self.runtime_root),
-            "--host",
-            self.host,
-            "--port",
-            str(self.port),
-            "--token",
-            self.token,
-            "--idle-timeout-seconds",
-            str(idle_timeout_seconds),
-            "--max-concurrency",
-            str(max_concurrency),
-        ]
-        self.process = subprocess.Popen(  # noqa: S603
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(self.runtime_root.parent),
-        )
-        started = False
-        for _ in range(40):
-            if not self._process_running():
-                break
-            try:
-                payload = self._request_json("GET", "/health", None, timeout_seconds=0.25)
-            except Exception:
-                time.sleep(0.1)
-                continue
-            if bool(payload.get("ok")):
-                started = True
-                self.last_error = ""
-                break
-        if started:
-            return
-        self.last_error = "browser service failed to start"
-        self.stop_sync()
-        raise RuntimeError(self.last_error)
+    def _ensure_started(
+        self,
+        *,
+        settings: dict[str, Any] | None = None,
+    ) -> _BrowserServiceProcess:
+        with self._start_lock:
+            resource = self._process
+            if self._process_running(resource):
+                assert resource is not None
+                return resource
+            if not playwright_python_available():
+                raise RuntimeError("playwright package is not available")
+            self.stop_sync()
+            port = self._choose_port()
+            token = secrets.token_urlsafe(24)
+            idle_timeout_seconds = max(5, int((settings or {}).get("idle_timeout_seconds") or 60))
+            max_concurrency = max(1, int((settings or {}).get("max_concurrency") or 2))
+            command = [
+                sys.executable,
+                "-m",
+                "pal.main",
+                "browser-service",
+                "--runtime-root",
+                str(self.runtime_root),
+                "--host",
+                self.host,
+                "--port",
+                str(port),
+                "--token",
+                token,
+                "--idle-timeout-seconds",
+                str(idle_timeout_seconds),
+                "--max-concurrency",
+                str(max_concurrency),
+            ]
+            process = subprocess.Popen(  # noqa: S603
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=str(self.runtime_root.parent),
+                start_new_session=os.name != "nt",
+            )
+            resource = _BrowserServiceProcess(
+                process=process,
+                host=self.host,
+                port=port,
+                token=token,
+            )
+            self._process = resource
+            self.port = port
+            self.token = token
+            started = False
+            for _ in range(40):
+                if not self._process_running(resource):
+                    break
+                try:
+                    payload = self._request_json(
+                        "GET",
+                        "/health",
+                        None,
+                        timeout_seconds=0.25,
+                        resource=resource,
+                    )
+                except Exception:
+                    time.sleep(0.1)
+                    continue
+                if bool(payload.get("ok")):
+                    started = True
+                    self.last_error = ""
+                    break
+            if started:
+                return resource
+            self.last_error = "browser service failed to start"
+            self.stop_sync()
+            raise RuntimeError(self.last_error)
 
-    def _request_json(self, method: str, path: str, payload: dict[str, Any] | None, *, timeout_seconds: float) -> dict[str, Any]:
-        if self.port is None or not self.token:
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        timeout_seconds: float,
+        resource: _BrowserServiceProcess | None = None,
+    ) -> dict[str, Any]:
+        resource = resource or self._process
+        if resource is None:
             raise RuntimeError("browser service is not configured")
-        data = None
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "User-Agent": "PalV2/0.1",
-        }
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = Request(f"http://{self.host}:{self.port}{path}", data=data, method=method, headers=headers)
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-            decoded = json.loads(response.read().decode("utf-8", errors="replace"))
-        if not isinstance(decoded, dict):
-            raise RuntimeError("browser service returned invalid JSON")
-        return decoded
+        return _request_browser_service_json(
+            resource,
+            method=method,
+            path=path,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def _process_running(self) -> bool:
-        if self.process is None:
+    def _process_running(
+        self,
+        resource: _BrowserServiceProcess | None = None,
+    ) -> bool:
+        resource = resource or self._process
+        if resource is None:
             return False
-        if self.process.poll() is not None:
+        status = self._process_status(resource)
+        if status is None or status[1] is not None:
+            with self._start_lock:
+                if self._process is resource:
+                    self._process = None
             return False
         return True
 
@@ -978,3 +1054,32 @@ class BrowserServiceManager:
             sock.bind((self.host, 0))
             sock.listen(1)
             return int(sock.getsockname()[1])
+
+
+def _request_browser_service_json(
+    resource: _BrowserServiceProcess,
+    *,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    data = None
+    headers = {
+        "Authorization": f"Bearer {resource.token}",
+        "User-Agent": "PalV2/0.1",
+    }
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(
+        f"http://{resource.host}:{resource.port}{path}",
+        data=data,
+        method=method,
+        headers=headers,
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+        decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not isinstance(decoded, dict):
+        raise RuntimeError("browser service returned invalid JSON")
+    return decoded

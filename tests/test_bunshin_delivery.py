@@ -139,6 +139,40 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(provider.settlements, [True])
 
+    async def test_completed_workflow_delivers_patch_before_terminal_message(self) -> None:
+        provider = _Provider()
+        core = _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry={"core:core": core})
+        event = EventEnvelope(
+            event_kind=EventKind.BUNSHIN_TERMINAL,
+            source_kind=SourceKind.BUNSHIN,
+            payload={
+                "delivery_id": "delivery-patch",
+                "workflow_id": "workflow-1",
+                "status": "completed",
+                "summary": "Bunshin workflow completed. Verified Git patch attached.",
+                "attachments": [
+                    {
+                        "path": "/tmp/result.patch",
+                        "file_name": "result.patch",
+                        "mime_type": "text/x-patch",
+                    }
+                ],
+                "route": {
+                    "endpoint_id": "telegram",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        await BunshinControlEventHandler(provider=provider).handle(event, context)
+
+        self.assertEqual(core.calls, ["/tmp/result.patch", "primary"])
+        self.assertEqual(provider.parts, {"attachment:0", "primary"})
+        self.assertEqual(provider.settlements, [True])
+
     async def test_resolved_clarification_closes_the_original_interaction(self) -> None:
         provider = _Provider()
         core = _Core()

@@ -50,6 +50,8 @@ class DebugDumpTests(unittest.TestCase):
 
         self.assertEqual(snapshot["runtime_app"]["loop_iterations"], 7)
         self.assertEqual(snapshot["core"]["main_loop_queue_size"], 1)
+        self.assertIn("fd_leases", snapshot["llm"])
+        self.assertIn("active_count", snapshot["llm"]["fd_leases"])
         self.assertIn("channel.mailbox", snapshot["core"]["event_sources"])
         self.assertEqual(snapshot["channel"]["runtime_queues"]["mailbox_size"], 3)
         endpoint = snapshot["channel"]["endpoints"][0]
