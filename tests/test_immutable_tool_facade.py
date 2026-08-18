@@ -368,6 +368,24 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.affordances[0].tool, "read_tool")
         self.assertEqual(result.affordances[0].arguments, {"name": "echo"})
 
+        rendered = self.runtime.execute_tool(
+            new_tool_call(
+                name="call_tool",
+                args={"name": "echo", "args": {"value": "x"}},
+            )
+        )
+        self.assertFalse(rendered.ok)
+        self.assertIn("call recall_memory with kind='case'", rendered.llm_text)
+
+        rejected = self.runtime.execute_tool(
+            new_tool_call(
+                name="call_tool",
+                args={"name": "echo", "args": {"value": 7}},
+            )
+        )
+        self.assertFalse(rejected.ok)
+        self.assertIn("call recall_memory with kind='case'", rejected.llm_text)
+
     async def test_paging_happens_after_complete_output_validation(self) -> None:
         mount_test_capability(
             self.runtime,

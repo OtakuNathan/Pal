@@ -80,6 +80,15 @@ if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
 
 
+_FAILURE_MEMORY_NEXT_STEP = (
+    "If this is not itself a memory-recall failure and the failure looks familiar, "
+    "repeated, or opaque, call recall_memory with kind='case' and 1-3 focused queries "
+    "using the tool name, error text, symptoms, and affected resource. Treat recalled "
+    "fixes as leads, verify them against the current state, and do not repeat the same "
+    "call unchanged."
+)
+
+
 def _merge_explicit_model_fields(
     defaults: dict[str, Any],
     explicit: dict[str, Any],
@@ -1497,6 +1506,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return base
         rendered_metadata = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
         rendered = f"{base}\n\nTool result metadata: {rendered_metadata}"
+        if isinstance(result, (RejectedResult, FailedResult)):
+            rendered = f"{rendered}\nFailure next step: {_FAILURE_MEMORY_NEXT_STEP}"
         return rendered.rstrip() if preserves_delivery_offsets else rendered.strip()
 
     def execute_tool(
