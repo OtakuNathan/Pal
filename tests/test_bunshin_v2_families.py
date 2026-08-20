@@ -1350,6 +1350,7 @@ workspace_policy: {}
                 "role"
             ]["playbook"]
         )
+        verifier_playbook = str(verifier_profile["role"]["playbook"])
 
         # Stable role philosophy remains explicit even though invocation-specific
         # and mechanically enforced rules are no longer duplicated here.
@@ -1450,9 +1451,16 @@ workspace_policy: {}
         self.assertIn("checklist is its execution cursor, never authority", coder)
         self.assertIn("Preserve MSDN-like docs", coder)
         self.assertIn("Make code self-documenting", coder)
+        self.assertIn("batch-sample only a few adjacent", coder)
+        self.assertIn("local naming scale, contract/comment dialect", coder)
+        self.assertIn("scannable structured contract dialect", coder)
+        self.assertIn("language's conventional structured form when none exists", coder)
+        self.assertIn("Do not silently add or change public semantics", coder)
         self.assertIn("owned public facade inward", coder_playbook)
         self.assertIn("deferred optional costs", coder_playbook)
-        self.assertIn("batching independent reads and searches", coder_playbook)
+        self.assertIn("batch a bounded sample", coder_playbook)
+        self.assertIn("local naming and contract dialect", coder_playbook)
+        self.assertIn("repository-native structured risk comments", coder_playbook)
         self.assertIn("batch independent settled edits and checks", coder_playbook)
         self.assertIn("Batch independent focused build/test checks", coder_playbook)
 
@@ -1478,6 +1486,13 @@ workspace_policy: {}
         self.assertIn("invalid combinations cannot be expressed as well-formed programs", verifier)
         self.assertIn("MSDN-like normative API documentation", verifier)
         self.assertIn("setup and protocol costs are absent until it is exercised", verifier)
+        self.assertIn("repository-supported dynamic analyzers", verifier)
+        self.assertIn("ordinary green tests alone cannot justify PASS", verifier)
+        self.assertIn("PASS still requires evidence adequate to the identified risk", verifier)
+        self.assertIn("material observable guarantee", verifier)
+        self.assertIn("structured risk comments as attack leads, not adjudication authority", verifier)
+        self.assertIn("risk-matched repository-supported dynamic instrumentation", verifier_playbook)
+        self.assertIn("private comments as product authority", verifier_playbook)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)
 

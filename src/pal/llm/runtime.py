@@ -687,6 +687,11 @@ class LLMRuntime(LLMRuntimePort):
                         error_response = _response_with_failure(
                             partial,
                             exc,
+                            partial_output_chars=(
+                                len(str(partial.message.text or ""))
+                                if semantic_seen
+                                else 0
+                            ),
                         )
                         self.usage_ledger.record_failed_request(
                             endpoint_id=endpoint.endpoint_id
@@ -1223,9 +1228,13 @@ def _failure_result(
 def _response_with_failure(
     response: LLMResponseIR,
     exc: Exception,
+    *,
+    partial_output_chars: int = 0,
 ) -> LLMResponseIR:
     metadata = dict(response.message.metadata)
     metadata.update(_failure_metadata(exc))
+    if partial_output_chars > 0:
+        metadata["partial_output_chars"] = int(partial_output_chars)
     return replace(
         response,
         message=replace(response.message, metadata=metadata),

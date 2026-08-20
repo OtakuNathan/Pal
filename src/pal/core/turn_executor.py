@@ -344,23 +344,41 @@ class TurnExecutor:
                 failure_metadata.get("failure_subsystem") or "llm"
             )
             local_state_failure = failure_subsystem == "persistence"
+            failure_component = (
+                "runtime_database"
+                if local_state_failure
+                else continuation.preferred_llm_endpoint_id
+                or str(getattr(llm_runtime, "last_endpoint_id", "") or "")
+                or "llm_runtime"
+            )
+            failure_kind = str(
+                failure_metadata.get("failure_kind")
+                or ("local_state" if local_state_failure else "provider_failure")
+            )
+            error_type = str(failure_metadata.get("error_type") or "UnknownError")
+            try:
+                partial_chars = max(
+                    0,
+                    int(failure_metadata.get("partial_output_chars") or 0),
+                )
+            except (TypeError, ValueError):
+                partial_chars = 0
+            blocker_text = (
+                f"LLM generation failed on {failure_component}: "
+                f"{error_type} ({failure_kind})"
+                + (
+                    f"; stream interrupted after {partial_chars} chars of partial output."
+                    if partial_chars
+                    else "."
+                )
+            )
             failure_result = await self._handle_failure_async(
                 FailureSignal(
                     subsystem=failure_subsystem,
-                    component=(
-                        "runtime_database"
-                        if local_state_failure
-                        else continuation.preferred_llm_endpoint_id
-                        or str(getattr(llm_runtime, "last_endpoint_id", "") or "")
-                        or "llm_runtime"
-                    ),
-                    failure_kind=(
-                        str(failure_metadata.get("failure_kind") or "local_state")
-                        if local_state_failure
-                        else "provider_failure"
-                    ),
+                    component=failure_component,
+                    failure_kind=failure_kind,
                     severity="high",
-                    primary_blocker=str(outcome.text or "LLM generation failed."),
+                    primary_blocker=blocker_text,
                     evidence={
                         "llm_text": outcome.text,
                         "preferred_model_id": continuation.preferred_llm_model_id,
