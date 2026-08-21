@@ -990,7 +990,8 @@ class BrowserServiceManager:
             self.port = port
             self.token = token
             started = False
-            for _ in range(40):
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
                 if not self._process_running(resource):
                     break
                 try:
