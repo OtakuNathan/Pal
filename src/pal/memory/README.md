@@ -2,7 +2,8 @@
 
 Owns:
 - `L1/L2/L3` memory semantics
-- runtime-only `L1` and `L2`
+- runtime-owned `L1` and `L2`, with one encrypted resident exit checkpoint
+  consumed on the next Pal startup
 - future durable `L3` repository boundary
 - memory pack projection
 - shared recall, L2 heat, and prompt projection for every agent host
@@ -40,6 +41,11 @@ Interaction rule:
   provider tool envelope
 - Memory exposes one runtime-state port for L1, L2, top-of-mind, and heat.
   Core orchestrates snapshot/restore/reset; Memory never reaches into Execution
+- Resident Pal quiesces on SIGINT/SIGTERM and first writes the fixed runtime
+  snapshot as an encrypted atomic fallback. It may then attempt one bounded
+  shutdown compaction and replace that checkpoint on success. Startup restores
+  and consumes the checkpoint before channel endpoints start. There is no
+  periodic checkpoint or background compaction loop
 - Core runs compaction and host policies render its checkpoint before storage;
   `MemoryService` performs the L1 replacement, dependent L2 cleanup, and
   execution-context projection inside one rollback boundary

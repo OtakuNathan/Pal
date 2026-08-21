@@ -462,16 +462,21 @@ The shared contract is typed data, not UI widgets. Core/control may produce `Int
 Provider rescan means:
 
 1. Scan `<runtime_root>/channel/providers/*/provider.toml`.
-2. Load enabled providers not already registered.
-3. Register provider ids and endpoint type ownership in `ChannelEndpointProviderManager`.
-4. Optionally hydrate enabled, attached endpoint rows.
-5. Republish channel introspection capabilities so LLM can see new endpoint ids.
+2. Clear the previous runtime-provider module generation and load a fresh candidate generation from source.
+3. Validate provider ids and endpoint type ownership; if loading fails, preserve the previous working generation.
+4. Recreate previously running endpoints through the new provider generation while preserving runtime-only state.
+5. Optionally hydrate newly configured enabled, attached endpoint rows.
+6. Republish channel introspection capabilities so LLM can see new endpoint ids.
 
 Endpoint restart means rebuilding a runtime endpoint instance through its provider. Do not use endpoint restart as provider discovery.
 
+After changing runtime-root provider source, `provider.toml`, or provider configuration, the default deployment step is one `channel_provider_rescan`. It hot-reloads the provider generation and rebuilds its running endpoints; do not restart the Pal service and do not add a redundant endpoint restart. Use `channel_reload_provider` only when the loaded provider generation is unchanged and one endpoint is stuck, misbehaving, or needs a fresh connection.
+
+Never stop, restart, or kill Pal's own hosting service or process from inside the active Pal turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
+
 Useful operations:
 
-- `channel_provider_rescan`: discover runtime-root channel providers and optionally attach enabled endpoints.
+- `channel_provider_rescan`: discover or hot-reload runtime-root channel providers, rebuild running endpoints, and optionally attach newly enabled endpoints.
 - `channel_list`: list configured channel endpoints and provider ids.
 - `channel_endpoint_inspect`: inspect one endpoint.
 - `channel_endpoint_auth_state`: inspect authorization without revealing secrets.
@@ -490,7 +495,7 @@ Before calling a channel provider done:
 3. Compile provider source with `python -m py_compile`.
 4. Test provider loading in isolation or with a temporary runtime root first.
 5. Add or preview the `channel_endpoints` row for the provider's endpoint type.
-6. Run `channel_provider_rescan` and check `runtime_provider_load_errors`.
+6. Run `channel_provider_rescan` once and check `runtime_provider_load_errors`; do not restart the Pal service.
 7. Verify `channel_list` shows `provider_id`.
 8. Verify endpoint `inspect`, `auth_state`, `health`, and `backlog`.
 9. Dogfood through the real channel if safe; for socket, send `/control` before sending LLM-consuming messages.

@@ -1699,6 +1699,8 @@ class TurnExecutor:
         continuation: Any | None = None,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        max_attempts: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -1711,6 +1713,20 @@ class TurnExecutor:
             return CompactionRunResult(
                 status="engine_unavailable",
                 clock_kind=engine.policy.clock_kind,
+            )
+        if max_attempts is not None or timeout_seconds is not None:
+            engine = replace(
+                engine,
+                max_attempts=(
+                    max(1, int(max_attempts))
+                    if max_attempts is not None
+                    else engine.max_attempts
+                ),
+                timeout_seconds=(
+                    max(0.1, float(timeout_seconds))
+                    if timeout_seconds is not None
+                    else engine.timeout_seconds
+                ),
             )
         metadata = dict(
             getattr(assembly_context, "metadata", {}) or {}

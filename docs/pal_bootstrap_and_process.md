@@ -199,6 +199,15 @@ sidecars.
 The service layer restarts Pal. Pal reloads runtime root state, reconnects to
 configured channels, republishes capabilities, and resumes from durable stores.
 
+On SIGINT/SIGTERM, resident Pal stops admitting turns and writes an encrypted,
+atomic runtime checkpoint before attempting optional shutdown compaction. The
+compaction gets one attempt and a configurable deadline (75 seconds by default);
+failure or timeout leaves the already-written full L1 checkpoint intact. A
+successful compact replaces it. The next process restores and consumes the
+checkpoint before starting channel endpoints. This lifecycle path performs no
+periodic saves; an unannounced SIGKILL, power loss, or OOM kill before the exit
+checkpoint begins cannot be intercepted.
+
 ### Worker Crash
 
 Pal or the relevant manager sidecar records the failure, marks the run/work

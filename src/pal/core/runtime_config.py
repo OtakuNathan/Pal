@@ -42,6 +42,7 @@ class RuntimeConfig:
     # this is deliberately not the whole-round deadline.
     llm_request_timeout_seconds: float = 600.0
     llm_compaction_timeout_seconds: float = 180.0
+    shutdown_compaction_timeout_seconds: float = 75.0
     llm_stream_wall_timeout_seconds: float = 1_800.0
     llm_stream_cleanup_timeout_seconds: float = 2.0
     llm_wait_status_seconds: tuple[float, ...] = (120.0, 300.0, 600.0, 1_200.0)
@@ -100,6 +101,7 @@ class RuntimeConfig:
             "max_output_recovery_attempts": ("llm_max_output_recovery_attempts", int),
             "request_timeout_seconds": ("llm_request_timeout_seconds", float),
             "compaction_timeout_seconds": ("llm_compaction_timeout_seconds", float),
+            "shutdown_compaction_timeout_seconds": ("shutdown_compaction_timeout_seconds", float),
             "stream_wall_timeout_seconds": ("llm_stream_wall_timeout_seconds", float),
             "stream_cleanup_timeout_seconds": ("llm_stream_cleanup_timeout_seconds", float),
         })

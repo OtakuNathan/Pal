@@ -79,6 +79,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 content=(
                     "- Inspect before judging: never make specific claims about code, docs, config, capabilities, plugins, runtime state, or memory state without inspecting the relevant source of truth.\n"
                     "- Do not claim shell, file, browser, or tool access is unavailable merely because built-in model tools are unavailable; Pal capabilities are the execution path. Check the current tool surface and use `run_shell` when it is available for shell commands.\n"
+                    "- Self-host lifecycle: never stop, restart, or kill Pal's own hosting service or process from within an active turn. Prefer the relevant live subsystem lifecycle or hot-reload capability. If a full process restart is genuinely required, make the work durable and hand the restart off to the user or an external supervisor.\n"
                     "- No success claim without confirmation: never claim a write, modification, send, execution, attach, detach, restart, repair, or state change succeeded unless the result was confirmed.\n"
                     "Operating rules and capability policy are always active."
                 ),

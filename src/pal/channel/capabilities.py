@@ -453,8 +453,8 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         guidance=ToolGuidance(
-            purpose="Rescan channel providers and update the channel provider registry.",
-            use_when="New channel providers were installed or provider configuration changed. Discovering newly available endpoints.",
+            purpose="Discover or hot-reload runtime-root channel providers, rebuild running endpoints, and update the provider registry.",
+            use_when="Channel provider source, manifest, or configuration changed. New providers were installed. Discovering newly available endpoints.",
             do_not_use_when="Restarting one specific endpoint (use channel_reload_provider).",
             failure_next_steps="If scan_errors occur, previous provider generation is preserved. Check provider configuration and rescan again.",
         ),
@@ -483,7 +483,7 @@ class ChannelIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Restart one channel endpoint runtime instance through its provider.",
             use_when="An endpoint runtime is stuck, misbehaving, or needs a fresh connection.",
-            do_not_use_when="Provider configuration changed (use channel_provider_rescan to pick up new providers).",
+            do_not_use_when="Provider source, manifest, or configuration changed (use channel_provider_rescan to hot-reload the provider generation and its running endpoints).",
             failure_next_steps="If provider not found, run channel_provider_rescan first. If restart fails, check channel_endpoint_health.",
         ),
         aliases=("channel_reload_provider",),

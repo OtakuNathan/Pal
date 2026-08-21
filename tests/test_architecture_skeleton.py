@@ -1258,6 +1258,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "Pal runtime, module, capability, or Bunshin state",
             capability["description"],
         )
+        self.assertIn(
+            "Never use shell to stop, restart, or kill Pal's own hosting service",
+            capability["description"],
+        )
         self.assertIn("Repository text search remains a run_shell task", capability["description"])
         self.assertIn("cmd", capability["input_schema"]["properties"])
         cmd_description = capability["input_schema"]["properties"]["cmd"]["description"]
@@ -4480,6 +4484,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("<recalled_memories> contains durable memory context", prompt_context_policy.content)
         self.assertIn("No success claim without confirmation", rules.content)
         self.assertIn("Pal capabilities are the execution path", rules.content)
+        self.assertIn("never stop, restart, or kill Pal's own hosting service", rules.content)
+        self.assertIn("hot-reload capability", rules.content)
         self.assertIn("shell", rules.content)
         self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
         self.assertIn("result-specific recovery affordances", tool_routing.content)

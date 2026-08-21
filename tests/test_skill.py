@@ -480,6 +480,8 @@ Run the workflow.
         self.assertIn("<runtime_root>/channel/providers/<provider_id>/", skill.manual_text)
         self.assertIn("provider.toml", skill.manual_text)
         self.assertIn("build_channel_provider", skill.manual_text)
+        self.assertIn("default deployment step is one `channel_provider_rescan`", skill.manual_text)
+        self.assertIn("do not restart the Pal service", skill.manual_text)
         self.assertIn("channel_provider_rescan", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "add channel provider provider.toml slash command", "top_k": 3})
