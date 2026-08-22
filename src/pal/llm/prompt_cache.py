@@ -20,6 +20,7 @@ class PromptCacheDialect(StrEnum):
     OPENAI_RESPONSES_EXPLICIT = "openai_responses_explicit"
     OPENAI_CHAT_EXPLICIT = "openai_chat_explicit"
     OPENAI_AUTOMATIC = "openai_automatic"
+    OPENROUTER_OPENAI_EXPLICIT = "openrouter_openai_explicit"
     OPENROUTER_AUTOMATIC = "openrouter_automatic"
     OPENROUTER_ANTHROPIC_AUTOMATIC = "openrouter_anthropic_automatic"
     OPENROUTER_ANTHROPIC_EXPLICIT = "openrouter_anthropic_explicit"
@@ -215,22 +216,24 @@ class PromptCacheCoordinator:
             PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
             PromptCacheDialect.OPENAI_CHAT_EXPLICIT,
             PromptCacheDialect.OPENAI_AUTOMATIC,
+            PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
         }:
             extra_body["prompt_cache_key"] = plan.cache_key
-        elif plan.dialect in {
+        if plan.dialect in {
+            PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
             PromptCacheDialect.OPENROUTER_AUTOMATIC,
             PromptCacheDialect.OPENROUTER_ANTHROPIC_AUTOMATIC,
             PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT,
         }:
-            # OpenRouter documents session_id as the provider-sticky routing
-            # key for long agent conversations. Provider prompt caching itself
-            # remains automatic for OpenAI-family models.
+            # OpenRouter uses session_id for provider-sticky routing. Explicit
+            # OpenAI caching additionally receives prompt_cache_key above.
             extra_body["session_id"] = plan.cache_key
             if plan.dialect == PromptCacheDialect.OPENROUTER_ANTHROPIC_AUTOMATIC:
                 extra_body["cache_control"] = {"type": "ephemeral"}
         if plan.dialect in {
             PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
             PromptCacheDialect.OPENAI_CHAT_EXPLICIT,
+            PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
         }:
             extra_body["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
             for breakpoint in plan.breakpoints:
@@ -338,6 +341,12 @@ def _resolve_dialect(context: ShapeContext) -> PromptCacheDialect:
             return PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT
         if is_anthropic_model:
             return PromptCacheDialect.OPENROUTER_ANTHROPIC_AUTOMATIC
+        if (
+            context.wire_shape
+            in {WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION}
+            and _supports_openai_explicit(context.model_id)
+        ):
+            return PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
         return PromptCacheDialect.OPENROUTER_AUTOMATIC
     if context.wire_shape == WireShape.ANTHROPIC_MESSAGES and "anthropic" in provider:
         return PromptCacheDialect.ANTHROPIC_EXPLICIT
@@ -362,6 +371,7 @@ def _supports_explicit_breakpoints(dialect: PromptCacheDialect) -> bool:
     return dialect in {
         PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
         PromptCacheDialect.OPENAI_CHAT_EXPLICIT,
+        PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
         PromptCacheDialect.ANTHROPIC_EXPLICIT,
         PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT,
     }

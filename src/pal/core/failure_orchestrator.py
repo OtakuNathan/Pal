@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from pal.core.turns import EffectResult, FailureFlowOutcome, LLMRequestEffect, ToolCallEffect, failure_turn_program
 from pal.execution.contracts import CapabilityCall
@@ -169,6 +170,7 @@ class FailureOrchestrator:
                 ),
                 enriched_fields={},
             )
+        safe_mode_scope_id = f"pal:safe_mode:{uuid4().hex}"
         program = failure_turn_program(draft, allowed_tools=allowed_tools)
         current: EffectResult | None = None
         while True:
@@ -179,7 +181,10 @@ class FailureOrchestrator:
             except Exception as exc:
                 return _failure_flow_exception_outcome(exc, phase="program")
             if isinstance(effect, LLMRequestEffect):
-                request = self._build_safe_mode_request(effect)
+                request = self._build_safe_mode_request(
+                    effect,
+                    logical_scope_id=safe_mode_scope_id,
+                )
                 self._debug_log_prompt(request)
                 try:
                     outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
@@ -244,7 +249,12 @@ class FailureOrchestrator:
                 },
             )
 
-    def _build_safe_mode_request(self, effect: LLMRequestEffect) -> LLMRequestIR:
+    def _build_safe_mode_request(
+        self,
+        effect: LLMRequestEffect,
+        *,
+        logical_scope_id: str,
+    ) -> LLMRequestIR:
         metadata = dict(effect.assembly_context.metadata or {})
         stage = str(metadata.get("failure_stage") or "diagnose").strip() or "diagnose"
         primary_input = str(metadata.get("failure_primary_input") or "").strip()
@@ -257,7 +267,7 @@ class FailureOrchestrator:
                 },
                 ensure_ascii=True,
             )
-        return request_ir_from_prompt(
+        request = request_ir_from_prompt(
             messages=[
                 {"role": "system", "content": _SAFE_MODE_SYSTEM_PROMPT},
                 {"role": "user", "content": primary_input},
@@ -270,10 +280,12 @@ class FailureOrchestrator:
                 "response_mode_hint": LLMResponseMode.OPERATIONAL,
                 "purpose": "failure_flow",
                 "prompt_profile": "safe_mode",
+                "prompt_cache_scope_id": logical_scope_id,
                 "failure_stage": stage,
                 "timeout_seconds": _SAFE_MODE_LLM_TIMEOUT_SECONDS,
             },
         )
+        return replace(request, logical_scope_id=logical_scope_id)
 
     async def _persist_repair_resolution_async(self, record: RepairResolutionRecord) -> None:
         try:

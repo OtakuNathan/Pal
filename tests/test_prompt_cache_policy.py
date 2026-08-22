@@ -79,7 +79,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
     assert len(marked) == 3
 
 
-def test_openrouter_uses_automatic_key_without_openai_explicit_fields() -> None:
+def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
@@ -92,21 +92,29 @@ def test_openrouter_uses_automatic_key_without_openai_explicit_fields() -> None:
 
     plan = coordinator.plan(request, context)
     encoded = coordinator.inject(OpenAIResponseCodec().encode(request, context), plan)
+    payload = thaw_json(encoded.payload)
 
-    assert plan.dialect == PromptCacheDialect.OPENROUTER_AUTOMATIC
-    assert plan.decision == "provider_automatic"
-    assert plan.breakpoints == ()
-    assert "session_id" in encoded.extra_body
-    assert "prompt_cache_key" not in encoded.extra_body
-    assert "prompt_cache_options" not in encoded.extra_body
+    assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
+    assert plan.decision == "rolling_enabled"
+    assert [item.label for item in plan.breakpoints] == ["stable", "settled", "active"]
+    assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
+    assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
+    assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    marked = [
+        block
+        for item in payload["input"]
+        for block in item.get("content", [])
+        if isinstance(block, dict) and "prompt_cache_breakpoint" in block
+    ]
+    assert len(marked) == 3
 
 
-def test_openrouter_automatic_cache_does_not_report_inert_breakpoints() -> None:
+def test_openrouter_pre56_automatic_cache_does_not_report_inert_breakpoints() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
         endpoint_id="openrouter",
-        model_id="openai/gpt-5.6-sol",
+        model_id="openai/gpt-5.5",
         provider_id="OpenRouter",
         base_url="https://openrouter.ai/api/v1",
     )
@@ -125,6 +133,33 @@ def test_openrouter_automatic_cache_does_not_report_inert_breakpoints() -> None:
 
     assert second.decision == "provider_automatic"
     assert second.breakpoints == ()
+
+
+def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_COMPLETION,
+        endpoint_id="openrouter-chat",
+        model_id="openai/gpt-5.6-luna",
+        provider_id="OpenRouter",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    coordinator = PromptCacheCoordinator()
+
+    plan = coordinator.plan(request, context)
+    encoded = coordinator.inject(OpenAICompletionCodec().encode(request, context), plan)
+    payload = thaw_json(encoded.payload)
+
+    assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
+    assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
+    assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    marked = [
+        block
+        for message in payload["messages"]
+        for block in message.get("content", [])
+        if isinstance(block, dict) and "prompt_cache_breakpoint" in block
+    ]
+    assert len(marked) == 3
 
 
 def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() -> None:

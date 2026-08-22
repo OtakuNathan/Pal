@@ -16,7 +16,12 @@ from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
 from pal.failure.handler import FailureEventHandler
 from pal.foundation import EventEnvelope
 from pal.llm import generation_result_from_values
+from pal.llm.ir import WireShape
+from pal.llm.prompt_cache import PromptCacheCoordinator, PromptCacheDialect
+from pal.llm.shapes.base import ShapeContext
+from pal.llm.shapes.openai_response import OpenAIResponseCodec
 from pal.shared import EventKind, RuntimeStatus, SourceKind
+from pal.shared.json_values import thaw_json
 from tests.capability_fixture import mount_test_capability
 
 
@@ -154,6 +159,59 @@ class FailureFlowTests(unittest.TestCase):
         self.assertEqual(request.metadata.get("prompt_profile"), "safe_mode")
         self.assertEqual(request.metadata.get("purpose"), "failure_flow")
         self.assertEqual(request.metadata.get("timeout_seconds"), 45.0)
+        self.assertTrue(request.logical_scope_id.startswith("pal:safe_mode:"))
+        self.assertEqual(
+            request.metadata.get("prompt_cache_scope_id"),
+            request.logical_scope_id,
+        )
+        context = ShapeContext(
+            wire_shape=WireShape.OPENAI_RESPONSE,
+            endpoint_id="openrouter",
+            model_id="openai/gpt-5.6-luna",
+            provider_id="OpenRouter",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        coordinator = PromptCacheCoordinator()
+        plan = coordinator.plan(request, context)
+        encoded = coordinator.inject(OpenAIResponseCodec().encode(request, context), plan)
+
+        self.assertEqual(plan.dialect, PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT)
+        self.assertEqual(plan.breakpoints, ())
+        self.assertEqual(
+            encoded.extra_body["session_id"],
+            encoded.extra_body["prompt_cache_key"],
+        )
+        self.assertEqual(
+            encoded.extra_body["prompt_cache_options"],
+            {"mode": "explicit", "ttl": "30m"},
+        )
+        self.assertNotIn(
+            "prompt_cache_breakpoint",
+            json.dumps(thaw_json(encoded.payload), ensure_ascii=False),
+        )
+
+    def test_failure_flows_use_distinct_safe_mode_cache_scopes(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        llm = _RecordingFailureLLM()
+        core.context.port_registry["llm:llm"] = llm
+        signal = FailureSignal(
+            subsystem="execution",
+            component="run_shell",
+            failure_kind="capability_failure",
+            severity="medium",
+            primary_blocker="tool execution failed: TimeoutExpired",
+            evidence={"tool_name": "run_shell"},
+        )
+
+        asyncio.run(core.handle_failure_async(signal, origin="op_tool_call"))
+        asyncio.run(core.handle_failure_async(signal, origin="op_tool_call"))
+
+        self.assertEqual(len(llm.requests), 2)
+        scopes = {request.logical_scope_id for request in llm.requests}
+        self.assertEqual(len(scopes), 2)
+        self.assertNotIn("default", scopes)
+        self.assertNotIn("pal:resident", scopes)
 
     def test_socket_session_closed_reply_failure_is_ephemeral(self) -> None:
         core = _RecordingFailureCore()
@@ -443,6 +501,9 @@ class FailureFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(len(llm.requests), 3)
+        scopes = {request.logical_scope_id for request in llm.requests}
+        self.assertEqual(len(scopes), 1)
+        self.assertTrue(next(iter(scopes)).startswith("pal:safe_mode:"))
         for request in llm.requests:
             self.assertEqual(request.metadata.get("prompt_profile"), "safe_mode")
             self.assertIn("Pal Safe Mode", request.messages[0].text)
