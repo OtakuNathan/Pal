@@ -12,7 +12,11 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
-from pal.llm.prompt_cache import PromptCacheCoordinator, PromptCacheDialect
+from pal.llm.prompt_cache import (
+    PromptCacheCoordinator,
+    PromptCacheDialect,
+    PromptCachePlan,
+)
 from pal.llm.shapes.base import ShapeContext
 from pal.llm.shapes.anthropic_messages import AnthropicMessagesCodec
 from pal.llm.shapes.openai_response import OpenAIResponseCodec
@@ -77,6 +81,25 @@ def _next_request(request: LLMRequestIR) -> LLMRequestIR:
     )
 
 
+def _record_success(
+    coordinator: PromptCacheCoordinator,
+    plan: PromptCachePlan,
+    usage: LLMUsageIR,
+    *,
+    applied_cache_breakpoint_message_ids: tuple[str, ...] | None = None,
+) -> None:
+    applied = (
+        tuple(item.message_id for item in plan.breakpoints)
+        if applied_cache_breakpoint_message_ids is None
+        else applied_cache_breakpoint_message_ids
+    )
+    coordinator.record_success(
+        plan,
+        usage,
+        applied_cache_breakpoint_message_ids=applied,
+    )
+
+
 def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
     request = _request()
     context = ShapeContext(
@@ -103,6 +126,9 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
     assert len(marked) == 2
+    assert set(encoded.applied_cache_breakpoint_message_ids) == {
+        item.message_id for item in plan.breakpoints
+    }
     reminder = payload["input"][-1]
     assert reminder["role"] == "developer"
     assert "prompt_cache_breakpoint" not in reminder["content"][0]
@@ -157,7 +183,8 @@ def test_openrouter_pre56_automatic_cache_does_not_report_inert_breakpoints() ->
     coordinator = PromptCacheCoordinator()
 
     first = coordinator.plan(request, context)
-    coordinator.record_success(
+    _record_success(
+        coordinator,
         first,
         LLMUsageIR(
             input_tokens=10_000,
@@ -356,7 +383,7 @@ def test_anthropic_uses_stable_confirmed_and_candidate_without_caching_reminder(
     )
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
     first = coordinator.plan(request, context)
-    coordinator.record_success(first, LLMUsageIR(reported=True))
+    _record_success(coordinator, first, LLMUsageIR(reported=True))
 
     next_request = _next_request(request)
     second = coordinator.plan(next_request, context)
@@ -394,7 +421,8 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
     )
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=2_000)
     first = coordinator.plan(request, context)
-    coordinator.record_success(
+    _record_success(
+        coordinator,
         first,
         LLMUsageIR(
             input_tokens=10_000,
@@ -407,7 +435,7 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
     second = coordinator.plan(next_request, context)
     assert second.decision == "rolling_batching"
     assert [item.label for item in second.breakpoints] == ["stable", "confirmed"]
-    coordinator.record_success(second, LLMUsageIR(input_tokens=1_000, reported=True))
+    _record_success(coordinator, second, LLMUsageIR(input_tokens=1_000, reported=True))
 
     advanced = None
     for _ in range(20):
@@ -415,7 +443,8 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
         if candidate.candidate_message_id:
             advanced = candidate
             break
-        coordinator.record_success(
+        _record_success(
+            coordinator,
             candidate,
             LLMUsageIR(input_tokens=1_000, reported=True),
         )
@@ -427,7 +456,7 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
         "confirmed",
         "candidate",
     ]
-    coordinator.record_success(advanced, LLMUsageIR(input_tokens=1_000, reported=True))
+    _record_success(coordinator, advanced, LLMUsageIR(input_tokens=1_000, reported=True))
     reused = coordinator.plan(next_request, context)
     assert reused.decision == "confirmed_reuse"
     assert [item.label for item in reused.breakpoints] == ["stable", "confirmed"]
@@ -451,6 +480,46 @@ def test_failed_candidate_is_not_promoted() -> None:
     assert [item.label for item in retry.breakpoints] == ["stable", "candidate"]
 
 
+def test_success_without_applied_candidate_marker_is_not_promoted() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-sol",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator()
+    candidate = coordinator.plan(request, context)
+    raw = OpenAIResponseCodec().encode(request, context)
+    encoded = coordinator.inject(
+        replace(
+            raw,
+            message_spans=tuple(
+                replace(span, cache_targets=())
+                if span.message_id == candidate.candidate_message_id
+                else span
+                for span in raw.message_spans
+            ),
+        ),
+        candidate,
+    )
+
+    assert candidate.candidate_message_id
+    assert (
+        candidate.candidate_message_id
+        not in encoded.applied_cache_breakpoint_message_ids
+    )
+    coordinator.record_success(
+        candidate,
+        LLMUsageIR(reported=True),
+        applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
+    )
+
+    retry = coordinator.plan(request, context)
+    assert retry.decision == "rolling_bootstrap"
+    assert retry.confirmed_message_id == ""
+
+
 def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
     request = _request()
     context = ShapeContext(
@@ -463,8 +532,8 @@ def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
     older = coordinator.plan(request, context)
     newer = coordinator.plan(request, context)
 
-    coordinator.record_success(newer, LLMUsageIR(reported=True))
-    coordinator.record_success(older, LLMUsageIR(reported=True))
+    _record_success(coordinator, newer, LLMUsageIR(reported=True))
+    _record_success(coordinator, older, LLMUsageIR(reported=True))
 
     reused = coordinator.plan(request, context)
     assert reused.decision == "confirmed_reuse"
@@ -481,7 +550,7 @@ def test_missing_confirmed_message_bootstraps_a_new_cache_epoch() -> None:
     )
     coordinator = PromptCacheCoordinator()
     first = coordinator.plan(request, context)
-    coordinator.record_success(first, LLMUsageIR(reported=True))
+    _record_success(coordinator, first, LLMUsageIR(reported=True))
     compacted = replace(
         request,
         messages=(
@@ -535,7 +604,8 @@ def test_cache_economics_use_only_the_latest_eight_observations() -> None:
     coordinator = PromptCacheCoordinator()
     plan = coordinator.plan(request, context)
     for _ in range(10):
-        coordinator.record_success(
+        _record_success(
+            coordinator,
             plan,
             LLMUsageIR(input_tokens=1_000, cached_input_tokens=1_000, reported=True),
         )

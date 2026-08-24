@@ -42,6 +42,7 @@ class EncodedRequest:
     payload: Mapping[str, Any]
     message_spans: tuple[EncodedMessageSpan, ...] = ()
     extra_body: Mapping[str, Any] = field(default_factory=dict)
+    applied_cache_breakpoint_message_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

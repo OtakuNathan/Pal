@@ -274,6 +274,7 @@ class PromptCacheCoordinator:
             span.message_id: span.cache_targets
             for span in encoded.message_spans
         }
+        applied_breakpoint_message_ids: list[str] = []
 
         if plan.dialect in {
             PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
@@ -300,28 +301,42 @@ class PromptCacheCoordinator:
         }:
             extra_body["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
             for breakpoint in plan.breakpoints:
-                _mark_last_target(
+                if _mark_last_target(
                     payload,
                     targets.get(breakpoint.message_id, ()),
                     "prompt_cache_breakpoint",
                     {"mode": "explicit"},
-                )
+                ):
+                    applied_breakpoint_message_ids.append(breakpoint.message_id)
         elif _uses_anthropic_breakpoints(plan.dialect):
             for breakpoint in plan.breakpoints:
                 marker: dict[str, Any] = {"type": "ephemeral"}
                 if breakpoint.ttl in {"5m", "1h"}:
                     marker["ttl"] = breakpoint.ttl
-                _mark_last_target(
+                if _mark_last_target(
                     payload,
                     targets.get(breakpoint.message_id, ()),
                     "cache_control",
                     marker,
-                )
-        return EncodedRequest(payload, encoded.message_spans, extra_body)
+                ):
+                    applied_breakpoint_message_ids.append(breakpoint.message_id)
+        return EncodedRequest(
+            payload=payload,
+            message_spans=encoded.message_spans,
+            extra_body=extra_body,
+            applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_message_ids),
+        )
 
-    def record_success(self, plan: PromptCachePlan, usage: LLMUsageIR) -> None:
+    def record_success(
+        self,
+        plan: PromptCachePlan,
+        usage: LLMUsageIR,
+        *,
+        applied_cache_breakpoint_message_ids: tuple[str, ...] = (),
+    ) -> None:
         if not plan.enabled:
             return
+        applied_breakpoint_ids = frozenset(applied_cache_breakpoint_message_ids)
         with self._lock:
             stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
             now = time.monotonic()
@@ -337,6 +352,7 @@ class PromptCacheCoordinator:
                 )
             if (
                 plan.candidate_message_id
+                and plan.candidate_message_id in applied_breakpoint_ids
                 and plan.plan_sequence >= stats.confirmed_sequence
             ):
                 stats.confirmed_message_id = plan.candidate_message_id
