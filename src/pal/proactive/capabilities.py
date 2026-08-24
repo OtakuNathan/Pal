@@ -788,7 +788,6 @@ def register_with_core(
     runner: ProactiveRunner | None = None,
 ) -> ModuleHandle:
     from pal.proactive.handler import ProactiveTriggerHandler
-    from pal.proactive.prompt import ProactivePromptFragmentProvider
 
     def refresh_capabilities() -> None:
         handle = context.module_registry.get(PROACTIVE_MODULE_ID)
@@ -801,7 +800,6 @@ def register_with_core(
 
     manager.on_change = refresh_capabilities
     provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities)
-    prompt_provider = ProactivePromptFragmentProvider(manager=manager)
     source = ProactiveEventSource(manager=manager)
     event_handler = ProactiveTriggerHandler(manager=manager, runner=runner)
     handle = ModuleHandle(
@@ -809,14 +807,12 @@ def register_with_core(
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        prompt_fragment_providers=[prompt_provider],
         supports_lifecycle_capabilities=True,
         event_sources=[source],
         event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
         ports={"proactive_manager": manager, "proactive_runner": runner},
     )
     context.register_module(handle)
-    context.prompt_fragment_registry.register(prompt_provider)
     context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)
     context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, module_id=PROACTIVE_MODULE_ID)
     return handle

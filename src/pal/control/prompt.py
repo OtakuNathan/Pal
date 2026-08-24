@@ -22,5 +22,9 @@ class ControlPromptFragmentProvider(PromptFragmentProvider):
                 title="Control Constraints",
                 content=f"Control plane is deterministic. Mounted={self.provider.mounted}. Status={status}.",
                 priority=20,
+                metadata={
+                    "prompt_target": "runtime_reminder",
+                    "block_id": "control_constraints",
+                },
             )
         ]

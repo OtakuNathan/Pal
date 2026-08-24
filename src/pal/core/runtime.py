@@ -32,6 +32,7 @@ from pal.core.pal_compaction import PalCompactionPolicy
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
 from pal.core.turn_executor import TurnExecutor
+from pal.core.turn_events import TURN_END, TURN_START
 from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, L1CommitPayload, channel_turn_program
 from pal.core.module_registry import ModuleHandle
 from pal.execution import CapabilityCall
@@ -677,7 +678,7 @@ class PalCore:
             )
         control_scope_key = delivery_binding.control_scope_key
         turn_id = channel_envelope.event.event_id
-        self.context.turn_event_bus.emit("turn.start", {
+        self.context.turn_event_bus.emit(TURN_START, {
             "turn_id": turn_id,
             "scope_key": control_scope_key,
             "endpoint_id": channel_envelope.endpoint.endpoint_id,
@@ -752,9 +753,81 @@ class PalCore:
         }
 
     def track_turn_task(self, continuation: TurnContinuation, task: asyncio.Task[Any]) -> None:
+        binding = continuation.delivery_binding
+        if binding is not None:
+            if not continuation.control_scope_key:
+                continuation.control_scope_key = binding.control_scope_key
+            self.state.turn_scopes[continuation.turn_id] = continuation.control_scope_key
+        if not continuation.turn_settings_snapshot:
+            continuation.turn_settings_snapshot = self.turn_manager._build_turn_settings_snapshot()
         self.state.active_turns[continuation.turn_id] = continuation
         self.state.turn_tasks[continuation.turn_id] = task
-        task.add_done_callback(lambda finished, current_turn_id=continuation.turn_id: self._on_turn_task_done(current_turn_id, finished))
+        self.context.turn_event_bus.emit(
+            TURN_START,
+            self._tracked_turn_event_payload(continuation),
+        )
+        task.add_done_callback(
+            lambda finished, current_continuation=continuation: self._on_tracked_turn_task_done(
+                current_continuation,
+                finished,
+            )
+        )
+
+    @staticmethod
+    def _tracked_turn_event_payload(continuation: TurnContinuation) -> dict[str, Any]:
+        binding = continuation.delivery_binding
+        opening_event = continuation.opening_event
+        return {
+            "turn_id": continuation.turn_id,
+            "scope_key": (
+                continuation.control_scope_key
+                or (binding.control_scope_key if binding is not None else "")
+            ),
+            "endpoint_id": binding.endpoint.endpoint_id if binding is not None else "",
+            "channel_kind": binding.endpoint.channel_kind if binding is not None else "",
+            "reply_target": (
+                dict(binding.response_handle.reply_target)
+                if binding is not None
+                else {}
+            ),
+            "event_kind": str(getattr(opening_event, "event_kind", "") or ""),
+            "source_kind": str(getattr(opening_event, "source_kind", "") or ""),
+        }
+
+    def _on_tracked_turn_task_done(
+        self,
+        continuation: TurnContinuation,
+        task: asyncio.Task[Any],
+    ) -> None:
+        status = "success"
+        if task.cancelled():
+            status = "interrupted"
+        else:
+            try:
+                result = task.result()
+            except asyncio.CancelledError:
+                status = "interrupted"
+            except Exception:
+                status = "failed"
+            else:
+                reported_status = str(result or "").strip().lower()
+                if reported_status in {"success", "failed", "interrupted"}:
+                    status = reported_status
+        if continuation.turn_id in self.state.active_turns:
+            if status == "success":
+                status = "failed"
+            self.turn_manager.cleanup_interrupted(
+                continuation.turn_id,
+                reason=status,
+            )
+        self.context.turn_event_bus.emit(
+            TURN_END,
+            {
+                **self._tracked_turn_event_payload(continuation),
+                "status": status,
+            },
+        )
+        self._on_turn_task_done(continuation.turn_id, task)
 
     async def run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         self.state.active_turns[continuation.turn_id] = continuation
@@ -799,7 +872,7 @@ class PalCore:
         finally:
             if self.state.turn_scopes.get(turn_id) == control_scope_key and turn_id not in self.state.active_turns:
                 self.turn_manager._mark_turn_exited(turn_id)
-            self.context.turn_event_bus.emit("turn.end", {
+            self.context.turn_event_bus.emit(TURN_END, {
                 "turn_id": turn_id,
                 "scope_key": control_scope_key,
                 "endpoint_id": channel_envelope.endpoint.endpoint_id,

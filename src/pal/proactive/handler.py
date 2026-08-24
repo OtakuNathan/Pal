@@ -40,7 +40,7 @@ class ProactiveTriggerHandler(EventHandler):
         core.track_turn_task(continuation, task)
         return []
 
-    async def _run_trigger_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> None:
+    async def _run_trigger_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> str:
         proactive_run_id = self.runner.begin_run(trigger) if self.runner is not None else None
         try:
             outcome = await core.run_turn_continuation_async(continuation)
@@ -61,7 +61,8 @@ class ProactiveTriggerHandler(EventHandler):
             )
             if self.runner is not None:
                 self.runner.fail_run(proactive_run_id, error_text=str(exc))
-            return
+            return "failed"
         if self.runner is not None:
             self.runner.complete_run(proactive_run_id, turn_id=outcome.turn_id, final_reply=settled_output_text(outcome))
         self.manager.mark_run_completed(trigger.proactive_id)
+        return "success"

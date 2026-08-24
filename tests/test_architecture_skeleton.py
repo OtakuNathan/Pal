@@ -28,6 +28,7 @@ from pal.channel import (
 )
 from pal.channel.contracts import ChannelDeliveryError
 from pal.control import ControlPlane, register_with_core as register_control_with_core
+from pal.control.prompt import ControlPromptFragmentProvider
 from pal.core import (
     CompactionClockKind,
     CompactionSnapshot,
@@ -41,6 +42,7 @@ from pal.core import (
 )
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.core.turn_events import TURN_END, TURN_START
 from pal.execution import CapabilityCall, CapabilityDescriptor, CapabilityResult, ToolCallBudget, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import (
     EffectKind,
@@ -86,7 +88,7 @@ from pal.memory import (
 )
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
-from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_proactive_with_core
+from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, build_proactive_turn_continuation, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, TurnDeliveryBinding, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
@@ -1724,6 +1726,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 sections,
                 [
                     "identity",
+                    "runtime",
                     "memory_guide",
                     "system_map",
                     "source_of_truth",
@@ -1773,7 +1776,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "knowledge_storage_boundary",
                 ),
             )
-            self.assertEqual(prompt.metadata["reminder_sections"], ())
+            self.assertEqual(prompt.metadata["reminder_sections"], ("current_date",))
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ("l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"),
@@ -1795,6 +1798,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("bunshin_dispatch_workflow", prompt.messages[0].text)
             self.assertIn("<tool_efficiency>", prompt.messages[0].text)
             system_text = prompt.messages[0].text
+            self.assertNotIn("Today's date is", system_text)
+            self.assertIn("Today's date is", prompt.metadata["runtime_reminder_text"])
             self.assertIn("<mutation_policy>", system_text)
             self.assertIn("<memory_guide>", system_text)
             self.assertIn("<knowledge_storage_boundary>", system_text)
@@ -1895,14 +1900,23 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     },
                 )
             )
+            chat_prompt = core.build_canonical_prompt(
+                PromptAssemblyContext(core_mode="default", turn_kind="chat")
+            )
 
             self.assertEqual(prompt.messages[0].role.value, "system")
+            self.assertEqual(prompt.messages[0].text, chat_prompt.messages[0].text)
+            self.assertNotIn("Task Directive", prompt.messages[0].text)
+            self.assertNotIn("proactive task trigger", prompt.messages[0].text)
             self.assertEqual(prompt.messages[-1].role.value, "user")
             proactive_text = prompt.messages[-1].text
             self.assertIn("<proactive_trigger>", proactive_text)
             self.assertIn("</proactive_trigger>", proactive_text)
+            self.assertIn("Pal-authored self-initiated proactive turn", proactive_text)
+            self.assertIn("Treat this trigger as the current request and execute it now.", proactive_text)
             self.assertIn("Goal: Summarize repository updates", proactive_text)
             self.assertIn("Method: Review recent changes and produce a concise digest.", proactive_text)
+            self.assertIn("Do not create, configure, or describe proactive tasks.", proactive_text)
             self.assertEqual(len(prompt.messages), 2)
             self.assertNotIn("Remember the last digest.", proactive_text)
             self.assertNotIn("Recent summaries", prompt.messages[0].text + "\n" + proactive_text)
@@ -1933,6 +1947,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
                 [generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
             )
+            turn_events: list[tuple[str, dict[str, object]]] = []
+            for topic in (TURN_START, TURN_END):
+                core.context.turn_event_bus.subscribe(
+                    topic,
+                    lambda emitted_topic, event, sink=turn_events: sink.append(
+                        (emitted_topic, dict(event))
+                    ),
+                )
 
             proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
             processed = core.run_until_idle()
@@ -1949,6 +1971,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("Goal: Summarize repository updates", transcript[0].content)
             self.assertEqual(transcript[-1].role, "assistant")
             self.assertEqual(transcript[-1].content, "Daily digest complete.")
+            self.assertEqual([topic for topic, _ in turn_events], [TURN_START, TURN_END])
+            start_event = turn_events[0][1]
+            end_event = turn_events[1][1]
+            self.assertEqual(start_event["turn_id"], end_event["turn_id"])
+            self.assertEqual(start_event["scope_key"], "proactive:daily_digest")
+            self.assertEqual(start_event["endpoint_id"], "proactive:daily_digest")
+            self.assertEqual(start_event["channel_kind"], "proactive")
+            self.assertEqual(start_event["event_kind"], "proactive.trigger")
+            self.assertEqual(start_event["source_kind"], "proactive")
+            self.assertEqual(end_event["status"], "success")
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1997,6 +2029,41 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
+    def test_cancelled_proactive_turn_still_broadcasts_turn_end(self) -> None:
+        async def exercise() -> tuple[list[tuple[str, dict[str, object]]], PalCore, str]:
+            core = PalCore()
+            definition = ProactiveDefinition(
+                proactive_id="daily_digest",
+                goal="Summarize repository updates",
+            )
+            continuation = build_proactive_turn_continuation(
+                core.context,
+                ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"),
+                definition,
+            )
+            turn_events: list[tuple[str, dict[str, object]]] = []
+            for topic in (TURN_START, TURN_END):
+                core.context.turn_event_bus.subscribe(
+                    topic,
+                    lambda emitted_topic, event, sink=turn_events: sink.append(
+                        (emitted_topic, dict(event))
+                    ),
+                )
+            task = asyncio.create_task(asyncio.sleep(60))
+            core.track_turn_task(continuation, task)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            return turn_events, core, continuation.turn_id
+
+        turn_events, core, turn_id = asyncio.run(exercise())
+
+        self.assertEqual([topic for topic, _ in turn_events], [TURN_START, TURN_END])
+        self.assertEqual(turn_events[-1][1]["status"], "interrupted")
+        self.assertNotIn(turn_id, core.state.active_turns)
+        self.assertNotIn(turn_id, core.state.turn_scopes)
+
     def test_identity_prompt_includes_current_date(self) -> None:
         service = SimpleNamespace(
             get_persona=lambda: SimpleNamespace(
@@ -2012,10 +2079,24 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 preferences_blob={},
             ),
         )
-        fragment = IdentityPromptFragmentProvider(service=service).build_prompt_fragments(PromptAssemblyContext())[0]
+        fragments = IdentityPromptFragmentProvider(service=service).build_prompt_fragments(PromptAssemblyContext())
+        identity_fragment = next(item for item in fragments if item.section == "identity")
+        date_fragment = next(item for item in fragments if item.metadata.get("block_id") == "current_date")
 
-        self.assertIn("Timezone: Asia/Shanghai", fragment.content)
-        self.assertRegex(fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
+        self.assertIn("Timezone: Asia/Shanghai", identity_fragment.content)
+        self.assertNotIn("Today's date is", identity_fragment.content)
+        self.assertEqual(date_fragment.metadata["prompt_target"], "runtime_reminder")
+        self.assertRegex(date_fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
+
+    def test_control_constraints_are_runtime_reminders(self) -> None:
+        provider = SimpleNamespace(mounted=True, degraded=True)
+
+        fragment = ControlPromptFragmentProvider(provider=provider).build_prompt_fragments(
+            PromptAssemblyContext(turn_kind="control")
+        )[0]
+
+        self.assertEqual(fragment.metadata["prompt_target"], "runtime_reminder")
+        self.assertEqual(fragment.metadata["block_id"], "control_constraints")
 
     def test_today_for_timezone_uses_configured_timezone(self) -> None:
         fixed_utc = datetime(2026, 7, 2, 16, 30, tzinfo=timezone.utc)
