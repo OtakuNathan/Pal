@@ -25,6 +25,10 @@ class SkillPromptFragmentProvider:
                     "boundaries. Skill tools define search, injection, learning, and persistence procedures."
                 ),
                 priority=72,
-                metadata={"module_id": self.module_id, "kind": "skill_guide"},
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "skill_guide",
+                    "prompt_target": "system",
+                },
             ),
         ]

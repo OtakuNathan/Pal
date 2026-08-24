@@ -55,6 +55,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                         content=_render_closed_tool_interaction(group),
                         priority=40 + block_index,
                         metadata={
+                            "prompt_target": "user_context",
                             "block_id": f"l1_recent_context_{block_index}",
                             "role": "assistant",
                             "runtime_context_kind": "closed_tool_interaction",
@@ -73,6 +74,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                         content=_render_orphaned_tool_result(message),
                         priority=40 + block_index,
                         metadata={
+                            "prompt_target": "user_context",
                             "block_id": f"l1_recent_context_{block_index}",
                             "role": "assistant",
                             "runtime_context_kind": "closed_tool_interaction",
@@ -88,6 +90,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                         content=content,
                         priority=40 + block_index,
                         metadata={
+                            "prompt_target": "user_context",
                             "block_id": f"l1_recent_context_{block_index}",
                             "role": role,
                         },
@@ -104,6 +107,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     content=summary_context,
                     priority=55,
                     metadata={
+                        "prompt_target": "user_context",
                         "block_id": "memory_current_summary",
                         "raw_user_context": True,
                         "runtime_context_kind": "conversation_summary",
@@ -121,6 +125,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     content=_render_recalled_memories_context(memory_lines),
                     priority=56,
                     metadata={
+                        "prompt_target": "user_context",
                         "block_id": "memory_recalled_context",
                         "raw_user_context": True,
                         "runtime_context_kind": "memory",
@@ -186,7 +191,11 @@ def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
                 "mem_ref values are opaque; prefixes such as fact: and case: are part of the ref."
             ),
             priority=71,
-            metadata={"module_id": "memory", "kind": "memory_guide"},
+            metadata={
+                "module_id": "memory",
+                "kind": "memory_guide",
+                "prompt_target": "system",
+            },
         ),
     )
 

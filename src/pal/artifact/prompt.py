@@ -41,6 +41,7 @@ class ArtifactPromptFragmentProvider(PromptFragmentProvider):
                 content=exposure.text,
                 priority=58,
                 metadata={
+                    "prompt_target": "user_context",
                     "block_id": "available_artifacts",
                     "runtime_context_kind": "artifact",
                     "content_parts": [part.to_message_part() for part in exposure.inline_parts],

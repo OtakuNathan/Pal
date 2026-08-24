@@ -33,7 +33,11 @@ class ChecklistPromptFragmentProvider:
                     "is an execution scratchpad, never authority or evidence."
                 ),
                 priority=91,
-                metadata={"module_id": self.module_id, "kind": "checklist_task_flow"},
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "checklist_task_flow",
+                    "prompt_target": "system",
+                },
             )
         ]
         snapshot = self.service.show()

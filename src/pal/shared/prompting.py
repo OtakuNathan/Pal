@@ -14,6 +14,18 @@ class PromptFragment:
     priority: int = 100
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        target = str((self.metadata or {}).get("prompt_target") or "").strip().lower()
+        if not target:
+            raise ValueError("prompt fragment must declare metadata.prompt_target")
+        if target not in {"system", "user_context", "runtime_reminder"}:
+            raise ValueError(f"unknown prompt fragment target: {target!r}")
+        object.__setattr__(
+            self,
+            "metadata",
+            {**dict(self.metadata or {}), "prompt_target": target},
+        )
+
 
 @dataclass(frozen=True)
 class PromptIRBlock:

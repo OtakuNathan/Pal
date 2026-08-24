@@ -32,5 +32,10 @@ class IdentityServicePort(Protocol):
     def get_preferences(self) -> PalPreferencesProfile | None:
         ...
 
+    def refresh_projection(
+        self,
+    ) -> tuple[PalPersonaProfile | None, PalPreferencesProfile | None]:
+        ...
+
     def update_preferences(self, *, timezone: str | None = None) -> PalPreferencesProfile:
         ...

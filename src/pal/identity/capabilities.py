@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.tool_facade import ToolGuidance
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 class IdentitySnapshot:
     has_persona: bool
     has_preferences: bool
+    persona: dict[str, Any] | None = None
+    preferences: dict[str, Any] | None = None
     mounted: bool = True
     degraded: bool = False
 
@@ -45,8 +47,8 @@ class IdentityIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            purpose="Show identity state — whether persona and preferences are configured.",
-            use_when="Diagnosing identity configuration or checking if persona/preferences exist.",
+            purpose="Read Pal's configured identity and preferences from durable storage and refresh the resident in-memory projection.",
+            use_when="Inspecting Pal's configured persona/preferences or explicitly refreshing identity after external configuration changes.",
             do_not_use_when="Recalling user facts (use recall_memory). Checking behavior routing (use behavior_show).",
             failure_next_steps="Read-only. If no persona, identity prompt fragments will use defaults.",
         ),
@@ -65,9 +67,12 @@ class IdentityIntrospectionProvider:
 
 def inspect_identity(provider: IdentityIntrospectionProvider) -> IdentitySnapshot:
     service = provider.service
+    persona, preferences = service.refresh_projection()
     return IdentitySnapshot(
-        has_persona=service.get_persona() is not None,
-        has_preferences=service.get_preferences() is not None,
+        has_persona=persona is not None,
+        has_preferences=preferences is not None,
+        persona=asdict(persona) if persona is not None else None,
+        preferences=asdict(preferences) if preferences is not None else None,
         mounted=True,
         degraded=False,
     )
@@ -76,6 +81,7 @@ def inspect_identity(provider: IdentityIntrospectionProvider) -> IdentitySnapsho
 def register_with_core(context: MainContext, service: IdentityService) -> ModuleHandle:
     from pal.identity.prompt import IdentityPromptFragmentProvider
 
+    service.refresh_projection()
     provider = IdentityIntrospectionProvider(service=service)
     prompt_provider = IdentityPromptFragmentProvider(service=service)
     handle = ModuleHandle(

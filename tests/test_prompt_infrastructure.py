@@ -47,11 +47,13 @@ def test_output_contract_is_projected_into_prompt_ir() -> None:
                     section="task_acceptance",
                     title="Bound Invocation",
                     content="Perform the bound task.",
+                    metadata={"prompt_target": "system"},
                 ),
                 PromptFragment(
                     section="output_contract",
                     title="Output Contract",
                     content="Call the terminal submission tool exactly once.",
+                    metadata={"prompt_target": "system"},
                 ),
             ),
         )
@@ -80,12 +82,50 @@ def test_unknown_prompt_section_fails_closed() -> None:
                     section="ouptut_contract",
                     title="Typo",
                     content="This must not disappear silently.",
+                    metadata={"prompt_target": "system"},
                 ),
             ),
         )
     )
 
     with pytest.raises(ValueError, match="unknown prompt fragment section"):
+        compiler.build_prompt_ir(
+            PromptAssemblyContext(metadata={"memory_pack": None})
+        )
+
+
+def test_prompt_fragment_target_must_be_explicit() -> None:
+    with pytest.raises(
+        ValueError,
+        match="prompt fragment must declare metadata.prompt_target",
+    ):
+        PromptFragment(
+            section="operating_rules",
+            title="Implicit target",
+            content="This must not silently become system content.",
+        )
+
+
+def test_dynamic_section_cannot_explicitly_target_system() -> None:
+    compiler = _compiler(
+        _Provider(
+            provider_id="test.dynamic_system",
+            module_id="test",
+            fragments=(
+                PromptFragment(
+                    section="resident_affordances",
+                    title="Misrouted dynamic state",
+                    content="This must remain outside the system prompt.",
+                    metadata={"prompt_target": "system"},
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="must target runtime_reminder",
+    ):
         compiler.build_prompt_ir(
             PromptAssemblyContext(metadata={"memory_pack": None})
         )

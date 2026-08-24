@@ -8,7 +8,6 @@ from pal.core.compaction import (
     CompactionClockKind,
     CompactionSnapshot,
     CompactionUnit,
-    compaction_visible_token_limit,
     extract_json_object,
 )
 from pal.foundation import utc_now
@@ -108,7 +107,6 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "- Keep temporary task state temporary. Do not turn it into a user preference, durable fact, or permanent task.\n"
     "- If a task is complete, cancelled, superseded, or contradicted by newer user text, move it to retired_or_superseded_context.\n"
     "- Write a complete bounded continuity summary. Do not trail off or rely on output continuation.\n"
-    "- Obey the request-specific visible checkpoint limit below. It applies to the JSON, not private reasoning.\n"
     "- If the source is long, preserve active continuity first, then user constraints, decisions, and warm history.\n"
     "- Prioritize durable user preferences, stable user status/context, real goals/plans/commitments, confirmed project decisions, and long-lived constraints.\n"
     "- Do not create entries from jokes, temporary emotions, momentary frustration, speculation, transient runtime state, or unconfirmed intent.\n"
@@ -133,11 +131,8 @@ class PalCompactionPolicy:
     accepts_memory_candidates: bool = True
 
     def system_prompt(self, snapshot: CompactionSnapshot) -> str:
-        limit = compaction_visible_token_limit(snapshot)
-        return (
-            f"{COMPACT_PAL_STRUCTURED_SYSTEM}\n"
-            f"The final visible JSON checkpoint for this request must not exceed {limit:,} tokens."
-        )
+        _ = snapshot
+        return COMPACT_PAL_STRUCTURED_SYSTEM
 
     def build_source(
         self,

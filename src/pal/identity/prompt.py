@@ -45,6 +45,7 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
                 title="Pal Identity",
                 content="\n".join(identity_lines),
                 priority=10,
+                metadata={"prompt_target": "system"},
             ))
         fragments.append(PromptFragment(
             section="runtime",

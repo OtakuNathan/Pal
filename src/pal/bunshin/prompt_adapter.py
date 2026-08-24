@@ -66,10 +66,34 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                     )
                 )
 
-        add("identity", "Bunshin Identity", str(scaffold.get("identity") or ""), 10)
-        add("tool_efficiency", "Tool Efficiency", TOOL_EFFICIENCY_SYSTEM_GUIDANCE, 15)
-        add("behavior_guidance", "Role Contract", str(scaffold.get("behavior") or ""), 20)
-        add("task_acceptance", "Bound Invocation", _render_bound_invocation(scaffold), 35)
+        add(
+            "identity",
+            "Bunshin Identity",
+            str(scaffold.get("identity") or ""),
+            10,
+            metadata={"prompt_target": "system"},
+        )
+        add(
+            "tool_efficiency",
+            "Tool Efficiency",
+            TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
+            15,
+            metadata={"prompt_target": "system"},
+        )
+        add(
+            "behavior_guidance",
+            "Role Contract",
+            str(scaffold.get("behavior") or ""),
+            20,
+            metadata={"prompt_target": "system"},
+        )
+        add(
+            "task_acceptance",
+            "Bound Invocation",
+            _render_bound_invocation(scaffold),
+            35,
+            metadata={"prompt_target": "system"},
+        )
         role_context = str(self.role_context_factory() or "").strip()
         if role_context:
             add(
@@ -78,14 +102,33 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                 role_context,
                 54,
                 metadata={
+                    "prompt_target": "user_context",
                     "block_id": "bunshin_role_working_state",
                     "raw_user_context": True,
                     "runtime_context_kind": "role_state",
                 },
             )
-        add("operating_rules", "Execution Rules", _render_execution_rules(scaffold), 60)
-        add("tool_routing", "Tool Routing", TOOL_ROUTING_SYSTEM_GUIDANCE, 65)
-        add("output_contract", "Output Contract", str(scaffold.get("output_contract") or ""), 70)
+        add(
+            "operating_rules",
+            "Execution Rules",
+            _render_execution_rules(scaffold),
+            60,
+            metadata={"prompt_target": "system"},
+        )
+        add(
+            "tool_routing",
+            "Tool Routing",
+            TOOL_ROUTING_SYSTEM_GUIDANCE,
+            65,
+            metadata={"prompt_target": "system"},
+        )
+        add(
+            "output_contract",
+            "Output Contract",
+            str(scaffold.get("output_contract") or ""),
+            70,
+            metadata={"prompt_target": "system"},
+        )
         retry = str(dict(context.metadata or {}).get("retry_note") or "")
         if retry:
             add(
@@ -94,6 +137,7 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                 retry,
                 95,
                 metadata={
+                    "prompt_target": "user_context",
                     "block_id": "bunshin_retry_guidance",
                     "raw_user_context": True,
                     "runtime_context_kind": "retry_guidance",

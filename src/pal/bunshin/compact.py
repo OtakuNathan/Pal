@@ -8,7 +8,6 @@ from pal.core.compaction import (
     CompactionClockKind,
     CompactionSnapshot,
     CompactionUnit,
-    compaction_visible_token_limit,
     extract_json_object,
 )
 from pal.foundation import utc_now
@@ -39,7 +38,6 @@ BUNSHIN_COMPACTION_SYSTEM_PROMPT = (
     "Record failed, rejected, and unknown-effect tool work accurately; do not claim its side effects succeeded.\n"
     "Closed tool batches may be compressed into verified work state. Never invent a tool result.\n"
     "Checklist state is the macro plan; this checkpoint is the precise cursor within it.\n"
-    "Obey the request-specific visible checkpoint limit below. It applies to the JSON, not private reasoning.\n"
     "Output JSON only, without markdown fences."
 )
 
@@ -83,11 +81,8 @@ class BunshinCompactionPolicy:
     accepts_memory_candidates: bool = False
 
     def system_prompt(self, snapshot: CompactionSnapshot) -> str:
-        limit = compaction_visible_token_limit(snapshot)
-        return (
-            f"{BUNSHIN_COMPACTION_SYSTEM_PROMPT}\n"
-            f"The final visible JSON checkpoint for this request must not exceed {limit:,} tokens."
-        )
+        _ = snapshot
+        return BUNSHIN_COMPACTION_SYSTEM_PROMPT
 
     def build_source(
         self,

@@ -68,7 +68,7 @@ from pal.failure import (
     register_with_core as register_failure_with_core,
 )
 from pal.foundation import EventEnvelope, RawSQLHookRegistry
-from pal.identity import IdentityRepository, IdentityService, register_with_core as register_identity_with_core
+from pal.identity import IdentityRepository, IdentityService, inspect_identity, register_with_core as register_identity_with_core
 from pal.identity.prompt import IdentityPromptFragmentProvider
 from pal.llm import generation_result_from_values, LLMPreflightAdvice
 from pal.llm.ir import LLMResponseDeltaKind, LLMResponseUpdate
@@ -1311,6 +1311,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(result.status, "ok")
             self.assertEqual(result.text, "identity snapshot")
             self.assertIn("has_persona", result.llm_text)
+            self.assertIn("persona", result.llm_text)
+            self.assertIn("preferences", result.llm_text)
             self.assertIn("mounted", result.llm_text)
         finally:
             database.close()
@@ -2087,6 +2089,31 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("Today's date is", identity_fragment.content)
         self.assertEqual(date_fragment.metadata["prompt_target"], "runtime_reminder")
         self.assertRegex(date_fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
+
+    def test_identity_prompt_uses_startup_projection_until_explicit_refresh(self) -> None:
+        runtime_root, database = self._create_database()
+        try:
+            repository = IdentityRepository()
+            service = IdentityService(repository=repository)
+            service.ensure_defaults()
+            core = PalCore()
+            register_core_with_core(core)
+            handle = register_identity_with_core(core.context, service)
+
+            initial = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+            repository.update_user_preferences(style_preference="Externally changed style")
+            before_refresh = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+
+            self.assertEqual(initial, before_refresh)
+            snapshot = inspect_identity(handle.introspection_provider)
+            after_refresh = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+            self.assertIsNotNone(snapshot.preferences)
+            self.assertEqual(snapshot.preferences["style_preference"], "Externally changed style")
+            self.assertNotEqual(initial, after_refresh)
+            self.assertIn("Style: Externally changed style", after_refresh)
+        finally:
+            database.close()
+            shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_control_constraints_are_runtime_reminders(self) -> None:
         provider = SimpleNamespace(mounted=True, degraded=True)

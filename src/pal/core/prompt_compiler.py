@@ -83,7 +83,13 @@ class PromptCompiler:
             rendered_body = str(fragment.content).strip()
             if not rendered_body and not self._preserve_empty_protocol_fragment(fragment):
                 continue
-            if self._prompt_target(fragment) == "runtime_reminder":
+            prompt_target = self._prompt_target(fragment)
+            self._validate_prompt_target(
+                fragment,
+                normalized_section=normalized_section,
+                prompt_target=prompt_target,
+            )
+            if prompt_target == "runtime_reminder":
                 runtime_reminder_blocks.append(
                     self._runtime_reminder_block(
                         fragment,
@@ -520,7 +526,35 @@ class PromptCompiler:
 
     @staticmethod
     def _prompt_target(fragment: PromptFragment) -> str:
-        return str((fragment.metadata or {}).get("prompt_target") or "system").strip().lower()
+        target = str((fragment.metadata or {}).get("prompt_target") or "").strip().lower()
+        if not target:
+            raise ValueError("prompt fragment must declare metadata.prompt_target")
+        if target not in {"system", "user_context", "runtime_reminder"}:
+            raise ValueError(f"unknown prompt fragment target: {target!r}")
+        return target
+
+    @staticmethod
+    def _validate_prompt_target(
+        fragment: PromptFragment,
+        *,
+        normalized_section: str,
+        prompt_target: str,
+    ) -> None:
+        if normalized_section in {"memory", "artifact"} and prompt_target != "user_context":
+            raise ValueError(
+                f"prompt fragment section {fragment.section!r} must target user_context"
+            )
+        if normalized_section in {"runtime", "resident_affordances"} and prompt_target != "runtime_reminder":
+            raise ValueError(
+                f"prompt fragment section {fragment.section!r} must target runtime_reminder"
+            )
+        if (
+            prompt_target == "user_context"
+            and normalized_section not in {"memory", "artifact"}
+        ):
+            raise ValueError(
+                f"prompt fragment section {fragment.section!r} cannot target user_context"
+            )
 
     @staticmethod
     def _runtime_reminder_block(

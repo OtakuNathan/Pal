@@ -60,7 +60,11 @@ class BehaviorPromptFragmentProvider:
                     "Use memory for remembered facts and reusable case knowledge. Use the skill system for reusable procedures/playbooks."
                 ),
                 priority=72,
-                metadata={"module_id": self.module_id, "kind": "behavior_guidance_guide"},
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "behavior_guidance_guide",
+                    "prompt_target": "system",
+                },
             ),
         ]
         resident = self._resident_affordance_fragment()
@@ -83,6 +87,8 @@ class BehaviorPromptFragmentProvider:
             metadata={
                 "module_id": self.module_id,
                 "kind": "resident_affordances",
+                "prompt_target": "runtime_reminder",
+                "block_id": "resident_affordances",
             },
         )
 
@@ -115,6 +121,8 @@ class DeclaredResidentAffordancePromptFragmentProvider:
                 metadata={
                     "module_id": self.module_id,
                     "kind": "declared_resident_affordances",
+                    "prompt_target": "runtime_reminder",
+                    "block_id": "resident_affordances",
                 },
             )
         ]

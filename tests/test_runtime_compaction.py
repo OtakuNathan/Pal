@@ -51,7 +51,7 @@ from pal.memory import (
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.memory.turn_ir import L1TurnIR
 from pal.core.pal_compaction import COMPACT_PAL_STRUCTURED_SYSTEM
-from pal.bunshin.compact import BunshinCompactionPolicy
+from pal.bunshin.compact import BUNSHIN_COMPACTION_SYSTEM_PROMPT, BunshinCompactionPolicy
 from pal.shared import (
     ChannelEnvelope,
     EndpointConfig,
@@ -331,6 +331,31 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertFalse(hasattr(LLMRuntime, "compact_memory_structured"))
         self.assertFalse(hasattr(LLMRuntime, "summarize_compaction"))
 
+    def test_compaction_system_prompts_do_not_depend_on_request_budget(self) -> None:
+        low_budget = CompactionSnapshot(
+            target_input_budget=12_000,
+            reserved_output_tokens=1_000,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+        )
+        high_budget = CompactionSnapshot(
+            target_input_budget=32_000,
+            reserved_output_tokens=1_000,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=2,
+        )
+
+        self.assertEqual(
+            PalCompactionPolicy().system_prompt(low_budget),
+            PalCompactionPolicy().system_prompt(high_budget),
+        )
+        self.assertEqual(
+            BunshinCompactionPolicy().system_prompt(low_budget),
+            BunshinCompactionPolicy().system_prompt(high_budget),
+        )
+        self.assertNotIn("must not exceed", COMPACT_PAL_STRUCTURED_SYSTEM)
+        self.assertNotIn("must not exceed", BUNSHIN_COMPACTION_SYSTEM_PROMPT)
+
     def test_first_success_uses_standard_agenerate_and_commits_once(self) -> None:
         service = _memory_with_turns()
         llm = _ScriptedLLM(
@@ -515,7 +540,11 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
         self.assertEqual(retry.model_hint, "small-model")
         self.assertEqual(retry.policy.max_output_tokens, 64_000)
-        self.assertIn("256 tokens", retry.messages[0].text)
+        self.assertEqual(
+            retry.messages[0].text,
+            llm.generate_requests[0].messages[0].text,
+        )
+        self.assertNotIn("256 tokens", retry.messages[0].text)
 
     def test_compactor_uses_provider_output_ceiling_for_reasoning_headroom(self) -> None:
         service = _memory_with_turns(2)
@@ -537,10 +566,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
 
         self.assertEqual(result.status, "compacted")
         self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 128_000)
-        self.assertIn(
-            "4,096 tokens",
-            llm.generate_requests[0].messages[0].text,
-        )
+        self.assertNotIn("4,096 tokens", llm.generate_requests[0].messages[0].text)
 
     def test_output_truncation_disables_continuation_and_shrinks_source(self) -> None:
         service = _memory_with_turns(6)
@@ -610,8 +636,15 @@ class SharedCompactionEngineTests(unittest.TestCase):
             memory_items=original.memory_items,
             metadata=original.metadata,
         )
+        oversized = json.loads(_valid_pal_payload())
+        oversized["summary"]["summary"] = "界" * 20_001
         llm = _ScriptedLLM(
-            [generation_result_from_values(text=_valid_pal_payload())]
+            [
+                generation_result_from_values(
+                    text=json.dumps(oversized, ensure_ascii=False)
+                ),
+                generation_result_from_values(text=_valid_pal_payload("bounded")),
+            ]
         )
 
         result = asyncio.run(
@@ -623,7 +656,9 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "compacted")
-        self.assertIn("20,000 tokens", llm.generate_requests[0].messages[0].text)
+        self.assertEqual(result.attempts, 2)
+        self.assertNotIn("20,000 tokens", llm.generate_requests[0].messages[0].text)
+        self.assertIn("20,000-token visible output limit", llm.generate_requests[1].messages[-1].text)
 
     def test_three_failures_leave_memory_unchanged(self) -> None:
         service = _memory_with_turns()

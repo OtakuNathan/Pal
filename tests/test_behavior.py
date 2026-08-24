@@ -40,7 +40,7 @@ from pal.behavior.tools import (
     BEHAVIOR_UPDATE_DESCRIPTION,
 )
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import INDIRECT_NONE
@@ -555,11 +555,13 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_affordance("declared.resident"))
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
-        self.assertIn("\n<behavior_guidance>\n", system)
-        self.assertIn("Declared resident", system)
-        self.assertIn("Consider declared resident guidance.", system)
-        self.assertIn("resident_affordances", prompt.metadata["fragment_sections"])
-        self.assertNotIn("resident_affordances", prompt.metadata["reminder_sections"])
+        reminder = str(prompt.metadata["runtime_reminder_text"])
+        self.assertNotIn("Declared resident", system)
+        self.assertIn("\n<behavior_guidance>\n", reminder)
+        self.assertIn("Declared resident", reminder)
+        self.assertIn("Consider declared resident guidance.", reminder)
+        self.assertNotIn("resident_affordances", prompt.metadata["fragment_sections"])
+        self.assertIn("resident_affordances", prompt.metadata["reminder_sections"])
 
         self.service.unregister_declared_module("declared_resident_plugin")
         after_prompt = core.build_canonical_prompt(PromptAssemblyContext())
@@ -1502,7 +1504,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNone(service.l2_store.get_entry("behavior_advice:evict.me"))
         self.assertEqual(service.failed_retirements, [])
 
-    def test_resident_affordances_are_dynamic_system_prompt_blocks(self) -> None:
+    def test_resident_affordances_are_runtime_reminders_with_stable_system(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_behavior_with_core(core.context, self.service)
@@ -1525,9 +1527,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         with_resident_prompt = core.build_canonical_prompt(PromptAssemblyContext())
         with_resident = _message_text(with_resident_prompt.messages[0])
-        self.assertIn("\n<behavior_guidance>\n", with_resident)
-        self.assertIn("OLED expression", with_resident)
-        self.assertIn("Use the OLED expression capability sparingly", with_resident)
+        reminder = str(with_resident_prompt.metadata["runtime_reminder_text"])
+        self.assertEqual(without_resident, with_resident)
+        self.assertNotIn("OLED expression", with_resident)
+        self.assertIn("\n<behavior_guidance>\n", reminder)
+        self.assertIn("OLED expression", reminder)
+        self.assertIn("Use the OLED expression capability sparingly", reminder)
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
             (
@@ -1541,13 +1546,26 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "mutation_policy",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
-                "resident_affordances",
             ),
         )
         self.assertEqual(
             with_resident_prompt.metadata["reminder_sections"],
-            (),
+            ("resident_affordances",),
         )
+
+        provider_request = core.turn_executor.build_turn_prompt(
+            TurnContinuation(
+                turn_id="resident-affordance-turn",
+                program=iter(()),
+                correlation_id="resident-affordance-turn",
+            ),
+            PromptAssemblyContext(),
+            max_output_tokens=128,
+        )
+        self.assertEqual(provider_request.messages[-1].role.value, "user")
+        self.assertEqual(provider_request.messages[-1].semantic_kind, "runtime_reminder")
+        self.assertIn("OLED expression", provider_request.messages[-1].text)
+        self.assertNotIn("OLED expression", provider_request.messages[0].text)
 
     def test_behavior_guidance_deduplicates_headers_and_uses_canonicalized_declared_titles(self) -> None:
         core = PalCore()
@@ -1585,9 +1603,11 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
-        guidance = system.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
+        reminder = str(prompt.metadata["runtime_reminder_text"])
+        guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
-        self.assertIn("\n<behavior_guidance>\n", system)
+        self.assertNotIn("OLED expression", system)
+        self.assertIn("\n<behavior_guidance>\n", reminder)
         self.assertEqual(guidance.count("Behavior guidance is behavior-owned routing metadata"), 1)
         self.assertEqual(guidance.count("Consider matching guidance before choosing a route"), 1)
         self.assertIn("- OLED expression: Use the OLED expression capability sparingly.", guidance)
