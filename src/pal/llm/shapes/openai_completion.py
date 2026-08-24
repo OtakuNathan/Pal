@@ -51,7 +51,6 @@ class OpenAICompletionCodec(ShapeCodecBase):
         messages: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
-            start = len(messages)
             if (
                 message.role == MessageRole.ASSISTANT
                 and message.replay is not None
@@ -75,10 +74,15 @@ class OpenAICompletionCodec(ShapeCodecBase):
                             "content": result.content,
                         }
                     )
+                spans.append(EncodedMessageSpan(message.message_id))
                 continue
+            role = "user" if message.role == MessageRole.DEVELOPER else role_value(message.role)
+            content = openai_content(message.parts)
+            if role == "user":
+                content = _openai_user_blocks(content)
             payload: dict[str, Any] = {
-                "role": role_value(message.role),
-                "content": openai_content(message.parts),
+                "role": role,
+                "content": content,
             }
             calls = tool_calls(message)
             if calls:
@@ -93,11 +97,11 @@ class OpenAICompletionCodec(ShapeCodecBase):
                     }
                     for call in calls
                 ]
-            messages.append(payload)
+            targets = _append_chat_message(messages, payload)
             spans.append(
                 EncodedMessageSpan(
                     message.message_id,
-                    tuple(("messages", index) for index in range(start, len(messages))),
+                    targets,
                 )
             )
         if not messages:
@@ -121,6 +125,44 @@ class OpenAICompletionCodec(ShapeCodecBase):
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":
         return OpenAICompletionDecoder(context)
+
+
+def _openai_user_blocks(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [dict(block) for block in content if isinstance(block, Mapping)]
+    text = str(content or "")
+    return [{"type": "text", "text": text}] if text else []
+
+
+def _append_chat_message(
+    messages: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> tuple[tuple[str | int, ...], ...]:
+    role = str(payload.get("role") or "")
+    content = payload.get("content")
+    if (
+        role == "user"
+        and messages
+        and messages[-1].get("role") == "user"
+        and isinstance(messages[-1].get("content"), list)
+        and isinstance(content, list)
+    ):
+        message_index = len(messages) - 1
+        previous = messages[-1]["content"]
+        start = len(previous)
+        previous.extend(content)
+        return tuple(
+            ("messages", message_index, "content", index)
+            for index in range(start, len(previous))
+        )
+    messages.append(payload)
+    message_index = len(messages) - 1
+    if isinstance(content, list):
+        return tuple(
+            ("messages", message_index, "content", index)
+            for index in range(len(content))
+        )
+    return (("messages", message_index),) if content else ()
 
 
 class OpenAICompletionDecoder:

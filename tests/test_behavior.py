@@ -1562,7 +1562,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
             PromptAssemblyContext(),
             max_output_tokens=128,
         )
-        self.assertEqual(provider_request.messages[-1].role.value, "user")
+        self.assertEqual(provider_request.messages[-1].role.value, "developer")
         self.assertEqual(provider_request.messages[-1].semantic_kind, "runtime_reminder")
         self.assertIn("OLED expression", provider_request.messages[-1].text)
         self.assertNotIn("OLED expression", provider_request.messages[0].text)

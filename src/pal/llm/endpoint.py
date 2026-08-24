@@ -112,9 +112,11 @@ class ShapeEndpointInvoker:
         )
         if not updates:
             raise RuntimeError("LLM codec completed without a response")
-        self.prompt_cache.observe(plan, updates[-1].response.usage)
-        self._report_usage(endpoint, request_id, updates[-1].response)
-        return updates[-1].response, updates
+        response = updates[-1].response
+        if response.finish_reason != LLMFinishReason.ERROR:
+            self.prompt_cache.record_success(plan, response.usage)
+        self._report_usage(endpoint, request_id, response)
+        return response, updates
 
     def invoke_updates(
         self,
@@ -165,13 +167,14 @@ class ShapeEndpointInvoker:
             yield update
         if last is None:
             raise RuntimeError("LLM stream completed without semantic output")
-        self.prompt_cache.observe(plan, last.response.usage)
-        self._report_usage(endpoint, request_id, last.response)
         if (
             not last.response.message.parts
             and last.response.finish_reason != LLMFinishReason.LENGTH
         ):
             raise RuntimeError("LLM stream completed without semantic output")
+        if last.response.finish_reason != LLMFinishReason.ERROR:
+            self.prompt_cache.record_success(plan, last.response.usage)
+        self._report_usage(endpoint, request_id, last.response)
 
     def _transport(self) -> LLMJSONTransportPort:
         if self.transport is None:

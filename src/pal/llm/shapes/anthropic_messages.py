@@ -14,6 +14,7 @@ from pal.llm.ir import (
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
+    PromptRegionIR,
     ReasoningPartIR,
     TextPartIR,
     ThinkingLevel,
@@ -41,7 +42,11 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         messages: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
-            if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
+            if message.role == MessageRole.SYSTEM or (
+                message.role == MessageRole.DEVELOPER
+                and not messages
+                and message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+            ):
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                 if text:
                     system_parts.append({"type": "text", "text": text})
@@ -53,6 +58,22 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     )
                 else:
                     spans.append(EncodedMessageSpan(message.message_id))
+                continue
+            if message.role == MessageRole.DEVELOPER:
+                # Anthropic Messages has no generally available developer
+                # role. Preserve chronological placement by degrading runtime
+                # developer guidance to a distinct user content block. Keeping
+                # it distinct lets a cache marker remain on the immutable user
+                # block immediately before this dynamic suffix.
+                blocks = _anthropic_user_content(message.parts)
+                if blocks:
+                    _append_message(messages, "user", blocks)
+                spans.append(
+                    EncodedMessageSpan(
+                        message.message_id,
+                        (_last_message_block_path(messages),) if blocks else (),
+                    )
+                )
                 continue
             if message.role == MessageRole.TOOL:
                 blocks = [

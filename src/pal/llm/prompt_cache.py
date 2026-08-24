@@ -42,6 +42,14 @@ class PromptCachePlan:
     breakpoints: tuple[PromptCacheBreakpoint, ...] = ()
     decision: str = "disabled"
     estimated_prefix_tokens: int = 0
+    plan_sequence: int = 0
+    confirmed_message_id: str = ""
+    candidate_message_id: str = ""
+    confirmed_prefix_tokens: int = 0
+    candidate_prefix_tokens: int = 0
+    reprocessed_delta_tokens: int = 0
+    projected_reprocessed_tokens: int = 0
+    estimated_net_tokens: float = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -50,10 +58,14 @@ class PromptCachePlan:
 
 @dataclass
 class _ScopeStats:
-    eligible_requests: int = 0
     observations: deque[tuple[float, int, int]] = field(
         default_factory=lambda: deque(maxlen=8)
     )
+    confirmed_message_id: str = ""
+    confirmed_prefix_tokens: int = 0
+    confirmed_sequence: int = 0
+    next_plan_sequence: int = 0
+    accumulated_reprocessed_tokens: int = 0
     last_decision: str = ""
     last_access_at: float = field(default_factory=time.monotonic)
 
@@ -65,23 +77,9 @@ class _ScopeStats:
     def cache_hit_requests(self) -> int:
         return sum(cached > 0 for _, cached, _ in self.observations)
 
-    @property
-    def cached_tokens(self) -> int:
-        return sum(cached for _, cached, _ in self.observations)
-
-    @property
-    def cache_write_tokens(self) -> int:
-        return sum(written for _, _, written in self.observations)
-
     def prune(self, *, now: float, ttl_seconds: float) -> None:
         while self.observations and now - self.observations[0][0] > ttl_seconds:
             self.observations.popleft()
-
-    @property
-    def predicted_net_tokens(self) -> float:
-        # Coarse provider-independent economics: a cached read saves roughly
-        # 90%; an explicit write costs roughly a 25% premium.
-        return self.cached_tokens * 0.9 - self.cache_write_tokens * 0.25
 
 
 @dataclass
@@ -91,7 +89,6 @@ class PromptCacheCoordinator:
     minimum_prefix_tokens: int = 1024
     rolling_threshold_tokens: int = 4096
     rolling_net_threshold_tokens: int = 1024
-    reprobe_every: int = 4
     observation_ttl_seconds: float = 30.0 * 60.0
     max_scope_count: int = 256
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
@@ -114,11 +111,6 @@ class PromptCacheCoordinator:
             message
             for message in request.messages
             if message.prompt_region == PromptRegionIR.STABLE_SYSTEM
-        ]
-        settled = [
-            message
-            for message in request.messages
-            if message.prompt_region == PromptRegionIR.SETTLED_HISTORY
         ]
         active = [
             message
@@ -157,39 +149,102 @@ class PromptCacheCoordinator:
             and bool(active)
             and estimated_prefix_tokens >= rolling_threshold
         )
-        rolling_enabled = False
         decision = "stable_only" if explicit_breakpoints else "provider_automatic"
+        plan_sequence = 0
+        confirmed_message_id = ""
+        candidate_message_id = ""
+        confirmed_prefix_tokens = 0
+        candidate_prefix_tokens = estimated_prefix_tokens
+        reprocessed_delta_tokens = 0
+        projected_reprocessed_tokens = 0
+        estimated_net_tokens = 0.0
         with self._lock:
             now = time.monotonic()
             stats = self._stats.setdefault(scope_key, _ScopeStats())
             stats.last_access_at = now
             self._prune_scopes_locked(now=now, keep=scope_key)
-            if rolling_eligible:
-                stats.eligible_requests += 1
-                rolling_enabled = (
-                    stats.observed_requests == 0
-                    or stats.predicted_net_tokens >= self.rolling_net_threshold_tokens
-                    or stats.eligible_requests % max(1, self.reprobe_every) == 0
+            stats.next_plan_sequence += 1
+            plan_sequence = stats.next_plan_sequence
+
+            message_positions = {
+                message.message_id: index
+                for index, message in enumerate(request.messages)
+            }
+            active_message = active[0] if active else None
+            active_position = (
+                message_positions.get(active_message.message_id, -1)
+                if active_message is not None
+                else -1
+            )
+            confirmed_position = message_positions.get(stats.confirmed_message_id, -1)
+            if stats.confirmed_message_id and (
+                confirmed_position < 0
+                or (active_position >= 0 and confirmed_position > active_position)
+            ):
+                _clear_confirmed(stats)
+
+            if stats.confirmed_message_id:
+                confirmed_message_id = stats.confirmed_message_id
+                confirmed_message = request.messages[
+                    message_positions[confirmed_message_id]
+                ]
+                confirmed_prefix_tokens = _estimate_request_prefix_tokens(
+                    request,
+                    through=[confirmed_message],
                 )
-                decision = "rolling_enabled" if rolling_enabled else "rolling_not_economic"
+                stats.confirmed_prefix_tokens = confirmed_prefix_tokens
+                breakpoints.append(
+                    PromptCacheBreakpoint("confirmed", confirmed_message_id)
+                )
+
+            if rolling_eligible:
+                assert active_message is not None
+                active_message_id = active_message.message_id
+                if not confirmed_message_id:
+                    candidate_message_id = active_message_id
+                    decision = "rolling_bootstrap"
+                elif active_message_id == confirmed_message_id:
+                    decision = "confirmed_reuse"
+                else:
+                    reprocessed_delta_tokens = max(
+                        0,
+                        candidate_prefix_tokens - confirmed_prefix_tokens,
+                    )
+                    projected_reprocessed_tokens = (
+                        stats.accumulated_reprocessed_tokens
+                        + reprocessed_delta_tokens
+                    )
+                    read_multiplier = _capability_float(
+                        context.capabilities,
+                        "read_multiplier",
+                        0.10,
+                    )
+                    write_multiplier = _capability_float(
+                        context.capabilities,
+                        "write_multiplier",
+                        1.25,
+                    )
+                    estimated_net_tokens = (
+                        projected_reprocessed_tokens
+                        * max(0.0, 1.0 - read_multiplier)
+                        - reprocessed_delta_tokens
+                        * max(0.0, write_multiplier - 1.0)
+                    )
+                    if estimated_net_tokens >= self.rolling_net_threshold_tokens:
+                        candidate_message_id = active_message_id
+                        decision = "rolling_advance"
+                    else:
+                        decision = "rolling_batching"
             elif explicit_breakpoints and not breakpoints:
                 decision = "below_provider_minimum"
+            elif explicit_breakpoints and confirmed_message_id:
+                decision = "confirmed_reuse"
             stats.last_decision = decision
 
-        if rolling_enabled:
-            settled_candidates = (
-                settled
-                if _supports_arbitrary_message_blocks(dialect)
-                else [message for message in settled if message.role.value == "user"]
+        if candidate_message_id:
+            breakpoints.append(
+                PromptCacheBreakpoint("candidate", candidate_message_id)
             )
-            if settled_candidates:
-                breakpoints.append(
-                    PromptCacheBreakpoint(
-                        "settled",
-                        settled_candidates[-1].message_id,
-                    )
-                )
-            breakpoints.append(PromptCacheBreakpoint("active", active[0].message_id))
 
         plan = PromptCachePlan(
             scope_key=scope_key,
@@ -198,6 +253,14 @@ class PromptCacheCoordinator:
             breakpoints=tuple(breakpoints),
             decision=decision,
             estimated_prefix_tokens=estimated_prefix_tokens,
+            plan_sequence=plan_sequence,
+            confirmed_message_id=confirmed_message_id,
+            candidate_message_id=candidate_message_id,
+            confirmed_prefix_tokens=confirmed_prefix_tokens,
+            candidate_prefix_tokens=candidate_prefix_tokens,
+            reprocessed_delta_tokens=reprocessed_delta_tokens,
+            projected_reprocessed_tokens=projected_reprocessed_tokens,
+            estimated_net_tokens=estimated_net_tokens,
         )
         self._remember(plan)
         return plan
@@ -256,21 +319,39 @@ class PromptCacheCoordinator:
                 )
         return EncodedRequest(payload, encoded.message_spans, extra_body)
 
-    def observe(self, plan: PromptCachePlan, usage: LLMUsageIR) -> None:
-        if not plan.enabled or not usage.reported:
+    def record_success(self, plan: PromptCachePlan, usage: LLMUsageIR) -> None:
+        if not plan.enabled:
             return
         with self._lock:
             stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
             now = time.monotonic()
             stats.last_access_at = now
             self._prune_scopes_locked(now=now, keep=plan.scope_key)
-            stats.observations.append(
-                (
-                    now,
-                    max(0, int(usage.cached_input_tokens)),
-                    max(0, int(usage.cache_write_input_tokens)),
+            if usage.reported:
+                stats.observations.append(
+                    (
+                        now,
+                        max(0, int(usage.cached_input_tokens)),
+                        max(0, int(usage.cache_write_input_tokens)),
+                    )
                 )
-            )
+            if (
+                plan.candidate_message_id
+                and plan.plan_sequence >= stats.confirmed_sequence
+            ):
+                stats.confirmed_message_id = plan.candidate_message_id
+                stats.confirmed_prefix_tokens = plan.candidate_prefix_tokens
+                stats.confirmed_sequence = plan.plan_sequence
+                stats.accumulated_reprocessed_tokens = 0
+            elif (
+                plan.reprocessed_delta_tokens > 0
+                and plan.confirmed_message_id
+                and plan.confirmed_message_id == stats.confirmed_message_id
+                and plan.plan_sequence >= stats.confirmed_sequence
+            ):
+                stats.accumulated_reprocessed_tokens += (
+                    plan.reprocessed_delta_tokens
+                )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -279,6 +360,11 @@ class PromptCacheCoordinator:
             self._prune_scopes_locked(now=now)
             observed = sum(item.observed_requests for item in self._stats.values())
             hit_requests = sum(item.cache_hit_requests for item in self._stats.values())
+            last_stats = (
+                self._stats.get(plan.scope_key)
+                if plan is not None
+                else None
+            )
             return {
                 "dialect": plan.dialect.value if plan is not None else "none",
                 "decision": plan.decision if plan is not None else "not_planned",
@@ -287,6 +373,27 @@ class PromptCacheCoordinator:
                 ),
                 "breakpoints": (
                     [item.label for item in plan.breakpoints] if plan is not None else []
+                ),
+                "confirmed_checkpoint": bool(
+                    last_stats and last_stats.confirmed_message_id
+                ),
+                "candidate_checkpoint": bool(
+                    plan and plan.candidate_message_id
+                ),
+                "confirmed_prefix_tokens": (
+                    last_stats.confirmed_prefix_tokens if last_stats else 0
+                ),
+                "candidate_delta_tokens": (
+                    plan.reprocessed_delta_tokens if plan is not None else 0
+                ),
+                "accumulated_reprocessed_tokens": (
+                    last_stats.accumulated_reprocessed_tokens if last_stats else 0
+                ),
+                "projected_reprocessed_tokens": (
+                    plan.projected_reprocessed_tokens if plan is not None else 0
+                ),
+                "estimated_net_tokens": (
+                    plan.estimated_net_tokens if plan is not None else 0.0
                 ),
                 "observed_request_count": observed,
                 "request_hit_rate": hit_requests / observed if observed else 0.0,
@@ -361,10 +468,6 @@ def _resolve_dialect(context: ShapeContext) -> PromptCacheDialect:
     }:
         return PromptCacheDialect.OPENAI_AUTOMATIC
     return PromptCacheDialect.NONE
-
-
-def _supports_arbitrary_message_blocks(dialect: PromptCacheDialect) -> bool:
-    return _uses_anthropic_breakpoints(dialect)
 
 
 def _supports_explicit_breakpoints(dialect: PromptCacheDialect) -> bool:
@@ -502,3 +605,22 @@ def _capability_int(
         return max(0, int(value)) if value is not None else int(default)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _capability_float(
+    capabilities: Mapping[str, Any],
+    name: str,
+    default: float,
+) -> float:
+    value = _prompt_cache_capabilities(capabilities).get(name)
+    try:
+        return max(0.0, float(value)) if value is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _clear_confirmed(stats: _ScopeStats) -> None:
+    stats.confirmed_message_id = ""
+    stats.confirmed_prefix_tokens = 0
+    stats.confirmed_sequence = 0
+    stats.accumulated_reprocessed_tokens = 0

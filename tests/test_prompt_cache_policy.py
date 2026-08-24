@@ -40,14 +40,40 @@ def _request() -> LLMRequestIR:
                 prompt_region=PromptRegionIR.ACTIVE_INPUT,
             ),
             LLMMessageIR(
-                MessageRole.USER,
+                MessageRole.DEVELOPER,
                 (TextPartIR("dynamic reminder"),),
+                semantic_kind="runtime_reminder",
                 prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
             ),
         ),
         tools=(),
         policy=GenerationPolicyIR(max_output_tokens=128),
         logical_scope_id="pal:resident",
+    )
+
+
+def _next_request(request: LLMRequestIR) -> LLMRequestIR:
+    return replace(
+        request,
+        messages=(
+            request.messages[0],
+            request.messages[1],
+            replace(
+                request.messages[2],
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (TextPartIR("reply " * 200),),
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.USER,
+                (TextPartIR("next " * 200),),
+                prompt_region=PromptRegionIR.ACTIVE_INPUT,
+            ),
+            request.messages[-1],
+        ),
     )
 
 
@@ -67,7 +93,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT
-    assert [item.label for item in plan.breakpoints] == ["stable", "settled", "active"]
+    assert [item.label for item in plan.breakpoints] == ["stable", "candidate"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
     marked = [
@@ -76,7 +102,17 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 3
+    assert len(marked) == 2
+    reminder = payload["input"][-1]
+    assert reminder["role"] == "developer"
+    assert "prompt_cache_breakpoint" not in reminder["content"][0]
+    current = next(
+        item
+        for item in payload["input"]
+        if item.get("role") == "user"
+        and str(item.get("content", [{}])[0].get("text") or "").startswith("current ")
+    )
+    assert "prompt_cache_breakpoint" in current["content"][0]
 
 
 def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
@@ -95,8 +131,8 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-    assert plan.decision == "rolling_enabled"
-    assert [item.label for item in plan.breakpoints] == ["stable", "settled", "active"]
+    assert plan.decision == "rolling_bootstrap"
+    assert [item.label for item in plan.breakpoints] == ["stable", "candidate"]
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
@@ -106,7 +142,7 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 3
+    assert len(marked) == 2
 
 
 def test_openrouter_pre56_automatic_cache_does_not_report_inert_breakpoints() -> None:
@@ -121,7 +157,7 @@ def test_openrouter_pre56_automatic_cache_does_not_report_inert_breakpoints() ->
     coordinator = PromptCacheCoordinator()
 
     first = coordinator.plan(request, context)
-    coordinator.observe(
+    coordinator.record_success(
         first,
         LLMUsageIR(
             input_tokens=10_000,
@@ -159,7 +195,20 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in message.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 3
+    assert len(marked) == 2
+    user_blocks = next(
+        message["content"]
+        for message in payload["messages"]
+        if message["role"] == "user"
+    )
+    assert user_blocks[-1]["text"] == "dynamic reminder"
+    assert "prompt_cache_breakpoint" not in user_blocks[-1]
+    current_block = next(
+        block
+        for block in user_blocks
+        if str(block.get("text") or "").startswith("current ")
+    )
+    assert "prompt_cache_breakpoint" in current_block
 
 
 def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() -> None:
@@ -184,7 +233,20 @@ def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() ->
         "cache_control" in block
         for message in payload["messages"]
         for block in message["content"]
-    ) == 2
+    ) == 1
+    assert all(
+        "dynamic reminder" not in str(block.get("text") or "")
+        for block in payload["system"]
+    )
+    assert payload["messages"][-1]["content"][-1]["text"] == "dynamic reminder"
+    assert "cache_control" not in payload["messages"][-1]["content"][-1]
+    current_block = next(
+        block
+        for message in payload["messages"]
+        for block in message["content"]
+        if str(block.get("text") or "").startswith("current ")
+    )
+    assert "cache_control" in current_block
 
 
 def test_openrouter_anthropic_alias_is_classified_by_wire_shape() -> None:
@@ -257,7 +319,7 @@ def test_openai_chat_uses_supported_text_block_breakpoints() -> None:
         for block in message.get("content", [])
         if "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 3
+    assert len(marked) == 2
 
 
 def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> None:
@@ -281,10 +343,135 @@ def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> Non
         for block in message["content"]
         if isinstance(block, dict) and "cache_control" in block
     ]
-    assert rolling_markers == ["5m", "5m"]
+    assert rolling_markers == ["5m"]
 
 
-def test_rolling_write_is_disabled_after_an_uneconomic_probe() -> None:
+def test_anthropic_uses_stable_confirmed_and_candidate_without_caching_reminder() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.ANTHROPIC_MESSAGES,
+        endpoint_id="anthropic",
+        model_id="claude-sonnet",
+        provider_id="Anthropic",
+    )
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    first = coordinator.plan(request, context)
+    coordinator.record_success(first, LLMUsageIR(reported=True))
+
+    next_request = _next_request(request)
+    second = coordinator.plan(next_request, context)
+    encoded = coordinator.inject(
+        AnthropicMessagesCodec().encode(next_request, context),
+        second,
+    )
+    payload = thaw_json(encoded.payload)
+
+    assert [item.label for item in second.breakpoints] == [
+        "stable",
+        "confirmed",
+        "candidate",
+    ]
+    assert sum(
+        "cache_control" in block
+        for block in payload["system"]
+    ) == 1
+    assert sum(
+        "cache_control" in block
+        for message in payload["messages"]
+        for block in message["content"]
+    ) == 2
+    assert payload["messages"][-1]["content"][-1]["text"] == "dynamic reminder"
+    assert "cache_control" not in payload["messages"][-1]["content"][-1]
+
+
+def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-sol",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=2_000)
+    first = coordinator.plan(request, context)
+    coordinator.record_success(
+        first,
+        LLMUsageIR(
+            input_tokens=10_000,
+            cache_write_input_tokens=5_000,
+            reported=True,
+        ),
+    )
+    next_request = _next_request(request)
+
+    second = coordinator.plan(next_request, context)
+    assert second.decision == "rolling_batching"
+    assert [item.label for item in second.breakpoints] == ["stable", "confirmed"]
+    coordinator.record_success(second, LLMUsageIR(input_tokens=1_000, reported=True))
+
+    advanced = None
+    for _ in range(20):
+        candidate = coordinator.plan(next_request, context)
+        if candidate.candidate_message_id:
+            advanced = candidate
+            break
+        coordinator.record_success(
+            candidate,
+            LLMUsageIR(input_tokens=1_000, reported=True),
+        )
+
+    assert advanced is not None
+    assert advanced.decision == "rolling_advance"
+    assert [item.label for item in advanced.breakpoints] == [
+        "stable",
+        "confirmed",
+        "candidate",
+    ]
+    coordinator.record_success(advanced, LLMUsageIR(input_tokens=1_000, reported=True))
+    reused = coordinator.plan(next_request, context)
+    assert reused.decision == "confirmed_reuse"
+    assert [item.label for item in reused.breakpoints] == ["stable", "confirmed"]
+
+
+def test_failed_candidate_is_not_promoted() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-sol",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator()
+
+    failed = coordinator.plan(request, context)
+    retry = coordinator.plan(request, context)
+
+    assert failed.decision == "rolling_bootstrap"
+    assert retry.decision == "rolling_bootstrap"
+    assert [item.label for item in retry.breakpoints] == ["stable", "candidate"]
+
+
+def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
+    request = _request()
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-sol",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator()
+    older = coordinator.plan(request, context)
+    newer = coordinator.plan(request, context)
+
+    coordinator.record_success(newer, LLMUsageIR(reported=True))
+    coordinator.record_success(older, LLMUsageIR(reported=True))
+
+    reused = coordinator.plan(request, context)
+    assert reused.decision == "confirmed_reuse"
+    assert reused.confirmed_message_id == request.messages[2].message_id
+
+
+def test_missing_confirmed_message_bootstraps_a_new_cache_epoch() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
@@ -294,19 +481,30 @@ def test_rolling_write_is_disabled_after_an_uneconomic_probe() -> None:
     )
     coordinator = PromptCacheCoordinator()
     first = coordinator.plan(request, context)
-    coordinator.observe(
-        first,
-        LLMUsageIR(
-            input_tokens=10_000,
-            cache_write_input_tokens=10_000,
-            reported=True,
+    coordinator.record_success(first, LLMUsageIR(reported=True))
+    compacted = replace(
+        request,
+        messages=(
+            request.messages[0],
+            LLMMessageIR(
+                MessageRole.USER,
+                (TextPartIR("compacted baseline " * 900),),
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.USER,
+                (TextPartIR("post compaction " * 900),),
+                prompt_region=PromptRegionIR.ACTIVE_INPUT,
+            ),
+            request.messages[-1],
         ),
     )
 
-    second = coordinator.plan(request, context)
+    reset = coordinator.plan(compacted, context)
 
-    assert second.decision == "rolling_not_economic"
-    assert [item.label for item in second.breakpoints] == ["stable"]
+    assert reset.decision == "rolling_bootstrap"
+    assert reset.confirmed_message_id == ""
+    assert [item.label for item in reset.breakpoints] == ["stable", "candidate"]
 
 
 def test_unknown_openai_compatible_provider_gets_no_unsupported_cache_fields() -> None:
@@ -337,7 +535,7 @@ def test_cache_economics_use_only_the_latest_eight_observations() -> None:
     coordinator = PromptCacheCoordinator()
     plan = coordinator.plan(request, context)
     for _ in range(10):
-        coordinator.observe(
+        coordinator.record_success(
             plan,
             LLMUsageIR(input_tokens=1_000, cached_input_tokens=1_000, reported=True),
         )

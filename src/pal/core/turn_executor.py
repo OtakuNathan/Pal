@@ -1076,7 +1076,7 @@ class TurnExecutor:
         tail_messages = (
             [
                 LLMMessageIR(
-                    role=MessageRole.USER,
+                    role=MessageRole.DEVELOPER,
                     parts=(TextPartIR(runtime_reminder),),
                     semantic_kind="runtime_reminder",
                     prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
@@ -1085,11 +1085,14 @@ class TurnExecutor:
             if runtime_reminder
             else []
         )
+        # Keep every ACTIVE_DYNAMIC projection after ACTIVE_INPUT. The active
+        # user message is the rolling checkpoint: once this turn settles, its
+        # provider prefix must still match before next turn's dynamic suffix.
         prompt_messages = [
             *stable_messages,
             *settled_messages,
-            *contextual_messages,
             *active_messages,
+            *contextual_messages,
             *tail_messages,
         ]
         metadata = dict(prompt.metadata)

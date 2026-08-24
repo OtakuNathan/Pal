@@ -234,8 +234,8 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 "stable_system",
                 "settled_history",
                 "settled_history",
-                "active_dynamic",
                 "active_input",
+                "active_dynamic",
             ],
         )
         self.assertEqual(
@@ -244,8 +244,8 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 "stable bunshin contract",
                 "prior assignment step",
                 "prior step completed",
-                "dynamic role working state",
                 "inspect the assigned module",
+                "dynamic role working state",
             ],
         )
 
