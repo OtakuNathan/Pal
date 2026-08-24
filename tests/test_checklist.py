@@ -149,8 +149,9 @@ class TestChecklistCapabilities:
     def test_tool_guidance_is_a_concise_local_contract(self):
         blueprint = ChecklistIntrospectionProvider.upsert.__capability_action_blueprints__[0]
         assert blueprint.guidance is not None
-        assert blueprint.guidance.purpose == "Create or replace Pal's active checklist."
-        assert "task-flow guidance" in blueprint.guidance.use_when
+        assert blueprint.guidance.purpose == "Create or replace Pal's active execution-cursor checklist."
+        assert "before the first mutation" in blueprint.guidance.use_when
+        assert "at least two concrete execution steps" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when
         assert "bunshin_start_workflow" not in blueprint.guidance.use_when
         assert "remember_memory" not in blueprint.guidance.do_not_use_when
@@ -209,6 +210,10 @@ class TestChecklistCapabilities:
         assert cleared.status == RuntimeStatus.OK
         assert cleared.structured is not None
         assert cleared.structured["cleared"] is True
+        assert cleared.structured["retired_checklist"]["active"] is False
+        assert cleared.structured["retired_checklist"]["plan"] == [
+            {"step": "a", "status": "pending"},
+        ]
         assert cleared.structured["echo"] == {
             "markdown": "Checklist cleared.",
             "tag": "checklist",
@@ -223,6 +228,10 @@ class TestChecklistCapabilities:
         repeated = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
         assert repeated.structured == {"cleared": False}
 
+        clear_blueprint = ChecklistIntrospectionProvider.clear.__capability_action_blueprints__[0]
+        assert "cancelled, replaced, or made stale" in clear_blueprint.guidance.use_when
+        assert "still expected to continue" in clear_blueprint.guidance.do_not_use_when
+
 
 class TestChecklistPrompt:
     def test_task_flow_matches_checklist_lifecycle_guidance(self):
@@ -230,16 +239,19 @@ class TestChecklistPrompt:
 
         fragments = provider.build_prompt_fragments(PromptAssemblyContext())
 
-        assert len(fragments) == 1
-        task_flow = fragments[0]
+        assert len(fragments) == 2
+        operating_rule, task_flow = fragments
+        assert operating_rule.section == "operating_rules"
+        assert "you must use Pal's checklist as the work cursor" in operating_rule.content
+        assert "before the first mutating action" in operating_rule.content
         assert task_flow.section == "task_flow"
-        assert "requires doing or changing things" in task_flow.content
-        assert "meaningful side effects" in task_flow.content
-        assert "checklist_upsert" in task_flow.content
         assert "checklist_check" in task_flow.content
         assert "checklist_clear" in task_flow.content
+        assert "Cancellation, replacement, or staleness" in task_flow.content
+        assert "do not finish remaining items" in task_flow.content
+        assert "summarize to the user what was done" in task_flow.content
         assert "simple answer" in task_flow.content
-        assert "never authority or evidence" in task_flow.content
+        assert "never truth, evidence, or permission" in task_flow.content
 
     def test_active_checklist_is_projected_only_in_runtime_reminder_tail(self):
         service = ChecklistService()
@@ -253,8 +265,8 @@ class TestChecklistPrompt:
 
         fragments = provider.build_prompt_fragments(PromptAssemblyContext())
 
-        assert len(fragments) == 2
-        reminder = fragments[1]
+        assert len(fragments) == 3
+        reminder = fragments[2]
         assert reminder.metadata["prompt_target"] == "runtime_reminder"
         assert reminder.metadata["block_id"] == "checklist_state"
         assert "Checklist progress 1/2" in reminder.content
@@ -263,6 +275,8 @@ class TestChecklistPrompt:
         assert "⬜ apply <the change>" not in reminder.content
         assert 'authority="execution_cursor"' in reminder.content
         assert 'trusted_as_evidence="false"' in reminder.content
+        assert "On cancellation, replacement, or staleness" in reminder.content
+        assert "retired checklist" in reminder.content
 
     def test_clear_retires_checklist_from_next_prompt_tail(self):
         core = PalCore()
@@ -281,6 +295,9 @@ class TestChecklistPrompt:
         service.clear()
         retired_prompt = core.build_canonical_prompt(PromptAssemblyContext())
 
+        assert active_prompt.messages[0].text == retired_prompt.messages[0].text
+        assert "Checklist work cursor" in active_prompt.messages[0].text
+        assert "before the first mutating action" in active_prompt.messages[0].text
         assert retired_prompt.metadata["reminder_sections"] == ()
         assert retired_prompt.metadata["runtime_reminder_text"] == ""
 

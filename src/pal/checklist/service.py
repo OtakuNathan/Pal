@@ -31,7 +31,7 @@ class CheckOutcome:
 
 
 class ChecklistService:
-    """In-memory scratchpad checklist for Pal's own multi-step work.
+    """In-memory execution-cursor checklist for Pal's own multi-step work.
 
     Plain runtime memory: not persisted, not projected into L2/memory, and
     never routed by a manager. The active plan is a single slot because Pal
@@ -39,10 +39,10 @@ class ChecklistService:
 
     The item shape borrows bunshin's checklist format
     (``{"plan": [{"step": ..., "status": ...}]}``) so the shapes stay
-    interoperable, but this is deliberately NOT a cursor: no gating, no
-    ordering enforcement, no external authority. Pal opens a list when work
-    is fragmented but easy, ticks items off as they finish, verifies at the
-    end, and clears it.
+    interoperable. It is a non-authoritative cursor: it does not gate actions,
+    enforce ordering, prove completion, or grant external authority. Pal opens
+    a list for multi-step side-effecting work, ticks items off as they finish,
+    settles completed or abandoned work, and clears it.
     """
 
     MAX_ITEMS = 64

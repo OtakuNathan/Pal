@@ -104,8 +104,11 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
-            purpose="Create or replace Pal's active checklist.",
-            use_when="The task-flow guidance calls for a checklist, or its concrete steps have materially changed.",
+            purpose="Create or replace Pal's active execution-cursor checklist.",
+            use_when=(
+                "Required before the first mutation when a task has at least two concrete execution steps "
+                "and any planned step can produce side effects; also use when the active steps materially change."
+            ),
             do_not_use_when="The active checklist already matches the work.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
             next_tool_hints=(
@@ -227,7 +230,10 @@ class ChecklistIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="checklist_clear",
-                    use_when="The snapshot is complete and the work has been re-verified.",
+                    use_when=(
+                        "The snapshot is complete and the work has been verified, or the task was "
+                        "cancelled, replaced, or made stale and performed work has been reviewed."
+                    ),
                 ),
             ),
         ),
@@ -259,9 +265,12 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="clear",
         guidance=ToolGuidance(
-            purpose="Remove Pal's active checklist.",
-            use_when="The checklist has reached a terminal state defined by the task-flow guidance.",
-            do_not_use_when="Checklist work remains in progress.",
+            purpose="Retire Pal's terminal checklist and return its final snapshot for user-facing settlement.",
+            use_when=(
+                "Either all steps are complete and the task has been verified, or the task was cancelled, "
+                "replaced, or made stale and only the work actually performed has been reviewed."
+            ),
+            do_not_use_when="The active task is still expected to continue and checklist work remains in progress.",
             failure_next_steps="If inactive, this is an idempotent no-op. If uncertain, use checklist_show to inspect the current state.",
         ),
         execution=DIRECT_LOCAL_WRITE,
@@ -270,9 +279,14 @@ class ChecklistIntrospectionProvider:
     )
     def clear(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
+        retired = self.service.show()
         cleared = self.service.clear()
         payload = {"cleared": cleared}
         if cleared:
+            if retired is not None:
+                retired_payload = _snapshot_payload(retired)
+                retired_payload["active"] = False
+                payload["retired_checklist"] = retired_payload
             payload["echo"] = _checklist_echo("clear", None)
         return CapabilityResult(
             status=RuntimeStatus.OK,
