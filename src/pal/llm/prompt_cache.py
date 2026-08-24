@@ -179,6 +179,16 @@ class PromptCacheCoordinator:
     max_scope_count: int = 256
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
     _last_plan: PromptCachePlan | None = field(default=None, init=False, repr=False)
+    _last_plans_by_scope: dict[str, PromptCachePlan] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _last_requests_by_scope: dict[str, LLMRequestIR] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def plan(
@@ -197,7 +207,7 @@ class PromptCacheCoordinator:
         scope_key = _scope_key(request, context, dialect)
         if dialect == PromptCacheDialect.NONE:
             plan = PromptCachePlan(scope_key=scope_key, cache_key="", dialect=dialect)
-            self._remember(plan)
+            self._remember(plan, request=request)
             return plan
         if not _supports_explicit_breakpoints(dialect):
             plan = PromptCachePlan(
@@ -206,7 +216,7 @@ class PromptCacheCoordinator:
                 dialect=dialect,
                 decision="provider_automatic",
             )
-            self._remember(plan)
+            self._remember(plan, request=request)
             return plan
 
         spans = {span.message_id: span for span in encoded.message_spans}
@@ -394,7 +404,7 @@ class PromptCacheCoordinator:
             anchor=anchor_plan,
             frontier=frontier_plan,
         )
-        self._remember(plan)
+        self._remember(plan, request=request)
         return plan
 
     def inject(self, encoded: EncodedRequest, plan: PromptCachePlan) -> EncodedRequest:
@@ -577,26 +587,27 @@ class PromptCacheCoordinator:
         """Expose the current confirmed A lifetime without leaking its prefix."""
 
         with self._lock:
-            plan = self._last_plan
-            scope_parts = plan.scope_key.split("|", 2) if plan is not None else []
-            if (
-                plan is None
-                or (
-                    logical_scope_id
-                    and (not scope_parts or scope_parts[0] != logical_scope_id)
+            matching = [
+                (self._stats.get(scope_key), plan)
+                for scope_key, plan in self._last_plans_by_scope.items()
+                if _scope_key_matches(
+                    scope_key,
+                    logical_scope_id=logical_scope_id,
+                    endpoint_id=endpoint_id,
                 )
-                or (
-                    endpoint_id
-                    and (len(scope_parts) < 2 or scope_parts[1] != endpoint_id)
-                )
-            ):
+            ]
+            matching = [item for item in matching if item[0] is not None]
+            if not matching:
                 return {
                     "eligible": False,
                     "anchor_epoch": "",
                     "anchor_ttl_seconds": 0,
                     "prefix_tokens": 0,
                 }
-            stats = self._stats.get(plan.scope_key)
+            stats, plan = max(
+                matching,
+                key=lambda item: item[0].last_access_at,
+            )
             anchor = stats.anchor if stats is not None else None
             confirmed_fingerprint = (
                 anchor.confirmed_fingerprint if anchor is not None else ""
@@ -616,10 +627,11 @@ class PromptCacheCoordinator:
                     )
                 ),
             )
-            prefix_tokens = max(
-                anchor.confirmed_prefix_tokens if anchor is not None else 0,
-                plan.anchor.target_prefix_tokens,
-                plan.frontier.target_prefix_tokens,
+            # The reminder is specifically about confirmed A.  Candidate A
+            # and the same-turn B frontier may be larger, but neither is a
+            # durable prefix that the idle compact request can rely on.
+            prefix_tokens = (
+                anchor.confirmed_prefix_tokens if anchor is not None else 0
             )
             eligible = bool(
                 _supports_explicit_breakpoints(plan.dialect)
@@ -649,9 +661,107 @@ class PromptCacheCoordinator:
                 "dialect": plan.dialect.value,
             }
 
-    def _remember(self, plan: PromptCachePlan) -> None:
+    def confirmed_anchor_request(
+        self,
+        *,
+        logical_scope_id: str = "",
+        endpoint_id: str = "",
+    ) -> dict[str, Any]:
+        """Return the exact in-memory request prefix through confirmed A.
+
+        This is deliberately ephemeral.  It is used by resident compaction to
+        replay provider-identical bytes without persisting prompt material.
+        """
+
+        with self._lock:
+            candidates = [
+                (self._stats.get(scope_key), plan)
+                for scope_key, plan in self._last_plans_by_scope.items()
+                if _scope_key_matches(
+                    scope_key,
+                    logical_scope_id=logical_scope_id,
+                    endpoint_id=endpoint_id,
+                )
+            ]
+            candidates = [
+                (stats, plan)
+                for stats, plan in candidates
+                if stats is not None
+                and stats.anchor.confirmed_message_id
+                and stats.anchor.confirmed_fingerprint
+            ]
+            if not candidates:
+                return {}
+            stats, plan = max(
+                candidates,
+                key=lambda item: item[0].last_access_at,
+            )
+            ttl_seconds = _ttl_seconds(plan.anchor.ttl)
+            if (
+                stats.anchor.last_used_at <= 0
+                or ttl_seconds <= 0
+                or time.monotonic() - stats.anchor.last_used_at
+                >= ttl_seconds
+            ):
+                return {}
+            request = self._last_requests_by_scope.get(plan.scope_key)
+            if request is None:
+                return {}
+            anchor_id = stats.anchor.confirmed_message_id
+            anchor_index = next(
+                (
+                    index
+                    for index, message in enumerate(request.messages)
+                    if message.message_id == anchor_id
+                ),
+                None,
+            )
+            if anchor_index is None:
+                return {}
+            scope_parts = plan.scope_key.split("|")
+            return {
+                "request": replace(
+                    request,
+                    messages=request.messages[: anchor_index + 1],
+                    metadata={
+                        **dict(request.metadata),
+                        "preferred_endpoint_id": (
+                            scope_parts[1] if len(scope_parts) > 1 else ""
+                        ),
+                        "preferred_model_id": (
+                            scope_parts[2] if len(scope_parts) > 2 else ""
+                        ),
+                        "preferred_endpoint_source": "prompt_cache_replay",
+                        "endpoint_fallback_policy": "strict_preferred",
+                    },
+                ),
+                "anchor_message_id": anchor_id,
+                "anchor_fingerprint": stats.anchor.confirmed_fingerprint,
+                "prefix_tokens": stats.anchor.confirmed_prefix_tokens,
+                "dialect": plan.dialect.value,
+                "wire_shape": (
+                    scope_parts[3]
+                    if len(scope_parts) > 3
+                    else ""
+                ),
+                "scope_key": plan.scope_key,
+            }
+
+    def _remember(
+        self,
+        plan: PromptCachePlan,
+        *,
+        request: LLMRequestIR,
+    ) -> None:
         with self._lock:
             self._last_plan = plan
+            self._last_plans_by_scope[plan.scope_key] = plan
+            # Raw prompt replay is useful only for the singleton resident
+            # conversation.  Retaining full Bunshin requests for every scope
+            # would turn this small policy index into an accidental prompt
+            # archive with O(scope * context) memory use.
+            if plan.scope_key.split("|", 1)[0] == "pal:resident":
+                self._last_requests_by_scope[plan.scope_key] = request
 
     def _prune_scopes_locked(self, *, now: float, keep: str = "") -> None:
         for scope_key, stats in tuple(self._stats.items()):
@@ -662,6 +772,8 @@ class PromptCacheCoordinator:
                 and now - stats.last_access_at > self.observation_ttl_seconds
             ):
                 self._stats.pop(scope_key, None)
+                self._last_plans_by_scope.pop(scope_key, None)
+                self._last_requests_by_scope.pop(scope_key, None)
         maximum = max(1, int(self.max_scope_count))
         if len(self._stats) <= maximum:
             return
@@ -674,6 +786,8 @@ class PromptCacheCoordinator:
         )
         for _, scope_key in candidates[: max(0, len(self._stats) - maximum)]:
             self._stats.pop(scope_key, None)
+            self._last_plans_by_scope.pop(scope_key, None)
+            self._last_requests_by_scope.pop(scope_key, None)
 
 
 def _last_cacheable_span(
@@ -973,6 +1087,19 @@ def _scope_key(
             context.wire_shape.value,
             dialect.value,
         )
+    )
+
+
+def _scope_key_matches(
+    scope_key: str,
+    *,
+    logical_scope_id: str = "",
+    endpoint_id: str = "",
+) -> bool:
+    parts = str(scope_key or "").split("|", 2)
+    return not (
+        (logical_scope_id and (not parts or parts[0] != logical_scope_id))
+        or (endpoint_id and (len(parts) < 2 or parts[1] != endpoint_id))
     )
 
 

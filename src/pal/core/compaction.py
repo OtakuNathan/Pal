@@ -12,7 +12,13 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.llm.conversions import request_ir_from_prompt
-from pal.llm.ir import LLMRequestIR, MessageRole, PromptRegionIR
+from pal.llm.ir import (
+    LLMMessageIR,
+    LLMRequestIR,
+    MessageRole,
+    PromptRegionIR,
+    TextPartIR,
+)
 from pal.memory.contracts import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -63,6 +69,9 @@ class CompactionSnapshot:
     clock_kind: CompactionClockKind
     clock_value: int
     memory_items: tuple[tuple[L1TranscriptMessage, ...], ...] = ()
+    replay_request: LLMRequestIR | None = None
+    replay_dialect: str = ""
+    replay_wire_shape: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -75,6 +84,9 @@ class CompactionSnapshot:
         clock_kind: CompactionClockKind,
         clock_value: int,
         metadata: dict[str, Any] | None = None,
+        replay_request: LLMRequestIR | None = None,
+        replay_dialect: str = "",
+        replay_wire_shape: str = "",
     ) -> "CompactionSnapshot":
         l1_store = getattr(memory_service, "l1_store", None)
         raw_items = list(getattr(l1_store, "items", ()) or ())
@@ -103,6 +115,9 @@ class CompactionSnapshot:
             clock_kind=clock_kind,
             clock_value=max(0, int(clock_value or 0)),
             memory_items=memory_items,
+            replay_request=replay_request,
+            replay_dialect=str(replay_dialect or "").strip(),
+            replay_wire_shape=str(replay_wire_shape or "").strip(),
             metadata=deepcopy(metadata or {}),
         )
 
@@ -198,18 +213,35 @@ class CompactionEngine:
         consecutive_schema_failures = 0
 
         while attempts < max(1, int(self.max_attempts or 1)):
-            source = self.policy.build_source(
-                snapshot,
-                retained,
-                validation_error=validation_error,
-            ).strip()
+            source = (
+                ""
+                if snapshot.replay_request is not None
+                else self.policy.build_source(
+                    snapshot,
+                    retained,
+                    validation_error=validation_error,
+                ).strip()
+            )
             request = self._request(
                 snapshot,
                 source,
                 attempt=attempts + 1,
+                validation_error=validation_error,
             )
             advice = await _preflight(llm_runtime, request)
             if _preflight_requires_compaction(advice):
+                if snapshot.replay_request is not None:
+                    # The provider-identical replay is useful only while it
+                    # fits.  Fall back to the bounded frozen-L1 source so the
+                    # ordinary shrink policy can still recover an oversized
+                    # conversation instead of looping on an immutable replay.
+                    snapshot = replace(
+                        snapshot,
+                        replay_request=None,
+                        replay_dialect="",
+                        replay_wire_shape="",
+                    )
+                    continue
                 previous_size = len(source)
                 snapshot = _snapshot_for_budget_advice(snapshot, advice)
                 shrunk = self._shrink(
@@ -238,6 +270,15 @@ class CompactionEngine:
             if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
                 failures.append("endpoint:compact_required")
                 consecutive_schema_failures = 0
+                if snapshot.replay_request is not None:
+                    snapshot = replace(
+                        snapshot,
+                        replay_request=None,
+                        replay_dialect="",
+                        replay_wire_shape="",
+                    )
+                    validation_error = ""
+                    continue
                 snapshot = _snapshot_for_outcome(snapshot, outcome)
                 shrunk = self._shrink(
                     snapshot,
@@ -255,6 +296,15 @@ class CompactionEngine:
             if _is_output_truncation(finish_reason):
                 failures.append(f"output:{finish_reason or 'truncated'}")
                 consecutive_schema_failures = 0
+                if snapshot.replay_request is not None:
+                    snapshot = replace(
+                        snapshot,
+                        replay_request=None,
+                        replay_dialect="",
+                        replay_wire_shape="",
+                    )
+                    validation_error = ""
+                    continue
                 snapshot = _snapshot_for_outcome(snapshot, outcome)
                 shrunk = self._shrink(
                     snapshot,
@@ -348,6 +398,7 @@ class CompactionEngine:
         source: str,
         *,
         attempt: int,
+        validation_error: str = "",
     ) -> LLMRequestIR:
         visible_limit = compaction_visible_token_limit(snapshot)
         user_prompt = (
@@ -369,6 +420,16 @@ class CompactionEngine:
                 "preferred_endpoint_id"
             ),
             "preferred_model_id": snapshot.metadata.get("preferred_model_id"),
+            "preferred_endpoint_source": (
+                "prompt_cache_replay"
+                if snapshot.replay_request is not None
+                else None
+            ),
+            "endpoint_fallback_policy": (
+                "strict_preferred"
+                if snapshot.replay_request is not None
+                else None
+            ),
             "response_mode_hint": "operational",
             "purpose": "memory_compaction_engine",
             "compaction_policy": self.policy.policy_id,
@@ -377,12 +438,76 @@ class CompactionEngine:
             "compaction_clock_value": snapshot.clock_value,
             "max_output_recovery_enabled": False,
             "timeout_seconds": self.timeout_seconds,
+            # Replay requests are captured after endpoint model hooks.  The
+            # LLM runtime must not inject those instructions/tools a second
+            # time before sending the provider-identical A prefix.
+            "model_hooks_already_applied": (
+                True if snapshot.replay_request is not None else None
+            ),
         }
         metadata = {
             key: value
             for key, value in metadata.items()
             if value is not None
         }
+        if snapshot.replay_request is not None:
+            replay = snapshot.replay_request
+            replay_source = [
+                self.policy.system_prompt(snapshot).strip(),
+                "",
+                "## Source Semantics",
+                "The preceding resident conversation prefix and its closed tool protocol are the frozen L1 truth source for this compaction.",
+                "Do not call tools. Return the complete checkpoint directly as valid JSON.",
+            ]
+            if validation_error:
+                replay_source.extend(
+                    [
+                        "",
+                        "## Previous Output Validation Error",
+                        validation_error,
+                        "Return a complete corrected JSON object.",
+                    ]
+                )
+            replay_source.extend(
+                [
+                    "",
+                    "## Request Constraint",
+                    "The final visible JSON checkpoint for this request must not exceed "
+                    f"{visible_limit:,} tokens.",
+                ]
+            )
+            tail_role = (
+                MessageRole.DEVELOPER
+                if snapshot.replay_wire_shape == "openai_response"
+                else MessageRole.USER
+            )
+            tail = LLMMessageIR(
+                role=tail_role,
+                parts=(TextPartIR("\n".join(replay_source).strip()),),
+                semantic_kind="memory_compaction_request",
+                prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
+            )
+            return replace(
+                replay,
+                messages=(*replay.messages, tail),
+                policy=replace(
+                    replay.policy,
+                    max_output_tokens=max_output,
+                    temperature=0.0,
+                ),
+                model_hint=str(
+                    snapshot.metadata.get("preferred_model_id")
+                    or replay.model_hint
+                    or ""
+                )
+                or None,
+                logical_scope_id=str(
+                    snapshot.metadata.get("prompt_cache_scope_id")
+                    or replay.logical_scope_id
+                    or "pal:resident"
+                ).strip(),
+                metadata=metadata,
+            )
         request = request_ir_from_prompt(
             messages=[
                 {

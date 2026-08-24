@@ -132,6 +132,65 @@ async def _new_user_activity_removes_notice_and_allows_same_epoch_again() -> Non
     manager.close()
 
 
+def test_compaction_removes_visible_notice_without_rearming_epoch() -> None:
+    asyncio.run(_compaction_removes_visible_notice_without_rearming_epoch())
+
+
+async def _compaction_removes_visible_notice_without_rearming_epoch() -> None:
+    sleep = _ControlledSleep()
+    delivered = []
+    expired = []
+    manager = CacheWarmDeadlineManager(
+        cache_snapshot=_snapshot,
+        settings_provider=lambda: _Settings(),
+        has_active_turn=lambda: False,
+        deliver_notice=lambda notice: _capture(delivered, notice),
+        expire_notice=lambda notice: _capture(expired, notice),
+        sleep=sleep,
+    )
+    assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
+    await asyncio.sleep(0)
+    await sleep.release(0)
+
+    await manager.clear_for_compaction()
+
+    assert expired == delivered
+    assert not manager.schedule_after_turn_commit(
+        route=_route(),
+        turn_id="turn-2",
+    )
+
+
+def test_active_turn_defers_notice_instead_of_dropping_it() -> None:
+    asyncio.run(_active_turn_defers_notice_instead_of_dropping_it())
+
+
+async def _active_turn_defers_notice_instead_of_dropping_it() -> None:
+    settings = _Settings()
+    sleep = _ControlledSleep()
+    active = [True]
+    delivered = []
+    manager = CacheWarmDeadlineManager(
+        cache_snapshot=_snapshot,
+        settings_provider=lambda: settings,
+        has_active_turn=lambda: active[0],
+        deliver_notice=lambda notice: _capture(delivered, notice),
+        expire_notice=_discard,
+        sleep=sleep,
+    )
+    assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
+    await asyncio.sleep(0)
+
+    await sleep.release(0)
+    assert delivered == []
+    assert sleep.calls[1] == 5.0
+
+    active[0] = False
+    await sleep.release(1)
+    assert len(delivered) == 1
+    manager.close()
+
+
 def test_configuration_is_persistent_but_timer_state_is_not() -> None:
     settings = _Settings()
     manager = CacheWarmDeadlineManager(

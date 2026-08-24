@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +27,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.llm.models import LLMEndpointModel
+from pal.llm.model_hooks import ModelHook, ModelHookRegistry
 from pal.llm.response_hooks import ProviderResponseHookError
 from pal.llm.repository import RuntimeSettingRepository
 from pal.llm.runtime import EndpointResolver, LLMRuntime
@@ -235,6 +237,42 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
 
 
 class LLMRuntimeIRTests(unittest.TestCase):
+    def test_prepared_cache_replay_does_not_apply_model_hooks_twice(self) -> None:
+        endpoint = _endpoint()
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(endpoint,)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=_Invoker(),
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+        runtime.model_hooks = ModelHookRegistry(
+            {
+                endpoint.model_id: ModelHook(
+                    model_id=endpoint.model_id,
+                    developer_instructions=("one model hook",),
+                )
+            }
+        )
+        prepared = runtime._compile_request(endpoint, _request()).request
+        replay = replace(
+            prepared,
+            metadata={
+                **dict(prepared.metadata),
+                "model_hooks_already_applied": True,
+            },
+        )
+
+        compiled = runtime._compile_request(endpoint, replay).request
+
+        self.assertEqual(
+            [
+                message.text
+                for message in compiled.messages
+                if message.semantic_kind == "model_hook"
+            ],
+            ["one model hook"],
+        )
+
     def test_turn_failure_feedback_preserves_kind_without_inventing_partial_output(self) -> None:
         response = LLMResponseIR(
             LLMMessageIR(

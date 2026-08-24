@@ -840,15 +840,43 @@ class LLMRuntime(LLMRuntimePort):
             else {}
         )
 
+    def prompt_cache_confirmed_anchor_request(
+        self,
+        *,
+        logical_scope_id: str = "pal:resident",
+        endpoint_id: str = "",
+    ) -> dict[str, Any]:
+        prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
+        snapshot = getattr(prompt_cache, "confirmed_anchor_request", None)
+        active_endpoint = self.active_endpoint()
+        resolved_endpoint_id = str(endpoint_id or "").strip() or (
+            str(active_endpoint.endpoint_id)
+            if active_endpoint is not None
+            else ""
+        )
+        return (
+            dict(
+                snapshot(
+                    logical_scope_id=str(logical_scope_id or "").strip(),
+                    endpoint_id=resolved_endpoint_id,
+                )
+                or {}
+            )
+            if callable(snapshot)
+            else {}
+        )
+
     def _compile_request(
         self,
         endpoint: LLMEndpointModel,
         request: LLMRequestIR,
     ) -> PreparedLLMRequest:
         LLMEndpointSpec.from_value(endpoint)
-        hooked = self.model_hooks.apply(
-            endpoint.model_id,
-            replace(request, model_hint=endpoint.model_id),
+        endpoint_request = replace(request, model_hint=endpoint.model_id)
+        hooked = (
+            endpoint_request
+            if bool(request.metadata.get("model_hooks_already_applied"))
+            else self.model_hooks.apply(endpoint.model_id, endpoint_request)
         )
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)

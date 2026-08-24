@@ -209,6 +209,17 @@ class CacheWarmDeadlineManager:
         self.cancel()
         self._notified_epoch = ""
         self._ignored_epoch = ""
+        await self._expire_active_notice(notice)
+
+    async def clear_for_compaction(self) -> None:
+        notice = self._active_notice
+        self.cancel()
+        await self._expire_active_notice(notice)
+
+    async def _expire_active_notice(
+        self,
+        notice: CacheWarmDeadlineNotice | None,
+    ) -> None:
         if notice is not None:
             try:
                 await self.expire_notice(notice)
@@ -271,14 +282,30 @@ class CacheWarmDeadlineManager:
     ) -> None:
         try:
             await self.sleep(delay_seconds)
-            if generation != self._generation or self.has_active_turn():
+            if generation != self._generation:
+                return
+            while self.has_active_turn():
+                remaining_seconds = (
+                    expires_at - datetime.now(timezone.utc)
+                ).total_seconds()
+                if remaining_seconds <= 0:
+                    return
+                await self.sleep(min(5.0, remaining_seconds))
+                if generation != self._generation:
+                    return
+            if datetime.now(timezone.utc) >= expires_at:
                 return
             settings = self.settings()
             snapshot = dict(self.cache_snapshot() or {})
+            remaining_ttl = snapshot.get("anchor_remaining_ttl_seconds")
             if (
                 not settings.enabled
                 or str(snapshot.get("anchor_epoch") or "") != epoch
                 or not bool(snapshot.get("eligible"))
+                or (
+                    remaining_ttl is not None
+                    and int(remaining_ttl) <= 0
+                )
                 or int(snapshot.get("prefix_tokens") or 0)
                 < settings.min_prefix_tokens
                 or epoch in {self._ignored_epoch, self._notified_epoch}
@@ -290,7 +317,10 @@ class CacheWarmDeadlineManager:
                 turn_id=turn_id,
                 ttl_seconds=ttl_seconds,
                 lead_seconds=lead_seconds,
-                prefix_tokens=prefix_tokens,
+                prefix_tokens=max(
+                    0,
+                    int(snapshot.get("prefix_tokens") or prefix_tokens),
+                ),
                 expires_at=expires_at.isoformat(),
             )
             if await self.deliver_notice(notice):

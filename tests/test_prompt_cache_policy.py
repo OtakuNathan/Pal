@@ -885,6 +885,23 @@ def test_warm_deadline_snapshot_uses_confirmed_anchor_provider_ttl() -> None:
     assert openai_snapshot["anchor_ttl_seconds"] == 1_800
     assert 1_798 <= openai_snapshot["anchor_remaining_ttl_seconds"] <= 1_800
     assert openai_snapshot["anchor_epoch"]
+    assert openai_snapshot["prefix_tokens"] == (
+        openai_plan.anchor.target_prefix_tokens
+    )
+    replay = openai.confirmed_anchor_request(
+        logical_scope_id=request.logical_scope_id,
+        endpoint_id=openai_context.endpoint_id,
+    )
+    assert replay["anchor_message_id"] == request.messages[2].message_id
+    assert replay["request"].messages == request.messages[:3]
+    assert replay["wire_shape"] == WireShape.OPENAI_RESPONSE.value
+
+    # A large mutable same-turn frontier must not inflate an A-based reminder.
+    frontier_request = _active_tool_request(request)
+    openai.plan(frontier_request, openai_context)
+    assert openai.warm_deadline_snapshot()["prefix_tokens"] == (
+        openai_plan.anchor.target_prefix_tokens
+    )
     assert openai.warm_deadline_snapshot(
         logical_scope_id=request.logical_scope_id,
         endpoint_id=openai_context.endpoint_id,

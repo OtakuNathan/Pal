@@ -106,6 +106,52 @@ class TelegramInteractionStore:
             state=str(row["state"]),
         )
 
+    def list_open(
+        self,
+        *,
+        interaction_kind: str | None = None,
+    ) -> list[StoredTelegramInteraction]:
+        normalized_kind = str(interaction_kind or "").strip()
+        query = (
+            """
+            SELECT interaction_id, interaction_kind, target_json, actions_json,
+                   expires_at, state
+            FROM interactions
+            WHERE state = 'open' AND interaction_kind = ?
+            ORDER BY created_at ASC
+            """
+            if normalized_kind
+            else """
+            SELECT interaction_id, interaction_kind, target_json, actions_json,
+                   expires_at, state
+            FROM interactions
+            WHERE state = 'open'
+            ORDER BY created_at ASC
+            """
+        )
+        params = (normalized_kind,) if normalized_kind else ()
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            StoredTelegramInteraction(
+                interaction_id=str(row["interaction_id"]),
+                interaction_kind=str(row["interaction_kind"]),
+                target=_load_mapping(row["target_json"]),
+                actions={
+                    str(key): dict(value)
+                    for key, value in _load_mapping(row["actions_json"]).items()
+                    if isinstance(value, dict)
+                },
+                expires_at=(
+                    str(row["expires_at"])
+                    if row["expires_at"]
+                    else None
+                ),
+                state=str(row["state"]),
+            )
+            for row in rows
+        ]
+
     def set_state(self, interaction_id: str, state: str) -> None:
         normalized = str(state or "").strip()
         if normalized not in {"resolved", "superseded", "expired"}:

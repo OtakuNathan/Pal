@@ -356,6 +356,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _last_get_updates_activity_at: float = 0.0
     _get_updates_in_flight_started_at: float = 0.0
     _interaction_store: TelegramInteractionStore | None = field(default=None, init=False, repr=False)
+    _next_persisted_deadline_sweep_at: float = field(
+        default=0.0,
+        init=False,
+        repr=False,
+    )
     _turn_stream_text: dict[tuple[str, str, str, str], str] = field(default_factory=dict, init=False, repr=False)
     _tagged_message_targets: dict[tuple[str, str, str], dict[str, int]] = field(
         default_factory=dict,
@@ -410,6 +415,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._get_updates_in_flight_started_at = 0.0
         self._reconnect_attempts = 0
         self._reconnecting = False
+        self._next_persisted_deadline_sweep_at = 0.0
         if not self._can_start():
             self._polling_running = False
             return
@@ -954,6 +960,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._reconnecting = False
                     self.drop_pending_updates_on_start = False
                     logger.info("telegram polling started successfully")
+                    await self._expire_persisted_cache_deadlines_async()
                     if self._control_commands_manifest:
                         await self._apply_control_catalog_async({"commands": list(self._control_commands_manifest)})
                 except Exception as exc:
@@ -974,6 +981,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 first_attempt = False
                 try:
                     while self._stop_event is not None and not self._stop_event.is_set():
+                        await self._expire_persisted_cache_deadlines_async()
                         updater = getattr(app, "updater", None)
                         if updater is not None and not bool(getattr(updater, "running", False)):
                             self._last_poll_error = "polling_stopped"
@@ -1637,15 +1645,18 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     ) -> None:
         if self.application is None:
             return
-        await self._prune_interactive_messages_async()
         spec = payload.get("spec")
         if not isinstance(spec, InteractionMessageSpec):
             return
-        if kind in {"interactive_open", "interactive_update"}:
-            await self._open_or_update_interaction_async(response_handle, spec=spec, allow_update=(kind == "interactive_update"))
-            return
+        # Explicit deletion owns its target.  Pruning it first would replace
+        # the reminder with generic expiry text, forget the target, and make
+        # the following delete a deterministic no-op at the exact TTL.
         if kind == "interactive_expire" and bool(payload.get("delete")):
             await self._delete_interaction_async(spec)
+            return
+        await self._prune_interactive_messages_async()
+        if kind in {"interactive_open", "interactive_update"}:
+            await self._open_or_update_interaction_async(response_handle, spec=spec, allow_update=(kind == "interactive_update"))
             return
         if kind in {"interactive_resolve", "interactive_expire"}:
             await self._resolve_interaction_async(spec)
@@ -1717,6 +1728,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         target = self._restore_interaction(spec.interaction_id)
         if target is None:
             return
+        await self._delete_interaction_target_async(
+            spec.interaction_id,
+            target,
+        )
+
+    async def _delete_interaction_target_async(
+        self,
+        interaction_id: str,
+        target: dict[str, Any],
+    ) -> None:
         chat_id = _safe_int(target.get("chat_id"))
         message_id = _safe_int(target.get("message_id"))
         if chat_id is not None and message_id is not None:
@@ -1730,9 +1751,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self.last_delivery_error = str(exc)
                     return
         self.last_delivery_error = ""
-        super().forget_interaction_message(spec.interaction_id)
+        super().forget_interaction_message(interaction_id)
         if self._interaction_store is not None:
-            self._interaction_store.set_state(spec.interaction_id, "expired")
+            self._interaction_store.set_state(interaction_id, "expired")
 
     async def _edit_interaction_message_async(
         self,
@@ -1777,6 +1798,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 if isinstance(target, dict):
                     stale.append((interaction_id, target))
         for interaction_id, target in stale:
+            if str(target.get("interaction_kind") or "") == "cache_warm_deadline":
+                await self._delete_interaction_target_async(
+                    interaction_id,
+                    target,
+                )
+                continue
             await self._edit_interaction_message_async(
                 target,
                 spec=InteractionMessageSpec(
@@ -1790,6 +1817,44 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
             if self._interaction_store is not None:
                 self._interaction_store.set_state(interaction_id, "expired")
+
+    async def _expire_persisted_cache_deadlines_async(self) -> None:
+        if self.application is None or self._interaction_store is None:
+            return
+        current = time.monotonic()
+        if current < self._next_persisted_deadline_sweep_at:
+            return
+        try:
+            stored_deadlines = self._interaction_store.list_open(
+                interaction_kind="cache_warm_deadline"
+            )
+        except Exception as exc:
+            logger.warning(
+                "telegram cache-deadline expiry sweep failed: %s",
+                exc,
+            )
+            self._next_persisted_deadline_sweep_at = current + 30.0
+            return
+        next_delay = 30.0
+        for stored in stored_deadlines:
+            target = self._restore_interaction(stored.interaction_id)
+            if target is None:
+                continue
+            expires_at_monotonic = target.get("expires_at_monotonic")
+            if not isinstance(expires_at_monotonic, (int, float)):
+                continue
+            if not self.is_interaction_metadata_expired(target):
+                next_delay = min(
+                    next_delay,
+                    max(0.5, float(expires_at_monotonic) - current),
+                )
+                continue
+            next_delay = min(next_delay, 0.5)
+            await self._delete_interaction_target_async(
+                stored.interaction_id,
+                target,
+            )
+        self._next_persisted_deadline_sweep_at = time.monotonic() + next_delay
 
     def _forget_interactive_message(self, interaction_id: str) -> None:
         super().forget_interaction_message(interaction_id)
@@ -1821,6 +1886,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             actions=dict(metadata.get("actions") or {}),
             expires_at=spec.expires_at,
         )
+        if spec.interaction_kind == "cache_warm_deadline":
+            self._next_persisted_deadline_sweep_at = 0.0
 
     def _restore_interaction(self, interaction_id: str) -> dict[str, Any] | None:
         metadata = self._interactive_messages.get(interaction_id)

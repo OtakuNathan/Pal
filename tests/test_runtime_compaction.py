@@ -6,6 +6,7 @@ import asyncio
 import json
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 from pal.control import ControlAction, ControlRoute
@@ -28,6 +29,7 @@ from pal.core.turns import (
     LLMPreflightEffect,
     agent_turn_program,
 )
+from pal.core.turn_events import TURN_END
 from pal.foundation import EventEnvelope
 from pal.execution.session_state import FileDeliveryManifest, FileDeliverySpan
 from pal.llm import (
@@ -35,8 +37,12 @@ from pal.llm import (
     LLMPreflightAdvice,
 )
 from pal.llm.ir import (
+    GenerationPolicyIR,
     LLMMessageIR,
+    LLMRequestIR,
     MessageRole,
+    PromptRegionIR,
+    TextPartIR,
 )
 from pal.llm.runtime import LLMRuntime
 from pal.memory import (
@@ -433,6 +439,61 @@ class SharedCompactionEngineTests(unittest.TestCase):
 
         self.assertEqual(result.attempts, 1)
         self.assertEqual(len(llm.generate_requests), 1)
+
+    def test_replay_compact_required_falls_back_to_bounded_compaction_request(self) -> None:
+        service = _memory_with_turns()
+        replay_request = LLMRequestIR(
+            messages=(
+                LLMMessageIR(
+                    role=MessageRole.SYSTEM,
+                    parts=(TextPartIR("resident stable"),),
+                    prompt_region=PromptRegionIR.STABLE_SYSTEM,
+                ),
+                LLMMessageIR(
+                    role=MessageRole.USER,
+                    parts=(TextPartIR("resident anchor"),),
+                    prompt_region=PromptRegionIR.ACTIVE_INPUT,
+                ),
+            ),
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=1024),
+            logical_scope_id="pal:resident",
+        )
+        snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+            metadata={"prompt_cache_scope_id": "pal:resident"},
+            replay_request=replay_request,
+            replay_dialect="openrouter_openai_explicit",
+            replay_wire_shape="openai_response",
+        )
+        llm = _ScriptedLLM(
+            [
+                generation_result_from_values(
+                    text="",
+                    finish_reason=LLMFinishReason.COMPACT_REQUIRED,
+                ),
+                generation_result_from_values(text=_valid_pal_payload()),
+            ]
+        )
+
+        result = asyncio.run(
+            CompactionEngine(PalCompactionPolicy()).run(
+                snapshot,
+                llm_runtime=llm,
+                memory_service=service,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(
+            [request.logical_scope_id for request in llm.generate_requests],
+            ["pal:resident", "pal:resident:compaction"],
+        )
 
     def test_three_schema_attempts_are_independent_and_can_recover(self) -> None:
         service = _memory_with_turns()
@@ -1374,6 +1435,71 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertNotIn("full result retired", compaction_source)
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
+    def test_manual_compact_replays_confirmed_resident_anchor_and_settled_tail(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = MemoryService()
+        register_memory_with_core(core.context, service)
+        service.begin_l1_turn("warm-turn", user_text="warm user request")
+        active = service.active_l1_turn("warm-turn")
+        self.assertIsNotNone(active)
+        anchor = active.messages[0]
+        service.upsert_l1_assistant(
+            "warm-turn",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(TextPartIR("settled final reply"),),
+            ),
+        )
+        service.settle_l1_turn("warm-turn")
+        cached_request = LLMRequestIR(
+            messages=(
+                LLMMessageIR(
+                    role=MessageRole.SYSTEM,
+                    parts=(TextPartIR("resident stable system"),),
+                    prompt_region=PromptRegionIR.STABLE_SYSTEM,
+                ),
+                replace(
+                    anchor,
+                    prompt_region=PromptRegionIR.ACTIVE_INPUT,
+                ),
+            ),
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=1024),
+            model_hint="gpt-5.6-luna",
+            logical_scope_id="pal:resident",
+        )
+        llm = _ScriptedLLM(
+            [generation_result_from_values(text=_valid_pal_payload())]
+        )
+        llm.prompt_cache_confirmed_anchor_request = lambda **_kwargs: {
+            "request": cached_request,
+            "anchor_message_id": anchor.message_id,
+            "dialect": "openrouter_openai_explicit",
+            "wire_shape": "openai_response",
+        }
+        core.context.port_registry["llm:llm"] = llm
+
+        result = asyncio.run(
+            core.turn_executor.compact_memory_async(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
+            )
+        )
+
+        self.assertTrue(result.success)
+        request = llm.generate_requests[0]
+        self.assertEqual(request.logical_scope_id, "pal:resident")
+        self.assertEqual(request.messages[:2], cached_request.messages)
+        self.assertEqual(request.messages[2].text, "settled final reply")
+        self.assertEqual(request.messages[-1].role, MessageRole.DEVELOPER)
+        self.assertIn("Do not call tools", request.messages[-1].text)
+        self.assertEqual(
+            sum("warm user request" in message.text for message in request.messages),
+            1,
+        )
+
     def test_compaction_does_not_reproject_retained_active_results(self) -> None:
         core = PalCore()
         register_core_with_core(core)
@@ -1827,6 +1953,44 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
                 for item in core.state.diagnostics
             )
         )
+
+    def test_background_cache_deadline_starts_after_successful_turn_end(self) -> None:
+        async def run() -> list[str]:
+            core = PalCore()
+            register_core_with_core(core)
+            service = MemoryService()
+            register_memory_with_core(core.context, service)
+            core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
+            order: list[str] = []
+            core.context.turn_event_bus.subscribe(
+                TURN_END,
+                lambda _topic, _event: order.append("turn_end"),
+            )
+            core.cache_warm_deadline.schedule_after_turn_commit = (
+                lambda **_kwargs: order.append("deadline") or True
+            )
+            envelope = ChannelEnvelope(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": "background turn"},
+                    event_id="background-deadline-order",
+                ),
+                endpoint=EndpointConfig(
+                    endpoint_id="memory",
+                    channel_kind="memory",
+                    binding_key="memory",
+                ),
+                response_handle=ResponseHandle(endpoint_id="memory"),
+            )
+
+            await core.schedule_channel_turn_async(envelope)
+            task = core.state.turn_tasks[envelope.event.event_id]
+            await task
+            await asyncio.sleep(0)
+            return order
+
+        self.assertEqual(asyncio.run(run()), ["turn_end", "deadline"])
 
 
 if __name__ == "__main__":

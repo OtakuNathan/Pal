@@ -807,7 +807,16 @@ class PalCore:
             delivery_binding=channel_envelope.opening_delivery_binding,
         )
         self._begin_tool_result_turn(continuation)
-        return await self._run_turn_continuation_async(continuation)
+        background_task = self.state.turn_tasks.get(
+            channel_envelope.event.event_id
+        )
+        return await self._run_turn_continuation_async(
+            continuation,
+            schedule_deadline=(
+                background_task is None
+                or background_task is not asyncio.current_task()
+            ),
+        )
 
     def turn_execution_options(self) -> dict[str, Any]:
         return {
@@ -917,8 +926,9 @@ class PalCore:
             else self._derive_channel_control_scope_key(channel_envelope)
         )
         turn_status = "success"
+        outcome: TurnOutcome | None = None
         try:
-            await self.process_channel_turn_async(channel_envelope)
+            outcome = await self.process_channel_turn_async(channel_envelope)
         except asyncio.CancelledError:
             turn_status = "interrupted"
             self.turn_manager.cleanup_interrupted(turn_id, reason="interrupted")
@@ -943,6 +953,16 @@ class PalCore:
                 "reply_target": dict(channel_envelope.response_handle.reply_target),
                 "status": turn_status,
             })
+            if (
+                turn_status == "success"
+                and outcome is not None
+            ):
+                self._schedule_cache_warm_deadline_after_turn_success(
+                    outcome,
+                    event=channel_envelope.event,
+                    delivery_binding=delivery_binding,
+                    schedule_timer=not self.state.pending_channel_turns,
+                )
             self._queue_channel_status(channel_envelope, "working_stop")
             await self._start_next_queued_turn_async()
 
@@ -1513,7 +1533,7 @@ class PalCore:
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
-        self.cache_warm_deadline.cancel()
+        await self.cache_warm_deadline.clear_for_compaction()
         if self.turn_manager.latest_active_turn_id() is not None:
             await self._complete_compact_reply_async(
                 action,
@@ -1827,7 +1847,12 @@ class PalCore:
             opening_delivery_binding=opening_binding,
         )
 
-    async def _run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
+    async def _run_turn_continuation_async(
+        self,
+        continuation: TurnContinuation,
+        *,
+        schedule_deadline: bool = True,
+    ) -> TurnOutcome:
         current: EffectResult | None = None
         try:
             await self.turn_executor._ensure_l1_turn_async(
@@ -1847,9 +1872,16 @@ class PalCore:
                         outcome,
                         event=continuation.opening_event,
                         delivery_binding=continuation.delivery_binding,
+                        schedule_deadline=False,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
                     self.turn_executor.clear_execution_cursors(continuation)
+                    if schedule_deadline:
+                        self._schedule_cache_warm_deadline_after_turn_success(
+                            outcome,
+                            event=continuation.opening_event,
+                            delivery_binding=continuation.delivery_binding,
+                        )
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
         except asyncio.CancelledError:
@@ -2104,6 +2136,7 @@ class PalCore:
         *,
         event: EventEnvelope | None = None,
         delivery_binding: TurnDeliveryBinding | None = None,
+        schedule_deadline: bool = True,
     ) -> None:
         result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
         if (
@@ -2114,14 +2147,35 @@ class PalCore:
                 "Pal L1 working-set settlement failed; refusing to complete "
                 "the logical turn"
             )
+        if schedule_deadline:
+            self._schedule_cache_warm_deadline_after_turn_success(
+                outcome,
+                event=event,
+                delivery_binding=delivery_binding,
+                settled_result=result,
+            )
+
+    def _schedule_cache_warm_deadline_after_turn_success(
+        self,
+        outcome: TurnOutcome,
+        *,
+        event: EventEnvelope | None,
+        delivery_binding: TurnDeliveryBinding | None,
+        settled_result: Any | None = None,
+        schedule_timer: bool = True,
+    ) -> None:
         if (
-            str(getattr(result, "state", "")) == "settled"
-            and event is not None
+            settled_result is not None
+            and str(getattr(settled_result, "state", "")) != "settled"
+        ):
+            return
+        if (
+            event is not None
             and str(event.event_kind or "") == EventKind.USER_MESSAGE
             and str(event.source_kind or "") == SourceKind.CHANNEL
         ):
             self.state.compaction_user_turn_count += 1
-            if delivery_binding is not None:
+            if schedule_timer and delivery_binding is not None:
                 try:
                     self.cache_warm_deadline.schedule_after_turn_commit(
                         route=ControlRoute(

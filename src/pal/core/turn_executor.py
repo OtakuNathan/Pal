@@ -1131,6 +1131,14 @@ class TurnExecutor:
         return prompt
 
     def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
+        return self._resolve_llm_capabilities_for_endpoint(
+            getattr(continuation, "preferred_llm_endpoint_id", None)
+        )
+
+    def _resolve_llm_capabilities_for_endpoint(
+        self,
+        preferred_endpoint_id: str | None,
+    ) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
             return {}
@@ -1138,7 +1146,7 @@ class TurnExecutor:
         if not callable(resolver):
             return {}
         try:
-            facts = resolver(preferred_endpoint_id=continuation.preferred_llm_endpoint_id)
+            facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
         except TypeError:
             facts = resolver()
         except Exception:
@@ -1802,6 +1810,36 @@ class TurnExecutor:
                 None,
             )
         )
+        replay_request = None
+        replay_dialect = ""
+        replay_wire_shape = ""
+        if logical_scope_id == "pal:resident" and continuation is None:
+            replay_request, replay_dialect, replay_wire_shape = (
+                self._resident_compaction_replay_request(
+                    memory_service,
+                    llm_runtime=llm_runtime,
+                    logical_scope_id=logical_scope_id,
+                    preferred_endpoint_id=preferred_endpoint_id,
+                )
+            )
+            if replay_request is not None:
+                preferred_endpoint_id = (
+                    preferred_endpoint_id
+                    or str(
+                        replay_request.metadata.get("preferred_endpoint_id")
+                        or ""
+                    ).strip()
+                    or None
+                )
+                preferred_model_id = (
+                    preferred_model_id
+                    or str(
+                        replay_request.metadata.get("preferred_model_id")
+                        or replay_request.model_hint
+                        or ""
+                    ).strip()
+                    or None
+                )
         try:
             clock_value = max(
                 0,
@@ -1821,6 +1859,9 @@ class TurnExecutor:
                 "preferred_model_id": preferred_model_id,
                 "prompt_cache_scope_id": logical_scope_id,
             },
+            replay_request=replay_request,
+            replay_dialect=replay_dialect,
+            replay_wire_shape=replay_wire_shape,
         )
         execution_runtime = getattr(self.context, "execution_runtime", None)
         def current_l1_result_ids() -> tuple[str, ...]:
@@ -1881,3 +1922,74 @@ class TurnExecutor:
 
         self.clear_execution_cursors(continuation)
         return run_result
+
+    def _resident_compaction_replay_request(
+        self,
+        memory_service: Any,
+        *,
+        llm_runtime: Any,
+        logical_scope_id: str,
+        preferred_endpoint_id: str | None,
+    ) -> tuple[LLMRequestIR | None, str, str]:
+        reader = getattr(
+            llm_runtime,
+            "prompt_cache_confirmed_anchor_request",
+            None,
+        )
+        if not callable(reader):
+            return None, "", ""
+        try:
+            replay = dict(
+                reader(
+                    logical_scope_id=logical_scope_id,
+                    endpoint_id=str(preferred_endpoint_id or ""),
+                )
+                or {}
+            )
+        except Exception:
+            return None, "", ""
+        anchor_request = replay.get("request")
+        anchor_message_id = str(
+            replay.get("anchor_message_id") or ""
+        ).strip()
+        if not isinstance(anchor_request, LLMRequestIR) or not anchor_message_id:
+            return None, "", ""
+
+        try:
+            memory_pack = memory_service.build_pack(
+                MemoryPackRequest(turn_kind="chat")
+            )
+        except Exception:
+            return None, "", ""
+        capabilities = self._resolve_llm_capabilities_for_endpoint(
+            preferred_endpoint_id
+        )
+        suffix: list[LLMMessageIR] = []
+        anchor_found = False
+        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            projected = self._project_messages_for_prompt(
+                list(getattr(settled_turn, "messages", ()) or ()),
+                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
+                artifact_scope_key=logical_scope_id,
+                capabilities=capabilities,
+            )
+            for message in projected:
+                if anchor_found:
+                    suffix.append(
+                        replace(
+                            message,
+                            prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
+                        )
+                    )
+                elif message.message_id == anchor_message_id:
+                    anchor_found = True
+        if not anchor_found:
+            return None, "", ""
+        return (
+            replace(
+                anchor_request,
+                messages=(*anchor_request.messages, *suffix),
+            ),
+            str(replay.get("dialect") or "").strip(),
+            str(replay.get("wire_shape") or "").strip(),
+        )

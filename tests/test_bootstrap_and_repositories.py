@@ -4263,6 +4263,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ),
             ),
+            expires_at="2999-01-01T00:00:00+00:00",
         )
         await self.endpoint._apply_interactive_status_async(
             handle,
@@ -4270,6 +4271,9 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             payload={"spec": spec},
         )
         target = dict(self.endpoint._interactive_messages[spec.interaction_id])
+        self.endpoint._interactive_messages[spec.interaction_id][
+            "expires_at_monotonic"
+        ] = 1.0
 
         await self.endpoint._apply_interactive_status_async(
             handle,
@@ -4287,6 +4291,29 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             [{"chat_id": 42, "message_id": target["message_id"]}],
         )
         self.assertNotIn(spec.interaction_id, self.endpoint._interactive_messages)
+
+    async def test_telegram_restart_sweep_deletes_expired_cache_notice(self) -> None:
+        store = self.endpoint._interaction_store
+        self.assertIsNotNone(store)
+        store.put_open(
+            interaction_id="cache_warm_restart",
+            interaction_kind="cache_warm_deadline",
+            target={"chat_id": 42, "message_id": 1776},
+            actions={},
+            expires_at="2000-01-01T00:00:00+00:00",
+        )
+        self.endpoint._interactive_messages.clear()
+        self.endpoint._next_persisted_deadline_sweep_at = 0.0
+
+        await self.endpoint._expire_persisted_cache_deadlines_async()
+
+        deletes = [
+            payload
+            for kind, payload in self.fake_bot.actions
+            if kind == "delete_message"
+        ]
+        self.assertIn({"chat_id": 42, "message_id": 1776}, deletes)
+        self.assertIsNone(store.get_open("cache_warm_restart"))
 
     async def test_telegram_endpoint_health_reflects_missing_token_without_starting_polling(self) -> None:
         other = TelegramChannelEndpoint(
