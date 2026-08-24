@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from pal.execution.tool_semantics import (
-    INDIRECT_LOCAL_WRITE,
-)
-from pal.execution.tool_facade import ToolGuidance
-
-from pal.execution.generated_tool_models import (
-    CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
-)
-
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
+from pal.execution.generated_tool_models import (
+    CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput,
+    CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
+)
+from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_semantics import INDIRECT_LOCAL_WRITE
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -93,6 +90,84 @@ class CoreIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Core configuration updated", {"mode": self.core.state.mode}),
         )
 
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="module",
+        action_name="cache_warm_deadline",
+        guidance=ToolGuidance(
+            purpose="Inspect the hot prompt-cache compact reminder configuration and current in-memory deadline.",
+            use_when="Checking whether Pal will suggest compacting before the confirmed A cache expires.",
+            do_not_use_when="Checking general token usage (use llm_usage). Triggering compaction now (use the compact control action).",
+            failure_next_steps="If no timer is scheduled, inspect whether A is confirmed, the provider exposes an A TTL, and the prefix exceeds the configured minimum.",
+        ),
+        aliases=("core_cache_warm_deadline",),
+    )
+    def cache_warm_deadline(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        snapshot = self.core.cache_warm_deadline.inspect()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="cache warm deadline status",
+            structured=snapshot,
+            llm_text=render_titled_structured_for_llm(
+                "Cache warm deadline",
+                snapshot,
+            ),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="configure_cache_warm_deadline",
+        guidance=ToolGuidance(
+            purpose="Enable, disable, or tune Pal's compact reminder before the confirmed A prompt cache expires.",
+            use_when="The user asks to change hot-cache compact reminders, their lead time, or their minimum prompt size.",
+            do_not_use_when="Triggering compaction immediately. Inspect first when the requested setting is ambiguous.",
+            failure_next_steps="Use core_cache_warm_deadline to inspect valid current values; lead_seconds must be at least 30 and min_prefix_tokens at least 1024.",
+        ),
+        InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput,
+        aliases=("core_configure_cache_warm_deadline",),
+        execution=INDIRECT_LOCAL_WRITE,
+    )
+    def configure_cache_warm_deadline(
+        self,
+        call: IntrospectionCall,
+    ) -> IntrospectionResult:
+        try:
+            snapshot = self.core.cache_warm_deadline.configure(
+                enabled=(
+                    bool(call.args["enabled"])
+                    if call.args.get("enabled") is not None
+                    else None
+                ),
+                lead_seconds=(
+                    int(call.args["lead_seconds"])
+                    if call.args.get("lead_seconds") is not None
+                    else None
+                ),
+                min_prefix_tokens=(
+                    int(call.args["min_prefix_tokens"])
+                    if call.args.get("min_prefix_tokens") is not None
+                    else None
+                ),
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text=str(exc),
+                llm_text=str(exc),
+            )
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="cache warm deadline configuration updated",
+            structured=snapshot,
+            llm_text=render_titled_structured_for_llm(
+                "Cache warm deadline configuration updated",
+                snapshot,
+            ),
+        )
+
 
 def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:
     core = provider.core
@@ -117,7 +192,12 @@ def register_with_core(core: PalCore) -> ModuleHandle:
         detachable=False,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
+        control_action_handlers={
+            "cache_warm_deadline_ignore": core.handle_cache_warm_deadline_ignore,
+            "cache_warm_deadline_disable": core.handle_cache_warm_deadline_disable,
+        },
         ports={"core": core},
+        shutdown_sync=core.close,
     )
     core.context.register_module(handle)
     core.context.prompt_fragment_registry.register(prompt_provider)

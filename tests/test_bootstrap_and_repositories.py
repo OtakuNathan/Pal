@@ -4247,6 +4247,47 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edit["text"], "This reset request expired.")
         self.assertIsNone(edit["reply_markup"])
 
+    async def test_telegram_explicit_delete_expiration_removes_interaction_message(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "42"},
+        )
+        spec = InteractionMessageSpec(
+            interaction_id="cache_warm_epoch_a",
+            interaction_kind="cache_warm_deadline",
+            text="Compact while the cache is warm.",
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Compact",
+                        action_key="control.compact.run",
+                    ),
+                ),
+            ),
+        )
+        await self.endpoint._apply_interactive_status_async(
+            handle,
+            kind="interactive_open",
+            payload={"spec": spec},
+        )
+        target = dict(self.endpoint._interactive_messages[spec.interaction_id])
+
+        await self.endpoint._apply_interactive_status_async(
+            handle,
+            kind="interactive_expire",
+            payload={"spec": spec, "delete": True},
+        )
+
+        deletes = [
+            payload
+            for kind, payload in self.fake_bot.actions
+            if kind == "delete_message"
+        ]
+        self.assertEqual(
+            deletes,
+            [{"chat_id": 42, "message_id": target["message_id"]}],
+        )
+        self.assertNotIn(spec.interaction_id, self.endpoint._interactive_messages)
+
     async def test_telegram_endpoint_health_reflects_missing_token_without_starting_polling(self) -> None:
         other = TelegramChannelEndpoint(
             endpoint=EndpointConfig(

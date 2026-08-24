@@ -14,6 +14,10 @@ from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.core.agent_turn_runtime import AgentTurnRuntime
+from pal.core.cache_warm_deadline import (
+    CacheWarmDeadlineManager,
+    CacheWarmDeadlineNotice,
+)
 from pal.core.contracts import CoreRuntimeState
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
@@ -452,6 +456,7 @@ class PalCore:
     agent_turn_runtime: AgentTurnRuntime = field(init=False)
     turn_executor: TurnExecutor = field(init=False)
     module_lifecycle: ModuleLifecycle = field(init=False)
+    cache_warm_deadline: CacheWarmDeadlineManager = field(init=False)
 
     def __post_init__(self) -> None:
         self.turn_manager = TurnManager(
@@ -490,6 +495,60 @@ class PalCore:
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
+        self.cache_warm_deadline = CacheWarmDeadlineManager(
+            cache_snapshot=self._prompt_cache_warm_deadline_snapshot,
+            settings_provider=self._runtime_settings_repository,
+            has_active_turn=lambda: bool(
+                self.state.active_turn_id or self.state.active_turns
+            ),
+            deliver_notice=self._deliver_cache_warm_deadline_notice_async,
+            expire_notice=self._expire_cache_warm_deadline_notice_async,
+        )
+
+    def close(self) -> None:
+        self.cache_warm_deadline.close()
+
+    def _runtime_settings_repository(self) -> Any | None:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        return getattr(llm_runtime, "settings_repository", None)
+
+    def _prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        snapshot = getattr(
+            llm_runtime,
+            "prompt_cache_warm_deadline_snapshot",
+            None,
+        )
+        return dict(snapshot() or {}) if callable(snapshot) else {}
+
+    async def _deliver_cache_warm_deadline_notice_async(
+        self,
+        notice: CacheWarmDeadlineNotice,
+    ) -> bool:
+        delivery = control_interactions.cache_warm_deadline_delivery(
+            notice.route,
+            epoch=notice.epoch,
+            prefix_tokens=notice.prefix_tokens,
+            lead_seconds=notice.lead_seconds,
+            expires_at=notice.expires_at,
+        )
+        return await self._deliver_control_delivery_async(
+            delivery,
+            require_provider=True,
+        )
+
+    async def _expire_cache_warm_deadline_notice_async(
+        self,
+        notice: CacheWarmDeadlineNotice,
+    ) -> bool:
+        delivery = control_interactions.cache_warm_deadline_expire_delivery(
+            notice.route,
+            epoch=notice.epoch,
+        )
+        return await self._deliver_control_delivery_async(
+            delivery,
+            require_provider=True,
+        )
 
     async def _after_tool_batch_async(self, continuation: TurnContinuation) -> None:
         from pal.core.interjection import inject_pending_interjection_async
@@ -708,6 +767,9 @@ class PalCore:
                 return
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
+        # Any new user activity makes the old idle-cache deadline irrelevant,
+        # even if this turn must queue behind the current one.
+        await self.cache_warm_deadline.clear_for_user_activity()
         channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         turn_id = channel_envelope.event.event_id
         async with self.state.channel_turn_transition_lock:
@@ -736,6 +798,7 @@ class PalCore:
     ) -> TurnOutcome:
         if self.state.resident_quiescing:
             raise RuntimeError("resident runtime is quiescing")
+        await self.cache_warm_deadline.clear_for_user_activity()
         channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
@@ -1450,6 +1513,7 @@ class PalCore:
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
+        self.cache_warm_deadline.cancel()
         if self.turn_manager.latest_active_turn_id() is not None:
             await self._complete_compact_reply_async(
                 action,
@@ -1499,6 +1563,40 @@ class PalCore:
             )
             if delivery is not None:
                 await self._deliver_control_delivery_async(delivery, fallback_route=action.route)
+
+    async def handle_cache_warm_deadline_ignore(
+        self,
+        action: ControlAction,
+    ) -> dict[str, Any]:
+        epoch = str(action.args.get("cache_epoch") or "").strip()
+        ignored = self.cache_warm_deadline.ignore(epoch)
+        message = (
+            "已忽略本轮热缓存 compact 提醒。"
+            if ignored
+            else "这条热缓存提醒已经失效。"
+        )
+        return {
+            "delivery": control_interactions.terminal_delivery_for_action(
+                action,
+                message,
+            )
+        }
+
+    async def handle_cache_warm_deadline_disable(
+        self,
+        action: ControlAction,
+    ) -> dict[str, Any]:
+        try:
+            self.cache_warm_deadline.configure(enabled=False)
+            message = "已关闭热缓存到期前的 compact 提醒。"
+        except Exception as exc:
+            message = f"关闭热缓存提醒失败：{exc}"
+        return {
+            "delivery": control_interactions.terminal_delivery_for_action(
+                action,
+                message,
+            )
+        }
 
     async def _handle_route_reply_async(self, action: ControlAction) -> None:
         route = action.route
@@ -1748,6 +1846,7 @@ class PalCore:
                     await self._schedule_post_turn_commit_async(
                         outcome,
                         event=continuation.opening_event,
+                        delivery_binding=continuation.delivery_binding,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
                     self.turn_executor.clear_execution_cursors(continuation)
@@ -2004,6 +2103,7 @@ class PalCore:
         outcome: TurnOutcome,
         *,
         event: EventEnvelope | None = None,
+        delivery_binding: TurnDeliveryBinding | None = None,
     ) -> None:
         result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
         if (
@@ -2021,6 +2121,28 @@ class PalCore:
             and str(event.source_kind or "") == SourceKind.CHANNEL
         ):
             self.state.compaction_user_turn_count += 1
+            if delivery_binding is not None:
+                try:
+                    self.cache_warm_deadline.schedule_after_turn_commit(
+                        route=ControlRoute(
+                            endpoint_id=delivery_binding.endpoint.endpoint_id,
+                            channel_kind=delivery_binding.endpoint.channel_kind,
+                            reply_target=dict(
+                                delivery_binding.response_handle.reply_target
+                            ),
+                            control_scope_key=delivery_binding.control_scope_key,
+                            correlation_id=delivery_binding.correlation_id,
+                        ),
+                        turn_id=str(outcome.commit_payload.turn_id),
+                    )
+                except Exception as exc:
+                    self.state.diagnostics.append(
+                        {
+                            "kind": "cache_warm_deadline.schedule_failed",
+                            "turn_id": str(outcome.commit_payload.turn_id),
+                            "error": f"{exc.__class__.__name__}: {exc}",
+                        }
+                    )
 
 def effect_result_to_observation(tool_result) -> "ToolObservation":
     from pal.core.turns import ToolObservation

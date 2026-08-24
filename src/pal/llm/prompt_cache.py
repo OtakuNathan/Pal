@@ -129,6 +129,7 @@ class _TrackStats:
     confirmed_fingerprint: str = ""
     confirmed_prefix_tokens: int = 0
     confirmed_sequence: int = 0
+    last_used_at: float = 0.0
     accumulated_reprocessed_tokens: int = 0
     last_decision: str = ""
 
@@ -137,6 +138,7 @@ class _TrackStats:
         self.confirmed_fingerprint = ""
         self.confirmed_prefix_tokens = 0
         self.confirmed_sequence = 0
+        self.last_used_at = 0.0
         self.accumulated_reprocessed_tokens = 0
         self.last_decision = ""
 
@@ -485,6 +487,7 @@ class PromptCacheCoordinator:
                 plan.anchor,
                 plan_sequence=plan.plan_sequence,
                 applied_breakpoint_ids=applied_breakpoint_ids,
+                observed_at=now,
             )
             if plan.frontier.epoch_key == stats.frontier_epoch:
                 _record_track_success(
@@ -492,6 +495,7 @@ class PromptCacheCoordinator:
                     plan.frontier,
                     plan_sequence=plan.plan_sequence,
                     applied_breakpoint_ids=applied_breakpoint_ids,
+                    observed_at=now,
                 )
 
     def snapshot(self) -> dict[str, Any]:
@@ -562,6 +566,87 @@ class PromptCacheCoordinator:
                     plan.frontier if plan is not None else None,
                     last_stats.frontier if last_stats else None,
                 ),
+            }
+
+    def warm_deadline_snapshot(
+        self,
+        *,
+        logical_scope_id: str = "",
+        endpoint_id: str = "",
+    ) -> dict[str, Any]:
+        """Expose the current confirmed A lifetime without leaking its prefix."""
+
+        with self._lock:
+            plan = self._last_plan
+            scope_parts = plan.scope_key.split("|", 2) if plan is not None else []
+            if (
+                plan is None
+                or (
+                    logical_scope_id
+                    and (not scope_parts or scope_parts[0] != logical_scope_id)
+                )
+                or (
+                    endpoint_id
+                    and (len(scope_parts) < 2 or scope_parts[1] != endpoint_id)
+                )
+            ):
+                return {
+                    "eligible": False,
+                    "anchor_epoch": "",
+                    "anchor_ttl_seconds": 0,
+                    "prefix_tokens": 0,
+                }
+            stats = self._stats.get(plan.scope_key)
+            anchor = stats.anchor if stats is not None else None
+            confirmed_fingerprint = (
+                anchor.confirmed_fingerprint if anchor is not None else ""
+            )
+            confirmed_message_id = (
+                anchor.confirmed_message_id if anchor is not None else ""
+            )
+            ttl_seconds = _ttl_seconds(plan.anchor.ttl)
+            remaining_ttl_seconds = max(
+                0,
+                int(
+                    ttl_seconds
+                    - max(
+                        0.0,
+                        time.monotonic()
+                        - (anchor.last_used_at if anchor is not None else 0.0),
+                    )
+                ),
+            )
+            prefix_tokens = max(
+                anchor.confirmed_prefix_tokens if anchor is not None else 0,
+                plan.anchor.target_prefix_tokens,
+                plan.frontier.target_prefix_tokens,
+            )
+            eligible = bool(
+                _supports_explicit_breakpoints(plan.dialect)
+                and confirmed_message_id
+                and confirmed_fingerprint
+                and ttl_seconds > 0
+            )
+            epoch_material = "|".join(
+                (
+                    plan.scope_key,
+                    confirmed_message_id,
+                    confirmed_fingerprint,
+                    str(anchor.confirmed_sequence if anchor is not None else 0),
+                )
+            )
+            return {
+                "eligible": eligible,
+                "anchor_epoch": (
+                    hashlib.sha256(epoch_material.encode("utf-8")).hexdigest()[:24]
+                    if eligible
+                    else ""
+                ),
+                "anchor_ttl": plan.anchor.ttl,
+                "anchor_ttl_seconds": ttl_seconds,
+                "anchor_remaining_ttl_seconds": remaining_ttl_seconds,
+                "prefix_tokens": prefix_tokens,
+                "dialect": plan.dialect.value,
             }
 
     def _remember(self, plan: PromptCachePlan) -> None:
@@ -757,6 +842,7 @@ def _record_track_success(
     *,
     plan_sequence: int,
     applied_breakpoint_ids: frozenset[str],
+    observed_at: float,
 ) -> None:
     if plan_sequence < stats.confirmed_sequence:
         return
@@ -768,8 +854,15 @@ def _record_track_success(
         stats.confirmed_fingerprint = plan.target_fingerprint
         stats.confirmed_prefix_tokens = plan.target_prefix_tokens
         stats.confirmed_sequence = plan_sequence
+        stats.last_used_at = observed_at
         stats.accumulated_reprocessed_tokens = 0
         return
+    if (
+        plan.confirmed_message_id
+        and plan.confirmed_message_id == stats.confirmed_message_id
+        and plan.confirmed_fingerprint == stats.confirmed_fingerprint
+    ):
+        stats.last_used_at = observed_at
     if plan.reprocessed_delta_tokens <= 0:
         return
     if (
@@ -956,3 +1049,13 @@ def _capability_float(
         return max(0.0, float(value)) if value is not None else float(default)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _ttl_seconds(value: str) -> int:
+    normalized = str(value or "").strip().lower()
+    match = re.fullmatch(r"(\d+)([smh])", normalized)
+    if match is None:
+        return 0
+    amount = int(match.group(1))
+    multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+    return max(0, amount * multiplier)

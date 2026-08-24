@@ -865,3 +865,53 @@ def test_prompt_cache_scope_accounting_is_lru_bounded() -> None:
         )
 
     assert coordinator.snapshot()["scope_count"] == 8
+
+
+def test_warm_deadline_snapshot_uses_confirmed_anchor_provider_ttl() -> None:
+    request = _request()
+    openai_context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-luna",
+        provider_id="OpenAI",
+    )
+    openai = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    openai_plan = openai.plan(request, openai_context)
+    _record_success(openai, openai_plan, LLMUsageIR(reported=True))
+
+    openai_snapshot = openai.warm_deadline_snapshot()
+    assert openai_snapshot["eligible"] is True
+    assert openai_snapshot["anchor_ttl"] == "30m"
+    assert openai_snapshot["anchor_ttl_seconds"] == 1_800
+    assert 1_798 <= openai_snapshot["anchor_remaining_ttl_seconds"] <= 1_800
+    assert openai_snapshot["anchor_epoch"]
+    assert openai.warm_deadline_snapshot(
+        logical_scope_id=request.logical_scope_id,
+        endpoint_id=openai_context.endpoint_id,
+    )["eligible"] is True
+    assert openai.warm_deadline_snapshot(
+        logical_scope_id=f"{request.logical_scope_id}:compaction",
+        endpoint_id=openai_context.endpoint_id,
+    )["eligible"] is False
+    assert openai.warm_deadline_snapshot(
+        logical_scope_id=request.logical_scope_id,
+        endpoint_id="another-endpoint",
+    )["eligible"] is False
+
+    anthropic_context = ShapeContext(
+        wire_shape=WireShape.ANTHROPIC_MESSAGES,
+        endpoint_id="anthropic",
+        model_id="claude-sonnet",
+        provider_id="Anthropic",
+    )
+    anthropic = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    first = anthropic.plan(request, anthropic_context)
+    _record_success(anthropic, first, LLMUsageIR(reported=True))
+    second = anthropic.plan(request, anthropic_context)
+    _record_success(anthropic, second, LLMUsageIR(reported=True))
+
+    anthropic_snapshot = anthropic.warm_deadline_snapshot()
+    assert anthropic_snapshot["eligible"] is True
+    assert anthropic_snapshot["anchor_ttl"] == "1h"
+    assert anthropic_snapshot["anchor_ttl_seconds"] == 3_600
+    assert 3_598 <= anthropic_snapshot["anchor_remaining_ttl_seconds"] <= 3_600

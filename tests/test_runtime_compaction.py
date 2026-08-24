@@ -1717,6 +1717,10 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         service = MemoryService()
         register_memory_with_core(core.context, service)
         core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
+        scheduled_deadlines: list[dict[str, object]] = []
+        core.cache_warm_deadline.schedule_after_turn_commit = (
+            lambda **kwargs: scheduled_deadlines.append(dict(kwargs)) or True
+        )
 
         def envelope(turn_id: str) -> ChannelEnvelope:
             return ChannelEnvelope(
@@ -1738,6 +1742,12 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         asyncio.run(core.process_channel_turn_async(envelope("two")))
 
         self.assertEqual(core.state.compaction_user_turn_count, 2)
+        self.assertEqual(len(scheduled_deadlines), 2)
+        self.assertEqual(
+            scheduled_deadlines[-1]["route"].endpoint_id,
+            "memory",
+        )
+        self.assertEqual(scheduled_deadlines[-1]["turn_id"], "two")
 
         proactive_outcome = TurnOutcome(
             turn_id="proactive",
@@ -1764,6 +1774,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         )
         self.assertEqual(core.state.compaction_user_turn_count, 2)
+        self.assertEqual(len(scheduled_deadlines), 2)
         core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
         asyncio.run(
             core.turn_executor.compact_memory_async(
@@ -1773,12 +1784,49 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             )
         )
         self.assertEqual(core.state.compaction_user_turn_count, 2)
+        self.assertEqual(len(scheduled_deadlines), 2)
 
     def test_configured_compaction_retry_count_is_not_silently_clamped(self) -> None:
         core = PalCore(
             config=RuntimeConfig(llm_compaction_retry_attempts=4)
         )
         self.assertEqual(core.agent_turn_runtime.compaction_engine.max_attempts, 4)
+
+    def test_cache_deadline_schedule_failure_cannot_fail_committed_user_turn(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = MemoryService()
+        register_memory_with_core(core.context, service)
+        core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
+
+        def fail_schedule(**_kwargs):
+            raise RuntimeError("timer unavailable")
+
+        core.cache_warm_deadline.schedule_after_turn_commit = fail_schedule
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "committed despite timer"},
+                event_id="timer-failure-turn",
+            ),
+            endpoint=EndpointConfig(
+                endpoint_id="memory",
+                channel_kind="memory",
+                binding_key="memory",
+            ),
+            response_handle=ResponseHandle(endpoint_id="memory"),
+        )
+
+        outcome = asyncio.run(core.process_channel_turn_async(envelope))
+
+        self.assertEqual(outcome.turn_id, "timer-failure-turn")
+        self.assertTrue(
+            any(
+                item.get("kind") == "cache_warm_deadline.schedule_failed"
+                for item in core.state.diagnostics
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -364,6 +364,86 @@ def reset_confirm_delivery(request: Any, *, already_opened: bool) -> ControlDeli
     )
 
 
+def cache_warm_deadline_interaction_id(epoch: str) -> str:
+    normalized = str(epoch or "").strip() or uuid4().hex[:12]
+    return f"cache_warm_{normalized[:24]}"
+
+
+def cache_warm_deadline_delivery(
+    route: ControlRoute,
+    *,
+    epoch: str,
+    prefix_tokens: int,
+    lead_seconds: int,
+    expires_at: str,
+) -> ControlDelivery:
+    minutes = max(1, int((max(0, lead_seconds) + 59) // 60))
+    text = (
+        f"当前约 {max(0, prefix_tokens):,} tokens 的对话缓存将在约 "
+        f"{minutes} 分钟后过期。现在 compact 可以利用热缓存，降低下次恢复成本。"
+    )
+    interaction = InteractionMessageSpec(
+        interaction_id=cache_warm_deadline_interaction_id(epoch),
+        interaction_kind="cache_warm_deadline",
+        route=route,
+        text=text,
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="立即 Compact",
+                    action_key="control.compact.run",
+                    action_args={"cache_epoch": epoch},
+                ),
+            ),
+            (
+                InteractionButtonSpec(
+                    label="本轮忽略",
+                    action_key="control.action.dispatch",
+                    action_args={
+                        "action_kind": "cache_warm_deadline_ignore",
+                        "target_scope": "core",
+                        "args": {"cache_epoch": epoch},
+                    },
+                ),
+                InteractionButtonSpec(
+                    label="关闭此提醒",
+                    action_key="control.action.dispatch",
+                    action_args={
+                        "action_kind": "cache_warm_deadline_disable",
+                        "target_scope": "core",
+                        "args": {"cache_epoch": epoch},
+                    },
+                ),
+            ),
+        ),
+        expires_at=expires_at,
+    )
+    return delivery_for_interaction(
+        route,
+        "interactive_open",
+        interaction,
+    )
+
+
+def cache_warm_deadline_expire_delivery(
+    route: ControlRoute,
+    *,
+    epoch: str,
+) -> ControlDelivery:
+    interaction_id = cache_warm_deadline_interaction_id(epoch)
+    return delivery_for_interaction(
+        route,
+        "interactive_expire",
+        build_terminal_interaction(
+            interaction_id=interaction_id,
+            interaction_kind="cache_warm_deadline",
+            route=route,
+            text="",
+        ),
+        payload={"delete": True},
+    )
+
+
 def build_terminal_interaction(
     *,
     interaction_id: str,

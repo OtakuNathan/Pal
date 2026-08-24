@@ -820,6 +820,26 @@ class LLMRuntime(LLMRuntimePort):
             snapshot["prompt_cache_policy"] = cache_snapshot()
         return snapshot
 
+    def prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]:
+        prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
+        snapshot = getattr(prompt_cache, "warm_deadline_snapshot", None)
+        active_endpoint = self.active_endpoint()
+        return (
+            dict(
+                snapshot(
+                    logical_scope_id="pal:resident",
+                    endpoint_id=(
+                        str(active_endpoint.endpoint_id)
+                        if active_endpoint is not None
+                        else ""
+                    ),
+                )
+                or {}
+            )
+            if callable(snapshot)
+            else {}
+        )
+
     def _compile_request(
         self,
         endpoint: LLMEndpointModel,

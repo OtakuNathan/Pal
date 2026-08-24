@@ -1644,6 +1644,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if kind in {"interactive_open", "interactive_update"}:
             await self._open_or_update_interaction_async(response_handle, spec=spec, allow_update=(kind == "interactive_update"))
             return
+        if kind == "interactive_expire" and bool(payload.get("delete")):
+            await self._delete_interaction_async(spec)
+            return
         if kind in {"interactive_resolve", "interactive_expire"}:
             await self._resolve_interaction_async(spec)
 
@@ -1707,6 +1710,29 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         super().forget_interaction_message(spec.interaction_id)
         if self._interaction_store is not None:
             self._interaction_store.set_state(spec.interaction_id, "resolved")
+
+    async def _delete_interaction_async(self, spec: InteractionMessageSpec) -> None:
+        if self.application is None:
+            return
+        target = self._restore_interaction(spec.interaction_id)
+        if target is None:
+            return
+        chat_id = _safe_int(target.get("chat_id"))
+        message_id = _safe_int(target.get("message_id"))
+        if chat_id is not None and message_id is not None:
+            try:
+                await self.application.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+            except Exception as exc:
+                if not _telegram_interaction_target_is_stale(exc):
+                    self.last_delivery_error = str(exc)
+                    return
+        self.last_delivery_error = ""
+        super().forget_interaction_message(spec.interaction_id)
+        if self._interaction_store is not None:
+            self._interaction_store.set_state(spec.interaction_id, "expired")
 
     async def _edit_interaction_message_async(
         self,
