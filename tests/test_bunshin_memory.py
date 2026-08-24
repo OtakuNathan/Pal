@@ -103,7 +103,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(len(memory_providers), 1)
         self.assertTrue(memory_providers[0].include_l1_recent_context)
 
-    def test_bunshin_hardcodes_shared_tool_routing_in_system_fragments(self) -> None:
+    def test_bunshin_preserves_shared_tool_guidance_authority(self) -> None:
         providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
         prompt_provider = next(
             provider for provider in providers if isinstance(provider, BunshinPromptFragmentProvider)
@@ -112,15 +112,20 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         fragments = prompt_provider.build_prompt_fragments(
             PromptAssemblyContext(core_mode="bunshin", turn_kind="bunshin")
         )
+        policy = next(fragment for fragment in fragments if fragment.section == "tool_policy")
         routing = next(fragment for fragment in fragments if fragment.section == "tool_routing")
 
+        self.assertEqual(policy.title, "Tool Policy")
+        self.assertEqual(policy.metadata["prompt_target"], "system")
+        self.assertIn("result-specific recovery affordances", policy.content)
+        self.assertIn("never blindly retry a mutation", policy.content)
+        self.assertIn("each tool call as one RPC", policy.content)
+        self.assertIn("point-in-time observations", policy.content)
+        self.assertIn("Replaying a stored result does not refresh", policy.content)
         self.assertEqual(routing.title, "Tool Routing")
-        self.assertIn("result-specific recovery affordances", routing.content)
+        self.assertEqual(routing.metadata["prompt_target"], "developer")
+        self.assertIn("returned affordances as its continuation contract", routing.content)
         self.assertIn("suggested next tool only when", routing.content)
-        self.assertIn("never blindly retry a mutation", routing.content)
-        self.assertIn("each tool call as one RPC", routing.content)
-        self.assertIn("point-in-time observations", routing.content)
-        self.assertIn("Replaying a stored result does not refresh", routing.content)
 
     def test_bunshin_puts_shared_tool_efficiency_before_every_role_contract(self) -> None:
         providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
