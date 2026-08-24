@@ -349,6 +349,13 @@ class CompactionEngine:
         *,
         attempt: int,
     ) -> LLMRequestIR:
+        visible_limit = compaction_visible_token_limit(snapshot)
+        user_prompt = (
+            f"{source.rstrip()}\n\n"
+            "## Request Constraint\n"
+            "The final visible JSON checkpoint for this request must not exceed "
+            f"{visible_limit:,} tokens."
+        )
         max_output = max(
             1,
             int(
@@ -382,7 +389,7 @@ class CompactionEngine:
                     "role": "system",
                     "content": self.policy.system_prompt(snapshot),
                 },
-                {"role": "user", "content": source},
+                {"role": "user", "content": user_prompt},
             ],
             max_output_tokens=max_output,
             model_hint=str(

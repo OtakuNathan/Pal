@@ -545,6 +545,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             llm.generate_requests[0].messages[0].text,
         )
         self.assertNotIn("256 tokens", retry.messages[0].text)
+        self.assertIn("must not exceed 256 tokens", retry.messages[-1].text)
 
     def test_compactor_uses_provider_output_ceiling_for_reasoning_headroom(self) -> None:
         service = _memory_with_turns(2)
@@ -567,6 +568,10 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "compacted")
         self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 128_000)
         self.assertNotIn("4,096 tokens", llm.generate_requests[0].messages[0].text)
+        self.assertIn(
+            "must not exceed 4,096 tokens",
+            llm.generate_requests[0].messages[-1].text,
+        )
 
     def test_output_truncation_disables_continuation_and_shrinks_source(self) -> None:
         service = _memory_with_turns(6)
@@ -658,7 +663,19 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "compacted")
         self.assertEqual(result.attempts, 2)
         self.assertNotIn("20,000 tokens", llm.generate_requests[0].messages[0].text)
-        self.assertIn("20,000-token visible output limit", llm.generate_requests[1].messages[-1].text)
+        self.assertIn(
+            "must not exceed 20,000 tokens",
+            llm.generate_requests[0].messages[-1].text,
+        )
+        self.assertIn(
+            "20,000-token visible output limit",
+            llm.generate_requests[1].messages[-1].text,
+        )
+        self.assertTrue(
+            llm.generate_requests[1].messages[-1].text.endswith(
+                "must not exceed 20,000 tokens."
+            )
+        )
 
     def test_three_failures_leave_memory_unchanged(self) -> None:
         service = _memory_with_turns()
