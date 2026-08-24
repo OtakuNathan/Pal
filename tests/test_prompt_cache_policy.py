@@ -22,7 +22,7 @@ from pal.llm.shapes.anthropic_messages import AnthropicMessagesCodec
 from pal.llm.shapes.openai_response import OpenAIResponseCodec
 from pal.llm.shapes.openai_completion import OpenAICompletionCodec
 from pal.shared.json_values import thaw_json
-from pal.shared.tool_protocol import ToolDefinitionIR
+from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR, ToolResultIR
 
 
 def _request() -> LLMRequestIR:
@@ -81,6 +81,68 @@ def _next_request(request: LLMRequestIR) -> LLMRequestIR:
     )
 
 
+def _active_tool_request(request: LLMRequestIR, *, suffix: str = "one") -> LLMRequestIR:
+    call_id = f"call-{suffix}"
+    return replace(
+        request,
+        messages=(
+            request.messages[0],
+            request.messages[1],
+            request.messages[2],
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (ToolCallIR(call_id, "probe", {"suffix": suffix}),),
+                prompt_region=PromptRegionIR.ACTIVE_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.TOOL,
+                (
+                    ToolResultIR(
+                        call_id=call_id,
+                        name="probe",
+                        content=("result " * 900),
+                        ok=True,
+                    ),
+                ),
+                prompt_region=PromptRegionIR.ACTIVE_HISTORY,
+            ),
+            request.messages[-1],
+        ),
+    )
+
+
+def _extend_active_tool_request(
+    request: LLMRequestIR,
+    *,
+    suffix: str,
+) -> LLMRequestIR:
+    call_id = f"call-{suffix}"
+    return replace(
+        request,
+        messages=(
+            *request.messages[:-1],
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (ToolCallIR(call_id, "probe", {"suffix": suffix}),),
+                prompt_region=PromptRegionIR.ACTIVE_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.TOOL,
+                (
+                    ToolResultIR(
+                        call_id=call_id,
+                        name="probe",
+                        content=(f"result-{suffix} " * 900),
+                        ok=True,
+                    ),
+                ),
+                prompt_region=PromptRegionIR.ACTIVE_HISTORY,
+            ),
+            request.messages[-1],
+        ),
+    )
+
+
 def _record_success(
     coordinator: PromptCacheCoordinator,
     plan: PromptCachePlan,
@@ -116,7 +178,10 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT
-    assert [item.label for item in plan.breakpoints] == ["stable", "candidate"]
+    assert [item.label for item in plan.breakpoints] == [
+        "stable",
+        "anchor_candidate",
+    ]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
     marked = [
@@ -157,8 +222,11 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-    assert plan.decision == "rolling_bootstrap"
-    assert [item.label for item in plan.breakpoints] == ["stable", "candidate"]
+    assert plan.anchor.decision == "economic_advance"
+    assert [item.label for item in plan.breakpoints] == [
+        "stable",
+        "anchor_candidate",
+    ]
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
@@ -256,11 +324,12 @@ def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() ->
     assert plan.dialect == PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT
     assert encoded.extra_body["session_id"].startswith("pal-")
     assert payload["system"][-1]["cache_control"]["ttl"] == "1h"
+    assert plan.anchor.decision == "economic_batching"
     assert sum(
         "cache_control" in block
         for message in payload["messages"]
         for block in message["content"]
-    ) == 1
+    ) == 0
     assert all(
         "dynamic reminder" not in str(block.get("text") or "")
         for block in payload["system"]
@@ -273,7 +342,7 @@ def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() ->
         for block in message["content"]
         if str(block.get("text") or "").startswith("current ")
     )
-    assert "cache_control" in current_block
+    assert "cache_control" not in current_block
 
 
 def test_openrouter_anthropic_alias_is_classified_by_wire_shape() -> None:
@@ -350,20 +419,22 @@ def test_openai_chat_uses_supported_text_block_breakpoints() -> None:
 
 
 def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> None:
-    request = _request()
+    request = _active_tool_request(_request())
     context = ShapeContext(
         wire_shape=WireShape.ANTHROPIC_MESSAGES,
         endpoint_id="anthropic",
         model_id="claude-sonnet",
         provider_id="Anthropic",
     )
-    coordinator = PromptCacheCoordinator()
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
 
     plan = coordinator.plan(request, context)
     encoded = coordinator.inject(AnthropicMessagesCodec().encode(request, context), plan)
     payload = thaw_json(encoded.payload)
 
     assert payload["system"][-1]["cache_control"]["ttl"] == "1h"
+    assert plan.anchor.decision == "economic_batching"
+    assert plan.frontier.decision == "economic_advance"
     rolling_markers = [
         block["cache_control"]["ttl"]
         for message in payload["messages"]
@@ -373,7 +444,155 @@ def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> Non
     assert rolling_markers == ["5m"]
 
 
-def test_anthropic_uses_stable_confirmed_and_candidate_without_caching_reminder() -> None:
+def test_openai_responses_frontier_marks_tool_output_and_rolls_within_turn() -> None:
+    request = _active_tool_request(_request())
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-luna",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+
+    first = coordinator.plan(request, context)
+    raw = OpenAIResponseCodec().encode(request, context)
+    encoded = coordinator.inject(raw, first)
+    payload = thaw_json(encoded.payload)
+    tool_output = next(
+        item for item in payload["input"] if item.get("type") == "function_call_output"
+    )
+
+    assert first.anchor.candidate_message_id == request.messages[2].message_id
+    assert first.frontier.candidate_message_id == request.messages[-2].message_id
+    assert tool_output["output"][0]["type"] == "input_text"
+    assert "prompt_cache_breakpoint" in tool_output["output"][0]
+    _record_success(coordinator, first, LLMUsageIR(reported=True))
+
+    reused = coordinator.plan(request, context)
+    assert reused.anchor.decision == "confirmed_reuse"
+    assert reused.frontier.decision == "confirmed_reuse"
+
+    extended = _extend_active_tool_request(request, suffix="two")
+    advanced = coordinator.plan(extended, context)
+    assert advanced.anchor.decision == "confirmed_reuse"
+    assert advanced.frontier.decision == "economic_advance"
+    assert [item.label for item in advanced.breakpoints] == [
+        "stable",
+        "anchor_confirmed",
+        "frontier_confirmed",
+        "frontier_candidate",
+    ]
+
+
+def test_frontier_resets_when_active_input_changes_but_anchor_survives() -> None:
+    request = _active_tool_request(_request())
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_RESPONSE,
+        endpoint_id="openai",
+        model_id="gpt-5.6-luna",
+        provider_id="OpenAI",
+    )
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    first = coordinator.plan(request, context)
+    _record_success(coordinator, first, LLMUsageIR(reported=True))
+
+    next_request = replace(
+        request,
+        messages=(
+            request.messages[0],
+            request.messages[1],
+            replace(
+                request.messages[2],
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            replace(
+                request.messages[3],
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            replace(
+                request.messages[4],
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.USER,
+                (TextPartIR("next user " * 900),),
+                prompt_region=PromptRegionIR.ACTIVE_INPUT,
+            ),
+            request.messages[-1],
+        ),
+    )
+    next_plan = coordinator.plan(next_request, context)
+
+    assert next_plan.anchor.confirmed_message_id == request.messages[2].message_id
+    assert next_plan.frontier.confirmed_message_id == ""
+    assert next_plan.frontier.decision == "unavailable"
+    assert "frontier_confirmed" not in {
+        item.label for item in next_plan.breakpoints
+    }
+
+
+def test_anthropic_four_slots_prioritize_anchor_before_frontier_candidate() -> None:
+    context = ShapeContext(
+        wire_shape=WireShape.ANTHROPIC_MESSAGES,
+        endpoint_id="anthropic",
+        model_id="claude-sonnet",
+        provider_id="Anthropic",
+    )
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    first_turn = _request()
+    first = coordinator.plan(first_turn, context)
+    _record_success(coordinator, first, LLMUsageIR(reported=True))
+    anchor_write = coordinator.plan(first_turn, context)
+    _record_success(coordinator, anchor_write, LLMUsageIR(reported=True))
+
+    second_turn = replace(
+        _active_tool_request(_request(), suffix="turn-two"),
+        messages=(
+            first_turn.messages[0],
+            first_turn.messages[1],
+            replace(
+                first_turn.messages[2],
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (TextPartIR("settled reply " * 900),),
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            ),
+            LLMMessageIR(
+                MessageRole.USER,
+                (TextPartIR("turn two " * 900),),
+                prompt_region=PromptRegionIR.ACTIVE_INPUT,
+            ),
+            *_active_tool_request(_request(), suffix="turn-two").messages[3:],
+        ),
+    )
+    frontier_write = coordinator.plan(second_turn, context)
+    assert frontier_write.anchor.decision == "economic_batching"
+    assert frontier_write.frontier.decision == "economic_advance"
+    _record_success(coordinator, frontier_write, LLMUsageIR(reported=True))
+
+    both_economic = coordinator.plan(
+        _extend_active_tool_request(second_turn, suffix="turn-two-more"),
+        context,
+    )
+    assert both_economic.anchor.decision == "economic_advance"
+    assert both_economic.frontier.decision == "slot_deferred"
+    assert [item.label for item in both_economic.breakpoints] == [
+        "stable",
+        "anchor_confirmed",
+        "anchor_candidate",
+        "frontier_confirmed",
+    ]
+    assert [item.ttl for item in both_economic.breakpoints] == [
+        "1h",
+        "1h",
+        "1h",
+        "5m",
+    ]
+
+
+def test_anthropic_anchor_is_gated_then_survives_the_turn_boundary() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.ANTHROPIC_MESSAGES,
@@ -383,21 +602,27 @@ def test_anthropic_uses_stable_confirmed_and_candidate_without_caching_reminder(
     )
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
     first = coordinator.plan(request, context)
+    assert first.anchor.decision == "economic_batching"
     _record_success(coordinator, first, LLMUsageIR(reported=True))
 
+    second = coordinator.plan(request, context)
+    assert second.anchor.decision == "economic_advance"
+    _record_success(coordinator, second, LLMUsageIR(reported=True))
+
     next_request = _next_request(request)
-    second = coordinator.plan(next_request, context)
+    third = coordinator.plan(next_request, context)
     encoded = coordinator.inject(
         AnthropicMessagesCodec().encode(next_request, context),
-        second,
+        third,
     )
     payload = thaw_json(encoded.payload)
 
-    assert [item.label for item in second.breakpoints] == [
+    assert [item.label for item in third.breakpoints] == [
         "stable",
-        "confirmed",
-        "candidate",
+        "anchor_confirmed",
     ]
+    assert third.anchor.confirmed_message_id == request.messages[2].message_id
+    assert third.anchor.decision == "economic_batching"
     assert sum(
         "cache_control" in block
         for block in payload["system"]
@@ -406,7 +631,7 @@ def test_anthropic_uses_stable_confirmed_and_candidate_without_caching_reminder(
         "cache_control" in block
         for message in payload["messages"]
         for block in message["content"]
-    ) == 2
+    ) == 1
     assert payload["messages"][-1]["content"][-1]["text"] == "dynamic reminder"
     assert "cache_control" not in payload["messages"][-1]["content"][-1]
 
@@ -433,8 +658,11 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
     next_request = _next_request(request)
 
     second = coordinator.plan(next_request, context)
-    assert second.decision == "rolling_batching"
-    assert [item.label for item in second.breakpoints] == ["stable", "confirmed"]
+    assert second.anchor.decision == "economic_batching"
+    assert [item.label for item in second.breakpoints] == [
+        "stable",
+        "anchor_confirmed",
+    ]
     _record_success(coordinator, second, LLMUsageIR(input_tokens=1_000, reported=True))
 
     advanced = None
@@ -450,16 +678,19 @@ def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -
         )
 
     assert advanced is not None
-    assert advanced.decision == "rolling_advance"
+    assert advanced.anchor.decision == "economic_advance"
     assert [item.label for item in advanced.breakpoints] == [
         "stable",
-        "confirmed",
-        "candidate",
+        "anchor_confirmed",
+        "anchor_candidate",
     ]
     _record_success(coordinator, advanced, LLMUsageIR(input_tokens=1_000, reported=True))
     reused = coordinator.plan(next_request, context)
-    assert reused.decision == "confirmed_reuse"
-    assert [item.label for item in reused.breakpoints] == ["stable", "confirmed"]
+    assert reused.anchor.decision == "confirmed_reuse"
+    assert [item.label for item in reused.breakpoints] == [
+        "stable",
+        "anchor_confirmed",
+    ]
 
 
 def test_failed_candidate_is_not_promoted() -> None:
@@ -475,9 +706,12 @@ def test_failed_candidate_is_not_promoted() -> None:
     failed = coordinator.plan(request, context)
     retry = coordinator.plan(request, context)
 
-    assert failed.decision == "rolling_bootstrap"
-    assert retry.decision == "rolling_bootstrap"
-    assert [item.label for item in retry.breakpoints] == ["stable", "candidate"]
+    assert failed.anchor.decision == "economic_advance"
+    assert retry.anchor.decision == "economic_advance"
+    assert [item.label for item in retry.breakpoints] == [
+        "stable",
+        "anchor_candidate",
+    ]
 
 
 def test_success_without_applied_candidate_marker_is_not_promoted() -> None:
@@ -516,7 +750,7 @@ def test_success_without_applied_candidate_marker_is_not_promoted() -> None:
     )
 
     retry = coordinator.plan(request, context)
-    assert retry.decision == "rolling_bootstrap"
+    assert retry.anchor.decision == "economic_advance"
     assert retry.confirmed_message_id == ""
 
 
@@ -536,7 +770,7 @@ def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
     _record_success(coordinator, older, LLMUsageIR(reported=True))
 
     reused = coordinator.plan(request, context)
-    assert reused.decision == "confirmed_reuse"
+    assert reused.anchor.decision == "confirmed_reuse"
     assert reused.confirmed_message_id == request.messages[2].message_id
 
 
@@ -571,9 +805,12 @@ def test_missing_confirmed_message_bootstraps_a_new_cache_epoch() -> None:
 
     reset = coordinator.plan(compacted, context)
 
-    assert reset.decision == "rolling_bootstrap"
+    assert reset.anchor.decision == "economic_advance"
     assert reset.confirmed_message_id == ""
-    assert [item.label for item in reset.breakpoints] == ["stable", "candidate"]
+    assert [item.label for item in reset.breakpoints] == [
+        "stable",
+        "anchor_candidate",
+    ]
 
 
 def test_unknown_openai_compatible_provider_gets_no_unsupported_cache_fields() -> None:

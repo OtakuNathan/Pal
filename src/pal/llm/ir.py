@@ -51,6 +51,7 @@ class PromptRegionIR(StrEnum):
     STABLE_SYSTEM = "stable_system"
     SETTLED_HISTORY = "settled_history"
     ACTIVE_INPUT = "active_input"
+    ACTIVE_HISTORY = "active_history"
     ACTIVE_DYNAMIC = "active_dynamic"
 
 

@@ -84,8 +84,9 @@ class ShapeEndpointInvoker:
             capabilities=dict(endpoint.capabilities_blob or {}),
         )
         codec = codec_for_shape(shape)
-        plan = self.prompt_cache.plan(request, context)
-        encoded = self.prompt_cache.inject(codec.encode(request, context), plan)
+        raw_encoded = codec.encode(request, context)
+        plan = self.prompt_cache.plan(request, context, raw_encoded)
+        encoded = self.prompt_cache.inject(raw_encoded, plan)
         request_id = f"llm_{uuid4().hex}"
         updates = tuple(
             self.response_hooks.normalize(
@@ -140,8 +141,9 @@ class ShapeEndpointInvoker:
             capabilities=dict(endpoint.capabilities_blob or {}),
         )
         codec = codec_for_shape(shape)
-        plan = self.prompt_cache.plan(request, context)
-        encoded = self.prompt_cache.inject(codec.encode(request, context), plan)
+        raw_encoded = codec.encode(request, context)
+        plan = self.prompt_cache.plan(request, context, raw_encoded)
+        encoded = self.prompt_cache.inject(raw_encoded, plan)
         request_id = f"llm_{uuid4().hex}"
         last: LLMResponseUpdate | None = None
         decoded = codec.decode(

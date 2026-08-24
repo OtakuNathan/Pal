@@ -27,6 +27,7 @@ from pal.llm.shapes.base import (
     ShapeContext,
     ShapeDecodeError,
     _JSONFrame,
+    finalize_cache_spans,
 )
 from pal.llm.shapes.builder import (
     ResponseIRBuilder,
@@ -79,10 +80,17 @@ class OpenAIResponseCodec(ShapeCodecBase):
                         {
                             "type": "function_call_output",
                             "call_id": result.call_id,
-                            "output": result.content,
+                            "output": [
+                                {"type": "input_text", "text": result.content}
+                            ],
                         }
                     )
-                spans.append(EncodedMessageSpan(message.message_id))
+                    targets.append(
+                        ("input", len(input_items) - 1, "output", 0)
+                    )
+                spans.append(
+                    EncodedMessageSpan(message.message_id, tuple(targets))
+                )
                 continue
             if message.role == MessageRole.ASSISTANT:
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
@@ -94,7 +102,6 @@ class OpenAIResponseCodec(ShapeCodecBase):
                             "content": [{"type": "output_text", "text": text}],
                         }
                     )
-                    targets.append(("input", len(input_items) - 1, "content", 0))
                 for part in message.parts:
                     if isinstance(part, ToolCallIR):
                         input_items.append(
@@ -130,7 +137,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
             payload["reasoning"] = {"effort": _responses_effort(policy.thinking_level)}
-        return EncodedRequest(payload, tuple(spans))
+        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
         return OpenAIResponseDecoder(context)

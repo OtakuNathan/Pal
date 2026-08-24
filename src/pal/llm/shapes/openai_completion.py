@@ -25,6 +25,7 @@ from pal.llm.shapes.base import (
     ShapeContext,
     ShapeDecodeError,
     _JSONFrame,
+    finalize_cache_spans,
 )
 from pal.llm.shapes.builder import (
     ResponseIRBuilder,
@@ -64,18 +65,32 @@ class OpenAICompletionCodec(ShapeCodecBase):
                 replay_message = message.replay.payload.get("message")
                 if isinstance(replay_message, Mapping):
                     messages.append(thaw_json(replay_message))
-                    spans.append(EncodedMessageSpan(message.message_id))
+                    spans.append(
+                        EncodedMessageSpan(
+                            message.message_id,
+                            _chat_message_cache_targets(
+                                messages,
+                                len(messages) - 1,
+                            ),
+                        )
+                    )
                     continue
             if message.role == MessageRole.TOOL:
+                targets: list[tuple[str | int, ...]] = []
                 for result in tool_results(message):
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": result.call_id,
-                            "content": result.content,
-                        }
+                    targets.extend(
+                        _append_chat_message(
+                            messages,
+                            {
+                                "role": "tool",
+                                "tool_call_id": result.call_id,
+                                "content": [
+                                    {"type": "text", "text": result.content}
+                                ],
+                            },
+                        )
                     )
-                spans.append(EncodedMessageSpan(message.message_id))
+                spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
                 continue
             role = _completion_message_role(message, messages)
             content = openai_content(message.parts)
@@ -122,7 +137,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
             payload["reasoning_effort"] = _openai_reasoning_effort(policy.thinking_level)
-        return EncodedRequest(payload, tuple(spans))
+        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":
         return OpenAICompletionDecoder(context)
@@ -186,6 +201,25 @@ def _append_chat_message(
             for index in range(len(content))
         )
     return (("messages", message_index),) if content else ()
+
+
+def _chat_message_cache_targets(
+    messages: list[dict[str, Any]],
+    message_index: int,
+) -> tuple[tuple[str | int, ...], ...]:
+    if not (0 <= message_index < len(messages)):
+        return ()
+    content = messages[message_index].get("content")
+    if isinstance(content, str):
+        return (("messages", message_index),) if content else ()
+    if not isinstance(content, list):
+        return ()
+    supported = {"text", "image_url", "input_audio", "file", "refusal"}
+    return tuple(
+        ("messages", message_index, "content", index)
+        for index, block in enumerate(content)
+        if isinstance(block, Mapping) and str(block.get("type") or "") in supported
+    )
 
 
 def _merge_instruction_text(left: str, right: str) -> str:

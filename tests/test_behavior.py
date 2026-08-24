@@ -1377,10 +1377,15 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(generate_requests[1].messages[0].prompt_region.value, "stable_system")
         self.assertEqual(generate_requests[1].messages[1].prompt_region.value, "stable_system")
         self.assertEqual(generate_requests[1].messages[2].prompt_region.value, "active_input")
+        followup_regions = [
+            message.prompt_region.value
+            for message in generate_requests[1].messages[3:]
+        ]
+        self.assertIn("active_history", followup_regions)
         self.assertTrue(
             all(
-                message.prompt_region.value == "active_dynamic"
-                for message in generate_requests[1].messages[3:]
+                region == "active_history"
+                for region in followup_regions
             )
         )
         self.assertIn("Behavior advice", followup_text)

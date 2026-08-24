@@ -27,6 +27,7 @@ from pal.llm.shapes.base import (
     ShapeContext,
     ShapeDecodeError,
     _JSONFrame,
+    finalize_cache_spans,
 )
 from pal.llm.shapes.builder import ResponseIRBuilder, canonical_finish_reason, merge_usage, usage_from_mapping
 from pal.llm.shapes.common import anthropic_tool_definition, json_object, tool_results
@@ -71,7 +72,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 spans.append(
                     EncodedMessageSpan(
                         message.message_id,
-                        (_last_message_block_path(messages),) if blocks else (),
+                        _last_message_cache_targets(messages) if blocks else (),
                     )
                 )
                 continue
@@ -90,7 +91,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 spans.append(
                     EncodedMessageSpan(
                         message.message_id,
-                        (_last_message_block_path(messages),) if blocks else (),
+                        _last_message_cache_targets(messages) if blocks else (),
                     )
                 )
                 continue
@@ -109,7 +110,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     spans.append(
                         EncodedMessageSpan(
                             message.message_id,
-                            (_last_message_block_path(messages),),
+                            _last_message_cache_targets(messages),
                         )
                     )
                     continue
@@ -148,7 +149,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 spans.append(
                     EncodedMessageSpan(
                         message.message_id,
-                        (_last_message_block_path(messages),) if blocks else (),
+                        _last_message_cache_targets(messages) if blocks else (),
                     )
                 )
                 continue
@@ -158,7 +159,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
             spans.append(
                 EncodedMessageSpan(
                     message.message_id,
-                    (_last_message_block_path(messages),) if blocks else (),
+                    _last_message_cache_targets(messages) if blocks else (),
                 )
             )
         if not messages:
@@ -188,7 +189,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     }
             else:
                 payload["thinking"] = {"type": "adaptive"}
-        return EncodedRequest(payload, tuple(spans))
+        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "AnthropicMessagesDecoder":
         return AnthropicMessagesDecoder(context)
@@ -477,12 +478,27 @@ def _anthropic_user_content(parts: tuple[Any, ...]) -> list[dict[str, Any]]:
     return rendered
 
 
-def _last_message_block_path(messages: list[dict[str, Any]]) -> tuple[str | int, ...]:
+def _last_message_cache_targets(
+    messages: list[dict[str, Any]],
+) -> tuple[tuple[str | int, ...], ...]:
     message_index = len(messages) - 1
     content = messages[message_index].get("content")
+    if isinstance(content, str):
+        return (("messages", message_index),) if content else ()
     if not isinstance(content, (list, tuple)) or not content:
-        return ("messages", message_index)
-    return ("messages", message_index, "content", len(content) - 1)
+        return ()
+    cacheable = {
+        "text",
+        "image",
+        "document",
+        "tool_use",
+        "tool_result",
+    }
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if isinstance(block, Mapping) and str(block.get("type") or "") in cacheable:
+            return (("messages", message_index, "content", index),)
+    return ()
 
 
 def _block_index(payload: Mapping[str, Any]) -> int:

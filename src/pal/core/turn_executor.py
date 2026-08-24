@@ -1072,7 +1072,7 @@ class TurnExecutor:
                     prompt_region=(
                         PromptRegionIR.ACTIVE_INPUT
                         if index == 0 and message.role == MessageRole.USER
-                        else PromptRegionIR.ACTIVE_DYNAMIC
+                        else PromptRegionIR.ACTIVE_HISTORY
                     ),
                 )
                 for index, message in enumerate(active_messages)
@@ -1090,9 +1090,9 @@ class TurnExecutor:
             if runtime_reminder
             else []
         )
-        # Keep every ACTIVE_DYNAMIC projection after ACTIVE_INPUT. The active
-        # user message is the rolling checkpoint: once this turn settles, its
-        # provider prefix must still match before next turn's dynamic suffix.
+        # ACTIVE_HISTORY is immutable within this active turn and may advance
+        # the same-turn cache frontier. Contextual compiler output and runtime
+        # reminders remain ACTIVE_DYNAMIC after every reusable checkpoint.
         prompt_messages = [
             *stable_messages,
             *settled_messages,
