@@ -63,7 +63,7 @@ class BehaviorPromptFragmentProvider:
                 metadata={
                     "module_id": self.module_id,
                     "kind": "behavior_guidance_guide",
-                    "prompt_target": "system",
+                    "prompt_target": "developer",
                 },
             ),
         ]

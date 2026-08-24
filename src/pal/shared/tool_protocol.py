@@ -106,6 +106,29 @@ class ToolResultIR:
             )
         object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
 
+
+@dataclass(frozen=True)
+class ToolContextMessageIR:
+    """User-authority context emitted after a completed tool-result batch.
+
+    The role is intentionally not configurable: tool handlers may attach
+    reference material, but may not promote it to developer or system
+    authority.
+    """
+
+    content: str
+    semantic_kind: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.content or "").strip():
+            raise ValueError("tool context content must be non-empty")
+        if not str(self.semantic_kind or "").strip():
+            raise ValueError("tool context semantic_kind must be non-empty")
+        object.__setattr__(self, "content", str(self.content))
+        object.__setattr__(self, "semantic_kind", str(self.semantic_kind))
+        object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+
 class EffectOutcome(str, Enum):
     NONE = "none"
     NOT_STARTED = "not_started"
@@ -144,6 +167,7 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     affordances: list[ToolAffordance] = Field(default_factory=list)
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
     replay_result_ref: str = Field(default="", exclude=True)
+    context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
 
 
 class PagedResult(_StrictProtocolModel):
@@ -154,6 +178,7 @@ class PagedResult(_StrictProtocolModel):
     llm_text: str
     affordances: list[ToolAffordance]
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
+    context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
 
 
 class RejectedResult(_StrictProtocolModel):
@@ -199,6 +224,7 @@ class ToolExecutionResult:
     invocation_result: ToolInvocationResult | None = None
     context_delivery: dict[str, Any] | None = None
     replay_result_ref: str = ""
+    context_messages: tuple[ToolContextMessageIR, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
@@ -206,6 +232,7 @@ class ToolExecutionResult:
         if not str(self.status or "").strip():
             object.__setattr__(self, "status", "ok" if self.ok else "error")
         object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
+        object.__setattr__(self, "context_messages", tuple(self.context_messages or ()))
 
 
 def default_tool_result_text(
@@ -236,6 +263,7 @@ __all__ = [
     "TOOL_INVOCATION_RESULT_ADAPTER",
     "ToolAffordance",
     "ToolCallIR",
+    "ToolContextMessageIR",
     "ToolDefinitionIR",
     "ToolExecutionResult",
     "ToolInvocationResult",

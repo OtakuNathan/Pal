@@ -111,6 +111,15 @@ class L1TurnIR:
             return self
         return replace(self, messages=(*self.messages, message), revision=self.revision + 1)
 
+    def append_user_contexts(self, messages: tuple[LLMMessageIR, ...]) -> "L1TurnIR":
+        """Atomically append idempotent user-role context messages."""
+
+        self._require_active()
+        updated = self
+        for message in tuple(messages):
+            updated = updated.append_user_once(message)
+        return updated
+
     def upsert_assistant(self, message: LLMMessageIR) -> "L1TurnIR":
         self._require_active()
         if message.role != MessageRole.ASSISTANT:

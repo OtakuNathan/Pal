@@ -18,7 +18,7 @@ class PromptFragment:
         target = str((self.metadata or {}).get("prompt_target") or "").strip().lower()
         if not target:
             raise ValueError("prompt fragment must declare metadata.prompt_target")
-        if target not in {"system", "user_context", "runtime_reminder"}:
+        if target not in {"system", "developer", "user_context", "runtime_reminder"}:
             raise ValueError(f"unknown prompt fragment target: {target!r}")
         object.__setattr__(
             self,
@@ -38,6 +38,7 @@ class PromptIRBlock:
 @dataclass(frozen=True)
 class PromptIR:
     system_blocks: tuple[PromptIRBlock, ...] = ()
+    developer_blocks: tuple[PromptIRBlock, ...] = ()
     user_context_blocks: tuple[PromptIRBlock, ...] = ()
     runtime_reminder_blocks: tuple[PromptIRBlock, ...] = ()
     primary_input: str = ""

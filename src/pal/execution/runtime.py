@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
+from pal.shared.tool_protocol import ToolCallIR, ToolContextMessageIR
 
 from pal.shared.tool_protocol import new_tool_call
 
@@ -1173,6 +1173,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         affordances: list[ToolAffordance] = []
         llm_text = ""
         context_delivery: dict[str, Any] | None = None
+        context_messages: tuple[ToolContextMessageIR, ...] = ()
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt
@@ -1189,6 +1190,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             raw_delivery = getattr(raw, "context_delivery", None)
             if isinstance(raw_delivery, dict):
                 context_delivery = dict(raw_delivery)
+            context_messages = tuple(getattr(raw, "context_messages", ()) or ())
             if isinstance(raw_receipt, EffectReceipt):
                 receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
@@ -1277,6 +1279,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             budget,
             turn_id=turn_id,
             context_delivery=context_delivery,
+            context_messages=context_messages,
         )
         if paged is not None:
             return paged
@@ -1287,6 +1290,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             affordances=affordances,
             context_delivery=context_delivery,
             replay_result_ref=replay_result_ref,
+            context_messages=context_messages,
         )
 
     def _page_validated_output(
@@ -1300,6 +1304,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         turn_id: str | None,
         context_delivery: dict[str, Any] | None,
+        context_messages: tuple[ToolContextMessageIR, ...],
     ) -> tuple[PagedResult | None, str]:
         if budget is None or record.execution.paging is PagingMode.NEVER:
             return None, ""
@@ -1370,6 +1375,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             # Pager backing data is replayable evidence, not live authority.
             # The initial result owns only the exact first page delivered.
             context_delivery=page_delivery,
+            context_messages=context_messages,
         ), handle.result_ref
 
     @staticmethod
@@ -1454,6 +1460,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     else None
                 ),
                 replay_result_ref=str(result.replay_result_ref or ""),
+                context_messages=tuple(result.context_messages),
             )
         payload = result.model_dump(mode="json")
         return ToolExecutionResult(
@@ -1475,6 +1482,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 str(result.result_handle.get("result_ref") or "")
                 if isinstance(result, PagedResult)
                 else ""
+            ),
+            context_messages=(
+                tuple(result.context_messages)
+                if isinstance(result, PagedResult)
+                else ()
             ),
         )
 
@@ -1776,6 +1788,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
                 context_delivery=getattr(result, "context_delivery", None),
+                context_messages=tuple(getattr(result, "context_messages", ()) or ()),
             )
         except ToolRejectedError as exc:
             return CapabilityResult(
@@ -1811,6 +1824,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
                 context_delivery=getattr(result, "context_delivery", None),
+                context_messages=tuple(getattr(result, "context_messages", ()) or ()),
             )
         except ToolRejectedError as exc:
             return CapabilityResult(

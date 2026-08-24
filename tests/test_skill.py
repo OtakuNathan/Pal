@@ -25,6 +25,7 @@ from pal.foundation import PalV2Database
 from pal.llm import generation_result_from_values
 from pal.lsp import build_lsp_plugin
 from pal.bunshin import register_with_core as register_bunshin_with_core
+from pal.shared import PromptAssemblyContext
 from pal.skill import (
     SKILL_STATUS_ACTIVE,
     SKILL_STATUS_DISABLED,
@@ -292,13 +293,16 @@ Run the workflow.
         long = SkillInjectTool(service=service).invoke({"skill_id": "long"})
 
         self.assertEqual(active.status, "ok")
-        self.assertIn("<system-reminder>", active.llm_text)
-        self.assertIn("Injected skill:", active.llm_text)
-        self.assertIn("Manual:\n1. Do it.", active.llm_text)
-        self.assertNotIn("manual_text", active.llm_text)
+        self.assertNotIn("<system-reminder>", active.llm_text)
+        self.assertEqual(len(active.context_messages), 1)
+        self.assertIn("<skill>", active.context_messages[0].content)
+        self.assertIn("Injected skill:", active.context_messages[0].content)
+        self.assertIn("Manual:\n1. Do it.", active.context_messages[0].content)
+        self.assertNotIn("manual_text", active.context_messages[0].content)
         self.assertEqual(disabled.structured["reason"], "skill_not_found_or_inactive")
         self.assertEqual(long.status, "ok")
         self.assertEqual(long.structured["manual_text"], "x" * 100)
+        self.assertIn("x" * 100, long.context_messages[0].content)
 
     def test_search_and_read_skills_without_injecting_manual_by_default(self) -> None:
         self.skill_repository.upsert_skill(
@@ -388,6 +392,9 @@ Run the workflow.
         register_skill_with_core(core.context, self.service)
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("skill")
+        system_before = core.build_canonical_prompt(
+            PromptAssemblyContext()
+        ).messages[0].text
 
         result = core.context.execution_runtime.execute_tool(
             new_tool_call(
@@ -397,11 +404,25 @@ Run the workflow.
         )
 
         self.assertTrue(result.ok, result.llm_text)
+        system_after = core.build_canonical_prompt(
+            PromptAssemblyContext()
+        ).messages[0].text
+        self.assertEqual(system_after, system_before)
+        self.assertNotIn("Inspect, execute, and verify.", system_after)
+        self.assertNotIn("Inspect, execute, and verify.", result.llm_text)
+        self.assertEqual(len(result.context_messages), 1)
+        self.assertIn("Inspect, execute, and verify.", result.context_messages[0].content)
+        self.assertEqual(
+            result.context_messages[0].semantic_kind,
+            "runtime_context_skill",
+        )
         self.assertIsInstance(result.invocation_result, CompleteResult)
         self.assertEqual(result.structured["status"], SKILL_STATUS_ACTIVE)
         record = core.context.execution_runtime.registry_generation.indirect_aliases[
             "skill_inject"
         ]
+        self.assertIn("current conversation context", record.compiled_description)
+        self.assertNotIn("active skills in system prompt", record.compiled_description)
         self.assertEqual(record.execution.effect_kind, EffectKind.LOCAL_READ)
         self.assertEqual(record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         update_record = core.context.execution_runtime.registry_generation.indirect_aliases[

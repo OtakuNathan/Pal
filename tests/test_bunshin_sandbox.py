@@ -82,6 +82,22 @@ class BunshinSandboxTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires run_id"):
                 build_slim_bunshin_runtime(Path(tmp), llm_authority="manager_proxy")
 
+    def test_slim_worker_runtime_publishes_read_only_skill_reference_tools(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_bunshin_skill_runtime_") as tmp:
+            bundle = build_slim_bunshin_runtime(
+                Path(tmp),
+                llm_authority="none",
+            )
+            try:
+                published = set(
+                    bundle.execution_runtime.compiled_capability_index.by_canonical
+                )
+                self.assertIn("op_skill_search", published)
+                self.assertIn("op_skill_read", published)
+                self.assertIn("op_skill_inject", published)
+            finally:
+                asyncio.run(bundle.close())
+
     def test_question_waits_for_matching_user_response(self) -> None:
         async def scenario() -> None:
             events: list[dict[str, object]] = []

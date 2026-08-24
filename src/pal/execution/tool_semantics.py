@@ -69,6 +69,11 @@ INDIRECT_LOCAL_READ = execution_semantics(
     invocation_mode=InvocationMode.INDIRECT,
     effect_kind=EffectKind.LOCAL_READ,
 )
+INDIRECT_LOCAL_READ_UNPAGED = execution_semantics(
+    invocation_mode=InvocationMode.INDIRECT,
+    effect_kind=EffectKind.LOCAL_READ,
+    paging=PagingMode.NEVER,
+)
 INDIRECT_LOCAL_WRITE = execution_semantics(
     invocation_mode=InvocationMode.INDIRECT,
     effect_kind=EffectKind.LOCAL_WRITE,

@@ -241,7 +241,8 @@ class TestChecklistPrompt:
 
         assert len(fragments) == 2
         operating_rule, task_flow = fragments
-        assert operating_rule.section == "operating_rules"
+        assert operating_rule.section == "operating_guidance"
+        assert operating_rule.metadata["prompt_target"] == "developer"
         assert "you must use Pal's checklist as the work cursor" in operating_rule.content
         assert "before the first mutating action" in operating_rule.content
         assert task_flow.section == "task_flow"
@@ -288,7 +289,8 @@ class TestChecklistPrompt:
         active_prompt = core.build_canonical_prompt(PromptAssemblyContext())
 
         assert handle.prompt_fragment_providers
-        assert "<task_flow>" in str(active_prompt.messages[0].text)
+        assert active_prompt.messages[1].role.value == "developer"
+        assert "<task_flow>" in str(active_prompt.messages[1].text)
         assert active_prompt.metadata["reminder_sections"] == ("checklist_state",)
         assert "Checklist progress 0/1" in active_prompt.metadata["runtime_reminder_text"]
 
@@ -296,8 +298,9 @@ class TestChecklistPrompt:
         retired_prompt = core.build_canonical_prompt(PromptAssemblyContext())
 
         assert active_prompt.messages[0].text == retired_prompt.messages[0].text
-        assert "Checklist work cursor" in active_prompt.messages[0].text
-        assert "before the first mutating action" in active_prompt.messages[0].text
+        assert active_prompt.messages[1].text == retired_prompt.messages[1].text
+        assert "Checklist work cursor" in active_prompt.messages[1].text
+        assert "before the first mutating action" in active_prompt.messages[1].text
         assert retired_prompt.metadata["reminder_sections"] == ()
         assert retired_prompt.metadata["runtime_reminder_text"] == ""
 

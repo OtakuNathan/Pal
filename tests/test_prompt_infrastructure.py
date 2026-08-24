@@ -47,13 +47,13 @@ def test_output_contract_is_projected_into_prompt_ir() -> None:
                     section="task_acceptance",
                     title="Bound Invocation",
                     content="Perform the bound task.",
-                    metadata={"prompt_target": "system"},
+                    metadata={"prompt_target": "developer"},
                 ),
                 PromptFragment(
                     section="output_contract",
                     title="Output Contract",
                     content="Call the terminal submission tool exactly once.",
-                    metadata={"prompt_target": "system"},
+                    metadata={"prompt_target": "developer"},
                 ),
             ),
         )
@@ -63,11 +63,12 @@ def test_output_contract_is_projected_into_prompt_ir() -> None:
         PromptAssemblyContext(metadata={"memory_pack": None})
     )
 
-    assert [block.block_id for block in prompt_ir.system_blocks] == [
+    assert not prompt_ir.system_blocks
+    assert [block.block_id for block in prompt_ir.developer_blocks] == [
         "task_acceptance",
         "output_contract",
     ]
-    assert prompt_ir.system_blocks[-1].content == (
+    assert prompt_ir.developer_blocks[-1].content == (
         "Call the terminal submission tool exactly once."
     )
 

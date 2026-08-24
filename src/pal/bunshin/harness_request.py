@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.shared import BunshinInvocationPack
+from pal.bunshin.skill_context import normalized_skill_injection
 from pal.shared.tool_routing import TOOL_EFFICIENCY_SYSTEM_GUIDANCE
 
 
@@ -172,16 +173,15 @@ def compile_architect_harness_request(
             lines.append(
                 f"- {str(item.get('name') or 'reference')}: `{path}`"
             )
-    reminders = [
-        str(dict(item).get("system_reminder") or "").strip()
-        for item in list(
-            dict(pack.metadata or {}).get("initial_skill_injections") or []
-        )
-        if isinstance(item, Mapping)
-        and str(dict(item).get("system_reminder") or "").strip()
-    ]
-    if reminders:
-        lines.extend(["", "## Approved Operating Manuals", *reminders])
+    skill_contexts = []
+    for item in list(dict(pack.metadata or {}).get("initial_skill_injections") or []):
+        if not isinstance(item, Mapping):
+            continue
+        normalized = normalized_skill_injection(item)
+        if normalized is not None:
+            skill_contexts.append(normalized["user_context"])
+    if skill_contexts:
+        lines.extend(["", "## Approved Operating Manuals", *skill_contexts])
     request = ArchitectHarnessRequest(
         developer_instructions=developer_instructions,
         user_input="\n".join(lines).strip(),

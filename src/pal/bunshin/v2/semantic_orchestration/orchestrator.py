@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from pal.bunshin.profiles import resolve_pinned_bunshin_pack
+from pal.bunshin.skill_context import normalized_skill_injection
 from pal.bunshin.checkpoint import (
     AgentSessionCheckpointError,
     LogicalCoroutineCheckpointStore,
@@ -534,19 +535,12 @@ def _workflow_skill_injections(
                 f"approved skill injection failed: {skill_ref} ({exc})"
             ) from exc
         skill_id = str(injected.get("skill_id") or skill_ref).strip()
-        reminder = str(injected.get("system_reminder") or "").strip()
-        if not reminder.startswith("<system-reminder>") or not reminder.endswith(
-            "</system-reminder>"
-        ):
+        normalized = normalized_skill_injection(injected)
+        if normalized is None:
             raise PermanentEffectError(
-                f"approved skill produced no valid system reminder: {skill_ref}"
+                f"approved skill produced no valid user context: {skill_ref}"
             )
-        result.append(
-            {
-                "skill_id": skill_id,
-                "system_reminder": reminder,
-            }
-        )
+        result.append({"skill_id": skill_id, "user_context": normalized["user_context"]})
     return result
 
 
@@ -7914,18 +7908,16 @@ class SemanticOrchestrator:
             prompt = BunshinInvocationPack.from_dict(
                 dict(self.service.artifacts.read_json(prompt_ref))
             )
-            return [
-                {
-                    "skill_id": str(item.get("skill_id") or ""),
-                    "system_reminder": str(item.get("system_reminder") or ""),
-                }
-                for item in list(
-                    dict(prompt.metadata or {}).get("initial_skill_injections") or []
-                )
-                if isinstance(item, Mapping)
-                and str(item.get("skill_id") or "").strip()
-                and str(item.get("system_reminder") or "").strip()
-            ]
+            result: list[dict[str, str]] = []
+            for item in list(
+                dict(prompt.metadata or {}).get("initial_skill_injections") or []
+            ):
+                if not isinstance(item, Mapping):
+                    continue
+                normalized = normalized_skill_injection(item)
+                if normalized is not None:
+                    result.append(normalized)
+            return result
         return None
 
     def _role_session_skill_injections(

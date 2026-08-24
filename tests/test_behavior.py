@@ -1248,49 +1248,52 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
+        developer = _message_text(prompt.messages[1])
 
-        self.assertIn("<system_map>", system)
+        self.assertIn("<system_map>", developer)
         self.assertIn("<source_of_truth>", system)
         self.assertIn("<prompt_context_policy>", system)
         self.assertIn("<operating_rules>", system)
         self.assertIn("<priority>", system)
         self.assertNotIn("<task_flow>", system)
-        self.assertIn("<tool_routing>", system)
-        self.assertIn("<tool_efficiency>", system)
+        self.assertIn("<tool_routing>", developer)
+        self.assertIn("<tool_efficiency>", developer)
         self.assertIn("<mutation_policy>", system)
-        self.assertIn("<behavior_guidance_guide>", system)
-        self.assertIn("<knowledge_storage_boundary>", system)
-        self.assertNotIn("<memory_guide>", system)
-        self.assertNotIn("\n<behavior_guidance>\n", system)
-        self.assertNotIn("##", system)
-        self.assertLess(system.index("<system_map>"), system.index("<source_of_truth>"))
+        self.assertIn("<behavior_guidance_guide>", developer)
+        self.assertIn("<knowledge_storage_boundary>", developer)
+        self.assertNotIn("<memory_guide>", developer)
+        self.assertNotIn("\n<behavior_guidance>\n", developer)
+        self.assertNotIn("##", developer)
         self.assertLess(system.index("<source_of_truth>"), system.index("<prompt_context_policy>"))
         self.assertLess(system.index("<prompt_context_policy>"), system.index("<operating_rules>"))
         self.assertLess(system.index("<operating_rules>"), system.index("<priority>"))
-        self.assertLess(system.index("<priority>"), system.index("<tool_routing>"))
-        self.assertLess(system.index("<tool_routing>"), system.index("<tool_efficiency>"))
-        self.assertLess(system.index("<mutation_policy>"), system.index("<behavior_guidance_guide>"))
+        self.assertLess(system.index("<priority>"), system.index("<mutation_policy>"))
+        self.assertLess(developer.index("<system_map>"), developer.index("<tool_routing>"))
+        self.assertLess(developer.index("<tool_routing>"), developer.index("<tool_efficiency>"))
+        self.assertLess(developer.index("<tool_efficiency>"), developer.index("<behavior_guidance_guide>"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
             (
-                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
+                "tool_policy",
+                "mutation_policy",
+                "system_map",
+                "operating_guidance",
                 "tool_routing",
                 "tool_efficiency",
-                "mutation_policy",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
             ),
         )
         self.assertEqual(prompt.metadata["reminder_sections"], ())
 
-        surfaces = system.split("<operating_rules>", 1)[0]
+        surfaces = developer.split("<operating_guidance>", 1)[0]
         self.assertIn("execution/capability", surfaces)
         self.assertIn("behavior: behavior guidance", surfaces)
-        self.assertNotIn("bunshin", system.split("</system_map>", 1)[0].lower())
+        self.assertNotIn("bunshin", developer.split("</system_map>", 1)[0].lower())
         source_of_truth = system.split("<source_of_truth>", 1)[1].split("</source_of_truth>", 1)[0]
         self.assertIn("Use the right source for the truth needed", source_of_truth)
         self.assertIn("live introspection/capability calls", source_of_truth)
@@ -1305,7 +1308,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("bypassing capability policy", mutation)
         self.assertNotIn("<task_flow>", system)
         self.assertNotIn("save_behavior", system)
-        self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
+        self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", developer)
 
     def test_behavior_advice_tool_result_activates_temporary_behavior_guidance(self) -> None:
         self.repository.upsert_affordance(
@@ -1372,11 +1375,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("Active Route Guidance", followup_system)
         followup_text = "\n".join(_message_text(message) for message in generate_requests[1].messages)
         self.assertEqual(generate_requests[1].messages[0].prompt_region.value, "stable_system")
-        self.assertEqual(generate_requests[1].messages[1].prompt_region.value, "active_input")
+        self.assertEqual(generate_requests[1].messages[1].prompt_region.value, "stable_system")
+        self.assertEqual(generate_requests[1].messages[2].prompt_region.value, "active_input")
         self.assertTrue(
             all(
                 message.prompt_region.value == "active_dynamic"
-                for message in generate_requests[1].messages[2:]
+                for message in generate_requests[1].messages[3:]
             )
         )
         self.assertIn("Behavior advice", followup_text)
@@ -1536,14 +1540,16 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
             (
-                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
+                "tool_policy",
+                "mutation_policy",
+                "system_map",
+                "operating_guidance",
                 "tool_routing",
                 "tool_efficiency",
-                "mutation_policy",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
             ),

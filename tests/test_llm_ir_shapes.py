@@ -21,6 +21,7 @@ from pal.llm.ir import (
     LLMResponseItemKind,
     LLMResponseUpdate,
     MessageRole,
+    PromptRegionIR,
     ReasoningPartIR,
     TextPartIR,
     WireShape,
@@ -45,6 +46,71 @@ def decode_frames(codec, frames, context):
 
 
 class LLMIRShapeTests(unittest.TestCase):
+    def test_instruction_roles_preserve_authority_or_degrade_at_shape_boundary(self) -> None:
+        request = LLMRequestIR(
+            messages=(
+                LLMMessageIR(
+                    MessageRole.SYSTEM,
+                    (TextPartIR("hard policy"),),
+                    prompt_region=PromptRegionIR.STABLE_SYSTEM,
+                ),
+                LLMMessageIR(
+                    MessageRole.DEVELOPER,
+                    (TextPartIR("stable operating guidance"),),
+                    prompt_region=PromptRegionIR.STABLE_SYSTEM,
+                ),
+                LLMMessageIR(
+                    MessageRole.USER,
+                    (TextPartIR("current request"),),
+                    prompt_region=PromptRegionIR.ACTIVE_INPUT,
+                ),
+                LLMMessageIR(
+                    MessageRole.DEVELOPER,
+                    (TextPartIR("dynamic reminder"),),
+                    prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
+                ),
+            ),
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=128),
+        )
+
+        responses = codec_for_shape(WireShape.OPENAI_RESPONSE).encode(
+            request,
+            _context(WireShape.OPENAI_RESPONSE),
+        ).payload
+        self.assertEqual(
+            [item["role"] for item in responses["input"]],
+            ["system", "developer", "user", "developer"],
+        )
+
+        completions = codec_for_shape(WireShape.OPENAI_COMPLETION).encode(
+            request,
+            _context(WireShape.OPENAI_COMPLETION),
+        ).payload
+        self.assertEqual(
+            [item["role"] for item in completions["messages"]],
+            ["system", "user"],
+        )
+        self.assertIn("hard policy", completions["messages"][0]["content"])
+        self.assertIn(
+            "stable operating guidance",
+            completions["messages"][0]["content"],
+        )
+
+        anthropic = codec_for_shape(WireShape.ANTHROPIC_MESSAGES).encode(
+            request,
+            _context(WireShape.ANTHROPIC_MESSAGES),
+        ).payload
+        self.assertEqual(
+            [item["text"] for item in anthropic["system"]],
+            ["hard policy", "stable operating guidance"],
+        )
+        self.assertEqual([item["role"] for item in anthropic["messages"]], ["user"])
+        self.assertEqual(
+            [item["text"] for item in anthropic["messages"][0]["content"]],
+            ["current request", "dynamic reminder"],
+        )
+
     def test_tool_protocol_has_no_llm_facade_exports(self) -> None:
         llm = importlib.import_module("pal.llm")
         ir = importlib.import_module("pal.llm.ir")

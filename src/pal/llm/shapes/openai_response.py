@@ -66,7 +66,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 if text:
                     input_items.append(
                         {
-                            "role": "developer",
+                            "role": message.role.value,
                             "content": [{"type": "input_text", "text": text}],
                         }
                     )

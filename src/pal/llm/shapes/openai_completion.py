@@ -13,6 +13,7 @@ from pal.llm.ir import (
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
+    PromptRegionIR,
     ReasoningPartIR,
     ThinkingLevel,
     WireShape,
@@ -76,7 +77,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
                     )
                 spans.append(EncodedMessageSpan(message.message_id))
                 continue
-            role = "user" if message.role == MessageRole.DEVELOPER else role_value(message.role)
+            role = _completion_message_role(message, messages)
             content = openai_content(message.parts)
             if role == "user":
                 content = _openai_user_blocks(content)
@@ -134,6 +135,16 @@ def _openai_user_blocks(content: Any) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text}] if text else []
 
 
+def _completion_message_role(message: Any, messages: list[dict[str, Any]]) -> str:
+    if message.role != MessageRole.DEVELOPER:
+        return role_value(message.role)
+    stable_prefix = message.prompt_region == PromptRegionIR.STABLE_SYSTEM or (
+        message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+        and not any(str(item.get("role") or "") != "system" for item in messages)
+    )
+    return "system" if stable_prefix else "user"
+
+
 def _append_chat_message(
     messages: list[dict[str, Any]],
     payload: dict[str, Any],
@@ -155,6 +166,18 @@ def _append_chat_message(
             ("messages", message_index, "content", index)
             for index in range(start, len(previous))
         )
+    if (
+        role == "system"
+        and messages
+        and messages[-1].get("role") == "system"
+        and isinstance(messages[-1].get("content"), str)
+        and isinstance(content, str)
+    ):
+        messages[-1]["content"] = _merge_instruction_text(
+            str(messages[-1].get("content") or ""),
+            content,
+        )
+        return (("messages", len(messages) - 1),)
     messages.append(payload)
     message_index = len(messages) - 1
     if isinstance(content, list):
@@ -163,6 +186,12 @@ def _append_chat_message(
             for index in range(len(content))
         )
     return (("messages", message_index),) if content else ()
+
+
+def _merge_instruction_text(left: str, right: str) -> str:
+    if left.strip() and right.strip():
+        return f"{left.rstrip()}\n\n{right.lstrip()}"
+    return left or right
 
 
 class OpenAICompletionDecoder:

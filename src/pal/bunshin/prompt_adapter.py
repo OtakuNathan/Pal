@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from pal.foundation import EventEnvelope
+from pal.bunshin.skill_context import normalized_skill_injection
 from pal.shared import (
     ChannelEnvelope,
     EndpointConfig,
@@ -19,8 +20,9 @@ from pal.shared import (
 )
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.tool_routing import (
-    TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
-    TOOL_ROUTING_SYSTEM_GUIDANCE,
+    TOOL_EFFICIENCY_DEVELOPER_GUIDANCE,
+    TOOL_EXECUTION_SYSTEM_POLICY,
+    TOOL_ROUTING_DEVELOPER_GUIDANCE,
 )
 
 
@@ -67,34 +69,61 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                 )
 
         add(
-            "identity",
+            "persona",
             "Bunshin Identity",
             str(scaffold.get("identity") or ""),
             10,
+            metadata={"prompt_target": "developer"},
+        )
+        add(
+            "tool_policy",
+            "Tool Policy",
+            TOOL_EXECUTION_SYSTEM_POLICY,
+            14,
             metadata={"prompt_target": "system"},
         )
         add(
             "tool_efficiency",
             "Tool Efficiency",
-            TOOL_EFFICIENCY_SYSTEM_GUIDANCE,
+            TOOL_EFFICIENCY_DEVELOPER_GUIDANCE,
             15,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         add(
             "behavior_guidance",
             "Role Contract",
             str(scaffold.get("behavior") or ""),
             20,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         add(
             "task_acceptance",
             "Bound Invocation",
             _render_bound_invocation(scaffold),
             35,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         role_context = str(self.role_context_factory() or "").strip()
+        seen_skill_ids: set[str] = set()
+        for item in list(scaffold.get("initial_skill_injections") or []):
+            if not isinstance(item, dict):
+                continue
+            injection = normalized_skill_injection(item)
+            if injection is None or injection["skill_id"] in seen_skill_ids:
+                continue
+            seen_skill_ids.add(injection["skill_id"])
+            add(
+                "memory",
+                "Startup Skill Manual",
+                injection["user_context"],
+                50,
+                metadata={
+                    "prompt_target": "user_context",
+                    "block_id": f"bunshin_startup_skill:{injection['skill_id']}",
+                    "raw_user_context": True,
+                    "runtime_context_kind": "skill",
+                },
+            )
         if role_context:
             add(
                 "memory",
@@ -109,25 +138,25 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
                 },
             )
         add(
-            "operating_rules",
+            "operating_guidance",
             "Execution Rules",
             _render_execution_rules(scaffold),
             60,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         add(
             "tool_routing",
             "Tool Routing",
-            TOOL_ROUTING_SYSTEM_GUIDANCE,
+            TOOL_ROUTING_DEVELOPER_GUIDANCE,
             65,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         add(
             "output_contract",
             "Output Contract",
             str(scaffold.get("output_contract") or ""),
             70,
-            metadata={"prompt_target": "system"},
+            metadata={"prompt_target": "developer"},
         )
         retry = str(dict(context.metadata or {}).get("retry_note") or "")
         if retry:
@@ -181,9 +210,6 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
     goal = str(pack.instruction or pack.goal or "").strip()
     if goal:
         lines.extend(["", "## Assignment", goal])
-    skill_reminders = _initial_skill_reminders(pack)
-    if skill_reminders:
-        lines.extend(["", *skill_reminders])
     lines.extend(
         [
             "",
@@ -305,21 +331,6 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
         ]
     )
     return "\n".join(lines)
-
-
-def _initial_skill_reminders(pack: BunshinInvocationPack) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in list(dict(pack.metadata or {}).get("initial_skill_injections") or []):
-        if not isinstance(item, dict):
-            continue
-        skill_id = str(item.get("skill_id") or "").strip()
-        reminder = str(item.get("system_reminder") or "").strip()
-        if not skill_id or not reminder or skill_id in seen:
-            continue
-        seen.add(skill_id)
-        result.append(reminder)
-    return result
 
 
 def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:

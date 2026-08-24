@@ -71,6 +71,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "RetryDirective": ("pal.shared.tool_protocol", "RetryDirective"),
     "ToolAffordance": ("pal.shared.tool_protocol", "ToolAffordance"),
     "ToolCallIR": ("pal.shared.tool_protocol", "ToolCallIR"),
+    "ToolContextMessageIR": ("pal.shared.tool_protocol", "ToolContextMessageIR"),
     "ToolDefinitionIR": ("pal.shared.tool_protocol", "ToolDefinitionIR"),
     "ToolExecutionResult": ("pal.shared.tool_protocol", "ToolExecutionResult"),
     "ToolInvocationResult": ("pal.shared.tool_protocol", "ToolInvocationResult"),

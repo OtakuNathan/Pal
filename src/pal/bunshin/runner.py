@@ -82,6 +82,8 @@ from pal.memory.turn_ir import L1TurnState
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.memory.compact import normalize_l1_transcript
+from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
+from pal.skill.prompt import SkillPromptFragmentProvider
 from pal.bunshin.compact import (
     BunshinCompactionPolicy,
 )
@@ -1481,6 +1483,7 @@ class BunshinRunner:
                 include_l1_recent_context=True,
             )
         )
+        prompt_fragment_registry.register(SkillPromptFragmentProvider())
         return prompt_fragment_registry
 
     async def _execute_bunshin_agent_effect(
@@ -2319,6 +2322,9 @@ class BunshinRunner:
             "allowed_capabilities": list(self.pack.allowed_capabilities),
             "visible_capabilities": list(self._visible_capability_aliases),
             "skill_manual_context": list((self.pack.metadata or {}).get("skill_manual_context") or []),
+            "initial_skill_injections": list(
+                (self.pack.metadata or {}).get("initial_skill_injections") or []
+            ),
             "output_contract": str(profile.get("output_contract_fragment") or ""),
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
@@ -2720,6 +2726,13 @@ def build_slim_bunshin_runtime(
         ),
     )
     register_memory_with_core(context, memory_service)
+    register_skill_with_core(
+        context,
+        SkillService(
+            repository=SkillRepository(),
+            runtime_root=Path(runtime_root),
+        ),
+    )
     l3_plugin = SQLiteVecL3Plugin(
         service=memory_service,
         embedding_provider=build_ollama_embedding_provider_from_config(config),
@@ -2750,7 +2763,16 @@ def build_slim_bunshin_runtime(
         read_delegate=broker_web.read if broker_web is not None else None,
     )
     build_lsp_plugin(runtime_root=Path(runtime_root)).register_with_core(context)
-    for module_id in ("execution", "artifact", "memory", l3_plugin.module_id, "web_search", "web_fetch", "lsp"):
+    for module_id in (
+        "execution",
+        "artifact",
+        "memory",
+        "skill",
+        l3_plugin.module_id,
+        "web_search",
+        "web_fetch",
+        "lsp",
+    ):
         lifecycle.publish_module_capabilities(module_id)
 
     async def close() -> None:

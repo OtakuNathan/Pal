@@ -257,6 +257,13 @@ class MemoryServicePort(Protocol):
     ) -> "L1TurnIR":
         ...
 
+    def append_l1_user_contexts(
+        self,
+        turn_id: str,
+        messages: tuple["LLMMessageIR", ...],
+    ) -> "L1TurnIR":
+        ...
+
     def contains_l1_message(self, turn_id: str, message_id: str) -> bool:
         ...
 

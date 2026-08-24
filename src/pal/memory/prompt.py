@@ -194,7 +194,7 @@ def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
             metadata={
                 "module_id": "memory",
                 "kind": "memory_guide",
-                "prompt_target": "system",
+                "prompt_target": "developer",
             },
         ),
     )

@@ -529,6 +529,11 @@ class TurnExecutor:
                 tool_result,
             )
             if len(continuation.pending_tool_results) >= len(continuation.pending_tool_call_batch):
+                await self._append_l1_tool_context_messages_async(
+                    continuation,
+                    tuple(continuation.pending_tool_call_batch),
+                    tuple(continuation.pending_tool_results),
+                )
                 continuation.pending_assistant_tool_text = ""
                 continuation.pending_tool_call_batch = []
                 continuation.pending_tool_results = []
@@ -1608,6 +1613,37 @@ class TurnExecutor:
                     result.replay_result_ref,
                 )
                 raise
+
+    async def _append_l1_tool_context_messages_async(
+        self,
+        continuation: Any,
+        calls: tuple[ToolCallIR, ...],
+        results: tuple[ToolExecutionResult, ...],
+    ) -> None:
+        """Append tool-declared user context after the complete tool-result batch."""
+
+        memory_service = self.context.port_registry.get("memory:memory")
+        method = getattr(memory_service, "append_l1_user_contexts", None)
+        if not callable(method):
+            return
+        messages: list[LLMMessageIR] = []
+        for call, result in zip(calls, results, strict=True):
+            for index, context_message in enumerate(result.context_messages):
+                messages.append(
+                    LLMMessageIR(
+                        role=MessageRole.USER,
+                        parts=(TextPartIR(context_message.content),),
+                        message_id=f"tool-context:{call.call_id}:{index}",
+                        semantic_kind=context_message.semantic_kind,
+                        metadata={
+                            **dict(context_message.metadata),
+                            "source_tool_call_id": call.call_id,
+                            "source_tool_name": call.name,
+                        },
+                    )
+                )
+        if messages:
+            method(str(continuation.turn_id), tuple(messages))
 
     def _discard_uncommitted_tool_delivery(
         self,

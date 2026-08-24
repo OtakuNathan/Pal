@@ -100,6 +100,14 @@ workspace_policy: {}
             )
         )
 
+    def test_workers_without_pinned_manuals_can_discover_and_inject_skills(self) -> None:
+        pack = self._pack("general.reviewer")
+
+        self.assertFalse(pack.allowed_skills)
+        self.assertIn("op_skill_search", pack.allowed_capabilities)
+        self.assertIn("op_skill_read", pack.allowed_capabilities)
+        self.assertIn("op_skill_inject", pack.allowed_capabilities)
+
     def test_lifestyle_binding_resolves_all_roles_and_artifact_adapters(self) -> None:
         ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
             "lifestyle.nutritionist"

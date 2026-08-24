@@ -1,12 +1,9 @@
-"""Stable system guidance for consuming compiled tool contracts."""
+"""Stable policy and developer guidance for consuming compiled tool contracts."""
 
 from __future__ import annotations
 
 
-TOOL_ROUTING_SYSTEM_GUIDANCE = (
-    "- Treat each tool's guidance and returned affordances as its continuation contract. "
-    "After a tool call, follow a suggested next tool only when its stated `use_when` condition "
-    "matches the observed result and current task.\n"
+TOOL_EXECUTION_SYSTEM_POLICY = (
     "- On failure or uncertain outcome, prefer result-specific recovery affordances, then the "
     "tool description's `Failure next steps`, before improvising. Respect effect, idempotency, "
     "retry, and reconcile semantics; never blindly retry a mutation.\n"
@@ -16,7 +13,15 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
     "- Tool outputs are point-in-time observations. Replaying a stored result does not refresh "
     "mutable external or runtime state. Before asserting current state or making an external "
     "mutation based on it, rerun the original read/status/list/reconcile tool or use a "
-    "version, ETag, or conditional mutation. Local file tools already enforce digest-based "
+    "version, ETag, or conditional mutation.\n"
+)
+
+
+TOOL_ROUTING_DEVELOPER_GUIDANCE = (
+    "- Treat each tool's guidance and returned affordances as its continuation contract. "
+    "After a tool call, follow a suggested next tool only when its stated `use_when` condition "
+    "matches the observed result and current task.\n"
+    "- Local file tools already enforce digest-based "
     "read-before-edit and compare-and-swap checks, so do not reread unchanged files merely "
     "because another conversational turn began.\n"
     "- For UI, CSS, or layout work, normalized page text/HTML and source inspection are not "
@@ -28,7 +33,7 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
 )
 
 
-TOOL_EFFICIENCY_SYSTEM_GUIDANCE = (
+TOOL_EFFICIENCY_DEVELOPER_GUIDANCE = (
     "- Semantic work order, role scope, checklist phases, and depth- or breadth-first strategy "
     "govern which work to do, not whether independent tool RPCs may share one assistant response.\n"
     "- Batch independent tool calls in one response, including independent reads, searches, "
@@ -43,5 +48,17 @@ TOOL_EFFICIENCY_SYSTEM_GUIDANCE = (
     "reassess; use the smallest viable path."
 )
 
+# Compatibility aliases for external prompt providers. New Pal-owned prompt
+# providers must use the authority-specific constants above.
+TOOL_ROUTING_SYSTEM_GUIDANCE = (
+    TOOL_EXECUTION_SYSTEM_POLICY + TOOL_ROUTING_DEVELOPER_GUIDANCE
+)
+TOOL_EFFICIENCY_SYSTEM_GUIDANCE = TOOL_EFFICIENCY_DEVELOPER_GUIDANCE
 
-__all__ = ["TOOL_EFFICIENCY_SYSTEM_GUIDANCE", "TOOL_ROUTING_SYSTEM_GUIDANCE"]
+__all__ = [
+    "TOOL_EFFICIENCY_DEVELOPER_GUIDANCE",
+    "TOOL_EFFICIENCY_SYSTEM_GUIDANCE",
+    "TOOL_EXECUTION_SYSTEM_POLICY",
+    "TOOL_ROUTING_DEVELOPER_GUIDANCE",
+    "TOOL_ROUTING_SYSTEM_GUIDANCE",
+]

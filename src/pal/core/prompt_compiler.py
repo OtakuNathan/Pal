@@ -75,6 +75,7 @@ class PromptCompiler:
         assembly_context = self._ensure_memory_pack(assembly_context)
         fragments = self.collect_prompt_fragments(assembly_context)
         system_blocks: list[PromptIRBlock] = []
+        developer_blocks: list[PromptIRBlock] = []
         user_context_blocks: list[PromptIRBlock] = []
         runtime_reminder_blocks: list[PromptIRBlock] = []
 
@@ -98,221 +99,7 @@ class PromptCompiler:
                     )
                 )
                 continue
-            if normalized_section == "identity":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="identity",
-                        title="Identity",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "system_map":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="system_map",
-                        title="System Map",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "source_of_truth":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="source_of_truth",
-                        title="Source of Truth",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "prompt_context_policy":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="prompt_context_policy",
-                        title="Prompt Context Policy",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "operating_rules":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="operating_rules",
-                        title="Operating Rules",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "operating_guidance":
-                existing_index = next(
-                    (
-                        index
-                        for index, block in enumerate(system_blocks)
-                        if block.block_id == "operating_rules"
-                    ),
-                    None,
-                )
-                if existing_index is None:
-                    system_blocks.append(
-                        PromptIRBlock(
-                            block_id="operating_rules",
-                            title="Operating Rules",
-                            content=rendered_body,
-                        )
-                    )
-                else:
-                    existing = system_blocks[existing_index]
-                    system_blocks[existing_index] = PromptIRBlock(
-                        block_id=existing.block_id,
-                        title=existing.title,
-                        content=f"{existing.content.rstrip()}\n\n{rendered_body}",
-                        metadata=existing.metadata,
-                    )
-            elif normalized_section == "priority":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="priority",
-                        title="Priority",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "task_flow":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="task_flow",
-                        title="Task Flow",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "tool_routing":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="tool_routing",
-                        title="Tool Routing",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "tool_efficiency":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="tool_efficiency",
-                        title="Tool Efficiency",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "mutation_policy":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="mutation_policy",
-                        title="Mutation Policy",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "memory_guide":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="memory_guide",
-                        title="Memory Guide",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "behavior_guidance":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="behavior_guidance",
-                        title="Behavior Guidance",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "behavior_guidance_guide":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="behavior_guidance_guide",
-                        title="Behavior Guidance Guide",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "skill_guide":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="skill_guide",
-                        title="Skill Guide",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "requirements_brief":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="requirements_brief",
-                        title=str(fragment.title or "Requirements Brief"),
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "requirements_policy":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="requirements_policy",
-                        title=str(fragment.title or "Requirements Policy"),
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "task_acceptance":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="task_acceptance",
-                        title=str(fragment.title or "Task Acceptance"),
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "task_acceptance_policy":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="task_acceptance_policy",
-                        title=str(fragment.title or "Task Acceptance Policy"),
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "output_contract":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="output_contract",
-                        title=str(fragment.title or "Output Contract"),
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "knowledge_storage_boundary":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="knowledge_storage_boundary",
-                        title="Knowledge Storage Boundary",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "resident_affordances":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="resident_affordances",
-                        title="Behavior Guidance",
-                        content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
-            elif normalized_section == "memory":
+            if normalized_section == "memory":
                 user_context_blocks.append(
                     PromptIRBlock(
                         block_id=str(fragment.metadata.get("block_id") or "memory_projection"),
@@ -325,7 +112,8 @@ class PromptCompiler:
                         },
                     )
                 )
-            elif normalized_section == "artifact":
+                continue
+            if normalized_section == "artifact":
                 user_context_blocks.append(
                     PromptIRBlock(
                         block_id=str(fragment.metadata.get("block_id") or "available_artifacts"),
@@ -338,39 +126,26 @@ class PromptCompiler:
                         },
                     )
                 )
-            elif normalized_section == "memory_system":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="memory_context",
-                        title=str(fragment.title or "Memory Context"),
-                        content=rendered_body,
-                        metadata={
-                            **dict(fragment.metadata),
-                            "source_section": fragment.section,
-                            "source_title": fragment.title,
-                        },
-                    )
-                )
-            elif normalized_section == "runtime":
-                system_blocks.append(
-                    PromptIRBlock(
-                        block_id="runtime_overlay",
-                        title="Runtime Overlay",
-                        content=f"{fragment.title}:\n{rendered_body}",
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
-                    )
-                )
+                continue
+            block = self._static_instruction_block(
+                fragment,
+                normalized_section=normalized_section,
+                rendered_body=rendered_body,
+            )
+            (system_blocks if prompt_target == "system" else developer_blocks).append(block)
 
         runtime_reminder_blocks.extend(
             self._build_runtime_overlay_blocks(assembly_context)
         )
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
+        ordered_developer_blocks = self._order_developer_blocks(developer_blocks)
         ordered_user_blocks = self._order_user_context_blocks(user_context_blocks, turn_kind=assembly_context.turn_kind)
         ordered_reminder_blocks = self._order_runtime_reminder_blocks(runtime_reminder_blocks)
         primary_input = self._extract_primary_input_text(assembly_context)
         return PromptIR(
             system_blocks=tuple(ordered_system_blocks),
+            developer_blocks=tuple(ordered_developer_blocks),
             user_context_blocks=tuple(ordered_user_blocks),
             runtime_reminder_blocks=tuple(ordered_reminder_blocks),
             primary_input=primary_input,
@@ -396,7 +171,12 @@ class PromptCompiler:
             model_hint=model_hint,
             temperature=None,
             metadata={
-                "fragment_sections": [block.block_id for block in prompt_ir.system_blocks],
+                "fragment_sections": [
+                    block.block_id
+                    for block in (*prompt_ir.system_blocks, *prompt_ir.developer_blocks)
+                ],
+                "system_sections": [block.block_id for block in prompt_ir.system_blocks],
+                "developer_sections": [block.block_id for block in prompt_ir.developer_blocks],
                 "user_context_blocks": [block.block_id for block in prompt_ir.user_context_blocks],
                 "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks],
                 "prompt_ir": self._prompt_ir_debug_dict(prompt_ir),
@@ -413,6 +193,7 @@ class PromptCompiler:
 
     def _build_failure_prompt_ir(self, assembly_context: PromptAssemblyContext) -> PromptIR:
         identity_blocks: list[PromptIRBlock] = []
+        persona_blocks: list[PromptIRBlock] = []
         for fragment in self.collect_prompt_fragments(
             PromptAssemblyContext(
                 event=assembly_context.event,
@@ -423,19 +204,18 @@ class PromptCompiler:
                 metadata={},
             )
         ):
-            if self._normalize_prompt_section(fragment.section) != "identity":
+            normalized_section = self._normalize_prompt_section(fragment.section)
+            if normalized_section not in {"identity", "persona"}:
                 continue
             rendered_body = str(fragment.content).strip()
             if not rendered_body:
                 continue
-            identity_blocks.append(
-                PromptIRBlock(
-                    block_id="identity",
-                    title="Identity",
-                    content=rendered_body,
-                    metadata={"source_section": fragment.section, "source_title": fragment.title},
-                )
+            block = self._static_instruction_block(
+                fragment,
+                normalized_section=normalized_section,
+                rendered_body=rendered_body,
             )
+            (identity_blocks if normalized_section == "identity" else persona_blocks).append(block)
         rules = str(
             assembly_context.metadata.get("failure_rules")
             or (
@@ -465,6 +245,7 @@ class PromptCompiler:
         primary_input = str(assembly_context.metadata.get("failure_primary_input") or "").strip()
         return PromptIR(
             system_blocks=tuple(self._order_system_blocks(system_blocks)),
+            developer_blocks=tuple(self._order_developer_blocks(persona_blocks)),
             user_context_blocks=tuple(user_context_blocks),
             runtime_reminder_blocks=tuple(runtime_blocks),
             primary_input=primary_input,
@@ -529,7 +310,7 @@ class PromptCompiler:
         target = str((fragment.metadata or {}).get("prompt_target") or "").strip().lower()
         if not target:
             raise ValueError("prompt fragment must declare metadata.prompt_target")
-        if target not in {"system", "user_context", "runtime_reminder"}:
+        if target not in {"system", "developer", "user_context", "runtime_reminder"}:
             raise ValueError(f"unknown prompt fragment target: {target!r}")
         return target
 
@@ -540,6 +321,33 @@ class PromptCompiler:
         normalized_section: str,
         prompt_target: str,
     ) -> None:
+        system_sections = {
+            "identity",
+            "memory_system",
+            "source_of_truth",
+            "prompt_context_policy",
+            "operating_rules",
+            "priority",
+            "tool_policy",
+            "mutation_policy",
+        }
+        developer_sections = {
+            "persona",
+            "system_map",
+            "operating_guidance",
+            "tool_routing",
+            "tool_efficiency",
+            "memory_guide",
+            "behavior_guidance",
+            "behavior_guidance_guide",
+            "skill_guide",
+            "knowledge_storage_boundary",
+            "requirements_brief",
+            "requirements_policy",
+            "task_acceptance",
+            "task_acceptance_policy",
+            "output_contract",
+        }
         if normalized_section in {"memory", "artifact"} and prompt_target != "user_context":
             raise ValueError(
                 f"prompt fragment section {fragment.section!r} must target user_context"
@@ -548,6 +356,11 @@ class PromptCompiler:
             raise ValueError(
                 f"prompt fragment section {fragment.section!r} must target runtime_reminder"
             )
+        if normalized_section == "task_flow" and prompt_target not in {
+            "developer",
+            "runtime_reminder",
+        }:
+            raise ValueError("task_flow fragments must target developer or runtime_reminder")
         if (
             prompt_target == "user_context"
             and normalized_section not in {"memory", "artifact"}
@@ -555,6 +368,62 @@ class PromptCompiler:
             raise ValueError(
                 f"prompt fragment section {fragment.section!r} cannot target user_context"
             )
+        if normalized_section in system_sections and prompt_target != "system":
+            raise ValueError(
+                f"prompt fragment section {fragment.section!r} must target system"
+            )
+        if normalized_section in developer_sections and prompt_target != "developer":
+            raise ValueError(
+                f"prompt fragment section {fragment.section!r} must target developer"
+            )
+
+    @staticmethod
+    def _static_instruction_block(
+        fragment: PromptFragment,
+        *,
+        normalized_section: str,
+        rendered_body: str,
+    ) -> PromptIRBlock:
+        block_ids = {
+            "memory_system": "memory_context",
+        }
+        default_titles = {
+            "identity": "Identity",
+            "persona": "Persona Defaults",
+            "system_map": "System Map",
+            "source_of_truth": "Source of Truth",
+            "prompt_context_policy": "Prompt Context Policy",
+            "operating_rules": "Operating Rules",
+            "operating_guidance": "Operating Guidance",
+            "priority": "Priority",
+            "task_flow": "Task Flow",
+            "tool_policy": "Tool Policy",
+            "tool_routing": "Tool Routing",
+            "tool_efficiency": "Tool Efficiency",
+            "mutation_policy": "Mutation Policy",
+            "memory_guide": "Memory Guide",
+            "behavior_guidance": "Behavior Guidance",
+            "behavior_guidance_guide": "Behavior Guidance Guide",
+            "skill_guide": "Skill Guide",
+            "knowledge_storage_boundary": "Knowledge Storage Boundary",
+            "requirements_brief": "Requirements Brief",
+            "requirements_policy": "Requirements Policy",
+            "task_acceptance": "Task Acceptance",
+            "task_acceptance_policy": "Task Acceptance Policy",
+            "output_contract": "Output Contract",
+            "memory_system": "Memory Context",
+        }
+        return PromptIRBlock(
+            block_id=block_ids.get(normalized_section, normalized_section),
+            title=str(fragment.title or default_titles.get(normalized_section) or normalized_section),
+            content=rendered_body,
+            metadata={
+                **dict(fragment.metadata or {}),
+                "source_section": fragment.section,
+                "source_title": fragment.title,
+                "source_priority": fragment.priority,
+            },
+        )
 
     @staticmethod
     def _runtime_reminder_block(
@@ -591,6 +460,7 @@ class PromptCompiler:
         lowered = aliases.get(lowered, lowered)
         if lowered in {
             "identity",
+            "persona",
             "memory",
             "memory_system",
             "artifact",
@@ -602,6 +472,7 @@ class PromptCompiler:
             "operating_guidance",
             "priority",
             "task_flow",
+            "tool_policy",
             "tool_routing",
             "tool_efficiency",
             "mutation_policy",
@@ -694,61 +565,61 @@ class PromptCompiler:
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
-        system_map_blocks = [block for block in blocks if block.block_id == "system_map"]
         source_of_truth_blocks = [block for block in blocks if block.block_id == "source_of_truth"]
         prompt_context_policy_blocks = [block for block in blocks if block.block_id == "prompt_context_policy"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
         priority_blocks = [block for block in blocks if block.block_id == "priority"]
-        task_flow_blocks = [block for block in blocks if block.block_id == "task_flow"]
-        tool_routing_blocks = [block for block in blocks if block.block_id == "tool_routing"]
-        tool_efficiency_blocks = [block for block in blocks if block.block_id == "tool_efficiency"]
+        tool_policy_blocks = [block for block in blocks if block.block_id == "tool_policy"]
         mutation_policy_blocks = [block for block in blocks if block.block_id == "mutation_policy"]
-        memory_guide_blocks = [block for block in blocks if block.block_id == "memory_guide"]
-        behavior_guidance_blocks = [block for block in blocks if block.block_id == "behavior_guidance"]
-        behavior_guidance_guide_blocks = [block for block in blocks if block.block_id == "behavior_guidance_guide"]
-        requirements_blocks = [block for block in blocks if block.block_id == "requirements_brief"]
-        requirements_policy_blocks = [block for block in blocks if block.block_id == "requirements_policy"]
-        task_acceptance_blocks = [block for block in blocks if block.block_id == "task_acceptance"]
-        task_acceptance_policy_blocks = [block for block in blocks if block.block_id == "task_acceptance_policy"]
-        output_contract_blocks = [block for block in blocks if block.block_id == "output_contract"]
-        skill_guide_blocks = [block for block in blocks if block.block_id == "skill_guide"]
-        knowledge_storage_boundary_blocks = [block for block in blocks if block.block_id == "knowledge_storage_boundary"]
-        resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
-        runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
-        ordered_runtime = [block for block in runtime_blocks if block.metadata.get("priority") != "finalization"]
-        ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
         return [
             *identity_blocks,
-            *system_map_blocks,
             *source_of_truth_blocks,
             *prompt_context_policy_blocks,
             *rule_blocks,
             *priority_blocks,
-            *task_flow_blocks,
-            *tool_routing_blocks,
-            *tool_efficiency_blocks,
+            *tool_policy_blocks,
             *mutation_policy_blocks,
-            *memory_guide_blocks,
-            *behavior_guidance_blocks,
-            *behavior_guidance_guide_blocks,
-            *requirements_blocks,
-            *requirements_policy_blocks,
-            *task_acceptance_blocks,
-            *task_acceptance_policy_blocks,
-            *output_contract_blocks,
-            *skill_guide_blocks,
-            *knowledge_storage_boundary_blocks,
-            *resident_blocks,
             *memory_blocks,
-            *ordered_runtime,
         ]
+
+    @staticmethod
+    def _order_developer_blocks(blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
+        order = {
+            "persona": 10,
+            "system_map": 20,
+            "operating_guidance": 30,
+            "task_flow": 40,
+            "tool_routing": 50,
+            "tool_efficiency": 60,
+            "memory_guide": 70,
+            "behavior_guidance": 80,
+            "behavior_guidance_guide": 90,
+            "skill_guide": 100,
+            "knowledge_storage_boundary": 110,
+            "requirements_brief": 120,
+            "requirements_policy": 130,
+            "task_acceptance": 140,
+            "task_acceptance_policy": 150,
+            "output_contract": 160,
+        }
+        return sorted(
+            blocks,
+            key=lambda block: (
+                order.get(block.block_id, 1000),
+                int(block.metadata.get("source_priority", 1000) or 1000),
+                str(block.title),
+            ),
+        )
 
     def _compile_prompt_ir_messages(self, prompt_ir: PromptIR) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         system_content = self._render_system_blocks(prompt_ir.system_blocks)
         if system_content:
             messages.append({"role": "system", "content": system_content})
+        developer_content = self._render_system_blocks(prompt_ir.developer_blocks)
+        if developer_content:
+            messages.append({"role": "developer", "content": developer_content})
         final_user_parts: list[dict[str, Any]] = []
         for block in prompt_ir.user_context_blocks:
             if block.block_id == "memory_current_summary":
@@ -1003,6 +874,10 @@ class PromptCompiler:
             "system_blocks": [
                 {"block_id": block.block_id, "title": block.title, "content": block.content}
                 for block in prompt_ir.system_blocks
+            ],
+            "developer_blocks": [
+                {"block_id": block.block_id, "title": block.title, "content": block.content}
+                for block in prompt_ir.developer_blocks
             ],
             "user_context_blocks": [
                 {"block_id": block.block_id, "title": block.title, "content": block.content}

@@ -424,6 +424,11 @@ class BunshinProfileRegistry:
         hook_capabilities = self._hook_capabilities(profile, pack)
         if hook_capabilities:
             allowed_capabilities = _dedupe([*allowed_capabilities, *hook_capabilities])
+        # Workers without startup skill refs retain the resident Pal path for
+        # discovering and loading read-only procedural references themselves.
+        allowed_capabilities = _dedupe(
+            [*allowed_capabilities, *BUNSHIN_SKILL_REFERENCE_CAPABILITIES]
+        )
         allowed_capabilities = filter_bunshin_allowed_capabilities(
             allowed_capabilities,
             capability_policy=capability_policy,
@@ -587,6 +592,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "bunshin_memory_candidates": ("op_bunshin_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
+    "skill_reference": ("op_skill_search", "op_skill_read", "op_skill_inject"),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
     "architecture_workspace_read": WORKSPACE_READ_CAPABILITIES,
     "workspace_write": (
@@ -639,6 +645,9 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
+BUNSHIN_SKILL_REFERENCE_CAPABILITIES = CAPABILITY_GROUPS["skill_reference"]
+
+
 DEFAULT_BUNSHIN_DENIED_CAPABILITIES = frozenset(
     {
         "op_path_delete",
@@ -654,7 +663,6 @@ DEFAULT_BUNSHIN_DENIED_CAPABILITIES = frozenset(
         "op_skill_assimilate",
         "op_skill_commit",
         "op_skill_disable",
-        "op_skill_inject",
         "op_skill_update",
     }
 )

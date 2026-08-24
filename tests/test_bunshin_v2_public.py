@@ -107,7 +107,7 @@ from pal.bunshin.v2.contracts import (
     SubmissionInvariantError,
 )
 from pal.bunshin.manager import BunshinManager, BunshinRunState
-from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
+from pal.bunshin.prompt_adapter import BunshinPromptFragmentProvider, render_bunshin_task_prompt
 from pal.bunshin.runner import BunshinAgentLoopState, BunshinRunner, BunshinRuntimeBundle
 from pal.memory import (
     L1MessageKind,
@@ -120,6 +120,7 @@ from pal.shared import (
     EventKind,
     IntrospectionCall,
     LLMFinishReason,
+    PromptAssemblyContext,
     BunshinInvocationPack,
     RuntimeStatus,
 )
@@ -4965,11 +4966,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 core.detach_module("bunshin")
 
     def test_start_pins_approved_skill_refs_for_manager_role_sessions(self) -> None:
-        reminder = (
-            "<system-reminder>\n"
+        user_context = (
+            "<skill>\n"
             "Injected skill:\nSkill id: pal.channel.provider.development\n\n"
             "Manual:\nReuse the channel provider contract.\n"
-            "</system-reminder>"
+            "</skill>"
         )
         provider = self._public_provider()
         started = provider.start_workflow(
@@ -5009,20 +5010,20 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         def inject(skill_id: str) -> dict[str, str]:
             injected.append(skill_id)
-            return {"skill_id": skill_id, "system_reminder": reminder}
+            return {"skill_id": skill_id, "user_context": user_context}
 
         self.assertEqual(
             _workflow_skill_injections(request, inject),
             [
                 {
                     "skill_id": "pal.channel.provider.development",
-                    "system_reminder": reminder,
+                    "user_context": user_context,
                 }
             ],
         )
         self.assertEqual(injected, ["pal.channel.provider.development"])
 
-    def test_approved_skill_reminder_is_one_user_side_prompt_block(self) -> None:
+    def test_approved_skill_manual_is_one_startup_user_context_block(self) -> None:
         reminder = (
             "<system-reminder>\n"
             "Injected skill:\nSkill id: channel-manual\n\n"
@@ -5041,6 +5042,19 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         first_prompt = render_bunshin_task_prompt(pack)
+        fragments = BunshinPromptFragmentProvider(
+            scaffold_factory=lambda: {
+                "initial_skill_injections": list(
+                    pack.metadata["initial_skill_injections"]
+                )
+            },
+            role_context_factory=lambda: "",
+        ).build_prompt_fragments(PromptAssemblyContext())
+        skill_fragments = [
+            item
+            for item in fragments
+            if item.metadata.get("runtime_context_kind") == "skill"
+        ]
         with patch(
             "pal.bunshin.sandbox.sandbox_supported_backend",
             return_value="bwrap",
@@ -5056,15 +5070,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertIn("initial_skill_injections", runner_pack.metadata)
-        self.assertEqual(first_prompt.count("<system-reminder>"), 1)
-        self.assertEqual(first_prompt.count("</system-reminder>"), 1)
+        self.assertNotIn("<system-reminder>", first_prompt)
+        self.assertNotIn("Follow the channel contract.", first_prompt)
+        self.assertEqual(len(skill_fragments), 1)
+        self.assertEqual(skill_fragments[0].metadata["prompt_target"], "user_context")
+        self.assertIn("<skill>", skill_fragments[0].content)
+        self.assertIn("Follow the channel contract.", skill_fragments[0].content)
         self.assertEqual(reconstructed_prompt, first_prompt)
-        self.assertLess(
-            first_prompt.index("<system-reminder>"),
-            first_prompt.index("## Execution Discipline"),
-        )
 
-    def test_manager_reuses_skill_inject_system_reminder_projection(self) -> None:
+    def test_manager_reuses_skill_inject_user_context_projection(self) -> None:
         from pal.behavior.models import BehaviorSkillModel
         from pal.foundation import PalV2Database
         from pal.skill.contracts import SkillDescriptor
@@ -5093,8 +5107,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 manager._skill_database.close()
 
         self.assertEqual(injected["skill_id"], "manager.manual")
-        self.assertTrue(injected["system_reminder"].startswith("<system-reminder>"))
-        self.assertIn("Read the contract before editing.", injected["system_reminder"])
+        self.assertTrue(injected["user_context"].startswith("<skill>"))
+        self.assertIn("Read the contract before editing.", injected["user_context"])
 
     def test_durable_role_session_reuses_injected_manual_without_reinjecting(self) -> None:
         reminder = {

@@ -11,6 +11,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     model_validation_schema,
 )
+from pal.shared.tool_protocol import ToolContextMessageIR
 
 
 @dataclass(frozen=True)
@@ -97,10 +98,12 @@ class CapabilityResult:
     structured: dict[str, Any] | None = None
     effect_receipt: EffectReceipt | None = None
     context_delivery: dict[str, Any] | None = None
+    context_messages: tuple[ToolContextMessageIR, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
             raise ValueError("CapabilityResult.llm_text must be non-empty")
+        object.__setattr__(self, "context_messages", tuple(self.context_messages or ()))
 
 
 @dataclass(frozen=True)

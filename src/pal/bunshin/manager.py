@@ -473,12 +473,15 @@ class BunshinManager:
                 or "skill_injection_failed"
             )
             raise ValueError(f"{skill_id}: {reason}")
-        reminder = str(result.llm_text or "").strip()
-        if not reminder:
-            raise ValueError(f"{skill_id}: skill injection returned no reminder")
+        context_messages = tuple(result.context_messages)
+        if len(context_messages) != 1:
+            raise ValueError(f"{skill_id}: skill injection returned no user context")
+        user_context = str(context_messages[0].content or "").strip()
+        if not user_context:
+            raise ValueError(f"{skill_id}: skill injection returned empty user context")
         return {
             "skill_id": str(dict(result.structured or {}).get("skill_id") or skill_id),
-            "system_reminder": reminder,
+            "user_context": user_context,
         }
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

@@ -363,6 +363,20 @@ class MemoryService(MemoryServicePort):
         self.l1_store.replace(updated)
         return updated
 
+    def append_l1_user_contexts(
+        self,
+        turn_id: str,
+        messages: tuple[LLMMessageIR, ...],
+    ) -> L1TurnIR:
+        """Append one tool batch's user-context sidecars in a single store write."""
+
+        current = self.l1_store.active(turn_id)
+        updated = current.append_user_contexts(tuple(messages))
+        if updated is current:
+            return current
+        self.l1_store.replace(updated)
+        return updated
+
     def rollback_l1_tool_result(
         self,
         turn_id: str,

@@ -5,8 +5,9 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
-from pal.shared.prompt_rendering import render_system_reminder
+from pal.shared.prompt_rendering import render_xml_block
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.tool_protocol import ToolContextMessageIR
 from pal.skill.service import SkillService
 
 
@@ -283,9 +284,29 @@ class SkillInjectTool:
         }
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text=skill.manual_text,
+            text="skill injected",
             structured=structured,
-            llm_text=render_system_reminder(_project_skill_text(self.service, _render_injected_skill_for_llm(structured))),
+            llm_text=(
+                f'Skill "{skill.skill_id}" loaded; its manual follows in '
+                "<skill> conversation context."
+            ),
+            context_messages=(
+                ToolContextMessageIR(
+                    content=render_xml_block(
+                        "skill",
+                        _project_skill_text(
+                            self.service,
+                            _render_injected_skill_for_llm(structured),
+                        ),
+                    ),
+                    semantic_kind="runtime_context_skill",
+                    metadata={
+                        "skill_id": skill.skill_id,
+                        "title": skill.title,
+                        "pal_authored": True,
+                    },
+                ),
+            ),
         )
 
 

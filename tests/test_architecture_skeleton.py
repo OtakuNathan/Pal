@@ -1729,6 +1729,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 [
                     "identity",
                     "runtime",
+                    "persona",
                     "memory_guide",
                     "system_map",
                     "source_of_truth",
@@ -1736,6 +1737,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "operating_rules",
                     "operating_guidance",
                     "priority",
+                    "tool_policy",
                     "tool_routing",
                     "tool_efficiency",
                     "mutation_policy",
@@ -1766,14 +1768,41 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 prompt.metadata["fragment_sections"],
                 (
                     "identity",
-                    "system_map",
                     "source_of_truth",
                     "prompt_context_policy",
                     "operating_rules",
                     "priority",
+                    "tool_policy",
+                    "mutation_policy",
+                    "persona",
+                    "system_map",
+                    "operating_guidance",
                     "tool_routing",
                     "tool_efficiency",
+                    "memory_guide",
+                    "knowledge_storage_boundary",
+                ),
+            )
+            self.assertEqual(
+                prompt.metadata["system_sections"],
+                (
+                    "identity",
+                    "source_of_truth",
+                    "prompt_context_policy",
+                    "operating_rules",
+                    "priority",
+                    "tool_policy",
                     "mutation_policy",
+                ),
+            )
+            self.assertEqual(
+                prompt.metadata["developer_sections"],
+                (
+                    "persona",
+                    "system_map",
+                    "operating_guidance",
+                    "tool_routing",
+                    "tool_efficiency",
                     "memory_guide",
                     "knowledge_storage_boundary",
                 ),
@@ -1785,33 +1814,37 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             self.assertEqual(prompt_ir.turn_kind, "chat")
             self.assertEqual(prompt.messages[0].role.value, "system")
+            self.assertEqual(prompt.messages[1].role.value, "developer")
             self.assertEqual(prompt.messages[-1].role.value, "user")
             self.assertIn("Hello from user", prompt.messages[-1].text)
             self.assertNotIn("<runtime_reminder", prompt.messages[-1].text)
             self.assertIn("<identity>", prompt.messages[0].text)
-            self.assertIn("<system_map>", prompt.messages[0].text)
             self.assertIn("<source_of_truth>", prompt.messages[0].text)
             self.assertIn("<prompt_context_policy>", prompt.messages[0].text)
             self.assertIn("<operating_rules>", prompt.messages[0].text)
             self.assertIn("<priority>", prompt.messages[0].text)
-            self.assertIn("<tool_routing>", prompt.messages[0].text)
+            self.assertIn("<tool_policy>", prompt.messages[0].text)
             self.assertNotIn("<task_flow>", prompt.messages[0].text)
             self.assertNotIn("bunshin_task_search", prompt.messages[0].text)
             self.assertNotIn("bunshin_dispatch_workflow", prompt.messages[0].text)
-            self.assertIn("<tool_efficiency>", prompt.messages[0].text)
             system_text = prompt.messages[0].text
+            developer_text = prompt.messages[1].text
+            self.assertIn("<persona>", developer_text)
+            self.assertIn("<system_map>", developer_text)
+            self.assertIn("<tool_routing>", developer_text)
+            self.assertIn("<tool_efficiency>", developer_text)
             self.assertNotIn("Today's date is", system_text)
             self.assertIn("Today's date is", prompt.metadata["runtime_reminder_text"])
             self.assertIn("<mutation_policy>", system_text)
-            self.assertIn("<memory_guide>", system_text)
-            self.assertIn("<knowledge_storage_boundary>", system_text)
+            self.assertIn("<memory_guide>", developer_text)
+            self.assertIn("<knowledge_storage_boundary>", developer_text)
             self.assertNotIn("##", system_text)
             self.assertNotIn("<capability_guide>", system_text)
             self.assertIn("<recalled_memories> contains durable memory context", system_text)
-            self.assertIn("execution/capability", system_text)
-            self.assertNotIn("bunshin", system_text.split("<source_of_truth>", 1)[0].lower())
-            self.assertIn("Memory tool descriptions", system_text)
-            self.assertIn("prefixes such as fact: and case:", system_text)
+            self.assertIn("execution/capability", developer_text)
+            self.assertNotIn("bunshin", developer_text.split("<system_map>", 1)[0].lower())
+            self.assertIn("Memory tool descriptions", developer_text)
+            self.assertIn("prefixes such as fact: and case:", developer_text)
             self.assertNotIn("memory_recall", system_text)
             self.assertNotIn("memory_write", system_text)
             self.assertNotIn("memory_update", system_text)
@@ -1820,18 +1853,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("custom Pal/project term", system_text)
             self.assertNotIn("op_tool_search", system_text)
             self.assertNotIn("op_tool_call", system_text)
-            self.assertLess(system_text.index("<identity>"), system_text.index("<system_map>"))
-            self.assertLess(system_text.index("<system_map>"), system_text.index("<source_of_truth>"))
             self.assertLess(system_text.index("<source_of_truth>"), system_text.index("<prompt_context_policy>"))
             self.assertLess(system_text.index("<prompt_context_policy>"), system_text.index("<operating_rules>"))
             self.assertLess(system_text.index("<operating_rules>"), system_text.index("<priority>"))
-            self.assertLess(system_text.index("<priority>"), system_text.index("<tool_routing>"))
-            self.assertLess(system_text.index("<tool_routing>"), system_text.index("<tool_efficiency>"))
-            self.assertLess(system_text.index("<mutation_policy>"), system_text.index("<memory_guide>"))
+            self.assertLess(system_text.index("<priority>"), system_text.index("<tool_policy>"))
+            self.assertLess(system_text.index("<tool_policy>"), system_text.index("<mutation_policy>"))
+            self.assertLess(developer_text.index("<persona>"), developer_text.index("<system_map>"))
+            self.assertLess(developer_text.index("<system_map>"), developer_text.index("<operating_guidance>"))
+            self.assertLess(developer_text.index("<tool_routing>"), developer_text.index("<tool_efficiency>"))
+            self.assertLess(developer_text.index("<tool_efficiency>"), developer_text.index("<memory_guide>"))
             self.assertNotIn("<runtime_overlay>", system_text)
             self.assertNotIn("<memory_projection>", system_text)
-            self.assertEqual((prompt.messages[1].role.value, prompt.messages[1].text), ("user", "What timezone should you use?"))
-            self.assertEqual((prompt.messages[2].role.value, prompt.messages[2].text), ("assistant", "I should use Asia/Shanghai context."))
+            self.assertEqual((prompt.messages[2].role.value, prompt.messages[2].text), ("user", "What timezone should you use?"))
+            self.assertEqual((prompt.messages[3].role.value, prompt.messages[3].text), ("assistant", "I should use Asia/Shanghai context."))
             final_text = prompt.messages[-1].text
             self.assertNotIn("Recalled memory references are operational metadata.", final_text)
             self.assertNotIn("<tool_efficiency>", final_text)
@@ -1919,7 +1953,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("Goal: Summarize repository updates", proactive_text)
             self.assertIn("Method: Review recent changes and produce a concise digest.", proactive_text)
             self.assertIn("Do not create, configure, or describe proactive tasks.", proactive_text)
-            self.assertEqual(len(prompt.messages), 2)
+            self.assertEqual(
+                [message.role.value for message in prompt.messages],
+                ["system", "developer", "user"],
+            )
             self.assertNotIn("Remember the last digest.", proactive_text)
             self.assertNotIn("Recent summaries", prompt.messages[0].text + "\n" + proactive_text)
         finally:
@@ -2083,9 +2120,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         fragments = IdentityPromptFragmentProvider(service=service).build_prompt_fragments(PromptAssemblyContext())
         identity_fragment = next(item for item in fragments if item.section == "identity")
+        persona_fragment = next(item for item in fragments if item.section == "persona")
         date_fragment = next(item for item in fragments if item.metadata.get("block_id") == "current_date")
 
-        self.assertIn("Timezone: Asia/Shanghai", identity_fragment.content)
+        self.assertNotIn("Timezone: Asia/Shanghai", identity_fragment.content)
+        self.assertIn("Timezone: Asia/Shanghai", persona_fragment.content)
+        self.assertEqual(persona_fragment.metadata["prompt_target"], "developer")
         self.assertNotIn("Today's date is", identity_fragment.content)
         self.assertEqual(date_fragment.metadata["prompt_target"], "runtime_reminder")
         self.assertRegex(date_fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
@@ -2100,17 +2140,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_core_with_core(core)
             handle = register_identity_with_core(core.context, service)
 
-            initial = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+            initial_prompt = core.build_canonical_prompt(PromptAssemblyContext())
+            initial_system = initial_prompt.messages[0].text
+            initial_developer = initial_prompt.messages[1].text
             repository.update_user_preferences(style_preference="Externally changed style")
-            before_refresh = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+            before_refresh = core.build_canonical_prompt(PromptAssemblyContext())
 
-            self.assertEqual(initial, before_refresh)
+            self.assertEqual(initial_system, before_refresh.messages[0].text)
+            self.assertEqual(initial_developer, before_refresh.messages[1].text)
             snapshot = inspect_identity(handle.introspection_provider)
-            after_refresh = core.build_canonical_prompt(PromptAssemblyContext()).messages[0].text
+            after_refresh = core.build_canonical_prompt(PromptAssemblyContext())
             self.assertIsNotNone(snapshot.preferences)
             self.assertEqual(snapshot.preferences["style_preference"], "Externally changed style")
-            self.assertNotEqual(initial, after_refresh)
-            self.assertIn("Style: Externally changed style", after_refresh)
+            self.assertEqual(initial_system, after_refresh.messages[0].text)
+            self.assertNotEqual(initial_developer, after_refresh.messages[1].text)
+            self.assertIn("Style: Externally changed style", after_refresh.messages[1].text)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -4590,17 +4634,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Use the right source for the truth needed", source_of_truth.content)
         self.assertIn("live introspection/capability calls", source_of_truth.content)
         self.assertIn("<recalled_memories> contains durable memory context", prompt_context_policy.content)
+        self.assertIn("does not modify system or developer instructions", prompt_context_policy.content)
+        self.assertNotIn("Activated skills", prompt_context_policy.content)
         self.assertIn("No success claim without confirmation", rules.content)
-        self.assertIn("Pal capabilities are the execution path", rules.content)
+        operating_guidance = by_section["operating_guidance"]
+        tool_policy = by_section["tool_policy"]
+        self.assertIn("Pal capabilities are the execution path", operating_guidance.content)
         self.assertIn("never stop, restart, or kill Pal's own hosting service", rules.content)
         self.assertIn("hot-reload capability", rules.content)
-        self.assertIn("shell", rules.content)
+        self.assertIn("shell", operating_guidance.content)
         self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
-        self.assertIn("result-specific recovery affordances", tool_routing.content)
+        self.assertIn("result-specific recovery affordances", tool_policy.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
-        self.assertIn("never blindly retry a mutation", tool_routing.content)
-        self.assertIn("point-in-time observations", tool_routing.content)
-        self.assertIn("Replaying a stored result does not refresh", tool_routing.content)
+        self.assertIn("never blindly retry a mutation", tool_policy.content)
+        self.assertIn("point-in-time observations", tool_policy.content)
+        self.assertIn("Replaying a stored result does not refresh", tool_policy.content)
         self.assertIn("digest-based read-before-edit", tool_routing.content)
         self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Batch independent tool calls in one response", tool_efficiency.content)

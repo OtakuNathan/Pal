@@ -17,7 +17,7 @@ class ChecklistPromptFragmentProvider:
         _ = context
         fragments = [
             PromptFragment(
-                section="operating_rules",
+                section="operating_guidance",
                 title="Checklist Work Cursor",
                 content=(
                     "- Checklist work cursor: when a task has at least two concrete execution "
@@ -33,7 +33,7 @@ class ChecklistPromptFragmentProvider:
                 metadata={
                     "module_id": self.module_id,
                     "kind": "checklist_operating_rule",
-                    "prompt_target": "system",
+                    "prompt_target": "developer",
                 },
             ),
             PromptFragment(
@@ -60,7 +60,7 @@ class ChecklistPromptFragmentProvider:
                 metadata={
                     "module_id": self.module_id,
                     "kind": "checklist_task_flow",
-                    "prompt_target": "system",
+                    "prompt_target": "developer",
                 },
             )
         ]

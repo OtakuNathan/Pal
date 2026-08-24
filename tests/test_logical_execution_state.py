@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
+from pal.shared.tool_protocol import (
+    ToolCallIR,
+    ToolContextMessageIR,
+    ToolResultIR,
+    new_tool_call,
+)
 
 import asyncio
 import unittest
@@ -28,6 +33,7 @@ from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.llm.ir import LLMMessageIR, MessageRole
 from pal.memory import MemoryService, register_with_core as register_memory_with_core
 from pal.memory.contracts import L1MessageKind
+from pal.shared import ToolExecutionResult
 
 
 class LogicalExecutionStateTests(unittest.TestCase):
@@ -1087,6 +1093,92 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertIn("timed out", result.text)
         self.assertIn("Inspect the current state", result.text)
         self.assertFalse(memory.active_l1_turn(turn_id).pending_call_ids)
+        self.assertEqual(continuation.pending_tool_call_batch, [])
+
+    def test_tool_context_sidecars_follow_the_complete_tool_result_batch(self) -> None:
+        core = PalCore()
+        memory = MemoryService()
+        register_memory_with_core(core.context, memory)
+        turn_id = "turn-tool-context-batch"
+        calls = (
+            new_tool_call(name="first", args={}, call_id="call-first"),
+            new_tool_call(name="second", args={}, call_id="call-second"),
+        )
+        memory.begin_l1_turn(turn_id, user_text="load both manuals")
+        memory.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=calls,
+                semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+            ),
+        )
+
+        async def execute(call, **_kwargs):
+            return ToolExecutionResult(
+                name=call.name,
+                ok=True,
+                text="loaded",
+                llm_text="loaded",
+                call_id=call.call_id,
+                context_messages=(
+                    ToolContextMessageIR(
+                        content=f"<skill>{call.name}</skill>",
+                        semantic_kind=L1MessageKind.RUNTIME_CONTEXT_SKILL,
+                    ),
+                ),
+            )
+
+        original = core.turn_executor._execute_tool_async
+        core.turn_executor._execute_tool_async = execute
+        continuation = SimpleNamespace(
+            turn_id=turn_id,
+            interrupted=False,
+            interrupt_reason="",
+            waiting_effect_id=None,
+            finalization_only=False,
+            pending_tool_call_batch=list(calls),
+            pending_tool_results=[],
+            pending_assistant_tool_text="",
+            tool_observations=[],
+            tool_batch_count=0,
+            echoed_keys=set(),
+            delivery_binding=None,
+            channel_stream_active=False,
+        )
+        try:
+            asyncio.run(
+                core.turn_executor.execute_turn_effect_async(
+                    continuation,
+                    ToolCallEffect(tool_call=calls[0]),
+                )
+            )
+            self.assertFalse(
+                any(
+                    message.semantic_kind == L1MessageKind.RUNTIME_CONTEXT_SKILL
+                    for message in memory.active_l1_turn(turn_id).messages
+                )
+            )
+            asyncio.run(
+                core.turn_executor.execute_turn_effect_async(
+                    continuation,
+                    ToolCallEffect(tool_call=calls[1]),
+                )
+            )
+        finally:
+            core.turn_executor._execute_tool_async = original
+
+        active = memory.active_l1_turn(turn_id)
+        self.assertIsNotNone(active)
+        assert active is not None
+        self.assertEqual(
+            [message.role.value for message in active.messages],
+            ["user", "assistant", "tool", "tool", "user", "user"],
+        )
+        self.assertEqual(
+            [message.text for message in active.messages[-2:]],
+            ["<skill>first</skill>", "<skill>second</skill>"],
+        )
         self.assertEqual(continuation.pending_tool_call_batch, [])
 
     def test_failed_cross_module_delivery_rolls_back_l1_and_retires_pager(self) -> None:
