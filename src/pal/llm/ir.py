@@ -245,6 +245,7 @@ class LLMUsageIR:
     cache_write_input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
+    reasoning_tokens_reported: bool = False
     cost: float = 0.0
     reported: bool = False
 

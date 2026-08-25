@@ -18,15 +18,28 @@ class _UsageBucket:
     provider_response_count: int = 0
     failed_attempt_count: int = 0
     usage_reported_request_count: int = 0
+    reasoning_usage_reported_request_count: int = 0
     cache_hit_request_count: int = 0
     usage: LLMUsageIR = field(default_factory=LLMUsageIR)
+    latest_usage: LLMUsageIR = field(default_factory=LLMUsageIR)
+    latest_provider_response_count: int = 0
 
     def record_success(self, usage: LLMUsageIR, *, provider_response_count: int) -> None:
         self.successful_request_count += 1
         self.provider_response_count += max(1, int(provider_response_count or 0))
         self.usage_reported_request_count += int(usage.reported)
+        self.reasoning_usage_reported_request_count += int(
+            usage.reported and usage.reasoning_tokens_reported
+        )
         self.cache_hit_request_count += int(usage.cached_input_tokens > 0)
         self.usage = _add_usage(self.usage, usage)
+        # Keep this separate from the process aggregate: status uses it to
+        # describe the latest request's context footprint, not lifetime volume.
+        self.latest_usage = usage
+        self.latest_provider_response_count = max(
+            1,
+            int(provider_response_count or 0),
+        )
 
     def record_failed_attempt(self) -> None:
         self.failed_attempt_count += 1
@@ -35,6 +48,12 @@ class _UsageBucket:
         request_count = self.successful_request_count + self.failed_request_count
         usage_reporting_rate = (
             self.usage_reported_request_count / self.successful_request_count
+            if self.successful_request_count > 0
+            else 0.0
+        )
+        reasoning_usage_reporting_rate = (
+            self.reasoning_usage_reported_request_count
+            / self.successful_request_count
             if self.successful_request_count > 0
             else 0.0
         )
@@ -50,7 +69,22 @@ class _UsageBucket:
             "failed_attempt_count": self.failed_attempt_count,
             "usage_reported_request_count": self.usage_reported_request_count,
             "usage_reporting_rate": usage_reporting_rate,
+            "reasoning_usage_reported_request_count": (
+                self.reasoning_usage_reported_request_count
+            ),
+            "reasoning_usage_reporting_rate": reasoning_usage_reporting_rate,
             "cache_hit_request_count": self.cache_hit_request_count,
+            "latest_input_tokens": max(0, int(self.latest_usage.input_tokens)),
+            "latest_output_tokens": max(0, int(self.latest_usage.output_tokens)),
+            "latest_reasoning_tokens": max(
+                0,
+                int(self.latest_usage.reasoning_tokens),
+            ),
+            "latest_reasoning_tokens_reported": bool(
+                self.latest_usage.reasoning_tokens_reported
+            ),
+            "latest_usage_reported": bool(self.latest_usage.reported),
+            "latest_provider_response_count": self.latest_provider_response_count,
             "request_cache_hit_rate": (
                 self.cache_hit_request_count / self.successful_request_count
                 if self.successful_request_count > 0
@@ -138,6 +172,10 @@ def _add_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
         ),
         output_tokens=left.output_tokens + right.output_tokens,
         reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
+        reasoning_tokens_reported=(
+            left.reasoning_tokens_reported
+            or right.reasoning_tokens_reported
+        ),
         cost=left.cost + right.cost,
         reported=left.reported or right.reported,
     )
@@ -155,6 +193,7 @@ def _usage_to_dict(usage: LLMUsageIR) -> dict[str, Any]:
         ),
         "output_tokens": max(0, int(usage.output_tokens)),
         "reasoning_tokens": max(0, int(usage.reasoning_tokens)),
+        "reasoning_tokens_reported": bool(usage.reasoning_tokens_reported),
         "cost": max(0.0, float(usage.cost)),
         "reported": bool(usage.reported),
         "cache_hit_rate": (

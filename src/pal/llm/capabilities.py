@@ -396,12 +396,20 @@ def llm_status_payload(provider: LLMIntrospectionProvider) -> dict[str, Any]:
         "failed_attempt_count": 0,
         "usage_reported_request_count": 0,
         "usage_reporting_rate": 0.0,
+        "reasoning_usage_reported_request_count": 0,
+        "reasoning_usage_reporting_rate": 0.0,
         "input_tokens": 0,
         "uncached_input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_write_input_tokens": 0,
         "output_tokens": 0,
         "reasoning_tokens": 0,
+        "latest_input_tokens": 0,
+        "latest_output_tokens": 0,
+        "latest_reasoning_tokens": 0,
+        "latest_reasoning_tokens_reported": False,
+        "latest_usage_reported": False,
+        "latest_provider_response_count": 0,
         "cost": 0.0,
         "reported": False,
         "cache_hit_rate": 0.0,
@@ -420,11 +428,80 @@ def render_llm_status(payload: dict[str, Any]) -> str:
     cache_write_ratio = max(0.0, float(usage.get("cache_write_ratio") or 0.0))
     cache_policy = dict(usage.get("prompt_cache_policy") or {})
     reporting_rate = max(0.0, float(usage.get("usage_reporting_rate") or 0.0))
+    reasoning_reporting_rate = max(
+        0.0,
+        float(usage.get("reasoning_usage_reporting_rate") or 0.0),
+    )
+    endpoint_rows = [
+        dict(item)
+        for item in list(usage.get("by_endpoint") or [])
+        if isinstance(item, dict)
+    ]
+    active_usage = next(
+        (
+            item
+            for item in endpoint_rows
+            if str(item.get("endpoint_id") or "") == endpoint_id
+        ),
+        {},
+    )
+    context_window = max(0, int(active.get("context_window") or 0))
+    latest_input = max(0, int(active_usage.get("latest_input_tokens") or 0))
+    latest_output = max(0, int(active_usage.get("latest_output_tokens") or 0))
+    latest_context = latest_input + latest_output
+    latest_reported = bool(active_usage.get("latest_usage_reported"))
+    latest_provider_responses = max(
+        0,
+        int(active_usage.get("latest_provider_response_count") or 0),
+    )
+    if (
+        context_window > 0
+        and latest_reported
+        and latest_provider_responses == 1
+    ):
+        context_line = (
+            "Last request context: "
+            f"{latest_context:,} / {context_window:,} tokens "
+            f"({latest_context / context_window:.1%})"
+        )
+        context_detail = f"Input: {latest_input:,} · Output: {latest_output:,}"
+    elif context_window > 0 and latest_provider_responses > 1:
+        context_line = (
+            "Last request context: unavailable / "
+            f"{context_window:,} tokens "
+            f"({latest_provider_responses} provider responses were combined)"
+        )
+        context_detail = "Input: combined · Output: combined"
+    elif context_window > 0:
+        context_line = f"Last request context: unavailable / {context_window:,} tokens"
+        context_detail = "Input: unavailable · Output: unavailable"
+    else:
+        context_line = "Last request context: unavailable (context window not configured)"
+        context_detail = "Input: unavailable · Output: unavailable"
+    reasoning_tokens = max(0, int(usage.get("reasoning_tokens") or 0))
+    successful_requests = max(
+        0,
+        int(usage.get("successful_request_count") or 0),
+    )
+    if successful_requests <= 0 or reasoning_reporting_rate <= 0:
+        reasoning_summary = "reasoning unavailable"
+    elif reasoning_reporting_rate < 1.0:
+        reasoning_summary = (
+            f"{reasoning_tokens:,} reasoning "
+            f"({reasoning_reporting_rate:.1%} breakdown coverage)"
+        )
+    else:
+        reasoning_summary = f"{reasoning_tokens:,} reasoning"
     lines = [
-        "LLM status",
+        "🤖 LLM status",
         f"Active: {endpoint_id} ({model_id})",
         f"Statistics scope: resident process since {usage.get('started_at') or '-'}",
         "",
+        "🧠 Context",
+        context_line,
+        context_detail,
+        "",
+        "📡 Requests",
         (
             "Logical requests: "
             f"{int(usage.get('successful_request_count') or 0)} successful, "
@@ -437,39 +514,35 @@ def render_llm_status(payload: dict[str, Any]) -> str:
             f"{int(usage.get('failed_attempt_count') or 0)} failed"
         ),
         "",
+        "💾 Prompt cache",
         (
             "Input tokens: "
-            f"{int(usage.get('input_tokens') or 0)} total; "
-            f"{int(usage.get('uncached_input_tokens') or 0)} uncached, "
-            f"{int(usage.get('cached_input_tokens') or 0)} cache reads, "
-            f"{int(usage.get('cache_write_input_tokens') or 0)} cache writes"
+            f"{int(usage.get('input_tokens') or 0):,} total; "
+            f"{int(usage.get('uncached_input_tokens') or 0):,} uncached, "
+            f"{int(usage.get('cached_input_tokens') or 0):,} cache reads, "
+            f"{int(usage.get('cache_write_input_tokens') or 0):,} cache writes"
         ),
         f"Prompt cache token ratio: {token_cache_ratio:.1%}",
         f"Prompt cache request hit rate: {request_hit_rate:.1%}",
         f"Prompt cache write ratio: {cache_write_ratio:.1%}",
-        (
-            "Prompt cache policy: "
-            f"{cache_policy.get('dialect') or 'none'}; "
-            f"decision={cache_policy.get('decision') or 'not_planned'}; "
-            f"breakpoints={','.join(cache_policy.get('breakpoints') or []) or '-'}"
-        ),
+        f"Policy: {cache_policy.get('dialect') or 'none'}",
+        f"Decision: {cache_policy.get('decision') or 'not_planned'}",
+        f"Breakpoints: {','.join(cache_policy.get('breakpoints') or []) or '-'}",
         "",
+        "🗣️ Output",
         (
             "Output tokens: "
-            f"{int(usage.get('output_tokens') or 0)} total; "
-            f"{int(usage.get('reasoning_tokens') or 0)} reasoning"
+            f"{int(usage.get('output_tokens') or 0):,} total; "
+            f"{reasoning_summary}"
         ),
-        f"Provider-reported cost: {float(usage.get('cost') or 0.0):.6f}",
+        "",
+        "💰 Billing",
+        f"Provider-reported cost: ${float(usage.get('cost') or 0.0):.6f}",
         f"Usage reporting coverage: {reporting_rate:.1%}",
-    ]
-    endpoint_rows = [
-        dict(item)
-        for item in list(usage.get("by_endpoint") or [])
-        if isinstance(item, dict)
     ]
     if endpoint_rows:
         lines.append("")
-        lines.append("By endpoint:")
+        lines.append("🔌 By endpoint")
         for item in endpoint_rows:
             endpoint_cache_rate = max(
                 0.0,
@@ -481,7 +554,7 @@ def render_llm_status(payload: dict[str, Any]) -> str:
                 f"({item.get('model_id') or '-'}): "
                 f"{int(item.get('successful_request_count') or 0)} successful, "
                 f"{int(item.get('failed_request_count') or 0)} failed; "
-                f"{int(item.get('input_tokens') or 0)} input, "
+                f"{int(item.get('input_tokens') or 0):,} input, "
                 f"{endpoint_cache_rate:.1%} cache hit"
             )
     return "\n".join(lines)

@@ -202,6 +202,9 @@ def merge_responses(
         reasoning_tokens=sum(
             item.usage.reasoning_tokens for item in usage_sources
         ),
+        reasoning_tokens_reported=all(
+            item.usage.reasoning_tokens_reported for item in usage_sources
+        ),
         cost=sum(item.usage.cost for item in usage_sources),
         reported=any(item.usage.reported for item in usage_sources),
     )

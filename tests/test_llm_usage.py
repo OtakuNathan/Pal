@@ -103,8 +103,47 @@ class LLMUsageNormalizationTests(unittest.TestCase):
         self.assertEqual(usage.cache_write_input_tokens, 50)
         self.assertEqual(usage.output_tokens, 300)
         self.assertEqual(usage.reasoning_tokens, 200)
+        self.assertTrue(usage.reasoning_tokens_reported)
         self.assertAlmostEqual(usage.cost, 1.25)
         self.assertTrue(usage.reported)
+
+    def test_openai_responses_usage_reads_output_reasoning_tokens(self) -> None:
+        usage = usage_from_mapping({
+            "input_tokens": 1_000,
+            "output_tokens": 300,
+            "input_tokens_details": {"cached_tokens": 800},
+            "output_tokens_details": {"reasoning_tokens": 200},
+        })
+
+        self.assertEqual(usage.input_tokens, 1_000)
+        self.assertEqual(usage.cached_input_tokens, 800)
+        self.assertEqual(usage.output_tokens, 300)
+        self.assertEqual(usage.reasoning_tokens, 200)
+        self.assertTrue(usage.reasoning_tokens_reported)
+        self.assertTrue(usage.reported)
+
+    def test_anthropic_usage_reads_thinking_token_breakdown(self) -> None:
+        usage = usage_from_mapping({
+            "input_tokens": 1_000,
+            "output_tokens": 300,
+            "output_tokens_details": {"thinking_tokens": 200},
+        })
+
+        self.assertEqual(usage.output_tokens, 300)
+        self.assertEqual(usage.reasoning_tokens, 200)
+        self.assertTrue(usage.reasoning_tokens_reported)
+
+    def test_explicit_zero_reasoning_is_distinct_from_missing_breakdown(self) -> None:
+        explicit_zero = usage_from_mapping({
+            "output_tokens": 20,
+            "output_tokens_details": {"thinking_tokens": 0},
+        })
+        unavailable = usage_from_mapping({"output_tokens": 20})
+
+        self.assertEqual(explicit_zero.reasoning_tokens, 0)
+        self.assertTrue(explicit_zero.reasoning_tokens_reported)
+        self.assertEqual(unavailable.reasoning_tokens, 0)
+        self.assertFalse(unavailable.reasoning_tokens_reported)
 
     def test_anthropic_usage_combines_separate_input_categories(self) -> None:
         usage = usage_from_mapping({
@@ -119,6 +158,7 @@ class LLMUsageNormalizationTests(unittest.TestCase):
         self.assertEqual(usage.cached_input_tokens, 800)
         self.assertEqual(usage.cache_write_input_tokens, 100)
         self.assertEqual(usage.output_tokens, 50)
+        self.assertFalse(usage.reasoning_tokens_reported)
         self.assertTrue(usage.reported)
 
     def test_missing_usage_is_distinguishable_from_reported_zero(self) -> None:
@@ -213,13 +253,33 @@ class LLMUsageLedgerTests(unittest.TestCase):
         self.assertEqual(snapshot["reasoning_tokens"], 200)
         self.assertAlmostEqual(snapshot["cache_hit_rate"], 0.8)
         self.assertAlmostEqual(snapshot["usage_reporting_rate"], 1.0)
+        self.assertAlmostEqual(snapshot["reasoning_usage_reporting_rate"], 1.0)
         self.assertEqual(snapshot["by_endpoint"][0]["endpoint_id"], "primary")
+        self.assertEqual(snapshot["by_endpoint"][0]["latest_input_tokens"], 1_000)
+        self.assertEqual(snapshot["by_endpoint"][0]["latest_output_tokens"], 300)
+        self.assertTrue(snapshot["by_endpoint"][0]["latest_usage_reported"])
+        self.assertEqual(
+            snapshot["by_endpoint"][0]["latest_provider_response_count"],
+            1,
+        )
 
         provider = LLMIntrospectionProvider(runtime=runtime)
         status = provider.handle_status_control_action(None)
+        self.assertIn("🤖 LLM status", status["message"])
+        self.assertIn("🧠 Context", status["message"])
+        self.assertIn(
+            "Last request context: 1,300 / 32,000 tokens (4.1%)",
+            status["message"],
+        )
+        self.assertIn("Input: 1,000 · Output: 300", status["message"])
+        self.assertIn("📡 Requests", status["message"])
+        self.assertIn("💾 Prompt cache", status["message"])
         self.assertIn("Prompt cache token ratio: 80.0%", status["message"])
         self.assertIn("Prompt cache request hit rate: 100.0%", status["message"])
-        self.assertIn("\n\nInput tokens:", status["message"])
+        self.assertIn("🗣️ Output", status["message"])
+        self.assertIn("Output tokens: 300 total; 200 reasoning", status["message"])
+        self.assertIn("💰 Billing", status["message"])
+        self.assertIn("🔌 By endpoint", status["message"])
         self.assertIn("1 successful", status["message"])
         self.assertEqual(status["usage"]["cached_input_tokens"], 800)
 
@@ -249,6 +309,65 @@ class LLMUsageLedgerTests(unittest.TestCase):
         self.assertEqual(snapshot["provider_request_count"], 1)
         self.assertEqual(snapshot["failed_attempt_count"], 1)
         self.assertEqual(snapshot["by_endpoint"][0]["failed_request_count"], 1)
+
+    def test_status_does_not_borrow_latest_context_from_another_endpoint(self) -> None:
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(
+                endpoints=(_endpoint("primary"), _endpoint("secondary")),
+            ),
+            settings_repository=_Settings(),
+            endpoint_invoker=_UsageInvoker(generation_result_from_values(text="ok")),
+            endpoint_retry_attempts=1,
+        )
+        runtime.usage_ledger.record_success(
+            endpoint_id="primary",
+            model_id="test-model",
+            provider="openai",
+            usage=generation_result_from_values(
+                text="ok",
+                input_tokens=1_000,
+                output_tokens=300,
+                usage_reported=True,
+            ).response.usage,
+            provider_response_count=1,
+        )
+        runtime.set_active_endpoint("secondary")
+
+        status = LLMIntrospectionProvider(runtime=runtime).handle_status_control_action(None)
+
+        self.assertIn(
+            "Last request context: unavailable / 32,000 tokens",
+            status["message"],
+        )
+        self.assertNotIn("Last request context: 1,300", status["message"])
+
+    def test_status_marks_missing_reasoning_breakdown_unavailable(self) -> None:
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(_endpoint(),)),
+            settings_repository=_Settings(),
+            endpoint_invoker=_UsageInvoker(
+                generation_result_from_values(
+                    text="ok",
+                    input_tokens=1_000,
+                    output_tokens=300,
+                    usage_reported=True,
+                )
+            ),
+            endpoint_retry_attempts=1,
+        )
+        runtime.generate(
+            request_ir_from_prompt(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=128,
+            )
+        )
+
+        status = LLMIntrospectionProvider(runtime=runtime).handle_status_control_action(None)
+
+        self.assertIn(
+            "Output tokens: 300 total; reasoning unavailable",
+            status["message"],
+        )
 
     def test_status_command_routes_to_llm_module(self) -> None:
         runtime = LLMRuntime(

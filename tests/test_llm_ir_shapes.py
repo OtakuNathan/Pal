@@ -495,7 +495,15 @@ class LLMIRShapeTests(unittest.TestCase):
         ]
         complete, _ = decode_frames(
             codec,
-            [JSONFrame(0, {"content": content, "stop_reason": "tool_use", "usage": {"input_tokens": 7, "output_tokens": 3}})],
+            [JSONFrame(0, {
+                "content": content,
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "output_tokens_details": {"thinking_tokens": 1},
+                },
+            })],
             _context(shape),
         )
         streamed, _ = decode_frames(
@@ -510,7 +518,15 @@ class LLMIRShapeTests(unittest.TestCase):
                 JSONFrame(6, {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": '{"path"'}}),
                 JSONFrame(7, {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": ':"a"}'}}),
                 JSONFrame(8, {"type": "content_block_stop", "index": 2}),
-                JSONFrame(9, {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"input_tokens": 7, "output_tokens": 3}}),
+                JSONFrame(9, {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use"},
+                    "usage": {
+                        "input_tokens": 7,
+                        "output_tokens": 3,
+                        "output_tokens_details": {"thinking_tokens": 1},
+                    },
+                }),
             ],
             _context(shape),
         )
@@ -519,6 +535,8 @@ class LLMIRShapeTests(unittest.TestCase):
         self.assertEqual(complete.message.tool_calls, streamed.message.tool_calls)
         self.assertEqual(complete.finish_reason, streamed.finish_reason)
         self.assertEqual(complete.usage, streamed.usage)
+        self.assertEqual(streamed.usage.reasoning_tokens, 1)
+        self.assertTrue(streamed.usage.reasoning_tokens_reported)
 
     def test_anthropic_fallback_replays_reasoning_when_envelope_is_missing(self) -> None:
         codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)

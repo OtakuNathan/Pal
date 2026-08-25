@@ -139,6 +139,10 @@ class LLMGenerationResult:
         return self.response.usage.reasoning_tokens
 
     @property
+    def reasoning_tokens_reported(self) -> bool:
+        return self.response.usage.reasoning_tokens_reported
+
+    @property
     def cost(self) -> float:
         return self.response.usage.cost
 
@@ -194,6 +198,7 @@ def generation_result_from_values(
     cache_write_input_tokens: int = 0,
     output_tokens: int = 0,
     reasoning_tokens: int = 0,
+    reasoning_tokens_reported: bool | None = None,
     cost: float = 0.0,
     usage_reported: bool = False,
     provider_response_count: int = 1,
@@ -221,6 +226,11 @@ def generation_result_from_values(
                 cache_write_input_tokens=cache_write_input_tokens,
                 output_tokens=output_tokens,
                 reasoning_tokens=reasoning_tokens,
+                reasoning_tokens_reported=(
+                    bool(reasoning_tokens) and bool(usage_reported)
+                    if reasoning_tokens_reported is None
+                    else bool(reasoning_tokens_reported)
+                ),
                 cost=cost,
                 reported=usage_reported,
             ),

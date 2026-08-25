@@ -213,10 +213,25 @@ def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
     else:
         input_tokens = raw_input_tokens
         uncached = max(0, input_tokens - cached - cache_write)
-    output_details = source.get("completion_tokens_details")
-    reasoning = _first_int(source, "reasoning_tokens")
-    if isinstance(output_details, Mapping):
-        reasoning = max(reasoning, _first_int(output_details, "reasoning_tokens"))
+    reasoning = _first_int(source, "reasoning_tokens", "thinking_tokens")
+    reasoning_reported = any(
+        key in source for key in ("reasoning_tokens", "thinking_tokens")
+    )
+    for detail_key in ("completion_tokens_details", "output_tokens_details"):
+        output_details = source.get(detail_key)
+        if isinstance(output_details, Mapping):
+            reasoning_reported = reasoning_reported or any(
+                key in output_details
+                for key in ("reasoning_tokens", "thinking_tokens")
+            )
+            reasoning = max(
+                reasoning,
+                _first_int(
+                    output_details,
+                    "reasoning_tokens",
+                    "thinking_tokens",
+                ),
+            )
     return LLMUsageIR(
         input_tokens=input_tokens,
         uncached_input_tokens=uncached,
@@ -224,6 +239,7 @@ def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
         cache_write_input_tokens=cache_write,
         output_tokens=output_tokens,
         reasoning_tokens=reasoning,
+        reasoning_tokens_reported=reasoning_reported,
         cost=_first_float(source, "cost", "total_cost"),
         reported=payload is not None,
     )
@@ -240,6 +256,10 @@ def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
         cache_write_input_tokens=max(left.cache_write_input_tokens, right.cache_write_input_tokens),
         output_tokens=max(left.output_tokens, right.output_tokens),
         reasoning_tokens=max(left.reasoning_tokens, right.reasoning_tokens),
+        reasoning_tokens_reported=(
+            left.reasoning_tokens_reported
+            or right.reasoning_tokens_reported
+        ),
         cost=max(left.cost, right.cost),
         reported=left.reported or right.reported,
     )

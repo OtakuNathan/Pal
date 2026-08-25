@@ -202,6 +202,9 @@ def _normalize_usage_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("LLM usage receipt cost must be non-negative")
     normalized["cost"] = cost
     normalized["reported"] = bool(value.get("reported", False))
+    normalized["reasoning_tokens_reported"] = bool(
+        value.get("reasoning_tokens_reported", False)
+    )
     return normalized
 
 
