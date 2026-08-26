@@ -161,6 +161,35 @@ async def _compaction_removes_visible_notice_without_rearming_epoch() -> None:
     )
 
 
+def test_reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action() -> None:
+    asyncio.run(_reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action())
+
+
+async def _reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action() -> None:
+    sleep = _ControlledSleep()
+    delivered = []
+    expired = []
+    manager = CacheWarmDeadlineManager(
+        cache_snapshot=_snapshot,
+        settings_provider=lambda: _Settings(),
+        has_active_turn=lambda: False,
+        deliver_notice=lambda notice: _capture(delivered, notice),
+        expire_notice=lambda notice: _capture(expired, notice),
+        sleep=sleep,
+    )
+    assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
+    await asyncio.sleep(0)
+    await sleep.release(0)
+
+    assert manager.claim_compaction("epoch-a")
+    assert not manager.claim_compaction("epoch-a")
+    await asyncio.sleep(0)
+
+    assert expired == []
+    assert manager.inspect()["timer_scheduled"] is False
+    assert manager.inspect()["consumed_epoch"] == "epoch-a"
+
+
 def test_active_turn_defers_notice_instead_of_dropping_it() -> None:
     asyncio.run(_active_turn_defers_notice_instead_of_dropping_it())
 
@@ -295,6 +324,19 @@ def test_interaction_has_control_actions_and_delete_expiration() -> None:
     assert ignore is not None
     assert ignore.action_kind == "cache_warm_deadline_ignore"
     assert ignore.args["cache_epoch"] == "epoch-a"
+
+    compact = plane.handle_interaction(
+        InteractionResult(
+            interaction_id=delivery.interaction.interaction_id,
+            interaction_kind=delivery.interaction.interaction_kind,
+            action_key=buttons[0].action_key,
+            action_args=buttons[0].action_args,
+            route=_route(),
+        )
+    )
+    assert compact is not None
+    assert compact.action_kind == "compact_memory"
+    assert compact.args["cache_epoch"] == "epoch-a"
 
 
 def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:

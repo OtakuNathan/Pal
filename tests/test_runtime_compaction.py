@@ -1804,6 +1804,77 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         spec = statuses[-1][1]["spec"]
         self.assertIn("Compact candidates need approval", spec.text)
 
+    def test_cache_reminder_compact_is_consumed_before_llm_and_runs_once(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = _memory_with_turns(2)
+        register_memory_with_core(core.context, service)
+        candidate = {
+            "kind": "fact",
+            "title": "One candidate batch",
+            "summary": "A duplicate click must not compact twice.",
+            "source_excerpt": "duplicate click",
+        }
+        llm = _PurposeAwareLLM(memory_candidates=[candidate])
+        core.context.port_registry["llm:llm"] = llm
+        statuses: list[tuple[str, dict[str, object]]] = []
+        claimed_epochs: list[str] = []
+
+        def claim_once(epoch: str) -> bool:
+            claimed_epochs.append(epoch)
+            return len(claimed_epochs) == 1
+
+        async def capture_status(
+            _route,
+            kind: str,
+            payload: dict[str, object],
+        ) -> None:
+            statuses.append((kind, payload))
+
+        core.cache_warm_deadline.claim_compaction = claim_once
+        core._status_to_route_async = capture_status
+        action = ControlAction(
+            action_kind="compact_memory",
+            target_scope="memory",
+            route=ControlRoute(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                reply_target={"chat_id": "42"},
+            ),
+            args={
+                "cache_epoch": "epoch-a",
+                "interaction_origin": "button",
+                "interaction_id": "cache_warm_epoch-a",
+                "interaction_kind": "cache_warm_deadline",
+            },
+        )
+
+        async def run_duplicate_clicks() -> None:
+            await core._handle_compact_memory_async(action)
+            await core._handle_compact_memory_async(action)
+
+        asyncio.run(run_duplicate_clicks())
+
+        compaction_requests = [
+            request
+            for kind, request in llm.requests
+            if kind == "generate"
+            and "compaction" in str(request.metadata.get("purpose") or "")
+        ]
+        self.assertEqual(claimed_epochs, ["epoch-a", "epoch-a"])
+        self.assertEqual(len(compaction_requests), 1)
+        self.assertEqual(statuses[0][0], "interactive_update")
+        pending_spec = statuses[0][1]["spec"]
+        self.assertEqual(pending_spec.buttons, ())
+        self.assertIn("正在利用热缓存", pending_spec.text)
+        candidate_notices = [
+            payload["spec"]
+            for kind, payload in statuses
+            if kind == "interactive_open"
+            and payload["spec"].interaction_kind == "memory_candidate_approval"
+        ]
+        self.assertEqual(len(candidate_notices), 1)
+
     def test_manual_compact_is_rejected_while_resident_turn_is_active(self) -> None:
         core = PalCore()
         register_core_with_core(core)

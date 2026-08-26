@@ -4,6 +4,7 @@ import unittest
 
 from pal.channel.contracts import ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
+from pal.channel.runtime import ChannelRuntime
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
 from pal.shared import ChannelStreamUpdateKind, EventKind
 
@@ -149,6 +150,57 @@ class SocketInteractionProjectionTests(unittest.TestCase):
         self.assertEqual(
             envelopes[0].response_handle.reply_target["request_id"],
             "request-2",
+        )
+
+    def test_pending_update_consumes_buttons_before_terminal_result(self) -> None:
+        self.endpoint.send_status(
+            self.response_handle,
+            "interactive_open",
+            {"spec": self.spec},
+        )
+        self.session.outbound.items.clear()
+        pending = InteractionMessageSpec(
+            interaction_id=self.spec.interaction_id,
+            interaction_kind=self.spec.interaction_kind,
+            text="Compacting…",
+            buttons=(),
+        )
+
+        self.endpoint.send_status(
+            self.response_handle,
+            "interactive_update",
+            {"spec": pending},
+        )
+
+        interaction = self.session.outbound.items[0]["interaction"]
+        self.assertEqual(self.session.outbound.items[0]["type"], "interactive_update")
+        self.assertEqual(interaction["buttons"], [])
+        self.assertEqual(
+            self.endpoint._interactive_messages[self.spec.interaction_id]["actions"],
+            {},
+        )
+
+    def test_endpoint_status_can_be_flushed_before_long_control_action_finishes(self) -> None:
+        runtime = ChannelRuntime()
+        runtime.register_endpoint(self.endpoint)
+        self.endpoint.queue_status(
+            "interactive_update",
+            response_handle=self.response_handle,
+            payload={
+                "spec": InteractionMessageSpec(
+                    interaction_id=self.spec.interaction_id,
+                    interaction_kind=self.spec.interaction_kind,
+                    text="Compacting…",
+                    buttons=(),
+                )
+            },
+        )
+
+        self.assertEqual(self.session.outbound.items, [])
+        self.assertTrue(runtime.flush_endpoint_status("socket_default"))
+        self.assertEqual(
+            self.session.outbound.items[0]["type"],
+            "interactive_update",
         )
 
     def test_other_socket_session_cannot_answer_interaction(self) -> None:

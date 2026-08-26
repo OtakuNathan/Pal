@@ -285,3 +285,8 @@ class ChannelRuntimePort(AgentOutputPort, Protocol):
         reply_target: dict[str, Any] | None = None,
     ) -> str | None:
         ...
+
+    def flush_endpoint_status(self, endpoint_id: str) -> bool:
+        """Start delivery of queued lifecycle updates for one endpoint now."""
+
+        ...

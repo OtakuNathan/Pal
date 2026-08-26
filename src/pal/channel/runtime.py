@@ -424,6 +424,13 @@ class ChannelRuntime(ChannelRuntimePort):
             payload=dict(payload or {}),
         )
 
+    def flush_endpoint_status(self, endpoint_id: str) -> bool:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return False
+        endpoint.flush_status_outbox()
+        return True
+
     def _queue_cached_control_catalog(self, endpoint: ChannelEndpointBase) -> None:
         payload = self.control_catalog_payload
         if not payload or not endpoint.attached or not endpoint.enabled:

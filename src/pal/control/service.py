@@ -230,10 +230,14 @@ class ControlPlane(ControlPlanePort):
             )
             return _with_interaction_context(action, result)
         if action_key == "control.compact.run":
+            cache_epoch = str(
+                result.action_args.get("cache_epoch") or ""
+            ).strip()
             action = ControlAction(
                 action_kind="compact_memory",
                 target_scope="memory",
                 route=result.route,
+                args={"cache_epoch": cache_epoch} if cache_epoch else {},
             )
             return _with_interaction_context(action, result)
         if action_key == "control.reset.open":
@@ -292,8 +296,8 @@ class ControlPlane(ControlPlanePort):
                 source_kind="interaction",
                 origin_event_id=result.interaction_id,
             )
-            action = spec.handler(invocation)
-            if action is None:
+            handled_action = spec.handler(invocation)
+            if handled_action is None:
                 return _with_interaction_context(
                     ControlAction(
                         action_kind="invalid_command",
@@ -304,10 +308,13 @@ class ControlPlane(ControlPlanePort):
                     ),
                     result,
                 )
-            return _with_interaction_context(action, result)
+            return _with_interaction_context(handled_action, result)
         if action_key == "control.action.dispatch":
-            action = _action_from_payload(result.action_args, route=result.route)
-            if action is None:
+            dispatched_action = _action_from_payload(
+                result.action_args,
+                route=result.route,
+            )
+            if dispatched_action is None:
                 return _with_interaction_context(
                     ControlAction(
                         action_kind="invalid_command",
@@ -318,7 +325,7 @@ class ControlPlane(ControlPlanePort):
                     ),
                     result,
                 )
-            return _with_interaction_context(action, result)
+            return _with_interaction_context(dispatched_action, result)
         return _with_interaction_context(
             ControlAction(
                 action_kind="invalid_command",

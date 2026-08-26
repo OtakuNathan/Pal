@@ -68,6 +68,7 @@ class CacheWarmDeadlineManager:
     _cache_expires_at: datetime | None = None
     _notified_epoch: str = ""
     _ignored_epoch: str = ""
+    _consumed_epoch: str = ""
     _active_notice: CacheWarmDeadlineNotice | None = None
     _last_error: str = ""
 
@@ -209,6 +210,7 @@ class CacheWarmDeadlineManager:
         self.cancel()
         self._notified_epoch = ""
         self._ignored_epoch = ""
+        self._consumed_epoch = ""
         await self._expire_active_notice(notice)
 
     async def clear_for_compaction(self) -> None:
@@ -231,6 +233,25 @@ class CacheWarmDeadlineManager:
         if not normalized or normalized != self._scheduled_epoch:
             return False
         self._ignored_epoch = normalized
+        self.cancel()
+        return True
+
+    def claim_compaction(self, epoch: str) -> bool:
+        """Atomically consume the currently visible compact reminder."""
+
+        normalized = str(epoch or "").strip()
+        notice = self._active_notice
+        if (
+            not normalized
+            or notice is None
+            or notice.epoch != normalized
+            or self._consumed_epoch == normalized
+        ):
+            return False
+        self._consumed_epoch = normalized
+        # The action now owns the interaction lifecycle.  Cancel the TTL task
+        # without expiring the message so its pending/final updates can reuse
+        # the same provider-native UI object.
         self.cancel()
         return True
 
@@ -260,6 +281,7 @@ class CacheWarmDeadlineManager:
             "seconds_until_notice": remaining,
             "last_notified_epoch": self._notified_epoch,
             "ignored_epoch": self._ignored_epoch,
+            "consumed_epoch": self._consumed_epoch,
             "last_error": self._last_error,
             "cache": snapshot,
         }

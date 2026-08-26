@@ -1533,7 +1533,24 @@ class PalCore:
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
-        await self.cache_warm_deadline.clear_for_compaction()
+        cache_epoch = str(action.args.get("cache_epoch") or "").strip()
+        if cache_epoch:
+            if not self.cache_warm_deadline.claim_compaction(cache_epoch):
+                await self._complete_compact_reply_async(
+                    action,
+                    "这条热缓存 compact 提醒已经处理或失效。",
+                )
+                return
+            await self._deliver_control_delivery_async(
+                control_interactions.terminal_delivery_for_action(
+                    action,
+                    "正在利用热缓存 Compact…",
+                    delivery_kind="interactive_update",
+                )
+            )
+            await self._flush_control_status_async(action.route)
+        else:
+            await self.cache_warm_deadline.clear_for_compaction()
         if self.turn_manager.latest_active_turn_id() is not None:
             await self._complete_compact_reply_async(
                 action,
@@ -1662,6 +1679,22 @@ class PalCore:
 
     async def _complete_action_reply_async(self, action: ControlAction, text: str) -> None:
         await self._deliver_control_delivery_async(control_interactions.terminal_delivery_for_action(action, text))
+
+    async def _flush_control_status_async(
+        self,
+        route: ControlRoute | None,
+    ) -> None:
+        if route is None:
+            return
+        channel_runtime = self.context.port_registry.get("channel:channel")
+        flush_status = getattr(channel_runtime, "flush_endpoint_status", None)
+        if not callable(flush_status):
+            return
+        flush_status(route.endpoint_id)
+        # Async channel providers schedule transport work from the synchronous
+        # outbox flush. Yield once so the consumed UI starts moving before the
+        # potentially long compaction request is dispatched.
+        await asyncio.sleep(0)
 
     async def _deliver_control_delivery_async(
         self,
