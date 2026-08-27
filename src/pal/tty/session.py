@@ -42,6 +42,7 @@ class SocketSession:
         repr=False,
     )
     _reader_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _delivery_ack_advertised: bool = field(default=False, init=False, repr=False)
 
     async def send(self, text: str) -> str:
         request_id = str(self.request_id_factory())
@@ -74,6 +75,13 @@ class SocketSession:
 
     async def _write(self, payload: dict[str, Any]) -> None:
         try:
+            if not self._delivery_ack_advertised:
+                self.writer.write(
+                    self.pack_message(
+                        {"type": "session_ready", "delivery_ack_v1": True}
+                    )
+                )
+                self._delivery_ack_advertised = True
             self.writer.write(self.pack_message(payload))
             await self.writer.drain()
         except (ConnectionError, OSError) as exc:
@@ -119,6 +127,9 @@ class SocketSession:
         try:
             while True:
                 payload = await self._read()
+                delivery_id = str(payload.get("_pal_delivery_id") or "")
+                if delivery_id:
+                    await self._write_delivery_ack(delivery_id)
                 request_id = str(payload.get("request_id") or "")
                 if request_id.startswith("task-notification:"):
                     await self._notifications.put(payload)
@@ -135,6 +146,17 @@ class SocketSession:
             await self._notifications.put(failure)
             for queue in self._response_queues.values():
                 await queue.put(failure)
+
+    async def _write_delivery_ack(self, delivery_id: str) -> None:
+        try:
+            self.writer.write(
+                self.pack_message(
+                    {"type": "delivery_ack", "delivery_id": delivery_id}
+                )
+            )
+            await self.writer.drain()
+        except (ConnectionError, OSError) as exc:
+            raise SocketDisconnected(f"socket acknowledgement failed: {exc}") from exc
 
     @staticmethod
     def _raise_reader_error(payload: dict[str, Any]) -> None:

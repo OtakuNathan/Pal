@@ -210,6 +210,8 @@ class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"slash_command", writer.written)
         self.assertIn(b"hello", writer.written)
         self.assertIn(b"/status", writer.written)
+        self.assertIn(b"session_ready", writer.written)
+        self.assertIn(b"delivery_ack_v1", writer.written)
 
     async def test_send_interaction_result_keeps_action_semantics_server_side(self) -> None:
         writer = _FakeWriter()

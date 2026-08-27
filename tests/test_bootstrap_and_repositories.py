@@ -2353,6 +2353,44 @@ class PalV2BootstrapTests(unittest.TestCase):
             {target.endpoint_id for target in provider.iter_endpoints()},
         )
 
+    def test_provider_lifecycle_failure_republishes_live_endpoint(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        self._write_demo_runtime_channel_provider()
+        ChannelEndpointRepository().upsert(
+            endpoint_id="demo_runtime_main",
+            channel_kind="demo_runtime",
+            binding_key="demo:1",
+            enabled=True,
+        )
+        handle = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        manager = handle.channel_provider_manager
+        endpoint = handle.channel_runtime.get_endpoint("demo_runtime_main")
+        provider = manager.provider_for_endpoint("demo_runtime_main")
+        self.assertIsNotNone(endpoint)
+        self.assertIsNotNone(provider)
+
+        with patch.object(provider, "restart_endpoint", side_effect=RuntimeError("boom")):
+            restarted = manager.restart_endpoint("demo_runtime_main")
+
+        self.assertEqual(restarted.status, "error")
+        self.assertIs(handle.channel_runtime.get_endpoint("demo_runtime_main"), endpoint)
+        hub = handle.channel_runtime.get_endpoint_hub("demo_runtime_main")
+        self.assertIsNotNone(hub)
+        self.assertEqual(hub.state, "attached")
+        self.assertTrue(hub.published)
+
+        with patch.object(provider, "detach_endpoint", side_effect=RuntimeError("boom")):
+            detached = manager.detach_endpoint("demo_runtime_main")
+
+        self.assertEqual(detached.status, "error")
+        self.assertIs(handle.channel_runtime.get_endpoint("demo_runtime_main"), endpoint)
+        self.assertEqual(hub.state, "attached")
+        self.assertTrue(hub.published)
+
     def test_runtime_shutdown_disposes_loaded_provider_raii_handle(self) -> None:
         self.wizard.seed_defaults(self.registration)
         self._write_demo_runtime_channel_provider()
@@ -3316,6 +3354,93 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_socket_endpoint_quiesce_waits_for_client_delivery_ack(self) -> None:
+        await self.endpoint.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            writer.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+            writer.write(
+                pack_socket_message(
+                    {"type": "user_message", "request_id": "req-ack", "text": "ping"}
+                )
+            )
+            await writer.drain()
+            envelopes = await self._poll_until_envelopes()
+            self.endpoint.queue_reply("pong", response_handle=envelopes[0].response_handle)
+            self.endpoint.flush_outbox()
+
+            first = await read_socket_message(reader)
+            self.assertEqual(first["type"], "text_delta")
+            self.assertTrue(first.get("_pal_delivery_id"))
+            quiesce = asyncio.create_task(self.endpoint.quiesce_delivery_async())
+            await asyncio.sleep(0)
+            self.assertFalse(quiesce.done())
+
+            writer.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": first["_pal_delivery_id"],
+            }))
+            await writer.drain()
+            second = await read_socket_message(reader)
+            self.assertEqual(second["type"], "done")
+            self.assertTrue(second.get("_pal_delivery_id"))
+            self.assertFalse(quiesce.done())
+
+            writer.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": second["_pal_delivery_id"],
+            }))
+            await writer.drain()
+            await asyncio.wait_for(quiesce, timeout=1.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_socket_endpoint_replays_frames_not_acked_before_disconnect(self) -> None:
+        await self.endpoint.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        writer.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+        writer.write(
+            pack_socket_message(
+                {"type": "user_message", "request_id": "req-replay", "text": "ping"}
+            )
+        )
+        await writer.drain()
+        envelopes = await self._poll_until_envelopes()
+        self.endpoint.queue_reply("pong", response_handle=envelopes[0].response_handle)
+        self.endpoint.flush_outbox()
+        first = await read_socket_message(reader)
+        writer.close()
+        await writer.wait_closed()
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while self.endpoint.sessions and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.endpoint._unacknowledged_frames)
+
+        reader2, writer2 = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            writer2.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+            await writer2.drain()
+            replayed_first = await read_socket_message(reader2)
+            self.assertEqual(replayed_first["type"], first["type"])
+            self.assertEqual(replayed_first["text"], first["text"])
+            writer2.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": replayed_first["_pal_delivery_id"],
+            }))
+            await writer2.drain()
+            replayed_second = await read_socket_message(reader2)
+            self.assertEqual(replayed_second["type"], "done")
+            writer2.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": replayed_second["_pal_delivery_id"],
+            }))
+            await writer2.drain()
+            await asyncio.wait_for(self.endpoint.quiesce_delivery_async(), timeout=1.0)
+        finally:
+            writer2.close()
+            await writer2.wait_closed()
+
     async def test_socket_endpoint_terminal_stream_needs_no_second_final_reply(self) -> None:
         await self.endpoint.start_async()
         reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
@@ -3449,6 +3574,108 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
                 await writer2.wait_closed()
         finally:
             writer.close()
+            await runtime.stop_async()
+
+    async def test_socket_replacement_cannot_detach_before_delivery_ack(self) -> None:
+        runtime = ChannelRuntime()
+        runtime.register_endpoint(self.endpoint)
+        await runtime.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        writer.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+        writer.write(
+            pack_socket_message(
+                {"type": "user_message", "request_id": "req-fenced", "text": "reload"}
+            )
+        )
+        await writer.drain()
+        envelopes = await self._poll_until_envelopes()
+        self.endpoint.queue_reply("still here", response_handle=envelopes[0].response_handle)
+        self.endpoint.flush_outbox()
+        replacement = SocketChannelEndpoint(
+            endpoint=self.endpoint.endpoint,
+            socket_path=self.socket_path,
+        )
+
+        try:
+            first = await read_socket_message(reader)
+            replace_task = asyncio.create_task(runtime.replace_endpoint_async(replacement))
+            await asyncio.sleep(0.01)
+            self.assertFalse(replace_task.done())
+            self.assertIs(runtime.get_endpoint("socket_default"), self.endpoint)
+
+            writer.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": first["_pal_delivery_id"],
+            }))
+            await writer.drain()
+            second = await read_socket_message(reader)
+            writer.write(pack_socket_message({
+                "type": "delivery_ack",
+                "delivery_id": second["_pal_delivery_id"],
+            }))
+            await writer.drain()
+
+            await asyncio.wait_for(replace_task, timeout=2.0)
+            self.assertIs(runtime.get_endpoint("socket_default"), replacement)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await runtime.stop_async()
+
+    async def test_socket_detach_keeps_unacked_frames_in_physical_hub(self) -> None:
+        runtime = ChannelRuntime()
+        runtime.register_endpoint(self.endpoint)
+        await runtime.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        writer.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+        writer.write(
+            pack_socket_message(
+                {"type": "user_message", "request_id": "req-detach", "text": "detach"}
+            )
+        )
+        await writer.drain()
+        envelopes = await self._poll_until_envelopes()
+        self.endpoint.delivery_quiesce_timeout_seconds = 0.01
+        self.endpoint.queue_reply("survive detach", response_handle=envelopes[0].response_handle)
+        self.endpoint.flush_outbox()
+        first = await read_socket_message(reader)
+
+        try:
+            self.assertTrue(await runtime.remove_endpoint_async("socket_default"))
+            hub = runtime.get_endpoint_hub("socket_default")
+            self.assertIsNotNone(hub)
+            self.assertEqual(len(hub.transport_backlog), 2)
+
+            replacement = SocketChannelEndpoint(
+                endpoint=self.endpoint.endpoint,
+                socket_path=self.socket_path,
+            )
+            await runtime.replace_endpoint_async(replacement)
+            reader2, writer2 = await asyncio.open_unix_connection(str(self.socket_path))
+            try:
+                writer2.write(pack_socket_message({"type": "session_ready", "delivery_ack_v1": True}))
+                await writer2.drain()
+                replayed_first = await read_socket_message(reader2)
+                self.assertEqual(replayed_first["_pal_delivery_id"], first["_pal_delivery_id"])
+                writer2.write(pack_socket_message({
+                    "type": "delivery_ack",
+                    "delivery_id": replayed_first["_pal_delivery_id"],
+                }))
+                await writer2.drain()
+                replayed_second = await read_socket_message(reader2)
+                writer2.write(pack_socket_message({
+                    "type": "delivery_ack",
+                    "delivery_id": replayed_second["_pal_delivery_id"],
+                }))
+                await writer2.drain()
+                await asyncio.wait_for(replacement.quiesce_delivery_async(), timeout=1.0)
+                self.assertFalse(hub.transport_backlog)
+            finally:
+                writer2.close()
+                await writer2.wait_closed()
+        finally:
+            writer.close()
+            await writer.wait_closed()
             await runtime.stop_async()
 
 

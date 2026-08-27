@@ -541,7 +541,11 @@ class ChannelEndpointProviderManager:
             self._unload_provider_if_idle(provider_id)
             return result
         except Exception as exc:
-            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            if endpoint is not None and self.runtime.get_endpoint(endpoint_id) is endpoint:
+                self.runtime.rollback_endpoint_transition(endpoint_id, attached=True)
+                self.runtime.publish_endpoint(endpoint_id)
+            else:
+                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
             return _provider_lifecycle_error("detach", provider_id, endpoint_id, exc)
 
     def restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -549,6 +553,7 @@ class ChannelEndpointProviderManager:
         provider = self.providers.get(provider_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
+        previous_endpoint = self.runtime.get_endpoint(endpoint_id)
         try:
             self.runtime.withdraw_endpoint(endpoint_id)
             self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
@@ -559,7 +564,14 @@ class ChannelEndpointProviderManager:
             self.runtime.complete_endpoint_transition(endpoint_id)
             return result
         except Exception as exc:
-            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            if (
+                previous_endpoint is not None
+                and self.runtime.get_endpoint(endpoint_id) is previous_endpoint
+            ):
+                self.runtime.rollback_endpoint_transition(endpoint_id, attached=True)
+                self.runtime.publish_endpoint(endpoint_id)
+            else:
+                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
             return _provider_lifecycle_error("restart", provider_id, endpoint_id, exc)
 
     def inspect_endpoint(self, endpoint_id: str) -> IntrospectionResult:

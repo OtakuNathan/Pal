@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,12 @@ class _SocketSession:
     request_ids: set[str] = field(default_factory=set)
     closed: bool = False
     writer_task: asyncio.Task[None] | None = None
+    ready_task: asyncio.Task[None] | None = None
+    delivery_ack_enabled: bool = False
+    delivery_ack_waiters: dict[str, asyncio.Future[None]] = field(default_factory=dict)
+    ready_notified: bool = False
+    inflight_payload: dict[str, Any] | None = None
+    outbound_recovered: bool = False
 def _stream_payload(response_handle: ResponseHandle, update: ChannelStreamUpdate) -> dict[str, Any]:
     payload_type = str(update.kind)
     if update.kind == ChannelStreamUpdateKind.DONE:
@@ -88,6 +95,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     _session_replacements: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _allow_single_session_rebind: bool = field(default=False, init=False, repr=False)
     _owns_socket_path: bool = field(default=False, init=False, repr=False)
+    _unacknowledged_frames: deque[dict[str, Any]] = field(default_factory=deque, init=False, repr=False)
+    delivery_quiesce_timeout_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
@@ -119,10 +128,15 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self._retired_session_ids.add(retired_id)
             self._allow_single_session_rebind = True
         self.sessions.clear()
+        session_tasks: list[asyncio.Task[None]] = []
         for session in sessions:
             session.closed = True
             if session.writer_task is not None:
                 session.writer_task.cancel()
+                session_tasks.append(session.writer_task)
+            if session.ready_task is not None:
+                session.ready_task.cancel()
+                session_tasks.append(session.ready_task)
             session.writer.close()
         client_tasks = [
             task
@@ -136,6 +150,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self._client_tasks.difference_update(done)
             for task in pending:
                 task.cancel()
+        if session_tasks:
+            await asyncio.gather(*session_tasks, return_exceptions=True)
+        for session in sessions:
+            self._recover_session_outbound(session)
         if sessions:
             await asyncio.gather(
                 *(self._close_writer_async(session.writer) for session in sessions),
@@ -151,6 +169,33 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         if owns_socket_path and self.socket_path is not None and self.socket_path.exists():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.socket_path)
+
+    async def quiesce_delivery_async(self) -> None:
+        """Wait until ACK-capable clients have accepted every queued frame.
+
+        Legacy clients do not advertise the ACK extension and retain the old
+        write-and-drain semantics. First-party socket clients advertise it, so
+        provider replacement cannot close their session with frames stranded
+        in ``session.outbound``.
+        """
+
+        queues = [
+            session.outbound
+            for session in self.sessions.values()
+            if session.delivery_ack_enabled and not session.closed
+        ]
+        if not queues:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(queue.join() for queue in queues)),
+                timeout=max(float(self.delivery_quiesce_timeout_seconds), 0.001),
+            )
+        except TimeoutError:
+            logger.warning(
+                "socket delivery acknowledgement timed out; pending frames "
+                "will return to the endpoint hub during shutdown"
+            )
 
     async def _prepare_socket_path(self) -> None:
         assert self.socket_path is not None
@@ -179,15 +224,26 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session_id = str(uuid4())
         session = _SocketSession(session_id=session_id, writer=writer)
         session.writer_task = asyncio.create_task(self._writer_loop(session))
+        session.ready_task = asyncio.create_task(self._mark_legacy_session_ready(session))
         self.sessions[session_id] = session
-        self._adopt_single_replacement_session(session_id)
-        if self.on_ready is not None:
-            self.on_ready()
         logger.info("socket session %s connected (%d active)", session_id, len(self.sessions))
         try:
             while True:
                 incoming = await read_socket_message(reader)
                 payload_type = str(incoming.get("type") or "user_message")
+                if payload_type == "session_ready":
+                    session.delivery_ack_enabled = bool(
+                        incoming.get("delivery_ack_v1")
+                    )
+                    self._mark_session_ready(session)
+                    continue
+                if payload_type == "delivery_ack":
+                    delivery_id = str(incoming.get("delivery_id") or "")
+                    waiter = session.delivery_ack_waiters.get(delivery_id)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(None)
+                    continue
+                self._mark_session_ready(session)
                 if payload_type == "interaction_result":
                     self._accept_interaction_result(session, incoming)
                     continue
@@ -215,9 +271,17 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             logger.debug("socket session %s disconnected", session_id)
         finally:
             session.closed = True
+            for waiter in session.delivery_ack_waiters.values():
+                if not waiter.done():
+                    waiter.cancel()
             self.sessions.pop(session_id, None)
             if session.writer_task is not None:
                 session.writer_task.cancel()
+                await asyncio.gather(session.writer_task, return_exceptions=True)
+            if session.ready_task is not None:
+                session.ready_task.cancel()
+                await asyncio.gather(session.ready_task, return_exceptions=True)
+            self._recover_session_outbound(session)
             await self._close_writer_async(writer)
             if client_task is not None:
                 self._client_tasks.discard(client_task)
@@ -238,13 +302,99 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self._session_replacements[retired_id] = session_id
         self._allow_single_session_rebind = False
 
+    def _mark_session_ready(self, session: _SocketSession) -> None:
+        if session.ready_notified:
+            return
+        session.ready_notified = True
+        self._adopt_single_replacement_session(session.session_id)
+        self._drain_replay_frames_to(session)
+        if self.on_ready is not None:
+            self.on_ready()
+
+    async def _mark_legacy_session_ready(self, session: _SocketSession) -> None:
+        await asyncio.sleep(0.05)
+        if (
+            not session.ready_notified
+            and not session.closed
+            and self.sessions.get(session.session_id) is session
+        ):
+            self._mark_session_ready(session)
+
+    def accept_transport_backlog(self, frames: tuple[dict[str, Any], ...]) -> None:
+        self._unacknowledged_frames.extend(dict(frame) for frame in frames)
+        ready_sessions = [
+            session
+            for session in self.sessions.values()
+            if session.ready_notified and not session.closed
+        ]
+        if len(ready_sessions) == 1:
+            self._drain_replay_frames_to(ready_sessions[0])
+
+    def _drain_replay_frames_to(self, session: _SocketSession) -> None:
+        while self._unacknowledged_frames:
+            session.outbound.put_nowait(self._unacknowledged_frames.popleft())
+
+    def _recover_session_outbound(self, session: _SocketSession) -> None:
+        if session.outbound_recovered:
+            return
+        session.outbound_recovered = True
+        if session.inflight_payload is not None:
+            self._unacknowledged_frames.append(session.inflight_payload)
+            session.inflight_payload = None
+        while True:
+            try:
+                payload = session.outbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._unacknowledged_frames.append(payload)
+            session.outbound.task_done()
+
+    def replacement_delivery_ready(self) -> bool:
+        ready_sessions = [
+            session
+            for session in self.sessions.values()
+            if session.ready_notified and not session.closed
+        ]
+        if self._allow_single_session_rebind and len(ready_sessions) == 1:
+            self._adopt_single_replacement_session(ready_sessions[0].session_id)
+        if self._unacknowledged_frames:
+            return False
+        if any(
+            session.inflight_payload is not None
+            or not session.outbound.empty()
+            or bool(session.delivery_ack_waiters)
+            for session in ready_sessions
+        ):
+            return False
+        return not self._allow_single_session_rebind
+
     async def _writer_loop(self, session: _SocketSession) -> None:
         try:
             while True:
                 payload = await session.outbound.get()
-                session.writer.write(pack_socket_message(payload))
-                await session.writer.drain()
-        except (asyncio.CancelledError, ConnectionError, OSError):
+                delivery_id = ""
+                waiter: asyncio.Future[None] | None = None
+                try:
+                    wire_payload = payload
+                    if session.delivery_ack_enabled:
+                        delivery_id = str(payload.get("_pal_delivery_id") or uuid4())
+                        wire_payload = dict(payload)
+                        wire_payload["_pal_delivery_id"] = delivery_id
+                        waiter = asyncio.get_running_loop().create_future()
+                        session.delivery_ack_waiters[delivery_id] = waiter
+                    session.inflight_payload = wire_payload
+                    session.writer.write(pack_socket_message(wire_payload))
+                    await session.writer.drain()
+                    if waiter is not None:
+                        await waiter
+                    session.inflight_payload = None
+                finally:
+                    if delivery_id:
+                        session.delivery_ack_waiters.pop(delivery_id, None)
+                    session.outbound.task_done()
+                    if self.on_ready is not None:
+                        self.on_ready()
+        except (asyncio.CancelledError, ConnectionError, OSError, SocketSessionClosed):
             session.closed = True
             logger.debug("socket writer loop ended for session %s", session.session_id)
 

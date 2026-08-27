@@ -15,6 +15,7 @@ VARIABLES
     publishIntent,
     providerLoaded,
     buffer,
+    transportPending,
     queued,
     delivered,
     lastRoute,
@@ -22,7 +23,7 @@ VARIABLES
 
 vars == <<
     hubState, physical, transport, published, publishIntent, providerLoaded,
-    buffer, queued, delivered, lastRoute, lastLifecycleTarget
+    buffer, transportPending, queued, delivered, lastRoute, lastLifecycleTarget
 >>
 
 SetOriginMembership(set, present) ==
@@ -55,6 +56,7 @@ Init ==
     /\ publishIntent = {"socket"}
     /\ providerLoaded = FALSE
     /\ buffer = [endpoint \in Endpoints |-> 0]
+    /\ transportPending = [endpoint \in Endpoints |-> 0]
     /\ queued = 0
     /\ delivered = 0
     /\ lastRoute = "none"
@@ -64,7 +66,7 @@ DiscoverOrigin ==
     /\ ApplyOrigin("DISCOVER")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 LoadOriginProvider ==
     /\ hubState["origin"] \in {"discovered", "detached", "degraded"}
@@ -74,7 +76,7 @@ LoadOriginProvider ==
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    buffer, queued, delivered>>
+                    buffer, transportPending, queued, delivered>>
 
 UnloadOriginProvider ==
     /\ hubState["origin"] \in {"discovered", "detached", "degraded"}
@@ -85,83 +87,103 @@ UnloadOriginProvider ==
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    buffer, queued, delivered>>
+                    buffer, transportPending, queued, delivered>>
 
 WithdrawOrigin ==
     /\ ApplyOrigin("WITHDRAW")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 BeginOriginTransition ==
     /\ ApplyOrigin("BEGIN_TRANSITION")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RegisterOriginTransport ==
     /\ providerLoaded
     /\ ApplyOrigin("REGISTER_TRANSPORT")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RequestOriginPublish ==
     /\ ApplyOrigin("REQUEST_PUBLISH")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 BeginOriginDrain ==
     /\ ApplyOrigin("BEGIN_DRAIN")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 DrainOrigin ==
     /\ hubState["origin"] = "draining"
     /\ buffer["origin"] > 0
     /\ buffer' = [buffer EXCEPT !["origin"] = @ - 1]
+    /\ transportPending' = [transportPending EXCEPT !["origin"] = @ + 1]
+    /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
+                    providerLoaded, queued, delivered, lastRoute, lastLifecycleTarget>>
+
+AckOriginDelivery ==
+    /\ transportPending["origin"] > 0
+    /\ transportPending' = [transportPending EXCEPT !["origin"] = @ - 1]
     /\ delivered' = delivered + 1
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, queued, lastRoute, lastLifecycleTarget>>
+                    providerLoaded, buffer, queued, lastRoute,
+                    lastLifecycleTarget>>
+
+RecoverOriginDelivery ==
+    /\ transportPending["origin"] > 0
+    /\ buffer["origin"] < MaxMessages
+    /\ transportPending' = [transportPending EXCEPT !["origin"] = @ - 1]
+    /\ buffer' = [buffer EXCEPT !["origin"] = @ + 1]
+    /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
+                    providerLoaded, queued, delivered, lastRoute,
+                    lastLifecycleTarget>>
 
 CompleteOriginDrain ==
+    /\ transportPending["origin"] = 0
     /\ ApplyOrigin("DRAIN_COMPLETE")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 FailOriginTransition ==
     /\ ApplyOrigin("TRANSITION_FAILED")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RemoveOriginTransport ==
+    /\ transportPending["origin"] = 0
     /\ ApplyOrigin("TRANSPORT_REMOVED")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 CompleteOriginDetach ==
+    /\ transportPending["origin"] = 0
     /\ ApplyOrigin("DETACH_COMPLETE")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RollbackOriginTransport ==
     /\ ApplyOrigin("ROLLBACK_TRANSPORT")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 BeginRemoveOrigin ==
     /\ ~providerLoaded
     /\ ApplyOrigin("BEGIN_REMOVE")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RerouteRemovedOriginBacklog ==
     /\ hubState["origin"] = "removing"
@@ -173,31 +195,31 @@ RerouteRemovedOriginBacklog ==
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, queued, delivered>>
+                    providerLoaded, transportPending, queued, delivered>>
 
 CompleteRemoveOrigin ==
     /\ ApplyOrigin("REMOVE_COMPLETE")
     /\ lastLifecycleTarget' = "origin"
     /\ lastRoute' = "none"
-    /\ UNCHANGED <<providerLoaded, buffer, queued, delivered>>
+    /\ UNCHANGED <<providerLoaded, buffer, transportPending, queued, delivered>>
 
 RejectMissingOriginLifecycle ==
     /\ hubState["origin"] = "absent"
     /\ lastLifecycleTarget' = "rejected"
     /\ lastRoute' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, buffer, queued, delivered>>
+                    providerLoaded, buffer, transportPending, queued, delivered>>
 
 QueueOriginDirect ==
     /\ hubState["origin"] = "attached"
     /\ "origin" \in transport
     /\ queued < MaxMessages
     /\ queued' = queued + 1
-    /\ delivered' = delivered + 1
+    /\ transportPending' = [transportPending EXCEPT !["origin"] = @ + 1]
     /\ lastRoute' = "origin"
     /\ lastLifecycleTarget' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, buffer>>
+                    providerLoaded, buffer, delivered>>
 
 QueueOriginBuffered ==
     /\ hubState["origin"] \notin {"absent", "attached", "removing"}
@@ -208,7 +230,7 @@ QueueOriginBuffered ==
     /\ lastRoute' = "origin"
     /\ lastLifecycleTarget' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, delivered>>
+                    providerLoaded, transportPending, delivered>>
 
 QueueLateReplyToSocket ==
     /\ hubState["origin"] = "absent"
@@ -219,17 +241,34 @@ QueueLateReplyToSocket ==
     /\ lastRoute' = "socket"
     /\ lastLifecycleTarget' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, delivered>>
+                    providerLoaded, transportPending, delivered>>
 
 DrainSocket ==
     /\ hubState["socket"] = "attached"
     /\ "socket" \in transport
     /\ buffer["socket"] > 0
     /\ buffer' = [buffer EXCEPT !["socket"] = @ - 1]
+    /\ transportPending' = [transportPending EXCEPT !["socket"] = @ + 1]
+    /\ lastLifecycleTarget' = "none"
+    /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
+                    providerLoaded, queued, delivered, lastRoute>>
+
+AckSocketDelivery ==
+    /\ transportPending["socket"] > 0
+    /\ transportPending' = [transportPending EXCEPT !["socket"] = @ - 1]
     /\ delivered' = delivered + 1
     /\ lastLifecycleTarget' = "none"
     /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
-                    providerLoaded, queued, lastRoute>>
+                    providerLoaded, buffer, queued, lastRoute>>
+
+RecoverSocketDelivery ==
+    /\ transportPending["socket"] > 0
+    /\ buffer["socket"] < MaxMessages
+    /\ transportPending' = [transportPending EXCEPT !["socket"] = @ - 1]
+    /\ buffer' = [buffer EXCEPT !["socket"] = @ + 1]
+    /\ UNCHANGED <<hubState, physical, transport, published, publishIntent,
+                    providerLoaded, queued, delivered, lastRoute,
+                    lastLifecycleTarget>>
 
 Next ==
     \/ DiscoverOrigin
@@ -241,6 +280,8 @@ Next ==
     \/ RequestOriginPublish
     \/ BeginOriginDrain
     \/ DrainOrigin
+    \/ AckOriginDelivery
+    \/ RecoverOriginDelivery
     \/ CompleteOriginDrain
     \/ FailOriginTransition
     \/ RemoveOriginTransport
@@ -254,6 +295,8 @@ Next ==
     \/ QueueOriginBuffered
     \/ QueueLateReplyToSocket
     \/ DrainSocket
+    \/ AckSocketDelivery
+    \/ RecoverSocketDelivery
 
 Spec == Init /\ [][Next]_vars
 
@@ -265,6 +308,7 @@ TypeOK ==
     /\ publishIntent \subseteq Endpoints
     /\ providerLoaded \in BOOLEAN
     /\ buffer \in [Endpoints -> 0..MaxMessages]
+    /\ transportPending \in [Endpoints -> 0..MaxMessages]
     /\ queued \in 0..MaxMessages
     /\ delivered \in 0..MaxMessages
     /\ lastRoute \in Routes
@@ -308,6 +352,7 @@ AbsentHubOwnsNothing ==
             /\ endpoint \notin published
             /\ endpoint \notin publishIntent
             /\ buffer[endpoint] = 0
+            /\ transportPending[endpoint] = 0
 
 RegistryIsLateAndEarly ==
     hubState["origin"] \in {
@@ -316,7 +361,12 @@ RegistryIsLateAndEarly ==
     } => "origin" \notin published
 
 MessageConservation ==
-    queued = delivered + buffer["origin"] + buffer["socket"]
+    queued = delivered
+        + buffer["origin"] + buffer["socket"]
+        + transportPending["origin"] + transportPending["socket"]
+
+TransportRemovalWaitsForAck ==
+    "origin" \notin transport => transportPending["origin"] = 0
 
 SocketFallbackOnlyAfterPhysicalRemoval ==
     lastRoute = "socket" => hubState["origin"] = "absent"

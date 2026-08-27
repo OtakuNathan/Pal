@@ -88,6 +88,7 @@ class ChannelEndpointHub:
     transition_epoch: int = 0
     next_sequence: int = 1
     buffer: deque[BufferedChannelDelivery] = field(default_factory=deque)
+    transport_backlog: deque[dict[str, Any]] = field(default_factory=deque)
     buffered_text_bytes: int = 0
     overflowed: bool = False
     last_error: str = ""
@@ -429,6 +430,11 @@ class ChannelRuntime(ChannelRuntimePort):
                 delivery.delivery_id,
                 self._reroute_item(delivery.item, recovery, original_endpoint_id=normalized),
             )
+        recovery.transport_backlog.extend(hub.transport_backlog)
+        hub.transport_backlog.clear()
+        recovery_endpoint = self.get_endpoint(self.recovery_endpoint_id)
+        if recovery_endpoint is not None:
+            self._restore_endpoint_transport_backlog(recovery, recovery_endpoint)
         if recovery.state == EndpointHubState.ATTACHED:
             self._flush_hub(recovery)
         self._apply_hub_action(hub, EndpointHubAction.REMOVE_COMPLETE)
@@ -611,6 +617,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 "lifecycle_state": "missing",
                 "transition_epoch": 0,
                 "buffered_delivery_count": 0,
+                "transport_backlog_count": 0,
                 "buffered_text_bytes": 0,
                 "buffer_overflowed": False,
                 "oldest_buffered_seconds": 0.0,
@@ -630,6 +637,7 @@ class ChannelRuntime(ChannelRuntimePort):
             "published": hub.published,
             "publish_when_ready": hub.publish_when_ready,
             "buffered_delivery_count": len(hub.buffer),
+            "transport_backlog_count": len(hub.transport_backlog),
             "buffered_text_bytes": hub.buffered_text_bytes,
             "buffer_overflowed": hub.overflowed,
             "oldest_buffered_seconds": oldest_age,
@@ -710,6 +718,11 @@ class ChannelRuntime(ChannelRuntimePort):
         old_stopper = getattr(old_endpoint, "stop_async", None)
         if old_endpoint is not None and callable(old_stopper):
             try:
+                quiescer = getattr(old_endpoint, "quiesce_delivery_async", None)
+                if callable(quiescer):
+                    quiescence = quiescer()
+                    if inspect.isawaitable(quiescence):
+                        await quiescence
                 await old_stopper()
             except Exception as exc:
                 if owns_transition:
@@ -721,7 +734,9 @@ class ChannelRuntime(ChannelRuntimePort):
                 # before publishing the replacement so later arrivals cannot
                 # overtake it.
                 self._absorb_endpoint_outboxes(hub, old_endpoint)
+                self._absorb_endpoint_transport_backlog(hub, old_endpoint)
         try:
+            self._restore_endpoint_transport_backlog(hub, endpoint)
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
                 await starter()
@@ -737,9 +752,12 @@ class ChannelRuntime(ChannelRuntimePort):
                     await failed_stopper()
                 except Exception:
                     pass
+            self._absorb_endpoint_transport_backlog(hub, endpoint)
             old_starter = getattr(old_endpoint, "start_async", None)
-            if old_endpoint is not None and callable(old_starter):
-                await old_starter()
+            if old_endpoint is not None:
+                self._restore_endpoint_transport_backlog(hub, old_endpoint)
+                if callable(old_starter):
+                    await old_starter()
                 self._bind_endpoint_ready(old_endpoint)
                 self.endpoint_registry.register(old_endpoint)
                 self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
@@ -804,9 +822,15 @@ class ChannelRuntime(ChannelRuntimePort):
             return False
         stopper = getattr(endpoint, "stop_async", None)
         if callable(stopper):
+            quiescer = getattr(endpoint, "quiesce_delivery_async", None)
+            if callable(quiescer):
+                quiescence = quiescer()
+                if inspect.isawaitable(quiescence):
+                    await quiescence
             await stopper()
         hub = self.endpoint_hubs.get(endpoint_id)
         if hub is not None:
+            self._absorb_endpoint_transport_backlog(hub, endpoint)
             self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
         self.endpoint_registry.unregister(endpoint_id)
         return True
@@ -1191,6 +1215,35 @@ class ChannelRuntime(ChannelRuntimePort):
             hub.append("reply", item.reply_id, item)
         endpoint.outbox.clear()
 
+    @staticmethod
+    def _absorb_endpoint_transport_backlog(
+        hub: ChannelEndpointHub,
+        endpoint: ChannelEndpointBase,
+    ) -> None:
+        pending = getattr(endpoint, "_unacknowledged_frames", None)
+        if not isinstance(pending, deque):
+            return
+        hub.transport_backlog.extend(pending)
+        pending.clear()
+
+    @staticmethod
+    def _restore_endpoint_transport_backlog(
+        hub: ChannelEndpointHub,
+        endpoint: ChannelEndpointBase,
+    ) -> None:
+        if not hub.transport_backlog:
+            return
+        acceptor = getattr(endpoint, "accept_transport_backlog", None)
+        if callable(acceptor):
+            acceptor(tuple(hub.transport_backlog))
+            hub.transport_backlog.clear()
+            return
+        pending = getattr(endpoint, "_unacknowledged_frames", None)
+        if not isinstance(pending, deque):
+            return
+        pending.extend(hub.transport_backlog)
+        hub.transport_backlog.clear()
+
     def _flush_hub(self, hub: ChannelEndpointHub) -> None:
         if hub.state in {
             EndpointHubState.TRANSITIONING,
@@ -1552,6 +1605,7 @@ def _transfer_endpoint_runtime_state(
         "attachment_outbox",
         "status_outbox",
         "stream_update_outbox",
+        "_unacknowledged_frames",
     ):
         old_queue = getattr(old_endpoint, attribute, None)
         new_queue = getattr(new_endpoint, attribute, None)

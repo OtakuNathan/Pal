@@ -2,8 +2,10 @@
 
 `EndpointHubLifecycle.tla` models one physical channel endpoint plus the
 non-detachable recovery socket. It checks the EndpointHub lifecycle, late/early
-capability publication, ordered in-process backlog ownership, physical removal,
-and delivery-only fallback to the socket.
+capability publication, ordered in-process backlog ownership, transport
+acknowledgement before replacement/removal, physical removal, and delivery-only
+fallback to the socket. Unacknowledged transport work returns to the hub before
+detach, so a later attach can replay it without a transport generation object.
 
 `EndpointHubImplementationReducer.tla` is generated from the executable Python
 reducer in `pal.channel.lifecycle`. Each relation row contains the lifecycle

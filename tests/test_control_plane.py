@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
@@ -1597,6 +1598,35 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             await self.channel_runtime.replace_endpoint_async(replacement)
 
         self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
+
+    async def test_channel_replace_start_failure_returns_transport_backlog_to_old_endpoint(self) -> None:
+        class FailingStartEndpoint(_StubEndpoint):
+            async def start_async(self) -> None:
+                raise RuntimeError("start failed")
+
+        self.endpoint._unacknowledged_frames = deque()
+        hub = self.channel_runtime.get_endpoint_hub("socket_main")
+        self.assertIsNotNone(hub)
+        hub.transport_backlog.append({"type": "text_delta", "text": "preserve"})
+        replacement = FailingStartEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key="runtime.sock",
+            )
+        )
+        replacement._unacknowledged_frames = deque()
+        await self.channel_runtime.start_async()
+
+        with self.assertRaisesRegex(RuntimeError, "start failed"):
+            await self.channel_runtime.replace_endpoint_async(replacement)
+
+        self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
+        self.assertEqual(
+            list(self.endpoint._unacknowledged_frames),
+            [{"type": "text_delta", "text": "preserve"}],
+        )
+        self.assertFalse(hub.transport_backlog)
 
     async def test_channel_replace_rejects_soft_unhealthy_candidate(self) -> None:
         class SoftUnhealthyEndpoint(_StubEndpoint):
