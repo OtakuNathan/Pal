@@ -464,7 +464,16 @@ class DeliveryAndForwardTests(unittest.IsolatedAsyncioTestCase):
                 await channel.stop()
 
         self.assertEqual(result, "pong")
-        self.assertEqual(channel.received[0]["text"], "hello")
+        self.assertEqual(
+            channel.received[0],
+            {"type": "session_ready", "delivery_ack_v1": True},
+        )
+        user_messages = [
+            message
+            for message in channel.received
+            if message.get("type") == "user_message"
+        ]
+        self.assertEqual(user_messages[0]["text"], "hello")
 
     async def test_deliver_inbound_rejects_slash_without_touching_socket(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
