@@ -101,9 +101,13 @@ def _local_sidecar_bind_available() -> bool:
 class _OutboundQueue:
     def __init__(self) -> None:
         self.items: list[dict[str, object]] = []
+        self.maxsize = 0
 
     def put_nowait(self, item: dict[str, object]) -> None:
         self.items.append(item)
+
+    def qsize(self) -> int:
+        return len(self.items)
 
 
 class PalV2BootstrapTests(unittest.TestCase):
