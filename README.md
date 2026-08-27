@@ -90,7 +90,11 @@ tar -xzf dist/pal_v2-install-bundle.tar.gz -C /tmp/pal-install
 ```
 
 For editable development, use `pip install -e .`, then run `pal doctor` and
-`pal setup`. The setup aliases `pal wizard` and `pal wizzard` remain available.
+`pal setup`. To guarantee that a launcher or service executes the current
+working tree instead of a packaged copy, invoke `scripts/pal_source.sh`; it
+prepends `src/` to `PYTHONPATH` and accepts the same arguments as `pal`.
+Set `PAL_PYTHON` when the desired interpreter is not `python3`. The setup
+aliases `pal wizard` and `pal wizzard` remain available.
 
 ### Pal Debugging Pal
 
