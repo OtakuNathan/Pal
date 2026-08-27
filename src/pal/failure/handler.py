@@ -70,6 +70,15 @@ class FailureEventHandler(EventHandler):
 
 
 def _is_ephemeral_delivery_failure(payload: dict) -> bool:
+    if bool(payload.get("expected_lifecycle")):
+        return True
+    reason_code = str(payload.get("reason_code") or "").strip().lower()
+    if reason_code in {
+        "provider_reloading",
+        "endpoint_reloading",
+        "provider_generation_changed",
+    }:
+        return True
     endpoint_id = str(payload.get("endpoint_id") or "").strip().lower()
     channel_kind = str(payload.get("channel_kind") or "").strip().lower()
     reason = str(payload.get("reason") or "").strip().lower()

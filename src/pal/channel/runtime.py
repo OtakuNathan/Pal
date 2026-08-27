@@ -5,7 +5,8 @@ import inspect
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 from uuid import uuid4
 
 from pal.channel.contracts import (
@@ -28,8 +29,159 @@ from pal.channel.channel_endpoint_queue_base import (
 )
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
 from pal.channel.ingress import ChannelIngressCompiler
+
+
+ENDPOINT_RELOAD_BUFFER_MAX_ITEMS = 1024
+ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class BufferedChannelDelivery:
+    sequence: int
+    delivery_kind: Literal["reply", "stream", "status", "attachment"]
+    delivery_id: str
+    item: QueuedReply | QueuedStreamUpdate | QueuedStatus | QueuedAttachment
+    queued_at: float = field(default_factory=time.monotonic)
+
+    @property
+    def text_bytes(self) -> int:
+        item = self.item
+        if isinstance(item, QueuedReply):
+            return len(item.text.encode("utf-8"))
+        if isinstance(item, QueuedStreamUpdate):
+            update = item.update
+            return len(update.text.encode("utf-8")) + len(update.reasoning_text.encode("utf-8"))
+        if isinstance(item, QueuedStatus):
+            return len(str(item.payload).encode("utf-8"))
+        return 0
+
+
+@dataclass
+class ChannelEndpointSlot:
+    """Stable delivery ownership that survives endpoint generation swaps."""
+
+    endpoint_id: str
+    provider_id: str = ""
+    state: str = "active"
+    reload_epoch: int = 0
+    next_sequence: int = 1
+    buffer: deque[BufferedChannelDelivery] = field(default_factory=deque)
+    buffered_text_bytes: int = 0
+    overflowed: bool = False
+    last_reload_error: str = ""
+
+    def begin_reload(self, *, provider_id: str = "") -> int:
+        if self.state != "reloading":
+            self.reload_epoch += 1
+        self.provider_id = str(provider_id or self.provider_id)
+        self.state = "reloading"
+        self.overflowed = (
+            len(self.buffer) > ENDPOINT_RELOAD_BUFFER_MAX_ITEMS
+            or self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
+        )
+        self.last_reload_error = ""
+        return self.reload_epoch
+
+    def append(
+        self,
+        delivery_kind: Literal["reply", "stream", "status", "attachment"],
+        delivery_id: str,
+        item: QueuedReply | QueuedStreamUpdate | QueuedStatus | QueuedAttachment,
+    ) -> None:
+        delivery = BufferedChannelDelivery(
+            sequence=self.next_sequence,
+            delivery_kind=delivery_kind,
+            delivery_id=delivery_id,
+            item=item,
+        )
+        self.next_sequence += 1
+        if self._coalesce(delivery):
+            return
+        self.buffer.append(delivery)
+        self.buffered_text_bytes += delivery.text_bytes
+        if (
+            len(self.buffer) > ENDPOINT_RELOAD_BUFFER_MAX_ITEMS
+            or self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
+        ):
+            self.overflowed = True
+
+    def popleft(self) -> BufferedChannelDelivery:
+        delivery = self.buffer.popleft()
+        self.buffered_text_bytes = max(0, self.buffered_text_bytes - delivery.text_bytes)
+        return delivery
+
+    def _coalesce(self, delivery: BufferedChannelDelivery) -> bool:
+        if not self.buffer:
+            return False
+        previous = self.buffer[-1]
+        if delivery.delivery_kind == "stream" and previous.delivery_kind == "stream":
+            prior = previous.item
+            current = delivery.item
+            if (
+                isinstance(prior, QueuedStreamUpdate)
+                and isinstance(current, QueuedStreamUpdate)
+                and prior.response_handle == current.response_handle
+                and prior.update.kind == ChannelStreamUpdateKind.TEXT_DELTA
+                and current.update.kind == ChannelStreamUpdateKind.TEXT_DELTA
+                and prior.update.tool_call is None
+                and current.update.tool_call is None
+            ):
+                combined = QueuedStreamUpdate(
+                    update_id=prior.update_id,
+                    response_handle=prior.response_handle,
+                    endpoint=prior.endpoint,
+                    update=ChannelStreamUpdate(
+                        kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                        text=f"{prior.update.text}{current.update.text}",
+                        reasoning_text=f"{prior.update.reasoning_text}{current.update.reasoning_text}",
+                    ),
+                    attempts=max(prior.attempts, current.attempts),
+                )
+                self.buffered_text_bytes = max(
+                    0,
+                    self.buffered_text_bytes - previous.text_bytes,
+                )
+                replacement = BufferedChannelDelivery(
+                    sequence=previous.sequence,
+                    delivery_kind="stream",
+                    delivery_id=prior.update_id,
+                    item=combined,
+                    queued_at=previous.queued_at,
+                )
+                self.buffer[-1] = replacement
+                self.buffered_text_bytes += replacement.text_bytes
+                if self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES:
+                    self.overflowed = True
+                return True
+        if delivery.delivery_kind == "status" and previous.delivery_kind == "status":
+            prior = previous.item
+            current = delivery.item
+            if (
+                isinstance(prior, QueuedStatus)
+                and isinstance(current, QueuedStatus)
+                and prior.response_handle == current.response_handle
+                and prior.kind == current.kind
+                and current.kind in {"typing_start", "working_stop", "control_catalog", "llm_waiting"}
+            ):
+                self.buffered_text_bytes = max(
+                    0,
+                    self.buffered_text_bytes - previous.text_bytes,
+                )
+                replacement = BufferedChannelDelivery(
+                    sequence=previous.sequence,
+                    delivery_kind="status",
+                    delivery_id=current.status_id,
+                    item=current,
+                    queued_at=previous.queued_at,
+                )
+                self.buffer[-1] = replacement
+                self.buffered_text_bytes += replacement.text_bytes
+                if self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES:
+                    self.overflowed = True
+                return True
+        return False
 
 
 @dataclass
@@ -72,6 +224,7 @@ class ChannelRuntime(ChannelRuntimePort):
     attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_update_outbox: deque[QueuedStreamUpdate] = field(default_factory=deque)
+    delivery_slots: dict[str, ChannelEndpointSlot] = field(default_factory=dict)
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
     ingress_compiler: ChannelIngressCompiler | None = None
@@ -87,8 +240,144 @@ class ChannelRuntime(ChannelRuntimePort):
         self.mailbox.on_put = self._notify_ready
 
     def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
-        endpoint.on_ready = self._notify_ready
+        self._bind_endpoint_ready(endpoint)
+        slot = self._slot(endpoint.endpoint.endpoint_id)
         self.endpoint_registry.register(endpoint)
+        if slot.state == "detached":
+            slot.state = "active"
+            slot.last_reload_error = ""
+
+    def _bind_endpoint_ready(self, endpoint: ChannelEndpointBase) -> None:
+        endpoint_id = endpoint.endpoint.endpoint_id
+        endpoint.on_ready = lambda: self._notify_endpoint_ready(endpoint_id)
+
+    def _slot(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointSlot:
+        normalized = str(endpoint_id or "").strip()
+        slot = self.delivery_slots.get(normalized)
+        if slot is None:
+            slot = ChannelEndpointSlot(endpoint_id=normalized, provider_id=str(provider_id or ""))
+            self.delivery_slots[normalized] = slot
+        elif provider_id:
+            slot.provider_id = str(provider_id)
+        return slot
+
+    def _call_on_owner_loop(
+        self,
+        callback: Callable[[], Any],
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> Any:
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return callback()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            return callback()
+
+        async def _invoke() -> Any:
+            return callback()
+
+        future = asyncio.run_coroutine_threadsafe(_invoke(), loop)
+        return future.result(timeout=timeout_seconds)
+
+    def begin_endpoint_reload(self, endpoint_id: str, *, provider_id: str = "") -> int:
+        return int(
+            self._call_on_owner_loop(
+                lambda: self._begin_endpoint_reload(endpoint_id, provider_id=provider_id)
+            )
+        )
+
+    def _begin_endpoint_reload(self, endpoint_id: str, *, provider_id: str = "") -> int:
+        slot = self._slot(endpoint_id, provider_id=provider_id)
+        epoch = slot.begin_reload(provider_id=provider_id)
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is not None:
+            self._absorb_endpoint_outboxes(slot, endpoint)
+        return epoch
+
+    def bind_endpoint_provider(self, endpoint_id: str, provider_id: str) -> None:
+        self._call_on_owner_loop(
+            lambda: self._slot(endpoint_id, provider_id=provider_id)
+        )
+
+    def begin_provider_reload(self, endpoint_ids: tuple[str, ...] | list[str], *, provider_id: str) -> dict[str, int]:
+        normalized_ids = tuple(endpoint_ids)
+        return dict(
+            self._call_on_owner_loop(
+                lambda: {
+                    endpoint_id: self._begin_endpoint_reload(
+                        endpoint_id,
+                        provider_id=provider_id,
+                    )
+                    for endpoint_id in normalized_ids
+                }
+            )
+        )
+
+    def complete_endpoint_reload(self, endpoint_id: str) -> None:
+        self._call_on_owner_loop(lambda: self._complete_endpoint_reload(endpoint_id))
+
+    def _complete_endpoint_reload(self, endpoint_id: str) -> None:
+        slot = self._slot(endpoint_id)
+        slot.state = "draining"
+        slot.last_reload_error = ""
+        self._flush_slot(slot)
+
+    def complete_provider_reload(self, endpoint_ids: tuple[str, ...] | list[str]) -> None:
+        normalized_ids = tuple(endpoint_ids)
+
+        def _complete_all() -> None:
+            for endpoint_id in normalized_ids:
+                self._complete_endpoint_reload(endpoint_id)
+
+        self._call_on_owner_loop(_complete_all)
+
+    def fail_endpoint_reload(self, endpoint_id: str, error: str) -> None:
+        def _fail() -> None:
+            slot = self._slot(endpoint_id)
+            slot.last_reload_error = str(error or "provider reload failed")
+            slot.state = "degraded"
+
+        self._call_on_owner_loop(_fail)
+
+    def mark_endpoint_detached(self, endpoint_id: str, *, reason: str = "") -> None:
+        def _mark_detached() -> None:
+            slot = self._slot(endpoint_id)
+            slot.state = "detached"
+            slot.last_reload_error = str(reason or "")
+
+        self._call_on_owner_loop(_mark_detached)
+
+    def inspect_delivery_slot(self, endpoint_id: str) -> dict[str, Any]:
+        slot = self.delivery_slots.get(str(endpoint_id or "").strip())
+        if slot is None:
+            return {
+                "lifecycle_state": "missing",
+                "reload_epoch": 0,
+                "buffered_delivery_count": 0,
+                "buffered_text_bytes": 0,
+                "buffer_overflowed": False,
+                "oldest_buffered_seconds": 0.0,
+                "last_reload_error": "",
+            }
+        oldest_age = (
+            max(0.0, time.monotonic() - slot.buffer[0].queued_at)
+            if slot.buffer
+            else 0.0
+        )
+        return {
+            "lifecycle_state": slot.state,
+            "reload_epoch": slot.reload_epoch,
+            "provider_id": slot.provider_id,
+            "buffered_delivery_count": len(slot.buffer),
+            "buffered_text_bytes": slot.buffered_text_bytes,
+            "buffer_overflowed": slot.overflowed,
+            "oldest_buffered_seconds": oldest_age,
+            "last_reload_error": slot.last_reload_error,
+        }
 
     async def start_async(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -106,13 +395,23 @@ class ChannelRuntime(ChannelRuntimePort):
         self._started = False
         self._loop = None
 
-    async def replace_endpoint_async(self, endpoint: ChannelEndpointBase) -> None:
+    async def replace_endpoint_async(
+        self,
+        endpoint: ChannelEndpointBase,
+        *,
+        manage_reload: bool = True,
+    ) -> None:
         old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+        endpoint_id = endpoint.endpoint.endpoint_id
         if old_endpoint is endpoint:
             if self._started:
                 self._queue_cached_control_catalog(endpoint)
             return
-        endpoint.on_ready = self._notify_ready
+        slot = self._slot(endpoint_id)
+        owns_reload = manage_reload and slot.state != "reloading"
+        if owns_reload:
+            self.begin_endpoint_reload(endpoint_id, provider_id=slot.provider_id)
+        self._bind_endpoint_ready(endpoint)
         preparer = getattr(endpoint, "prepare_replacement", None)
         if old_endpoint is not None and callable(preparer):
             preparation = preparer(old_endpoint)
@@ -121,11 +420,19 @@ class ChannelRuntime(ChannelRuntimePort):
         if not self._started:
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.endpoint_registry.register(endpoint)
+            if owns_reload:
+                self.complete_endpoint_reload(endpoint_id)
             return
 
         old_stopper = getattr(old_endpoint, "stop_async", None)
         if old_endpoint is not None and callable(old_stopper):
             await old_stopper()
+            if slot.state == "reloading":
+                # A transport may return scheduled-but-unconfirmed work to its
+                # local outboxes while stopping. Pull it behind the same fence
+                # before publishing the replacement so later arrivals cannot
+                # overtake it.
+                self._absorb_endpoint_outboxes(slot, old_endpoint)
         try:
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
@@ -145,16 +452,27 @@ class ChannelRuntime(ChannelRuntimePort):
             old_starter = getattr(old_endpoint, "start_async", None)
             if old_endpoint is not None and callable(old_starter):
                 await old_starter()
+                self._bind_endpoint_ready(old_endpoint)
+                self.endpoint_registry.register(old_endpoint)
+            if owns_reload:
+                slot.last_reload_error = "replacement startup failed"
+                self.complete_endpoint_reload(endpoint_id)
             raise
-        # Registry replacement is the commit point.  Until the candidate has
-        # started successfully, readers continue to resolve the old endpoint.
         _transfer_endpoint_runtime_state(old_endpoint, endpoint)
         self.endpoint_registry.register(endpoint)
         self._queue_cached_control_catalog(endpoint)
+        if owns_reload:
+            self.complete_endpoint_reload(endpoint_id)
 
-    def replace_endpoint(self, endpoint: ChannelEndpointBase, *, timeout_seconds: float = 10.0) -> None:
+    def replace_endpoint(
+        self,
+        endpoint: ChannelEndpointBase,
+        *,
+        timeout_seconds: float = 10.0,
+        manage_reload: bool = True,
+    ) -> None:
         async def _replace() -> None:
-            await self.replace_endpoint_async(endpoint)
+            await self.replace_endpoint_async(endpoint, manage_reload=manage_reload)
 
         loop = self._loop
         if loop is not None and loop.is_running():
@@ -169,6 +487,10 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         if not self._started:
             old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+            slot = self._slot(endpoint.endpoint.endpoint_id)
+            owns_reload = manage_reload and slot.state != "reloading"
+            if owns_reload:
+                self.begin_endpoint_reload(endpoint.endpoint.endpoint_id)
             preparer = getattr(endpoint, "prepare_replacement", None)
             if old_endpoint is not None and callable(preparer):
                 preparation = preparer(old_endpoint)
@@ -178,6 +500,8 @@ class ChannelRuntime(ChannelRuntimePort):
                     )
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.register_endpoint(endpoint)
+            if owns_reload:
+                self.complete_endpoint_reload(endpoint.endpoint.endpoint_id)
             return
         asyncio.run(_replace())
 
@@ -189,6 +513,9 @@ class ChannelRuntime(ChannelRuntimePort):
         if callable(stopper):
             await stopper()
         self.endpoint_registry.unregister(endpoint_id)
+        slot = self.delivery_slots.get(endpoint_id)
+        if slot is not None and slot.state != "reloading":
+            slot.state = "detached"
         return True
 
     def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
@@ -206,7 +533,11 @@ class ChannelRuntime(ChannelRuntimePort):
             future = asyncio.run_coroutine_threadsafe(_remove(), loop)
             return bool(future.result(timeout=timeout_seconds))
         if not self._started:
-            return self.endpoint_registry.unregister(endpoint_id) is not None
+            removed = self.endpoint_registry.unregister(endpoint_id) is not None
+            slot = self.delivery_slots.get(endpoint_id)
+            if removed and slot is not None and slot.state != "reloading":
+                slot.state = "detached"
+            return removed
         return bool(asyncio.run(_remove()))
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
@@ -268,12 +599,18 @@ class ChannelRuntime(ChannelRuntimePort):
         return True
 
     def sync_endpoints(self) -> None:
-        # Concrete endpoints own transport-specific ingress/outbox flow. The
-        # runtime aggregates those per-endpoint queues into the shared channel
-        # mailbox that MainLoop polls.
         for endpoint in self.list_endpoints():
+            endpoint_id = endpoint.endpoint.endpoint_id
+            slot = self._slot(endpoint_id)
             for envelope in endpoint.poll():
                 self.emit(envelope)
+            if slot.state == "reloading":
+                self._absorb_endpoint_outboxes(slot, endpoint)
+                continue
+            if slot.buffer:
+                self._flush_slot(slot)
+                if slot.buffer:
+                    continue
             endpoint.flush_status_outbox()
             for event in endpoint.flush_attachment_outbox():
                 self.mailbox.put(event)
@@ -310,53 +647,68 @@ class ChannelRuntime(ChannelRuntimePort):
     def queue_reply(self, envelope: TurnDeliveryBinding, message: ChannelMessage | str) -> str:
         # Outbox acceptance is the turn-facing completion point; actual delivery
         # is handled later by flush_outbox and surfaced as channel diagnostics.
-        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
-        if endpoint is not None:
+        endpoint_id = envelope.endpoint.endpoint_id
+        endpoint = self.get_endpoint(endpoint_id)
+        slot = self._slot(endpoint_id)
+        if endpoint is not None and slot.state == "active":
             return endpoint.queue_reply(message, response_handle=envelope.response_handle)
         normalized = message if isinstance(message, ChannelMessage) else ChannelMessage(text=str(message or ""))
         reply_id = str(uuid4())
-        self.outbox.append(
-            QueuedReply(
-                reply_id=reply_id,
-                response_handle=envelope.response_handle,
-                endpoint=envelope.endpoint,
-                text=normalized.text,
-                tag=normalized.tag,
-                payload=dict(normalized.payload),
-            )
+        item = QueuedReply(
+            reply_id=reply_id,
+            response_handle=envelope.response_handle,
+            endpoint=envelope.endpoint,
+            text=normalized.text,
+            tag=normalized.tag,
+            payload=dict(normalized.payload),
         )
+        if slot.state == "active":
+            self.outbox.append(item)
+            self._notify_ready()
+            return reply_id
+        slot.append("reply", reply_id, item)
         self._notify_ready()
         return reply_id
 
     def queue_stream_update(self, envelope: TurnDeliveryBinding, update: ChannelStreamUpdate) -> str:
-        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
-        if endpoint is not None:
+        endpoint_id = envelope.endpoint.endpoint_id
+        endpoint = self.get_endpoint(endpoint_id)
+        slot = self._slot(endpoint_id)
+        if endpoint is not None and slot.state == "active":
             return endpoint.queue_stream_update(update, response_handle=envelope.response_handle)
         update_id = str(uuid4())
-        self.stream_update_outbox.append(
-            QueuedStreamUpdate(
-                update_id=update_id,
-                response_handle=envelope.response_handle,
-                endpoint=envelope.endpoint,
-                update=update,
-            )
+        item = QueuedStreamUpdate(
+            update_id=update_id,
+            response_handle=envelope.response_handle,
+            endpoint=envelope.endpoint,
+            update=update,
         )
+        if slot.state == "active":
+            self.stream_update_outbox.append(item)
+            self._notify_ready()
+            return update_id
+        slot.append("stream", update_id, item)
         self._notify_ready()
         return update_id
 
     def queue_attachment(self, envelope: TurnDeliveryBinding, attachment: AttachmentSpec) -> str:
-        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
-        if endpoint is not None:
+        endpoint_id = envelope.endpoint.endpoint_id
+        endpoint = self.get_endpoint(endpoint_id)
+        slot = self._slot(endpoint_id)
+        if endpoint is not None and slot.state == "active":
             return endpoint.queue_attachment(attachment, response_handle=envelope.response_handle)
         attachment_id = str(uuid4())
-        self.attachment_outbox.append(
-            QueuedAttachment(
-                attachment_id=attachment_id,
-                response_handle=envelope.response_handle,
-                endpoint=envelope.endpoint,
-                attachment=attachment,
-            )
+        item = QueuedAttachment(
+            attachment_id=attachment_id,
+            response_handle=envelope.response_handle,
+            endpoint=envelope.endpoint,
+            attachment=attachment,
         )
+        if slot.state == "active":
+            self.attachment_outbox.append(item)
+            self._notify_ready()
+            return attachment_id
+        slot.append("attachment", attachment_id, item)
         self._notify_ready()
         return attachment_id
 
@@ -365,6 +717,21 @@ class ChannelRuntime(ChannelRuntimePort):
             if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
                 endpoint.abort_stream(response_handle, reason=reason)
                 break
+        slot = self.delivery_slots.get(str(response_handle.endpoint_id or ""))
+        if slot is not None and slot.buffer:
+            retained: deque[BufferedChannelDelivery] = deque()
+            while slot.buffer:
+                delivery = slot.popleft()
+                item = delivery.item
+                if (
+                    delivery.delivery_kind == "stream"
+                    and isinstance(item, QueuedStreamUpdate)
+                    and item.response_handle == response_handle
+                ):
+                    continue
+                retained.append(delivery)
+                slot.buffered_text_bytes += delivery.text_bytes
+            slot.buffer = retained
         if not self.stream_update_outbox:
             return
         remaining: deque[QueuedStreamUpdate] = deque()
@@ -384,23 +751,28 @@ class ChannelRuntime(ChannelRuntimePort):
         *,
         payload: dict[str, object] | None = None,
     ) -> str:
-        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
-        if endpoint is not None:
+        endpoint_id = envelope.endpoint.endpoint_id
+        endpoint = self.get_endpoint(endpoint_id)
+        slot = self._slot(endpoint_id)
+        if endpoint is not None and slot.state == "active":
             return endpoint.queue_status(
                 kind,
                 response_handle=envelope.response_handle,
                 payload=dict(payload or {}),
             )
         status_id = str(uuid4())
-        self.status_outbox.append(
-            QueuedStatus(
-                status_id=status_id,
-                response_handle=envelope.response_handle,
-                endpoint=envelope.endpoint,
-                kind=str(kind),
-                payload=dict(payload or {}),
-            )
+        item = QueuedStatus(
+            status_id=status_id,
+            response_handle=envelope.response_handle,
+            endpoint=envelope.endpoint,
+            kind=str(kind),
+            payload=dict(payload or {}),
         )
+        if slot.state == "active":
+            self.status_outbox.append(item)
+            self._notify_ready()
+            return status_id
+        slot.append("status", status_id, item)
         self._notify_ready()
         return status_id
 
@@ -418,27 +790,250 @@ class ChannelRuntime(ChannelRuntimePort):
         if endpoint is None:
             return None
         target = dict(reply_target or endpoint.derive_default_reply_target())
-        return endpoint.queue_status(
-            kind,
-            response_handle=endpoint.build_response_handle(reply_target=target),
+        handle = endpoint.build_response_handle(reply_target=target)
+        slot = self._slot(endpoint_id)
+        if slot.state == "active":
+            return endpoint.queue_status(kind, response_handle=handle, payload=dict(payload or {}))
+        status_id = str(uuid4())
+        item = QueuedStatus(
+            status_id=status_id,
+            response_handle=handle,
+            endpoint=endpoint.endpoint,
+            kind=str(kind),
             payload=dict(payload or {}),
         )
+        slot.append("status", status_id, item)
+        self._notify_ready()
+        return status_id
 
     def flush_endpoint_status(self, endpoint_id: str) -> bool:
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:
             return False
-        endpoint.flush_status_outbox()
+        slot = self._slot(endpoint_id)
+        if slot.state == "active":
+            endpoint.flush_status_outbox()
+        else:
+            self._absorb_endpoint_outboxes(slot, endpoint)
         return True
 
     def _queue_cached_control_catalog(self, endpoint: ChannelEndpointBase) -> None:
         payload = self.control_catalog_payload
         if not payload or not endpoint.attached or not endpoint.enabled:
             return
-        endpoint.queue_status(
-            "control_catalog",
-            response_handle=endpoint.build_response_handle(reply_target=endpoint.derive_default_reply_target()),
-            payload=dict(payload),
+        endpoint_id = endpoint.endpoint.endpoint_id
+        handle = endpoint.build_response_handle(reply_target=endpoint.derive_default_reply_target())
+        slot = self._slot(endpoint_id)
+        if slot.state == "active":
+            endpoint.queue_status("control_catalog", response_handle=handle, payload=dict(payload))
+            return
+        status_id = str(uuid4())
+        slot.append(
+            "status",
+            status_id,
+            QueuedStatus(
+                status_id=status_id,
+                response_handle=handle,
+                endpoint=endpoint.endpoint,
+                kind="control_catalog",
+                payload=dict(payload),
+            ),
+        )
+
+    def _absorb_endpoint_outboxes(
+        self,
+        slot: ChannelEndpointSlot,
+        endpoint: ChannelEndpointBase,
+    ) -> None:
+        # Match the legacy sync order for work that predates the reload fence.
+        for item in tuple(endpoint.status_outbox):
+            slot.append("status", item.status_id, item)
+        endpoint.status_outbox.clear()
+        for item in tuple(endpoint.attachment_outbox):
+            slot.append("attachment", item.attachment_id, item)
+        endpoint.attachment_outbox.clear()
+        for item in tuple(endpoint.stream_update_outbox):
+            slot.append("stream", item.update_id, item)
+        endpoint.stream_update_outbox.clear()
+        for item in tuple(endpoint.outbox):
+            slot.append("reply", item.reply_id, item)
+        endpoint.outbox.clear()
+
+    def _flush_slot(self, slot: ChannelEndpointSlot) -> None:
+        if slot.state in {"reloading", "detached", "degraded"}:
+            return
+        endpoint = self.get_endpoint(slot.endpoint_id)
+        if endpoint is None or not endpoint.attached or not endpoint.enabled:
+            return
+        while slot.buffer:
+            delivery = slot.buffer[0]
+            try:
+                confirmed = self._deliver_buffered(endpoint, delivery)
+            except Exception as exc:
+                slot.last_reload_error = str(exc)
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(
+                    getattr(exc, "permanent", False)
+                )
+                # A generation swap owns this gap. Keep the head item and wait
+                # for the replacement transport's ready notification.
+                if slot.state == "draining" and not permanent:
+                    return
+                self._emit_delivery_failure(
+                    slot,
+                    delivery,
+                    exc,
+                    permanent=permanent,
+                    expected_lifecycle=False,
+                )
+                if permanent:
+                    slot.popleft()
+                    continue
+                return
+            slot.popleft()
+            slot.last_reload_error = ""
+            if confirmed and delivery.delivery_kind != "status":
+                self.mailbox.put(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_DELIVERED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={
+                            "reply_id": delivery.delivery_id,
+                            "delivery_kind": delivery.delivery_kind,
+                            "endpoint_id": slot.endpoint_id,
+                            "provider_id": slot.provider_id,
+                            "reload_epoch": slot.reload_epoch,
+                        },
+                    )
+                )
+        if self._replacement_delivery_ready(endpoint):
+            slot.state = "active"
+
+    def _deliver_buffered(
+        self,
+        endpoint: ChannelEndpointBase,
+        delivery: BufferedChannelDelivery,
+    ) -> bool:
+        item = delivery.item
+        if isinstance(item, QueuedReply):
+            prepared = endpoint.prepare_final_reply(item.response_handle, item.text)
+            if prepared is None:
+                return False
+            endpoint.outbox.append(replace(item, endpoint=endpoint.endpoint, text=prepared))
+            events = endpoint.flush_outbox()
+            return self._accept_endpoint_flush_result(
+                endpoint,
+                delivery,
+                endpoint.outbox,
+                events,
+            )
+        if isinstance(item, QueuedStreamUpdate):
+            endpoint.stream_update_outbox.append(replace(item, endpoint=endpoint.endpoint))
+            events = endpoint.flush_stream_update_outbox()
+            return self._accept_endpoint_flush_result(
+                endpoint,
+                delivery,
+                endpoint.stream_update_outbox,
+                events,
+            )
+        if isinstance(item, QueuedStatus):
+            # Status is explicitly ephemeral and may be coalesced. Its legacy
+            # endpoint contract has no retry acknowledgement surface.
+            endpoint.send_status(item.response_handle, item.kind, dict(item.payload))
+            return False
+        endpoint.attachment_outbox.append(replace(item, endpoint=endpoint.endpoint))
+        events = endpoint.flush_attachment_outbox()
+        return self._accept_endpoint_flush_result(
+            endpoint,
+            delivery,
+            endpoint.attachment_outbox,
+            events,
+        )
+
+    def _accept_endpoint_flush_result(
+        self,
+        endpoint: ChannelEndpointBase,
+        delivery: BufferedChannelDelivery,
+        outbox: deque[Any],
+        events: list[EventEnvelope],
+    ) -> bool:
+        retained = next(
+            (
+                item
+                for item in outbox
+                if _queued_delivery_id(item) == delivery.delivery_id
+            ),
+            None,
+        )
+        if retained is not None:
+            outbox.remove(retained)
+        failure = next(
+            (
+                event
+                for event in events
+                if event.event_kind == EventKind.REPLY_FAILED
+                and str(event.payload.get("reply_id") or "") == delivery.delivery_id
+            ),
+            None,
+        )
+        for event in events:
+            if str(event.payload.get("reply_id") or "") != delivery.delivery_id:
+                self.mailbox.put(event)
+        if failure is not None or retained is not None:
+            payload = failure.payload if failure is not None else {}
+            raise ChannelDeliveryError(
+                str(payload.get("reason") or endpoint.last_delivery_error or "delivery deferred"),
+                permanent=bool(payload.get("permanent", False)),
+                reason=str(payload.get("reason_code") or "delivery_deferred"),
+            )
+        return any(
+            event.event_kind == EventKind.REPLY_DELIVERED
+            and str(event.payload.get("reply_id") or "") == delivery.delivery_id
+            for event in events
+        )
+
+    @staticmethod
+    def _replacement_delivery_ready(endpoint: ChannelEndpointBase) -> bool:
+        checker = getattr(endpoint, "replacement_delivery_ready", None)
+        if callable(checker):
+            return bool(checker())
+        if bool(getattr(endpoint, "_allow_single_session_rebind", False)):
+            sessions = getattr(endpoint, "sessions", None)
+            adopter = getattr(endpoint, "_adopt_single_replacement_session", None)
+            if isinstance(sessions, dict) and len(sessions) == 1 and callable(adopter):
+                adopter(next(iter(sessions)))
+            return not bool(getattr(endpoint, "_allow_single_session_rebind", False))
+        return True
+
+    def _emit_delivery_failure(
+        self,
+        slot: ChannelEndpointSlot,
+        delivery: BufferedChannelDelivery,
+        reason: Exception | str,
+        *,
+        permanent: bool,
+        expected_lifecycle: bool,
+    ) -> None:
+        endpoint = self.get_endpoint(slot.endpoint_id)
+        self.mailbox.put(
+            EventEnvelope(
+                event_kind=EventKind.REPLY_FAILED,
+                source_kind=SourceKind.CHANNEL,
+                payload={
+                    "reply_id": delivery.delivery_id,
+                    "delivery_kind": delivery.delivery_kind,
+                    "endpoint_id": slot.endpoint_id,
+                    "channel_kind": (
+                        endpoint.endpoint.channel_kind if endpoint is not None else ""
+                    ),
+                    "provider_id": slot.provider_id,
+                    "reload_epoch": slot.reload_epoch,
+                    "reason": str(reason or "delivery_failed"),
+                    "reason_code": getattr(reason, "reason", "delivery_failed"),
+                    "permanent": permanent,
+                    "transient": not permanent,
+                    "expected_lifecycle": expected_lifecycle,
+                },
+            )
         )
 
     def flush_outbox(self) -> None:
@@ -574,6 +1169,12 @@ class ChannelRuntime(ChannelRuntimePort):
         if self.on_ready is not None:
             self.on_ready()
 
+    def _notify_endpoint_ready(self, endpoint_id: str) -> None:
+        slot = self.delivery_slots.get(str(endpoint_id or ""))
+        if slot is not None and slot.state == "draining":
+            self._flush_slot(slot)
+        self._notify_ready()
+
 
 def _transfer_endpoint_runtime_state(
     old_endpoint: ChannelEndpointBase | None,
@@ -643,3 +1244,12 @@ def _transfer_endpoint_runtime_state(
         None,
     ):
         new_endpoint._control_commands_manifest = old_commands
+
+
+def _queued_delivery_id(item: Any) -> str:
+    return str(
+        getattr(item, "reply_id", "")
+        or getattr(item, "update_id", "")
+        or getattr(item, "status_id", "")
+        or getattr(item, "attachment_id", "")
+    )

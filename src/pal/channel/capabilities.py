@@ -11,6 +11,7 @@ from pal.execution.generated_tool_models import (
     ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
     ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
     ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
+    ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
     ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
@@ -453,9 +454,9 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         guidance=ToolGuidance(
-            purpose="Discover or hot-reload runtime-root channel providers, rebuild running endpoints, and update the provider registry.",
+            purpose="Diff runtime-root channel providers and add, atomically reload, or runtime-detach only affected providers.",
             use_when="Channel provider source, manifest, or configuration changed. New providers were installed. Discovering newly available endpoints.",
-            do_not_use_when="Restarting one specific endpoint (use channel_reload_provider).",
+            do_not_use_when="Restarting one specific endpoint (use channel_restart_endpoint) or forcing one known provider reload (use channel_reload_provider).",
             failure_next_steps="If scan_errors occur, previous provider generation is preserved. Check provider configuration and rescan again.",
         ),
         aliases=("channel_provider_rescan",),
@@ -467,7 +468,12 @@ class ChannelIntrospectionProvider:
         payload = self._manager().rescan_providers(attach_enabled_endpoints=attach_enabled)
         payload["republished_capability_names"] = self._republish_capabilities()
         status = RuntimeStatus.ERROR if payload.get("scan_errors") else RuntimeStatus.OK
-        text = "channel provider rescan failed; previous generation preserved" if status == RuntimeStatus.ERROR else "channel providers rescanned"
+        text = (
+            "channel provider rescan completed with errors; failed providers kept "
+            "their previous generation"
+            if status == RuntimeStatus.ERROR
+            else "channel providers rescanned"
+        )
         return IntrospectionResult(
             status=status,
             text=text,
@@ -481,16 +487,43 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="reload_provider",
         guidance=ToolGuidance(
-            purpose="Restart one channel endpoint runtime instance through its provider.",
-            use_when="An endpoint runtime is stuck, misbehaving, or needs a fresh connection.",
-            do_not_use_when="Provider source, manifest, or configuration changed (use channel_provider_rescan to hot-reload the provider generation and its running endpoints).",
-            failure_next_steps="If provider not found, run channel_provider_rescan first. If restart fails, check channel_endpoint_health.",
+            purpose="Atomically reload one runtime-root channel provider generation and rebuild only its endpoints.",
+            use_when="A known provider's source, manifest, or provider-wide resources need an explicit fresh generation.",
+            do_not_use_when="Only one endpoint connection is stuck (use channel_restart_endpoint). Discovering provider additions/removals/changes (use channel_provider_rescan).",
+            failure_next_steps="The previous provider generation is restored on failure. Fix the reported provider error and retry.",
         ),
         aliases=("channel_reload_provider",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
         execution=INDIRECT_CONTROL,
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
+        provider_id = str(call.args.get("name") or "").strip()
+        if not provider_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="name is required",
+                llm_text="name is required",
+            )
+        result = self._manager().reload_provider(provider_id)
+        self._republish_capabilities()
+        return result
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="restart_endpoint",
+        guidance=ToolGuidance(
+            purpose="Restart one channel endpoint runtime instance without reloading provider code.",
+            use_when="One endpoint connection is stuck, misbehaving, or needs a fresh transport session.",
+            do_not_use_when="Provider source or provider-wide resources changed (use channel_reload_provider or channel_provider_rescan).",
+            failure_next_steps="If the endpoint is missing, verify it with channel_list. If restart fails, inspect channel_endpoint_health.",
+        ),
+        aliases=("channel_restart_endpoint",),
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
+        execution=INDIRECT_CONTROL,
+    )
+    def restart_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._restart_endpoint(str(call.args.get("name") or "").strip())
 
     @capability_action(
@@ -599,7 +632,7 @@ class ChannelIntrospectionProvider:
             purpose="Inspect network connectivity and delivery health for one endpoint.",
             use_when="Diagnosing message delivery failures or connection issues.",
             do_not_use_when="Checking auth (use channel_endpoint_auth_state). Checking message queue (use channel_endpoint_backlog).",
-            failure_next_steps="If endpoint not found, verify its name with channel_list. If unhealthy, try channel_reload_provider to restart the runtime.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. If unhealthy, try channel_restart_endpoint to refresh its runtime instance.",
         ),
         aliases=("channel_endpoint_health",),
     )

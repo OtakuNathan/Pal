@@ -199,8 +199,22 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "        endpoint.paired = True",
                     "        return endpoint",
                     "",
+                    "def _record_lifecycle(path: Path, event: str) -> None:",
+                    "    path.parent.mkdir(parents=True, exist_ok=True)",
+                    "    with path.open('a', encoding='utf-8') as handle:",
+                    "        handle.write(f'{event}\\n')",
+                    "",
+                    "class DemoRuntimeProvider(FactoryChannelProvider):",
+                    "    def attach(self, context):",
+                    "        _record_lifecycle(context.runtime_root / 'data' / 'demo_runtime_lifecycle.log', 'attach')",
+                    "",
+                    "    def detach(self, context):",
+                    "        _record_lifecycle(context.runtime_root / 'data' / 'demo_runtime_lifecycle.log', 'detach')",
+                    "",
                     "def build_channel_provider(context):",
-                    "    return FactoryChannelProvider(",
+                    "    lifecycle_path = context.runtime_root / 'data' / 'demo_runtime_lifecycle.log'",
+                    "    context.register_cleanup(lambda: _record_lifecycle(lifecycle_path, 'cleanup'))",
+                    "    return DemoRuntimeProvider(",
                     "        provider_id=context.manifest.provider_id,",
                     "        endpoint_types=('demo_runtime',),",
                     "        factory=DemoRuntimeFactory(),",
@@ -1807,7 +1821,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_channel_endpoint_provider_reload_rebuilds_provider_without_detaching_channel_bus(self) -> None:
+    def test_channel_endpoint_restart_rebuilds_only_endpoint_without_reloading_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
         ChannelEndpointRepository().upsert(
             endpoint_id="socket_aux",
@@ -1831,6 +1845,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(old_aux_endpoint)
         self.assertIn("channel", handle.core.context.module_registry.modules)
         self.assertIn("channel_reload_provider", handle.core.context.capability_registry.descriptors)
+        self.assertIn("channel_restart_endpoint", handle.core.context.capability_registry.descriptors)
 
         prefixes = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
         original_modules = {
@@ -1843,11 +1858,11 @@ class PalV2BootstrapTests(unittest.TestCase):
             sys.modules[probe_name] = types.ModuleType(probe_name)
 
             result = runtime.execute(
-                CapabilityCall(name="channel_reload_provider", args={"name": "socket_default"})
+                CapabilityCall(name="channel_restart_endpoint", args={"name": "socket_default"})
             )
 
             self.assertEqual(result.status, "ok")
-            self.assertNotIn(probe_name, sys.modules)
+            self.assertIn(probe_name, sys.modules)
             self.assertIn("pal.channel.endpoints.socket_endpoint", result.structured["reload_modules"])
             new_endpoint = handle.channel_runtime.get_endpoint("socket_default")
             self.assertIsNotNone(new_endpoint)
@@ -2014,8 +2029,9 @@ class PalV2BootstrapTests(unittest.TestCase):
             result.structured["endpoint_type_map"]["websocket_bridge"],
             "websocket_bridge",
         )
+        self.assertEqual(result.structured["plugin_result"], {})
 
-    def test_channel_provider_rescan_restores_running_endpoints_without_attach_flag(self) -> None:
+    def test_channel_provider_rescan_leaves_unchanged_generation_running(self) -> None:
         self.wizard.seed_defaults(self.registration)
         ChannelEndpointRepository().upsert(
             endpoint_id="telegram_main",
@@ -2035,6 +2051,16 @@ class PalV2BootstrapTests(unittest.TestCase):
         old_endpoint = handle.channel_runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(old_endpoint)
         old_endpoint.bot_token = "runtime-only-token"
+        generated_build_file = (
+            self.runtime_root
+            / "channel"
+            / "providers"
+            / "telegram"
+            / "build"
+            / "generated.txt"
+        )
+        generated_build_file.parent.mkdir(parents=True, exist_ok=True)
+        generated_build_file.write_text("packaging output", encoding="utf-8")
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(name="channel_provider_rescan")
@@ -2043,10 +2069,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         endpoint = handle.channel_runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(endpoint)
-        self.assertIsNot(endpoint, old_endpoint)
+        self.assertIs(endpoint, old_endpoint)
         self.assertTrue(endpoint.attached)
         self.assertEqual(endpoint.bot_token, "runtime-only-token")
-        self.assertIn("telegram_main", result.structured["restored_endpoint_ids"])
+        self.assertIn("telegram", result.structured["unchanged_provider_ids"])
+        self.assertNotIn("telegram_main", result.structured["restored_endpoint_ids"])
 
     def test_channel_provider_rescan_transfers_pending_reply_ownership(self) -> None:
         repository = ChannelEndpointRepository()
@@ -2064,7 +2091,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             runtime_root=self.runtime_root,
         )
         provider.provider_manager.load_runtime_providers()
-        provider.provider_manager.hydrate_all()
         old_endpoint = runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(old_endpoint)
         pending_reply_id = old_endpoint.queue_reply(
@@ -2077,19 +2103,30 @@ class PalV2BootstrapTests(unittest.TestCase):
                 reply_target={"chat_id": "123"}
             ),
         )
+        provider_path = (
+            self.runtime_root / "channel" / "providers" / "telegram" / "runtime.py"
+        )
+        provider_path.write_text(
+            f"{provider_path.read_text(encoding='utf-8')}\n# generation change\n",
+            encoding="utf-8",
+        )
 
         result = provider.provider_manager.rescan_providers()
 
         self.assertFalse(result["scan_errors"])
+        self.assertIn("telegram", result["changed_provider_ids"])
         endpoint = runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(endpoint)
         self.assertIsNot(endpoint, old_endpoint)
-        self.assertEqual(
-            [item.reply_id for item in endpoint.outbox],
-            [pending_reply_id],
+        slot = runtime.delivery_slots["telegram_main"]
+        self.assertEqual([item.delivery_id for item in slot.buffer], [pending_reply_id])
+        self.assertEqual(slot.state, "draining")
+        self.assertFalse(
+            any(event.event_kind == "reply.failed" for event in runtime.mailbox.items)
         )
-        self.assertEqual(endpoint.outbox[0].tag, "checklist")
-        self.assertEqual(endpoint.outbox[0].payload["action"], "upsert")
+        queued = slot.buffer[0].item
+        self.assertEqual(queued.tag, "checklist")
+        self.assertEqual(queued.payload["action"], "upsert")
         self.assertFalse(old_endpoint.outbox)
 
     def test_compose_runtime_loads_runtime_root_channel_provider(self) -> None:
@@ -2151,7 +2188,6 @@ class PalV2BootstrapTests(unittest.TestCase):
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
                 name="channel_provider_rescan",
-                args={"attach_enabled_endpoints": True},
             )
         )
 
@@ -2172,6 +2208,98 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(health.status, "ok")
         self.assertEqual(health.structured["source"], "runtime_root_provider")
+
+    def test_channel_reload_provider_is_scoped_and_provider_removal_is_non_durable(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        self._write_demo_runtime_channel_provider()
+        ChannelEndpointRepository().upsert(
+            endpoint_id="demo_runtime_main",
+            channel_kind="demo_runtime",
+            binding_key="demo:1",
+            enabled=True,
+        )
+        handle = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        manager = handle.core.context.require_port("channel:provider_manager")
+        old_demo = handle.channel_runtime.get_endpoint("demo_runtime_main")
+        old_socket = handle.channel_runtime.get_endpoint("socket_default")
+        lifecycle_path = self.runtime_root / "data" / "demo_runtime_lifecycle.log"
+        self.assertEqual(lifecycle_path.read_text(encoding="utf-8").splitlines(), ["attach"])
+
+        reloaded = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="channel_reload_provider",
+                args={"name": "demo_runtime"},
+            )
+        )
+
+        self.assertEqual(reloaded.status, "ok")
+        self.assertIsNot(handle.channel_runtime.get_endpoint("demo_runtime_main"), old_demo)
+        self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), old_socket)
+        self.assertEqual(
+            lifecycle_path.read_text(encoding="utf-8").splitlines(),
+            ["attach", "attach", "detach", "cleanup"],
+        )
+        self.assertEqual(
+            handle.channel_runtime.inspect_delivery_slot("demo_runtime_main")[
+                "lifecycle_state"
+            ],
+            "active",
+        )
+        blocked_core_reload = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="channel_reload_provider",
+                args={"name": "socket"},
+            )
+        )
+        self.assertEqual(blocked_core_reload.status, "invalid")
+
+        manifest_path = (
+            self.runtime_root
+            / "channel"
+            / "providers"
+            / "demo_runtime"
+            / "provider.toml"
+        )
+        manifest_payload = manifest_path.read_text(encoding="utf-8")
+        manifest_path.write_text(
+            manifest_payload.replace(
+                'provider_id = "demo_runtime"',
+                'provider_id = "renamed_runtime"',
+            ),
+            encoding="utf-8",
+        )
+        drifted = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="channel_reload_provider",
+                args={"name": "demo_runtime"},
+            )
+        )
+        self.assertEqual(drifted.status, "error")
+        self.assertIn("manifest id changed", drifted.text)
+        self.assertIn("demo_runtime", manager.runtime_provider_generations)
+        self.assertNotIn("renamed_runtime", manager.runtime_provider_generations)
+        manifest_path.write_text(manifest_payload, encoding="utf-8")
+        manifest_path.unlink()
+        removed = manager.rescan_providers()
+
+        self.assertIn("demo_runtime", removed["removed_provider_ids"])
+        self.assertIsNone(handle.channel_runtime.get_endpoint("demo_runtime_main"))
+        self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), old_socket)
+        self.assertIsNotNone(ChannelEndpointRepository().get("demo_runtime_main"))
+        self.assertEqual(
+            handle.channel_runtime.inspect_delivery_slot("demo_runtime_main")[
+                "lifecycle_state"
+            ],
+            "detached",
+        )
+        self.assertEqual(
+            lifecycle_path.read_text(encoding="utf-8").splitlines(),
+            ["attach", "attach", "detach", "cleanup", "detach", "cleanup"],
+        )
 
     def test_channel_provider_rescan_failure_restores_previous_generation(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -2195,6 +2323,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertEqual(attached.status, "ok")
         old_endpoint = handle.channel_runtime.get_endpoint("demo_runtime_main")
+        old_socket = handle.channel_runtime.get_endpoint("socket_default")
         self.assertIsNotNone(old_endpoint)
         provider_path = self.runtime_root / "channel" / "providers" / "demo_runtime" / "runtime.py"
         provider_path.write_text("this is not valid python !!!\n", encoding="utf-8")
@@ -2210,6 +2339,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(failed.structured["runtime_provider_load_errors"])
         self.assertIn("demo_runtime", failed.structured["runtime_provider_ids"])
         self.assertIs(handle.channel_runtime.get_endpoint("demo_runtime_main"), old_endpoint)
+        self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), old_socket)
 
     def test_channel_provider_reload_preserves_runtime_telegram_auth_state(self) -> None:
         repository = ChannelEndpointRepository()

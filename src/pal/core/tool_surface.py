@@ -98,7 +98,7 @@ class ToolSurface:
             include("intro_module_channel_list")
             include("op_channel_mgmt_enable")
             include("op_channel_mgmt_attach")
-            include("op_channel_mgmt_reload_provider")
+            include("op_channel_mgmt_restart_endpoint")
             endpoint_id = (
                 str(signal.related_ids.get("endpoint_id") or "").strip()
                 or str(signal.component or "").strip()

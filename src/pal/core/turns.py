@@ -358,7 +358,11 @@ def _finish_compaction_failure_turn(
     observations: list[ToolObservation],
     reply_texts: list[str],
 ) -> TurnProgram:
-    final_reply = str(text or "Memory compaction failed; the current turn cannot safely continue.").strip()
+    detail = str(
+        text or "Memory compaction failed; the current turn cannot safely continue."
+    ).strip()
+    recovery = "Please run `/compact` manually, then resend your request."
+    final_reply = detail if recovery in detail else f"{detail}\n\n{recovery}"
     effect = emit_final_text(final_reply) if emit_final_text is not None else None
     if effect is not None:
         reply_result = yield effect

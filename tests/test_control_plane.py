@@ -15,6 +15,7 @@ from pal.channel import ChannelRuntime, register_with_core as register_channel_w
 from pal.channel.ingress import ChannelIngressCompiler
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
+from pal.channel.runtime import ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
 from pal.control import (
     ControlAction,
     ControlCommandSpec,
@@ -1357,15 +1358,174 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(self.endpoint.outbox)
         self.assertEqual(
-            [item.reply_id for item in replacement.outbox],
-            [reply_id],
-        )
-        delivered = replacement.flush_outbox()
-        self.assertEqual(
             replacement.sent_replies,
             [("queued before reload", dict(self.route.reply_target))],
         )
-        self.assertEqual(delivered[0].payload["reply_id"], reply_id)
+        slot = self.channel_runtime.inspect_delivery_slot("socket_main")
+        self.assertEqual(slot["lifecycle_state"], "active")
+        self.assertEqual(slot["buffered_delivery_count"], 0)
+        delivered = [
+            event
+            for event in self.channel_runtime.mailbox.items
+            if event.event_kind == EventKind.REPLY_DELIVERED
+            and event.payload.get("reply_id") == reply_id
+        ]
+        self.assertEqual(len(delivered), 1)
+
+    async def test_provider_reload_fence_buffers_delivery_until_generation_commit(self) -> None:
+        await self.channel_runtime.start_async()
+        self.channel_runtime.begin_provider_reload(
+            ["socket_main"],
+            provider_id="socket",
+        )
+
+        envelope = self._make_channel_envelope(
+            turn_id="turn-reload-fence",
+            request_id="req-1",
+        )
+        reply_id = self.channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(
+                envelope,
+                control_scope_key=self.route.control_scope_key,
+            ),
+            "queued inside reload fence",
+        )
+
+        self.assertFalse(getattr(self.endpoint, "sent_replies", []))
+        self.assertEqual(
+            self.channel_runtime.inspect_delivery_slot("socket_main")[
+                "buffered_delivery_count"
+            ],
+            1,
+        )
+        replacement = _StubEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key="runtime.sock",
+            )
+        )
+        await self.channel_runtime.replace_endpoint_async(
+            replacement,
+            manage_reload=False,
+        )
+        self.assertFalse(getattr(replacement, "sent_replies", []))
+
+        self.channel_runtime.complete_provider_reload(["socket_main"])
+
+        self.assertEqual(
+            replacement.sent_replies,
+            [
+                (
+                    "queued inside reload fence",
+                    dict(envelope.response_handle.reply_target),
+                )
+            ],
+        )
+        self.assertEqual(
+            self.channel_runtime.inspect_delivery_slot("socket_main")[
+                "lifecycle_state"
+            ],
+            "active",
+        )
+        failures = [
+            event
+            for event in self.channel_runtime.mailbox.items
+            if event.event_kind == EventKind.REPLY_FAILED
+            and event.payload.get("reply_id") == reply_id
+        ]
+        self.assertFalse(failures)
+
+    async def test_provider_reload_commit_from_worker_drains_on_owner_loop(self) -> None:
+        owner_loop = asyncio.get_running_loop()
+
+        class LoopCheckingEndpoint(_StubEndpoint):
+            delivery_loop = None
+
+            def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
+                self.delivery_loop = asyncio.get_running_loop()
+                super().send_reply(response_handle, text)
+
+        await self.channel_runtime.start_async()
+        await asyncio.to_thread(
+            self.channel_runtime.begin_provider_reload,
+            ["socket_main"],
+            provider_id="socket",
+        )
+        envelope = self._make_channel_envelope(
+            turn_id="turn-worker-reload",
+            request_id="req-worker-reload",
+        )
+        self.channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(
+                envelope,
+                control_scope_key=self.route.control_scope_key,
+            ),
+            "drain on channel owner",
+        )
+        replacement = LoopCheckingEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key="runtime.sock",
+            )
+        )
+        await self.channel_runtime.replace_endpoint_async(
+            replacement,
+            manage_reload=False,
+        )
+
+        await asyncio.to_thread(
+            self.channel_runtime.complete_provider_reload,
+            ["socket_main"],
+        )
+
+        self.assertIs(replacement.delivery_loop, owner_loop)
+        self.assertEqual(replacement.sent_replies[0][0], "drain on channel owner")
+
+    def test_reload_buffer_coalesces_ephemeral_updates_and_keeps_critical_overflow(self) -> None:
+        envelope = self._make_channel_envelope(
+            turn_id="turn-reload-buffer",
+            request_id="req-buffer",
+        )
+        binding = TurnDeliveryBinding.from_envelope(
+            envelope,
+            control_scope_key=self.route.control_scope_key,
+        )
+        self.channel_runtime.begin_provider_reload(
+            ["socket_main"],
+            provider_id="socket",
+        )
+
+        self.channel_runtime.queue_stream_update(
+            binding,
+            ChannelStreamUpdate(kind="text_delta", text="hello "),
+        )
+        self.channel_runtime.queue_stream_update(
+            binding,
+            ChannelStreamUpdate(kind="text_delta", text="world"),
+        )
+        self.channel_runtime.queue_status(
+            binding,
+            "typing_start",
+            payload={"phase": 1},
+        )
+        self.channel_runtime.queue_status(
+            binding,
+            "typing_start",
+            payload={"phase": 2},
+        )
+        reply_id = self.channel_runtime.queue_reply(
+            binding,
+            "x" * (ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES + 1),
+        )
+
+        slot = self.channel_runtime.delivery_slots["socket_main"]
+        self.assertEqual(len(slot.buffer), 3)
+        self.assertEqual(slot.buffer[0].item.update.text, "hello world")
+        self.assertEqual(slot.buffer[1].item.payload, {"phase": 2})
+        self.assertEqual(slot.buffer[2].delivery_id, reply_id)
+        self.assertTrue(slot.overflowed)
 
     async def test_channel_replace_from_running_channel_loop_requires_async_api(self) -> None:
         await self.channel_runtime.start_async()
@@ -1416,7 +1576,14 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             await self.channel_runtime.replace_endpoint_async(replacement)
 
         self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
-        self.assertEqual([item.reply_id for item in self.endpoint.outbox], [reply_id])
+        self.assertFalse(self.endpoint.outbox)
+        self.assertEqual(
+            self.endpoint.sent_replies,
+            [("preserve me", dict(self.route.reply_target))],
+        )
+        slot = self.channel_runtime.inspect_delivery_slot("socket_main")
+        self.assertEqual(slot["lifecycle_state"], "active")
+        self.assertEqual(slot["buffered_delivery_count"], 0)
 
     async def test_channel_remove_stop_failure_preserves_endpoint(self) -> None:
         class FailingStopEndpoint(_StubEndpoint):

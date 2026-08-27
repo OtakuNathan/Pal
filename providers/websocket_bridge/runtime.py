@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import json
 import logging
 import os
@@ -438,11 +437,10 @@ class WebSocketBridgeProvider:
         )
 
     def restart_endpoint(self, endpoint_id: str, context: ChannelProviderContext) -> IntrospectionResult:
-        """Restart the endpoint runtime instance and the sidecar."""
+        """Restart the endpoint runtime instance without reloading provider code."""
         record = context.repository.get(endpoint_id)
         if record is None:
             return _not_found(endpoint_id)
-        _drop_module_cache(self.reload_modules)
         endpoint = self.create_endpoint(record, context)
         if endpoint is None:
             return _provider_missing(endpoint_id, str(record.channel_kind))
@@ -615,16 +613,6 @@ def _preserve_state(
     pairing_metadata = dict(getattr(old_endpoint, "pairing_metadata", {}) or {})
     if pairing_metadata and hasattr(new_endpoint, "pairing_metadata"):
         new_endpoint.pairing_metadata.update(pairing_metadata)
-
-
-def _drop_module_cache(prefixes: tuple[str, ...]) -> None:
-    clean = tuple(dict.fromkeys(str(prefix).strip() for prefix in prefixes if str(prefix).strip()))
-    if not clean:
-        return
-    importlib.invalidate_caches()
-    for module_name in list(sys.modules):
-        if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in clean):
-            sys.modules.pop(module_name, None)
 
 
 def _snapshot(

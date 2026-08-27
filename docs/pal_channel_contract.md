@@ -125,6 +125,11 @@ Provider 至少应表达：
 - `inspect_backlog(endpoint_id, context)`
 - `inspect_health(endpoint_id, context)`
 
+Runtime-root provider 还可以实现 generation 级 `attach(context)` /
+`detach(context)`，或在 build context 上调用 `register_cleanup(callback)`。
+这些资源由 manager 以 RAII 方式管理：candidate 失败时逆序清理 candidate，
+提交成功后才清理旧 generation。
+
 这些方法返回统一 `IntrospectionResult`，但结果内容由 provider 自己决定。
 
 这条规则很重要：
@@ -166,9 +171,24 @@ def build_channel_provider(context):
 `channel_provider_rescan` 的语义是：
 
 - 重新扫描 `runtime_root/channel/providers`
-- 加载此前没有注册的 provider
-- 可选地 attach enabled endpoints
+- 按源码 fingerprint 做完整 diff；unchanged provider 是 no-op
+- 新增 provider 自动 attach 已配置的 enabled/attached endpoints
+- changed provider 只原子替换自己的 generation 和 endpoints
+- removed/disabled provider 只从 runtime detach，不改持久化 endpoint 行
+- manifest 或 candidate 加载失败时保留该 provider 的上一 working generation
 - 不替 provider 决定 endpoint 的具体 attach 机制
+
+`channel_reload_provider(provider_id)` 强制对一个 runtime-root provider 执行同样的
+generation 事务；它不接受 endpoint id，也不能 reload core recovery socket。
+`channel_restart_endpoint(endpoint_id)` 只重建一个 endpoint/transport，不重新导入
+provider code。
+
+每个 endpoint id 在 `ChannelRuntime` 中有稳定 delivery slot。provider reload 开始时
+slot 进入 `reloading` 并接管旧 endpoint outbox；reload 期间的新 reply、stream、status
+和 attachment 进入同一有序缓冲。candidate 可投递后 slot 进入 `draining`，按序清空后
+才回到 `active`。1024 items / 4 MiB 是可观测 soft high-water mark；critical delivery
+不会因超过该阈值而被静默丢弃。可合并的 ephemeral status 和相邻纯文本 delta 会被
+coalesce。generation 切换造成的预期 transport gap 不会上升为 Safe Mode failure。
 
 ### `EndpointConfig`
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
+import hashlib
 import inspect
 import re
 import sys
 import tomllib
 import types
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.channel.factory import ChannelEndpointFactory, SocketChannelEndpointFactory
@@ -46,16 +50,32 @@ class ChannelProviderContext:
         return channel_endpoint_data_root(self.runtime_root, endpoint_id)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ChannelProviderBuildContext:
     runtime_root: Path
     provider_dir: Path
     manifest: RuntimeChannelProviderManifest
     manager: Any
+    cleanup_callbacks: list[Callable[[], Any]] = field(default_factory=list)
 
     @property
     def channel_data_root(self) -> Path:
         return self.runtime_root / RUNTIME_CHANNEL_DATA_DIR
+
+    def register_cleanup(self, callback: Callable[[], Any]) -> None:
+        if not callable(callback):
+            raise TypeError("channel provider cleanup callback must be callable")
+        self.cleanup_callbacks.append(callback)
+
+
+@dataclass
+class RuntimeChannelProviderGeneration:
+    manifest: RuntimeChannelProviderManifest
+    provider: ChannelProvider
+    fingerprint: str
+    module_names: tuple[str, ...]
+    cleanup_callbacks: list[Callable[[], Any]] = field(default_factory=list)
+    lifecycle_context: ChannelProviderBuildContext | None = None
 
 
 class ChannelProvider(Protocol):
@@ -173,7 +193,6 @@ class FactoryChannelProvider:
         record = context.repository.get(endpoint_id)
         if record is None:
             return _not_found(endpoint_id)
-        _drop_module_import_cache(tuple(self.reload_modules))
         endpoint = self.create_endpoint(record, context)
         if endpoint is None:
             return _provider_missing(endpoint_id, record.channel_kind)
@@ -303,6 +322,7 @@ class ChannelEndpointProviderManager:
     runtime_provider_ids: set[str] = field(default_factory=set)
     runtime_module_names: set[str] = field(default_factory=set)
     runtime_provider_manifests: dict[str, RuntimeChannelProviderManifest] = field(default_factory=dict)
+    runtime_provider_generations: dict[str, RuntimeChannelProviderGeneration] = field(default_factory=dict)
     runtime_provider_load_errors: list[str] = field(default_factory=list)
 
     def context(self) -> ChannelProviderContext:
@@ -362,11 +382,15 @@ class ChannelEndpointProviderManager:
                 "source": "runtime_root" if provider.provider_id in self.runtime_provider_ids else "registered",
             }
             if manifest is not None:
+                generation = self.runtime_provider_generations.get(provider.provider_id)
                 row.update(
                     {
                         "version": manifest.version,
                         "filesystem_path": manifest.filesystem_path,
                         "entrypoint": manifest.entrypoint,
+                        "generation_fingerprint": (
+                            generation.fingerprint if generation is not None else ""
+                        ),
                     }
                 )
             providers.append(row)
@@ -447,6 +471,7 @@ class ChannelEndpointProviderManager:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
+        self.runtime.bind_endpoint_provider(endpoint_id, provider.provider_id)
         return provider.attach_endpoint(endpoint_id, self.context())
 
     def detach_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -459,13 +484,17 @@ class ChannelEndpointProviderManager:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
+        self.runtime.bind_endpoint_provider(endpoint_id, provider.provider_id)
         return provider.restart_endpoint(endpoint_id, self.context())
 
     def inspect_endpoint(self, endpoint_id: str) -> IntrospectionResult:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return provider.inspect_endpoint(endpoint_id, self.context())
+        return self._with_delivery_slot(
+            endpoint_id,
+            provider.inspect_endpoint(endpoint_id, self.context()),
+        )
 
     def inspect_auth_state(self, endpoint_id: str) -> IntrospectionResult:
         provider = self.provider_for_endpoint(endpoint_id)
@@ -483,214 +512,265 @@ class ChannelEndpointProviderManager:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return provider.inspect_backlog(endpoint_id, self.context())
+        return self._with_delivery_slot(
+            endpoint_id,
+            provider.inspect_backlog(endpoint_id, self.context()),
+        )
 
     def inspect_health(self, endpoint_id: str) -> IntrospectionResult:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return provider.inspect_health(endpoint_id, self.context())
+        return self._with_delivery_slot(
+            endpoint_id,
+            provider.inspect_health(endpoint_id, self.context()),
+        )
+
+    def _with_delivery_slot(
+        self,
+        endpoint_id: str,
+        result: IntrospectionResult,
+    ) -> IntrospectionResult:
+        payload = dict(result.structured or {})
+        payload["delivery_slot"] = self.runtime.inspect_delivery_slot(endpoint_id)
+        return IntrospectionResult(
+            status=result.status,
+            text=result.text,
+            structured=payload,
+            llm_text=render_titled_structured_for_llm(result.text, payload),
+        )
 
     def load_runtime_providers(self) -> dict[str, Any]:
-        previous_providers = dict(self.providers)
-        previous_type_map = dict(self.endpoint_type_to_provider)
-        previous_provider_ids = set(self.runtime_provider_ids)
-        previous_module_names = set(self.runtime_module_names)
-        previous_manifests = dict(self.runtime_provider_manifests)
-        previous_runtime_endpoint_types = {
-            str(endpoint_type or "").strip()
-            for provider_id in previous_provider_ids
-            for provider in (previous_providers.get(provider_id),)
-            if provider is not None
-            for endpoint_type in provider.endpoint_types
-            if str(endpoint_type or "").strip()
-        }
-        previous_endpoints = tuple(
-            (endpoint, bool(endpoint.attached))
-            for endpoint in self.runtime.list_endpoints()
-            if endpoint.endpoint.channel_kind in previous_runtime_endpoint_types
+        result = self.rescan_providers(attach_enabled_endpoints=True)
+        runtime_result = dict(result.get("runtime_result") or {})
+        runtime_result.setdefault("runtime_provider_ids", sorted(self.runtime_provider_ids))
+        runtime_result.setdefault(
+            "runtime_provider_load_errors", list(self.runtime_provider_load_errors)
         )
-        previous_module_cache = {
-            module_name: module
-            for module_name, module in sys.modules.items()
-            if module_name in previous_module_names
-            or any(
-                _module_loaded_from(module_name, Path(manifest.filesystem_path).resolve())
-                for manifest in previous_manifests.values()
-                if manifest.filesystem_path
-            )
-        }
-        self.runtime_provider_load_errors = []
-        manifests_seen: list[str] = []
-        loaded_provider_ids: list[str] = []
-        disabled_provider_ids: list[str] = []
-        restored_endpoint_ids: list[str] = []
-        try:
-            self._clear_runtime_providers()
-            primary_dir = self.runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR
-            primary_dir.mkdir(parents=True, exist_ok=True)
-            for providers_dir in _runtime_provider_dirs(self.runtime_root):
-                for manifest_path in _iter_runtime_provider_manifest_paths(providers_dir):
-                    manifests_seen.append(str(manifest_path))
-                    try:
-                        manifest = _read_runtime_provider_manifest(manifest_path)
-                    except Exception as exc:
-                        self.runtime_provider_load_errors.append(
-                            f"{manifest_path}: {exc.__class__.__name__}: {exc}"
-                        )
-                        continue
-                    if not manifest.enabled:
-                        disabled_provider_ids.append(manifest.provider_id)
-                        continue
-                    try:
-                        self._load_runtime_provider_manifest(manifest)
-                        loaded_provider_ids.append(manifest.provider_id)
-                    except Exception as exc:
-                        self.runtime_provider_load_errors.append(
-                            f"{manifest_path}: {exc.__class__.__name__}: {exc}"
-                        )
-            if self.runtime_provider_load_errors:
-                raise RuntimeError("runtime channel provider candidate failed validation")
-            # Reloading a provider generation is an implementation detail, not
-            # an endpoint detach operation.  Recreate every runtime endpoint
-            # that existed before the scan when its provider still exists.
-            # Temporarily publishing the old endpoint lets the new factory
-            # preserve runtime-only state (for example an in-memory Telegram
-            # token) through its normal attach path.
-            for previous_endpoint, was_attached in previous_endpoints:
-                endpoint_id = previous_endpoint.endpoint.endpoint_id
-                provider = self.provider_for_endpoint_type(
-                    previous_endpoint.endpoint.channel_kind
-                )
-                if provider is None:
-                    # A deliberately removed or disabled provider owns the
-                    # topology change; do not resurrect it from the old
-                    # generation.
-                    continue
-                record = self.repository.get(endpoint_id)
-                if record is None or record.detached_at is not None:
-                    continue
-                previous_endpoint.attached = was_attached
-                self.runtime.register_endpoint(previous_endpoint)
-                result = provider.attach_endpoint(endpoint_id, self.context())
-                if result.status != RuntimeStatus.OK:
-                    raise RuntimeError(
-                        f"runtime channel endpoint restore failed: {endpoint_id}: "
-                        f"{result.text or result.status}"
-                    )
-                restored_endpoint_ids.append(endpoint_id)
-        except Exception as exc:
-            if not self.runtime_provider_load_errors:
-                self.runtime_provider_load_errors.append(f"{exc.__class__.__name__}: {exc}")
-            try:
-                self._clear_runtime_providers()
-            except Exception:
-                pass
-            self.providers.clear()
-            self.providers.update(previous_providers)
-            self.endpoint_type_to_provider.clear()
-            self.endpoint_type_to_provider.update(previous_type_map)
-            self.runtime_provider_ids.clear()
-            self.runtime_provider_ids.update(previous_provider_ids)
-            self.runtime_module_names.clear()
-            self.runtime_module_names.update(previous_module_names)
-            self.runtime_provider_manifests.clear()
-            self.runtime_provider_manifests.update(previous_manifests)
-            sys.modules.update(previous_module_cache)
-            for endpoint, attached in previous_endpoints:
-                endpoint.attached = attached
-                self.runtime.replace_endpoint(endpoint)
-            loaded_provider_ids = []
-            restored_endpoint_ids = []
-        self.scan_errors = list(self.runtime_provider_load_errors)
-        return {
-            "runtime_provider_dirs": [str(path) for path in _runtime_provider_dirs(self.runtime_root)],
-            "runtime_provider_manifests": manifests_seen,
-            "runtime_provider_ids": sorted(self.runtime_provider_ids),
-            "loaded_runtime_provider_ids": sorted(dict.fromkeys(loaded_provider_ids)),
-            "disabled_runtime_provider_ids": sorted(dict.fromkeys(disabled_provider_ids)),
-            "restored_runtime_endpoint_ids": sorted(dict.fromkeys(restored_endpoint_ids)),
-            "runtime_provider_load_errors": list(self.runtime_provider_load_errors),
-        }
+        return runtime_result
 
     def rescan_providers(self, *, attach_enabled_endpoints: bool = False) -> dict[str, Any]:
         before = sorted(self.providers)
-        plugin_result: dict[str, Any] = {}
-        plugin_host = self.plugin_host
-        if plugin_host is not None:
-            rescan_attach = getattr(plugin_host, "rescan_and_attach_new_first_party", None)
-            if callable(rescan_attach):
-                plugin_result = dict(rescan_attach())
-            else:
-                rescan = getattr(plugin_host, "rescan", None)
-                if callable(rescan):
-                    plugin_result = dict(rescan())
-        runtime_result = self.load_runtime_providers()
-        restored = set(runtime_result.get("restored_runtime_endpoint_ids") or ())
-        hydrated = (
-            self.hydrate_all(exclude_endpoint_ids=restored)
-            if attach_enabled_endpoints
-            else []
-        )
+        scan = self._scan_runtime_provider_manifests()
+        enabled = scan["enabled"]
+        disabled = scan["disabled"]
+        seen_paths = scan["seen_paths"]
+        errors = list(scan["errors"])
+        added: list[str] = []
+        changed: list[str] = []
+        unchanged: list[str] = []
+        removed: list[str] = []
+        disabled_removed: list[str] = []
+        hydrated: list[str] = []
+        restored: list[str] = []
+
+        for provider_id in sorted(enabled):
+            manifest = enabled[provider_id]
+            try:
+                fingerprint = _runtime_provider_source_fingerprint(manifest)
+                old_generation = self.runtime_provider_generations.get(provider_id)
+                if old_generation is not None and old_generation.fingerprint == fingerprint:
+                    unchanged.append(provider_id)
+                    continue
+                candidate = self._build_runtime_provider_generation(
+                    manifest,
+                    fingerprint=fingerprint,
+                )
+                transition = self._activate_runtime_provider_generation(
+                    candidate,
+                    include_configured_endpoints=(
+                        attach_enabled_endpoints or old_generation is None
+                    ),
+                )
+                hydrated.extend(transition["hydrated_endpoint_ids"])
+                restored.extend(transition["restored_endpoint_ids"])
+                if old_generation is None:
+                    added.append(provider_id)
+                else:
+                    changed.append(provider_id)
+            except Exception as exc:
+                errors.append(
+                    f"{manifest.filesystem_path}: {exc.__class__.__name__}: {exc}"
+                )
+
+        for provider_id in sorted(self.runtime_provider_generations):
+            if provider_id in enabled:
+                continue
+            generation = self.runtime_provider_generations.get(provider_id)
+            if generation is None:
+                continue
+            expected_manifest = str(
+                Path(generation.manifest.filesystem_path)
+                / CHANNEL_PROVIDER_MANIFEST_FILENAME
+            )
+            if provider_id not in disabled and expected_manifest in seen_paths:
+                # The manifest exists but could not be parsed. Preserve the
+                # known-good generation instead of interpreting damage as removal.
+                continue
+            try:
+                reason = "provider_disabled" if provider_id in disabled else "provider_removed"
+                self._deactivate_runtime_provider_generation(provider_id, reason=reason)
+                if provider_id in disabled:
+                    disabled_removed.append(provider_id)
+                else:
+                    removed.append(provider_id)
+            except Exception as exc:
+                errors.append(f"{provider_id}: {exc.__class__.__name__}: {exc}")
+
+        self.runtime_provider_load_errors = errors
+        self.scan_errors = list(errors)
         after = sorted(self.providers)
+        runtime_result = {
+            "runtime_provider_dirs": [str(path) for path in _runtime_provider_dirs(self.runtime_root)],
+            "runtime_provider_manifests": sorted(seen_paths),
+            "runtime_provider_ids": sorted(self.runtime_provider_ids),
+            "loaded_runtime_provider_ids": sorted(added + changed),
+            "added_runtime_provider_ids": sorted(added),
+            "changed_runtime_provider_ids": sorted(changed),
+            "unchanged_runtime_provider_ids": sorted(unchanged),
+            "removed_runtime_provider_ids": sorted(removed),
+            "disabled_runtime_provider_ids": sorted(disabled),
+            "disabled_removed_runtime_provider_ids": sorted(disabled_removed),
+            "restored_runtime_endpoint_ids": sorted(dict.fromkeys(restored)),
+            "hydrated_runtime_endpoint_ids": sorted(dict.fromkeys(hydrated)),
+            "runtime_provider_load_errors": list(errors),
+        }
         return {
             "providers_before": before,
             "providers_after": after,
-            "added_provider_ids": sorted(set(after) - set(before)),
-            "removed_provider_ids": sorted(set(before) - set(after)),
+            "added_provider_ids": sorted(added),
+            "changed_provider_ids": sorted(changed),
+            "unchanged_provider_ids": sorted(unchanged),
+            "removed_provider_ids": sorted(removed + disabled_removed),
             "provider_count": len(after),
             "endpoint_type_map": dict(sorted(self.endpoint_type_to_provider.items())),
-            "hydrated_endpoint_ids": hydrated,
-            "restored_endpoint_ids": sorted(restored),
-            "plugin_result": plugin_result,
+            "hydrated_endpoint_ids": sorted(dict.fromkeys(hydrated)),
+            "restored_endpoint_ids": sorted(dict.fromkeys(restored)),
+            "plugin_result": {},
             "runtime_result": runtime_result,
             "runtime_provider_ids": sorted(self.runtime_provider_ids),
-            "runtime_provider_load_errors": list(self.runtime_provider_load_errors),
+            "runtime_provider_load_errors": list(errors),
             "scan_errors": list(self.scan_errors),
         }
 
-    def _clear_runtime_providers(self) -> None:
-        provider_roots = [
-            Path(manifest.filesystem_path).resolve()
-            for manifest in self.runtime_provider_manifests.values()
-            if manifest.filesystem_path
-        ]
-        for provider_id in sorted(self.runtime_provider_ids):
-            self.unload_provider_endpoints(provider_id)
-            self.unregister_provider(provider_id)
-        importlib.invalidate_caches()
-        for module_name in list(sys.modules):
-            if module_name in self.runtime_module_names:
-                sys.modules.pop(module_name, None)
-                continue
-            if any(_module_loaded_from(module_name, provider_root) for provider_root in provider_roots):
-                sys.modules.pop(module_name, None)
-        self.runtime_provider_ids.clear()
-        self.runtime_module_names.clear()
-        self.runtime_provider_manifests.clear()
+    def reload_provider(self, provider_id: str) -> IntrospectionResult:
+        normalized = str(provider_id or "").strip()
+        generation = self.runtime_provider_generations.get(normalized)
+        if generation is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="channel provider does not support runtime reload",
+                structured={"provider_id": normalized, "reason": "provider_not_runtime_owned"},
+                llm_text="channel provider does not support runtime reload",
+            )
+        manifest_path = (
+            Path(generation.manifest.filesystem_path) / CHANNEL_PROVIDER_MANIFEST_FILENAME
+        )
+        try:
+            manifest = _read_runtime_provider_manifest(manifest_path)
+            if manifest.provider_id != normalized:
+                raise RuntimeError(
+                    "channel provider manifest id changed during reload: "
+                    f"expected {normalized!r}, found {manifest.provider_id!r}"
+                )
+            if not manifest.enabled:
+                raise RuntimeError(f"channel provider is disabled: {normalized}")
+            candidate = self._build_runtime_provider_generation(
+                manifest,
+                fingerprint=_runtime_provider_source_fingerprint(manifest),
+            )
+            transition = self._activate_runtime_provider_generation(
+                candidate,
+                include_configured_endpoints=True,
+            )
+        except Exception as exc:
+            return IntrospectionResult(
+                status=RuntimeStatus.ERROR,
+                text=f"channel provider reload failed: {exc}",
+                structured={
+                    "provider_id": normalized,
+                    "reloaded": False,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
+                llm_text=f"channel provider reload failed: {exc}",
+            )
+        return _ok(
+            "Channel provider reloaded",
+            {
+                "provider_id": normalized,
+                "reloaded": True,
+                **transition,
+            },
+        )
 
-    def _load_runtime_provider_manifest(self, manifest: RuntimeChannelProviderManifest) -> None:
+    def _scan_runtime_provider_manifests(self) -> dict[str, Any]:
+        primary_dir = self.runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR
+        primary_dir.mkdir(parents=True, exist_ok=True)
+        enabled: dict[str, RuntimeChannelProviderManifest] = {}
+        disabled: set[str] = set()
+        seen_provider_ids: set[str] = set()
+        seen_paths: set[str] = set()
+        errors: list[str] = []
+        for providers_dir in _runtime_provider_dirs(self.runtime_root):
+            for manifest_path in _iter_runtime_provider_manifest_paths(providers_dir):
+                seen_paths.add(str(manifest_path))
+                try:
+                    manifest = _read_runtime_provider_manifest(manifest_path)
+                    if manifest.provider_id in seen_provider_ids:
+                        enabled.pop(manifest.provider_id, None)
+                        disabled.discard(manifest.provider_id)
+                        raise ValueError(f"duplicate channel provider_id: {manifest.provider_id}")
+                    seen_provider_ids.add(manifest.provider_id)
+                    if manifest.enabled:
+                        enabled[manifest.provider_id] = manifest
+                    else:
+                        disabled.add(manifest.provider_id)
+                except Exception as exc:
+                    errors.append(f"{manifest_path}: {exc.__class__.__name__}: {exc}")
+        return {
+            "enabled": enabled,
+            "disabled": disabled,
+            "seen_paths": seen_paths,
+            "errors": errors,
+        }
+
+    def _build_runtime_provider_generation(
+        self,
+        manifest: RuntimeChannelProviderManifest,
+        *,
+        fingerprint: str,
+    ) -> RuntimeChannelProviderGeneration:
         provider_id = str(manifest.provider_id or "").strip()
         if not provider_id:
             raise ValueError("provider_id is required")
         if provider_id in self.providers and provider_id not in self.runtime_provider_ids:
-            raise ValueError(f"provider_id '{provider_id}' conflicts with an existing channel provider")
-        provider_dir = Path(manifest.filesystem_path)
-        entrypoint_path = _runtime_provider_entrypoint_path(manifest)
-        module_name = _runtime_provider_module_name(entrypoint_path, root=self.runtime_root, provider_id=provider_id)
-        module = _load_source_module(module_name, entrypoint_path)
-        try:
-            build_context = ChannelProviderBuildContext(
-                runtime_root=self.runtime_root,
-                provider_dir=provider_dir,
-                manifest=manifest,
-                manager=self,
+            raise ValueError(
+                f"provider_id '{provider_id}' conflicts with an existing channel provider"
             )
+        provider_dir = Path(manifest.filesystem_path).resolve()
+        entrypoint_path = _runtime_provider_entrypoint_path(manifest)
+        module_name = _runtime_provider_module_name(
+            entrypoint_path,
+            root=self.runtime_root,
+            provider_id=provider_id,
+            generation=f"{fingerprint[:12]}_{uuid4().hex[:12]}",
+        )
+        modules_before = set(sys.modules)
+        build_context = ChannelProviderBuildContext(
+            runtime_root=self.runtime_root,
+            provider_dir=provider_dir,
+            manifest=manifest,
+            manager=self,
+        )
+        try:
+            module = _load_source_module(module_name, entrypoint_path)
             provider = _provider_from_module(module, context=build_context)
             actual_provider_id = str(getattr(provider, "provider_id", "") or "").strip()
             if actual_provider_id != provider_id:
                 raise ValueError(
-                    f"provider object id '{actual_provider_id}' does not match manifest provider_id '{provider_id}'"
+                    f"provider object id '{actual_provider_id}' does not match manifest "
+                    f"provider_id '{provider_id}'"
                 )
             endpoint_types = tuple(
                 dict.fromkeys(
@@ -700,20 +780,215 @@ class ChannelEndpointProviderManager:
                 )
             )
             if not endpoint_types:
-                raise ValueError(f"provider '{provider_id}' must declare at least one endpoint type")
+                raise ValueError(
+                    f"provider '{provider_id}' must declare at least one endpoint type"
+                )
             for endpoint_type in endpoint_types:
                 owner_id = self.endpoint_type_to_provider.get(endpoint_type)
                 if owner_id and owner_id != provider_id:
-                    raise ValueError(f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'")
-            self.register_provider(provider)
+                    raise ValueError(
+                        f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'"
+                    )
         except Exception:
-            for loaded_name in list(sys.modules):
-                if loaded_name == module_name or _module_loaded_from(loaded_name, provider_dir.resolve()):
-                    sys.modules.pop(loaded_name, None)
+            _run_cleanup_callbacks(build_context.cleanup_callbacks, runtime=self.runtime)
+            _remove_generation_modules(
+                tuple(
+                    name
+                    for name in set(sys.modules) - modules_before
+                    if name.startswith(module_name.rpartition(".")[0])
+                )
+            )
             raise
-        self.runtime_provider_ids.add(provider_id)
-        self.runtime_module_names.add(module_name)
-        self.runtime_provider_manifests[provider_id] = manifest
+        module_names = tuple(
+            sorted(
+                name
+                for name in set(sys.modules) - modules_before
+                if name == module_name
+                or name.startswith(f"{module_name.rpartition('.')[0]}.")
+                or _module_loaded_from(name, provider_dir)
+            )
+        )
+        return RuntimeChannelProviderGeneration(
+            manifest=manifest,
+            provider=provider,
+            fingerprint=fingerprint,
+            module_names=module_names,
+            cleanup_callbacks=build_context.cleanup_callbacks,
+            lifecycle_context=build_context,
+        )
+
+    def _activate_runtime_provider_generation(
+        self,
+        candidate: RuntimeChannelProviderGeneration,
+        *,
+        include_configured_endpoints: bool,
+    ) -> dict[str, list[str]]:
+        provider_id = candidate.manifest.provider_id
+        old_generation = self.runtime_provider_generations.get(provider_id)
+        old_provider = old_generation.provider if old_generation is not None else None
+        old_types = set(getattr(old_provider, "endpoint_types", ()) or ())
+        candidate_types = set(candidate.provider.endpoint_types)
+        old_endpoints = {
+            endpoint.endpoint.endpoint_id: endpoint
+            for endpoint in self.runtime.list_endpoints()
+            if endpoint.endpoint.channel_kind in old_types
+        }
+        target_records: dict[str, ChannelEndpointModel] = {}
+        for endpoint_id in old_endpoints:
+            record = self.repository.get(endpoint_id)
+            if (
+                record is not None
+                and bool(record.enabled)
+                and record.detached_at is None
+                and record.channel_kind in candidate_types
+            ):
+                target_records[endpoint_id] = record
+        if include_configured_endpoints:
+            for record in self.repository.list_all():
+                if (
+                    record.channel_kind in candidate_types
+                    and bool(record.enabled)
+                    and record.detached_at is None
+                ):
+                    target_records[record.endpoint_id] = record
+        affected_ids = sorted(set(old_endpoints) | set(target_records))
+        self.runtime.begin_provider_reload(affected_ids, provider_id=provider_id)
+        replaced_ids: list[str] = []
+        removed_ids: list[str] = []
+        previous_providers = dict(self.providers)
+        previous_type_map = dict(self.endpoint_type_to_provider)
+        try:
+            lifecycle_context = candidate.lifecycle_context
+            if lifecycle_context is None:
+                raise RuntimeError(
+                    f"provider '{provider_id}' candidate has no lifecycle context"
+                )
+            lifecycle_cleanup = _invoke_provider_lifecycle(
+                candidate.provider,
+                "attach",
+                lifecycle_context,
+                runtime=self.runtime,
+            )
+            if callable(lifecycle_cleanup):
+                lifecycle_context.register_cleanup(lifecycle_cleanup)
+            for endpoint_id in sorted(target_records):
+                result = candidate.provider.attach_endpoint(endpoint_id, self.context())
+                if result.status != RuntimeStatus.OK:
+                    raise RuntimeError(
+                        f"provider '{provider_id}' could not attach endpoint "
+                        f"'{endpoint_id}': {result.text or result.status}"
+                    )
+                endpoint = self.runtime.get_endpoint(endpoint_id)
+                if endpoint is None:
+                    raise RuntimeError(
+                        f"provider '{provider_id}' reported attach success without "
+                        f"publishing endpoint '{endpoint_id}'"
+                    )
+                replaced_ids.append(endpoint_id)
+            for endpoint_id in sorted(set(old_endpoints) - set(target_records)):
+                if self.runtime.remove_endpoint(endpoint_id):
+                    removed_ids.append(endpoint_id)
+            self.unregister_provider(provider_id)
+            self.register_provider(candidate.provider)
+            self.runtime_provider_generations[provider_id] = candidate
+            self.runtime_provider_ids.add(provider_id)
+            self.runtime_provider_manifests[provider_id] = candidate.manifest
+            self.runtime_module_names.update(candidate.module_names)
+        except Exception as exc:
+            self.providers.clear()
+            self.providers.update(previous_providers)
+            self.endpoint_type_to_provider.clear()
+            self.endpoint_type_to_provider.update(previous_type_map)
+            rollback_errors: list[str] = []
+            for endpoint_id in reversed(replaced_ids):
+                old_endpoint = old_endpoints.get(endpoint_id)
+                try:
+                    if old_endpoint is None:
+                        self.runtime.remove_endpoint(endpoint_id)
+                    else:
+                        self.runtime.replace_endpoint(old_endpoint, manage_reload=False)
+                except Exception as rollback_exc:
+                    rollback_errors.append(
+                        f"{endpoint_id}: {rollback_exc.__class__.__name__}: {rollback_exc}"
+                    )
+            for endpoint_id in removed_ids:
+                old_endpoint = old_endpoints.get(endpoint_id)
+                if old_endpoint is not None:
+                    try:
+                        self.runtime.replace_endpoint(old_endpoint, manage_reload=False)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(
+                            f"{endpoint_id}: {rollback_exc.__class__.__name__}: {rollback_exc}"
+                        )
+            _dispose_runtime_provider_generation(candidate, runtime=self.runtime)
+            if rollback_errors:
+                rollback_reason = "; ".join(rollback_errors)
+                for endpoint_id in affected_ids:
+                    self.runtime.fail_endpoint_reload(endpoint_id, rollback_reason)
+                raise RuntimeError(
+                    f"provider '{provider_id}' reload failed and rollback was incomplete: "
+                    f"{rollback_reason}"
+                ) from exc
+            self.runtime.complete_provider_reload(sorted(old_endpoints))
+            for endpoint_id in sorted(set(affected_ids) - set(old_endpoints)):
+                self.runtime.mark_endpoint_detached(
+                    endpoint_id,
+                    reason=f"provider_reload_rolled_back: {exc}",
+                )
+            raise
+        if old_generation is not None:
+            _dispose_runtime_provider_generation(old_generation, runtime=self.runtime)
+            self.runtime_module_names.difference_update(old_generation.module_names)
+        self.runtime.complete_provider_reload(sorted(target_records))
+        for endpoint_id in removed_ids:
+            self.runtime.mark_endpoint_detached(
+                endpoint_id,
+                reason="provider_endpoint_type_removed",
+            )
+        return {
+            "hydrated_endpoint_ids": sorted(set(target_records) - set(old_endpoints)),
+            "restored_endpoint_ids": sorted(set(target_records) & set(old_endpoints)),
+            "removed_endpoint_ids": removed_ids,
+        }
+
+    def _deactivate_runtime_provider_generation(self, provider_id: str, *, reason: str) -> None:
+        generation = self.runtime_provider_generations.get(provider_id)
+        if generation is None:
+            return
+        endpoint_types = set(generation.provider.endpoint_types)
+        endpoint_ids = sorted(
+            endpoint.endpoint.endpoint_id
+            for endpoint in self.runtime.list_endpoints()
+            if endpoint.endpoint.channel_kind in endpoint_types
+        )
+        self.runtime.begin_provider_reload(endpoint_ids, provider_id=provider_id)
+        for endpoint_id in endpoint_ids:
+            self.runtime.remove_endpoint(endpoint_id)
+        self.unregister_provider(provider_id)
+        self.runtime_provider_generations.pop(provider_id, None)
+        self.runtime_provider_ids.discard(provider_id)
+        self.runtime_provider_manifests.pop(provider_id, None)
+        self.runtime_module_names.difference_update(generation.module_names)
+        _dispose_runtime_provider_generation(generation, runtime=self.runtime)
+        for endpoint_id in endpoint_ids:
+            self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
+
+    def _clear_runtime_providers(self) -> None:
+        for provider_id in sorted(self.runtime_provider_ids):
+            self._deactivate_runtime_provider_generation(
+                provider_id,
+                reason="provider_manager_clear",
+            )
+
+    def _load_runtime_provider_manifest(self, manifest: RuntimeChannelProviderManifest) -> None:
+        candidate = self._build_runtime_provider_generation(
+            manifest,
+            fingerprint=_runtime_provider_source_fingerprint(manifest),
+        )
+        self._activate_runtime_provider_generation(
+            candidate,
+            include_configured_endpoints=True,
+        )
 
 
 def build_default_channel_provider_manager(
@@ -801,10 +1076,20 @@ def _runtime_provider_entrypoint_path(manifest: RuntimeChannelProviderManifest) 
     return entrypoint_path
 
 
-def _runtime_provider_module_name(entrypoint_path: Path, *, root: Path, provider_id: str) -> str:
+def _runtime_provider_module_name(
+    entrypoint_path: Path,
+    *,
+    root: Path,
+    provider_id: str,
+    generation: str = "default",
+) -> str:
     provider_stem = re.sub(r"[^0-9A-Za-z_]+", "_", provider_id)
     module_stem = re.sub(r"[^0-9A-Za-z_]+", "_", entrypoint_path.stem)
-    return f"_pal_runtime_channel_provider_{provider_stem}.{module_stem}"
+    generation_stem = re.sub(r"[^0-9A-Za-z_]+", "_", generation)
+    return (
+        f"_pal_runtime_channel_provider_{provider_stem}_{generation_stem}."
+        f"{module_stem}"
+    )
 
 
 def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType:
@@ -839,6 +1124,122 @@ def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType
             sys.modules.pop(package_name, None)
         raise
     return module
+
+
+_PROVIDER_FINGERPRINT_IGNORED_NAMES = {
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".pal-provider-install.json",
+    ".desktop-avatar-install.json",
+}
+
+
+def _runtime_provider_source_fingerprint(
+    manifest: RuntimeChannelProviderManifest,
+) -> str:
+    provider_dir = Path(manifest.filesystem_path).resolve()
+    digest = hashlib.sha256()
+    for path in sorted(
+        (item for item in provider_dir.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(provider_dir).as_posix(),
+    ):
+        relative = path.relative_to(provider_dir)
+        if any(
+            part in _PROVIDER_FINGERPRINT_IGNORED_NAMES or part.endswith(".egg-info")
+            for part in relative.parts
+        ):
+            continue
+        if path.suffix in {".pyc", ".pyo"} or any(
+            part.startswith(".tmp") or ".bak" in part for part in relative.parts
+        ):
+            continue
+        digest.update(relative.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _resolve_provider_awaitable(value: Any, *, runtime: ChannelRuntime) -> Any:
+    if not inspect.isawaitable(value):
+        return value
+    owner_loop = getattr(runtime, "_loop", None)
+    if owner_loop is not None and owner_loop.is_running():
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is owner_loop:
+            raise RuntimeError(
+                "async provider lifecycle cannot block its owner event loop"
+            )
+        return asyncio.run_coroutine_threadsafe(value, owner_loop).result(timeout=10.0)
+    return asyncio.run(value)
+
+
+def _invoke_provider_lifecycle(
+    provider: Any,
+    lifecycle: str,
+    context: ChannelProviderBuildContext,
+    *,
+    runtime: ChannelRuntime,
+) -> Any:
+    hook = getattr(provider, lifecycle, None)
+    if not callable(hook):
+        return None
+    signature = inspect.signature(hook)
+    accepts_context = any(
+        parameter.kind
+        in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        }
+        for parameter in signature.parameters.values()
+    )
+    value = hook(context) if accepts_context else hook()
+    return _resolve_provider_awaitable(value, runtime=runtime)
+
+
+def _run_cleanup_callbacks(
+    callbacks: list[Callable[[], Any]],
+    *,
+    runtime: ChannelRuntime,
+) -> None:
+    while callbacks:
+        callback = callbacks.pop()
+        try:
+            _resolve_provider_awaitable(callback(), runtime=runtime)
+        except Exception:
+            pass
+
+
+def _remove_generation_modules(module_names: tuple[str, ...]) -> None:
+    importlib.invalidate_caches()
+    for module_name in sorted(set(module_names), key=lambda item: (-item.count("."), item)):
+        sys.modules.pop(module_name, None)
+
+
+def _dispose_runtime_provider_generation(
+    generation: RuntimeChannelProviderGeneration,
+    *,
+    runtime: ChannelRuntime,
+) -> None:
+    context = generation.lifecycle_context
+    if context is not None:
+        try:
+            _invoke_provider_lifecycle(
+                generation.provider,
+                "detach",
+                context,
+                runtime=runtime,
+            )
+        except Exception:
+            pass
+    _run_cleanup_callbacks(generation.cleanup_callbacks, runtime=runtime)
+    _remove_generation_modules(generation.module_names)
 
 
 def channel_endpoint_data_root(runtime_root: Path, endpoint_id: str) -> Path:
@@ -1078,13 +1479,3 @@ def _preserve_runtime_endpoint_state(old_endpoint: ChannelEndpointBase | None, n
     control_commands = list(getattr(old_endpoint, "_control_commands_manifest", []) or [])
     if control_commands and hasattr(new_endpoint, "_control_commands_manifest"):
         setattr(new_endpoint, "_control_commands_manifest", control_commands)
-
-
-def _drop_module_import_cache(prefixes: tuple[str, ...]) -> None:
-    clean_prefixes = tuple(dict.fromkeys(str(prefix).strip() for prefix in prefixes if str(prefix).strip()))
-    if not clean_prefixes:
-        return
-    importlib.invalidate_caches()
-    for module_name in list(sys.modules):
-        if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in clean_prefixes):
-            sys.modules.pop(module_name, None)

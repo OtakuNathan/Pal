@@ -348,7 +348,7 @@ enabled = true
 reload_modules = ["runtime"]
 ```
 
-`provider_id` must be stable and unique. `entrypoint` must point to a Python file inside the provider directory. `enabled = false` keeps the provider discoverable on disk but not loaded. `reload_modules` is advisory for endpoint restart and hot-refresh diagnostics.
+`provider_id` must be stable and unique. `entrypoint` must point to a Python file inside the provider directory. `enabled = false` keeps the provider discoverable on disk but not loaded. `reload_modules` is retained for diagnostics; endpoint restart does not evict provider modules.
 
 ## Provider Entrypoint
 
@@ -462,21 +462,24 @@ The shared contract is typed data, not UI widgets. Core/control may produce `Int
 Provider rescan means:
 
 1. Scan `<runtime_root>/channel/providers/*/provider.toml`.
-2. Clear the previous runtime-provider module generation and load a fresh candidate generation from source.
-3. Validate provider ids and endpoint type ownership; if loading fails, preserve the previous working generation.
-4. Recreate previously running endpoints through the new provider generation while preserving runtime-only state.
-5. Optionally hydrate newly configured enabled, attached endpoint rows.
-6. Republish channel introspection capabilities so LLM can see new endpoint ids.
+2. Fingerprint each provider tree and compute added/changed/removed/disabled providers; unchanged providers remain running.
+3. Load each added or changed provider into an isolated candidate generation and validate ids and endpoint type ownership.
+4. Fence only that provider's endpoint delivery slots, recreate its running endpoints, and publish only after every candidate endpoint starts successfully.
+5. On failure, dispose the candidate and restore the previous provider/endpoints. On success, dispose the old generation in reverse cleanup order.
+6. Automatically hydrate enabled, attached endpoint rows for newly discovered providers; removed/disabled providers detach only from runtime and leave durable rows unchanged.
+7. Republish channel introspection capabilities so LLM can see new endpoint ids.
 
-Endpoint restart means rebuilding a runtime endpoint instance through its provider. Do not use endpoint restart as provider discovery.
+Provider build code may call `context.register_cleanup(callback)` for generation-owned resources and may expose optional `attach(context)` / `detach(context)` hooks. Treat those as RAII. Do not start unmanaged resources that cannot be released during candidate rollback.
 
-After changing runtime-root provider source, `provider.toml`, or provider configuration, the default deployment step is one `channel_provider_rescan`. It hot-reloads the provider generation and rebuilds its running endpoints; do not restart the Pal service and do not add a redundant endpoint restart. Use `channel_reload_provider` only when the loaded provider generation is unchanged and one endpoint is stuck, misbehaving, or needs a fresh connection.
+Endpoint restart means rebuilding one runtime endpoint instance through its already loaded provider. It does not reload modules. Do not use endpoint restart as provider discovery.
+
+After changing runtime-root provider source, `provider.toml`, or provider configuration, the default deployment step is one `channel_provider_rescan`. It reloads only changed provider generations; do not restart the Pal service and do not add a redundant endpoint restart. Use `channel_reload_provider` to force one known provider generation reload, and `channel_restart_endpoint` when only one endpoint connection is stuck or needs a fresh transport session.
 
 Never stop, restart, or kill Pal's own hosting service or process from inside the active Pal turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
 
 Useful operations:
 
-- `channel_provider_rescan`: discover or hot-reload runtime-root channel providers, rebuild running endpoints, and optionally attach newly enabled endpoints.
+- `channel_provider_rescan`: discover the provider diff; add, atomically reload, or runtime-detach only affected providers.
 - `channel_list`: list configured channel endpoints and provider ids.
 - `channel_endpoint_inspect`: inspect one endpoint.
 - `channel_endpoint_auth_state`: inspect authorization without revealing secrets.
@@ -484,7 +487,8 @@ Useful operations:
 - `channel_endpoint_backlog`: inspect queue sizes.
 - `channel_attach`: attach one endpoint through its provider.
 - `channel_detach`: detach one endpoint through its provider.
-- `channel_reload_provider`: restart one endpoint runtime instance.
+- `channel_reload_provider`: atomically reload one runtime-root provider by provider id.
+- `channel_restart_endpoint`: restart one endpoint runtime instance without reloading provider code.
 
 ## Verification Workflow
 
@@ -627,6 +631,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "channel_attach",
                 "channel_detach",
                 "channel_reload_provider",
+                "channel_restart_endpoint",
             ),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to add or repair a channel integration without pushing transport details into core.",

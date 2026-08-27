@@ -1273,6 +1273,45 @@ class CompactionPolicyTests(unittest.TestCase):
 
 
 class RuntimeCompactionIntegrationTests(unittest.TestCase):
+    def test_compaction_failure_stops_and_requests_manual_compact_then_resend(self) -> None:
+        program = agent_turn_program(
+            turn_id="failed-compact",
+            build_assembly_context=lambda _frame: PromptAssemblyContext(),
+            render_final_text=lambda _outcome: "",
+            build_commit_payload=lambda final, observations, _replies: L1CommitPayload(
+                turn_id="failed-compact",
+                transcript=[
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content=final,
+                        kind=L1MessageKind.ASSISTANT_REPLY,
+                    )
+                ],
+                tool_observations=list(observations),
+            ),
+        )
+        effect = next(program)
+        self.assertIsInstance(effect, LLMPreflightEffect)
+        effect = program.send(
+            EffectResult(
+                status=RuntimeStatus.OK,
+                payload=LLMPreflightAdvice(status=LLMPreflightStatus.COMPACT_REQUIRED),
+            )
+        )
+        self.assertIsInstance(effect, MemoryCompactEffect)
+
+        with self.assertRaises(StopIteration) as stopped:
+            program.send(
+                EffectResult(
+                    status=RuntimeStatus.ERROR,
+                    text="Automatic compaction request failed.",
+                )
+            )
+
+        self.assertIn("Automatic compaction request failed", stopped.exception.value.final_reply)
+        self.assertIn("`/compact` manually", stopped.exception.value.final_reply)
+        self.assertIn("resend your request", stopped.exception.value.final_reply)
+
     def test_one_logical_turn_stops_after_three_compaction_generations(self) -> None:
         program = agent_turn_program(
             turn_id="bounded-compact",

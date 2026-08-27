@@ -1575,7 +1575,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("memory_provider_inventory", tool_names)
         self.assertNotIn("shell", tool_names)
 
-    def test_channel_failure_surface_prefers_reload_over_destructive_controls(self) -> None:
+    def test_channel_failure_surface_prefers_endpoint_restart_over_provider_reload(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
@@ -1600,7 +1600,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for descriptor in descriptors
         }
 
-        self.assertIn("op_channel_mgmt_reload_provider", canonical_paths)
+        self.assertIn("op_channel_mgmt_restart_endpoint", canonical_paths)
+        self.assertNotIn("op_channel_mgmt_reload_provider", canonical_paths)
         self.assertNotIn("op_channel_mgmt_disable", canonical_paths)
         self.assertNotIn("op_channel_mgmt_detach", canonical_paths)
 

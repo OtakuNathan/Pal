@@ -288,6 +288,13 @@ ChannelCapabilitiesChannelIntrospectionProviderRescanInput = _strict_model(
 ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput',
     {
+        'name': (str, Field(..., description='Runtime-root provider id shown by channel_list.')),
+    },
+)
+
+ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput = _strict_model(
+    'ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput',
+    {
         'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )

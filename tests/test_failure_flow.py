@@ -98,6 +98,29 @@ def _unknown_effect_failure_program(draft, *, allowed_tools):
 
 
 class FailureFlowTests(unittest.TestCase):
+    def test_expected_lifecycle_delivery_failure_does_not_enter_safe_mode(self) -> None:
+        core = _RecordingFailureCore()
+        handler = FailureEventHandler(core=core)
+
+        asyncio.run(
+            handler.handle(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_FAILED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={
+                        "reply_id": "reply-during-reload",
+                        "endpoint_id": "avatar-main",
+                        "reason": "provider generation changed",
+                        "reason_code": "provider_generation_changed",
+                        "expected_lifecycle": True,
+                    },
+                ),
+                context=None,
+            )
+        )
+
+        self.assertFalse(core.calls)
+
     def test_persistence_failure_stops_without_invoking_safe_mode_llm(self) -> None:
         core = PalCore()
         register_core_with_core(core)

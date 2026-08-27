@@ -101,7 +101,7 @@ Channel providers are managed through `ChannelEndpointProviderManager`. Builtin 
 <runtime_root>/channel/providers/<provider_id>/provider.toml
 ```
 
-The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach/restart, provider reload, and provider rescan.
+The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach, endpoint restart, provider reload, and provider rescan.
 
 The important boundary is:
 
@@ -109,7 +109,9 @@ The important boundary is:
 - provider owns endpoint lifecycle, attach/detach mechanics, platform SDK usage, provider-specific introspection, interaction rendering, and interaction result normalization
 - `channel_kind` remains the endpoint row discriminator for persistence and deserialization; core should not infer platform behavior from it
 
-`channel_provider_rescan` rescans runtime-root channel providers and may attach enabled endpoints, but it does not define how any concrete endpoint attaches. That remains provider-owned.
+`channel_provider_rescan` computes a source-tree diff. Added providers auto-attach eligible endpoint rows, changed providers swap only their own generation, unchanged providers are not disturbed, and removed/disabled providers detach only from runtime. `channel_reload_provider` forces one runtime-root provider generation transaction; `channel_restart_endpoint` refreshes one endpoint without reloading modules. Stable endpoint delivery slots buffer and drain output across generation swaps, and expected lifecycle gaps do not enter Safe Mode.
+
+Automatic compaction failure is a terminal result for the current turn, not a Safe Mode trigger. Pal preserves memory/tool RPC state, reports the failure directly, and asks the user to run `/compact` manually and resend the request.
 
 Interaction is typed internally but realized per provider. Telegram may use inline keyboards, callback queries, command menu publication, message edit, reaction, and typing. Socket/CLI/Web providers may choose their own transport shape. Core and Control consume typed actions/results only.
 

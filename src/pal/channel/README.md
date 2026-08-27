@@ -7,7 +7,8 @@ Owns:
 - active text delivery resolved by configured endpoint id
 - adapter registry for legacy/transport compatibility
 - provider manager for runtime-root channel providers
-- delivery diagnostics for queued replies
+- stable per-endpoint delivery slots across provider generations
+- delivery diagnostics for queued replies and reload-buffer pressure
 - channel-neutral interaction status and callback mapping
 
 Does not own:
@@ -68,14 +69,20 @@ Interaction rule:
 - `ChannelEndpointProviderManager` is the parent management/introspection router:
   - it registers channel providers
   - maps persisted endpoint type keys (`channel_kind`) to providers
-  - dispatches attach/detach/restart and endpoint introspection by `endpoint_id`
-  - rescans providers without treating `channel_kind` as an LLM-facing concept
+  - dispatches attach/detach/endpoint restart and introspection by `endpoint_id`
+  - reloads one runtime-root provider generation by `provider_id`
+  - rescans providers as an added/changed/removed/disabled fingerprint diff
+    without touching plugins or unrelated channel providers
 - runtime-root channel providers live under:
   - `runtime_root/channel/providers/<provider_id>/provider.toml`
   - the manifest points at provider-owned Python code, usually `entrypoint = "runtime.py"`
   - rescan loads that directory as a Python package through `importlib`, so
     provider-owned modules may use relative imports without entering Pal's wheel
-  - rescan registers the resulting provider with `ChannelEndpointProviderManager`
+  - each candidate loads in a unique generation namespace and is published only
+    after its endpoints start successfully; the previous generation remains the
+    rollback target until commit
+  - build code may register reverse-order cleanup callbacks; optional
+    generation `attach`/`detach` hooks have the same RAII lifetime
 - provider-owned mutable state lives under:
   - `runtime_root/data/channel/<endpoint_id>/`
   - providers choose their private representation inside that directory
@@ -96,6 +103,12 @@ Interaction rule:
 - channel root and the recovery socket endpoint are core runtime components and
   are not hot-reloaded; every other provider/endpoint implementation is a
   runtime-root hot-reload boundary
+- `channel_restart_endpoint` refreshes one endpoint connection without evicting
+  provider modules; `channel_reload_provider` atomically reloads one provider;
+  `channel_provider_rescan` discovers the provider-tree diff
+- endpoint delivery slots fence generation changes. They absorb old transport
+  queues, buffer reload-time output, and drain it in order through the committed
+  endpoint. Lifecycle gaps are retryable and do not trigger Safe Mode
 - detachable providers are not imported from `site-packages`; deployment,
   replacement, and removal happen entirely within the selected runtime root
 - only channel-neutral operations are exposed to `Pal/LLM`; provider-specific
