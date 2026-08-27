@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
-import hashlib
 import inspect
 import re
 import sys
@@ -13,7 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.channel.factory import ChannelEndpointFactory, SocketChannelEndpointFactory
@@ -69,13 +67,19 @@ class ChannelProviderBuildContext:
 
 
 @dataclass
-class RuntimeChannelProviderGeneration:
+class RuntimeChannelProviderHandle:
     manifest: RuntimeChannelProviderManifest
     provider: ChannelProvider
-    fingerprint: str
     module_names: tuple[str, ...]
     cleanup_callbacks: list[Callable[[], Any]] = field(default_factory=list)
     lifecycle_context: ChannelProviderBuildContext | None = None
+    attached: bool = False
+
+
+@dataclass(frozen=True)
+class DiscoveredChannelProvider:
+    manifest: RuntimeChannelProviderManifest
+    endpoint_types: tuple[str, ...]
 
 
 class ChannelProvider(Protocol):
@@ -319,11 +323,14 @@ class ChannelEndpointProviderManager:
     endpoint_type_to_provider: dict[str, str] = field(default_factory=dict)
     scan_errors: list[str] = field(default_factory=list)
     plugin_host: Any = None
-    runtime_provider_ids: set[str] = field(default_factory=set)
-    runtime_module_names: set[str] = field(default_factory=set)
-    runtime_provider_manifests: dict[str, RuntimeChannelProviderManifest] = field(default_factory=dict)
-    runtime_provider_generations: dict[str, RuntimeChannelProviderGeneration] = field(default_factory=dict)
+    discovered_runtime_providers: dict[str, DiscoveredChannelProvider] = field(default_factory=dict)
+    runtime_provider_handles: dict[str, RuntimeChannelProviderHandle] = field(default_factory=dict)
     runtime_provider_load_errors: list[str] = field(default_factory=list)
+    shutdown_errors: list[str] = field(default_factory=list)
+
+    @property
+    def runtime_provider_ids(self) -> set[str]:
+        return set(self.discovered_runtime_providers)
 
     def context(self) -> ChannelProviderContext:
         return ChannelProviderContext(
@@ -373,24 +380,31 @@ class ChannelEndpointProviderManager:
 
     def list_providers(self) -> list[dict[str, Any]]:
         providers: list[dict[str, Any]] = []
-        for provider in sorted(self.providers.values(), key=lambda item: item.provider_id):
-            manifest = self.runtime_provider_manifests.get(provider.provider_id)
+        provider_ids = set(self.providers) | set(self.discovered_runtime_providers)
+        for provider_id in sorted(provider_ids):
+            provider = self.providers.get(provider_id)
+            discovered = self.discovered_runtime_providers.get(provider_id)
+            manifest = discovered.manifest if discovered is not None else None
+            endpoint_types = (
+                tuple(provider.endpoint_types)
+                if provider is not None
+                else discovered.endpoint_types
+                if discovered is not None
+                else ()
+            )
             row = {
-                "provider_id": provider.provider_id,
-                "endpoint_types": list(provider.endpoint_types),
-                "reload_modules": list(getattr(provider, "reload_modules", ()) or ()),
-                "source": "runtime_root" if provider.provider_id in self.runtime_provider_ids else "registered",
+                "provider_id": provider_id,
+                "endpoint_types": list(endpoint_types),
+                "reload_modules": list(getattr(provider, "reload_modules", ()) or ()) if provider else [],
+                "source": "runtime_root" if provider_id in self.runtime_provider_ids else "registered",
+                "code_loaded": provider_id in self.runtime_provider_handles or provider_id not in self.runtime_provider_ids,
             }
             if manifest is not None:
-                generation = self.runtime_provider_generations.get(provider.provider_id)
                 row.update(
                     {
                         "version": manifest.version,
                         "filesystem_path": manifest.filesystem_path,
                         "entrypoint": manifest.entrypoint,
-                        "generation_fingerprint": (
-                            generation.fingerprint if generation is not None else ""
-                        ),
                     }
                 )
             providers.append(row)
@@ -411,87 +425,147 @@ class ChannelEndpointProviderManager:
             return None
         return self.provider_for_endpoint_type(endpoint.endpoint.channel_kind)
 
+    def _provider_id_for_endpoint(self, endpoint_id: str) -> str:
+        hub = self.runtime.get_endpoint_hub(endpoint_id)
+        if hub is not None and hub.provider_id:
+            return hub.provider_id
+        record = self.repository.get(endpoint_id)
+        if record is None:
+            return ""
+        return str(self.endpoint_type_to_provider.get(record.channel_kind) or "")
+
+    def _ensure_hub(self, record: ChannelEndpointModel, provider_id: str) -> None:
+        self.runtime.ensure_endpoint_hub(
+            record.endpoint_id,
+            provider_id=provider_id,
+            channel_kind=record.channel_kind,
+            binding_key=record.binding_key,
+        )
+        if is_recovery_socket_endpoint(record, None, self.runtime_root):
+            self.runtime.set_recovery_endpoint(record.endpoint_id)
+
+    def _ensure_provider_hubs(self, provider_id: str, endpoint_types: tuple[str, ...]) -> list[str]:
+        endpoint_type_set = set(endpoint_types)
+        endpoint_ids: list[str] = []
+        for record in self.repository.list_all():
+            if record.channel_kind not in endpoint_type_set:
+                continue
+            self._ensure_hub(record, provider_id)
+            endpoint_ids.append(record.endpoint_id)
+        return sorted(endpoint_ids)
+
     def hydrate_all(self, *, exclude_endpoint_ids: set[str] | None = None) -> list[str]:
         hydrated: list[str] = []
         excluded = set(exclude_endpoint_ids or ())
         for record in self.repository.list_all():
             if record.endpoint_id in excluded:
                 continue
+            provider_id = str(self.endpoint_type_to_provider.get(record.channel_kind) or "")
+            if not provider_id:
+                continue
+            self._ensure_hub(record, provider_id)
             if not bool(record.enabled) or record.detached_at is not None:
                 continue
-            provider = self.provider_for_endpoint_type(record.channel_kind)
-            if provider is None:
-                continue
-            result = provider.attach_endpoint(record.endpoint_id, self.context())
+            result = self.attach_endpoint(record.endpoint_id)
             if result.status == RuntimeStatus.OK:
                 hydrated.append(record.endpoint_id)
         return hydrated
 
     def hydrate_provider(self, provider_id: str) -> list[str]:
-        provider = self.providers.get(str(provider_id or "").strip())
-        if provider is None:
+        normalized = str(provider_id or "").strip()
+        endpoint_types = self._provider_endpoint_types(normalized)
+        if not endpoint_types:
             return []
         hydrated: list[str] = []
-        for endpoint_type in provider.endpoint_types:
+        for endpoint_type in endpoint_types:
             for record in self.repository.list_all(channel_kind=endpoint_type):
+                self._ensure_hub(record, normalized)
                 if not bool(record.enabled) or record.detached_at is not None:
                     continue
-                result = provider.attach_endpoint(record.endpoint_id, self.context())
+                result = self.attach_endpoint(record.endpoint_id)
                 if result.status == RuntimeStatus.OK:
                     hydrated.append(record.endpoint_id)
         return hydrated
 
-    def detach_provider_endpoints(self, provider_id: str) -> list[str]:
-        provider = self.providers.get(str(provider_id or "").strip())
-        if provider is None:
-            return []
-        detached: list[str] = []
-        for endpoint_type in provider.endpoint_types:
-            for record in self.repository.list_all(channel_kind=endpoint_type):
-                result = provider.detach_endpoint(record.endpoint_id, self.context())
-                if result.status == RuntimeStatus.OK:
-                    detached.append(record.endpoint_id)
-        return detached
-
-    def unload_provider_endpoints(self, provider_id: str) -> list[str]:
-        provider = self.providers.get(str(provider_id or "").strip())
-        if provider is None:
-            return []
-        endpoint_types = set(provider.endpoint_types)
-        removed: list[str] = []
-        for endpoint in self.runtime.list_endpoints():
-            if endpoint.endpoint.channel_kind not in endpoint_types:
-                continue
-            endpoint.detach()
-            if self.runtime.remove_endpoint(endpoint.endpoint.endpoint_id):
-                removed.append(endpoint.endpoint.endpoint_id)
-        return removed
-
     def attach_endpoint(self, endpoint_id: str) -> IntrospectionResult:
-        provider = self.provider_for_endpoint(endpoint_id)
-        if provider is None:
+        record = self.repository.get(endpoint_id)
+        provider_id = self._provider_id_for_endpoint(endpoint_id)
+        if record is None or not provider_id:
             return _provider_missing_for_endpoint(endpoint_id)
-        self.runtime.bind_endpoint_provider(endpoint_id, provider.provider_id)
-        return provider.attach_endpoint(endpoint_id, self.context())
+        self._ensure_hub(record, provider_id)
+        try:
+            provider = self._ensure_provider_loaded(provider_id)
+        except Exception as exc:
+            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            try:
+                self._unload_provider_if_idle(provider_id)
+            except Exception:
+                pass
+            return _provider_lifecycle_error("attach", provider_id, endpoint_id, exc)
+        self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
+        try:
+            result = provider.attach_endpoint(endpoint_id, self.context())
+            if result.status != RuntimeStatus.OK:
+                raise RuntimeError(result.text or str(result.status))
+            if self.runtime.get_endpoint(endpoint_id) is None:
+                raise RuntimeError("provider reported success without registering an endpoint")
+            self.runtime.publish_endpoint_when_ready(endpoint_id)
+            self.runtime.complete_endpoint_transition(endpoint_id)
+            return result
+        except Exception as exc:
+            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            return _provider_lifecycle_error("attach", provider_id, endpoint_id, exc)
 
     def detach_endpoint(self, endpoint_id: str) -> IntrospectionResult:
-        provider = self.provider_for_endpoint(endpoint_id)
+        provider_id = self._provider_id_for_endpoint(endpoint_id)
+        provider = self.providers.get(provider_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return provider.detach_endpoint(endpoint_id, self.context())
+        record = self.repository.get(endpoint_id)
+        endpoint = self.runtime.get_endpoint(endpoint_id)
+        if is_recovery_socket_endpoint(record, endpoint, self.runtime_root):
+            return provider.detach_endpoint(endpoint_id, self.context())
+        try:
+            self.runtime.withdraw_endpoint(endpoint_id)
+            self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
+            result = provider.detach_endpoint(endpoint_id, self.context())
+            if result.status != RuntimeStatus.OK:
+                hub = self.runtime.get_endpoint_hub(endpoint_id)
+                if hub is not None:
+                    hub.state = "attached" if endpoint is not None else "detached"
+                    if endpoint is not None:
+                        self.runtime.publish_endpoint(endpoint_id)
+                return result
+            self.runtime.mark_endpoint_detached(endpoint_id)
+            self._unload_provider_if_idle(provider_id)
+            return result
+        except Exception as exc:
+            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            return _provider_lifecycle_error("detach", provider_id, endpoint_id, exc)
 
     def restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
-        provider = self.provider_for_endpoint(endpoint_id)
+        provider_id = self._provider_id_for_endpoint(endpoint_id)
+        provider = self.providers.get(provider_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        self.runtime.bind_endpoint_provider(endpoint_id, provider.provider_id)
-        return provider.restart_endpoint(endpoint_id, self.context())
+        try:
+            self.runtime.withdraw_endpoint(endpoint_id)
+            self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
+            result = provider.restart_endpoint(endpoint_id, self.context())
+            if result.status != RuntimeStatus.OK:
+                raise RuntimeError(result.text or str(result.status))
+            self.runtime.publish_endpoint_when_ready(endpoint_id)
+            self.runtime.complete_endpoint_transition(endpoint_id)
+            return result
+        except Exception as exc:
+            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            return _provider_lifecycle_error("restart", provider_id, endpoint_id, exc)
 
     def inspect_endpoint(self, endpoint_id: str) -> IntrospectionResult:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return self._with_delivery_slot(
+        return self._with_endpoint_hub(
             endpoint_id,
             provider.inspect_endpoint(endpoint_id, self.context()),
         )
@@ -512,7 +586,7 @@ class ChannelEndpointProviderManager:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return self._with_delivery_slot(
+        return self._with_endpoint_hub(
             endpoint_id,
             provider.inspect_backlog(endpoint_id, self.context()),
         )
@@ -521,18 +595,18 @@ class ChannelEndpointProviderManager:
         provider = self.provider_for_endpoint(endpoint_id)
         if provider is None:
             return _provider_missing_for_endpoint(endpoint_id)
-        return self._with_delivery_slot(
+        return self._with_endpoint_hub(
             endpoint_id,
             provider.inspect_health(endpoint_id, self.context()),
         )
 
-    def _with_delivery_slot(
+    def _with_endpoint_hub(
         self,
         endpoint_id: str,
         result: IntrospectionResult,
     ) -> IntrospectionResult:
         payload = dict(result.structured or {})
-        payload["delivery_slot"] = self.runtime.inspect_delivery_slot(endpoint_id)
+        payload["endpoint_hub"] = self.runtime.inspect_endpoint_hub(endpoint_id)
         return IntrospectionResult(
             status=result.status,
             text=result.text,
@@ -541,7 +615,7 @@ class ChannelEndpointProviderManager:
         )
 
     def load_runtime_providers(self) -> dict[str, Any]:
-        result = self.rescan_providers(attach_enabled_endpoints=True)
+        result = self.rescan_providers()
         runtime_result = dict(result.get("runtime_result") or {})
         runtime_result.setdefault("runtime_provider_ids", sorted(self.runtime_provider_ids))
         runtime_result.setdefault(
@@ -549,67 +623,107 @@ class ChannelEndpointProviderManager:
         )
         return runtime_result
 
-    def rescan_providers(self, *, attach_enabled_endpoints: bool = False) -> dict[str, Any]:
-        before = sorted(self.providers)
+    def rescan_providers(self) -> dict[str, Any]:
+        before = sorted(set(self.providers) | set(self.discovered_runtime_providers))
         scan = self._scan_runtime_provider_manifests()
         enabled = scan["enabled"]
         disabled = scan["disabled"]
         seen_paths = scan["seen_paths"]
         errors = list(scan["errors"])
         added: list[str] = []
-        changed: list[str] = []
         unchanged: list[str] = []
         removed: list[str] = []
         disabled_removed: list[str] = []
         hydrated: list[str] = []
-        restored: list[str] = []
+        discovered_endpoints: list[str] = []
 
         for provider_id in sorted(enabled):
             manifest = enabled[provider_id]
+            if provider_id in self.discovered_runtime_providers:
+                discovered = self.discovered_runtime_providers[provider_id]
+                known_hubs = set(self._provider_hub_ids(provider_id))
+                endpoint_ids = self._ensure_provider_hubs(
+                    provider_id,
+                    discovered.endpoint_types,
+                )
+                new_endpoint_ids = sorted(set(endpoint_ids) - known_hubs)
+                discovered_endpoints.extend(new_endpoint_ids)
+                for endpoint_id in new_endpoint_ids:
+                    record = self.repository.get(endpoint_id)
+                    if (
+                        record is not None
+                        and bool(record.enabled)
+                        and record.detached_at is None
+                    ):
+                        result = self.attach_endpoint(endpoint_id)
+                        if result.status == RuntimeStatus.OK:
+                            hydrated.append(endpoint_id)
+                        else:
+                            errors.append(
+                                f"{endpoint_id}: {result.status}: {result.text}"
+                            )
+                unchanged.append(provider_id)
+                continue
             try:
-                fingerprint = _runtime_provider_source_fingerprint(manifest)
-                old_generation = self.runtime_provider_generations.get(provider_id)
-                if old_generation is not None and old_generation.fingerprint == fingerprint:
-                    unchanged.append(provider_id)
-                    continue
-                candidate = self._build_runtime_provider_generation(
-                    manifest,
-                    fingerprint=fingerprint,
+                candidate = self._build_runtime_provider_handle(manifest)
+                endpoint_types = tuple(candidate.provider.endpoint_types)
+                self._register_discovered_provider(
+                    DiscoveredChannelProvider(manifest=manifest, endpoint_types=endpoint_types)
                 )
-                transition = self._activate_runtime_provider_generation(
-                    candidate,
-                    include_configured_endpoints=(
-                        attach_enabled_endpoints or old_generation is None
-                    ),
+                endpoint_ids = self._ensure_provider_hubs(provider_id, endpoint_types)
+                discovered_endpoints.extend(endpoint_ids)
+                should_attach = any(
+                    record.endpoint_id in endpoint_ids
+                    and bool(record.enabled)
+                    and record.detached_at is None
+                    for record in self.repository.list_all()
                 )
-                hydrated.extend(transition["hydrated_endpoint_ids"])
-                restored.extend(transition["restored_endpoint_ids"])
-                if old_generation is None:
-                    added.append(provider_id)
+                if should_attach:
+                    self._activate_runtime_provider_handle(candidate)
+                    eligible_endpoint_ids = {
+                        record.endpoint_id
+                        for record in self.repository.list_all()
+                        if record.endpoint_id in endpoint_ids
+                        and bool(record.enabled)
+                        and record.detached_at is None
+                    }
+                    provider_hydrated = self.hydrate_provider(provider_id)
+                    hydrated.extend(provider_hydrated)
+                    for endpoint_id in sorted(
+                        eligible_endpoint_ids - set(provider_hydrated)
+                    ):
+                        errors.append(
+                            f"{endpoint_id}: provider attach did not complete"
+                        )
                 else:
-                    changed.append(provider_id)
+                    for cleanup_error in _dispose_runtime_provider_handle(
+                        candidate,
+                        runtime=self.runtime,
+                    ):
+                        errors.append(f"{provider_id}: {cleanup_error}")
+                added.append(provider_id)
             except Exception as exc:
                 errors.append(
                     f"{manifest.filesystem_path}: {exc.__class__.__name__}: {exc}"
                 )
 
-        for provider_id in sorted(self.runtime_provider_generations):
+        for provider_id in sorted(self.discovered_runtime_providers):
             if provider_id in enabled:
                 continue
-            generation = self.runtime_provider_generations.get(provider_id)
-            if generation is None:
+            discovered = self.discovered_runtime_providers.get(provider_id)
+            if discovered is None:
                 continue
             expected_manifest = str(
-                Path(generation.manifest.filesystem_path)
+                Path(discovered.manifest.filesystem_path)
                 / CHANNEL_PROVIDER_MANIFEST_FILENAME
             )
             if provider_id not in disabled and expected_manifest in seen_paths:
                 # The manifest exists but could not be parsed. Preserve the
-                # known-good generation instead of interpreting damage as removal.
+                # known physical provider instead of interpreting damage as removal.
                 continue
             try:
                 reason = "provider_disabled" if provider_id in disabled else "provider_removed"
-                self._deactivate_runtime_provider_generation(provider_id, reason=reason)
+                self._remove_discovered_provider(provider_id, reason=reason)
                 if provider_id in disabled:
                     disabled_removed.append(provider_id)
                 else:
@@ -619,33 +733,34 @@ class ChannelEndpointProviderManager:
 
         self.runtime_provider_load_errors = errors
         self.scan_errors = list(errors)
-        after = sorted(self.providers)
+        after = sorted(set(self.providers) | set(self.discovered_runtime_providers))
         runtime_result = {
             "runtime_provider_dirs": [str(path) for path in _runtime_provider_dirs(self.runtime_root)],
             "runtime_provider_manifests": sorted(seen_paths),
             "runtime_provider_ids": sorted(self.runtime_provider_ids),
-            "loaded_runtime_provider_ids": sorted(added + changed),
+            "loaded_runtime_provider_ids": sorted(self.runtime_provider_handles),
             "added_runtime_provider_ids": sorted(added),
-            "changed_runtime_provider_ids": sorted(changed),
+            "changed_runtime_provider_ids": [],
             "unchanged_runtime_provider_ids": sorted(unchanged),
             "removed_runtime_provider_ids": sorted(removed),
             "disabled_runtime_provider_ids": sorted(disabled),
             "disabled_removed_runtime_provider_ids": sorted(disabled_removed),
-            "restored_runtime_endpoint_ids": sorted(dict.fromkeys(restored)),
             "hydrated_runtime_endpoint_ids": sorted(dict.fromkeys(hydrated)),
+            "discovered_runtime_endpoint_ids": sorted(dict.fromkeys(discovered_endpoints)),
             "runtime_provider_load_errors": list(errors),
         }
         return {
             "providers_before": before,
             "providers_after": after,
             "added_provider_ids": sorted(added),
-            "changed_provider_ids": sorted(changed),
+            "changed_provider_ids": [],
             "unchanged_provider_ids": sorted(unchanged),
             "removed_provider_ids": sorted(removed + disabled_removed),
             "provider_count": len(after),
             "endpoint_type_map": dict(sorted(self.endpoint_type_to_provider.items())),
             "hydrated_endpoint_ids": sorted(dict.fromkeys(hydrated)),
-            "restored_endpoint_ids": sorted(dict.fromkeys(restored)),
+            "discovered_endpoint_ids": sorted(dict.fromkeys(discovered_endpoints)),
+            "restored_endpoint_ids": [],
             "plugin_result": {},
             "runtime_result": runtime_result,
             "runtime_provider_ids": sorted(self.runtime_provider_ids),
@@ -655,8 +770,8 @@ class ChannelEndpointProviderManager:
 
     def reload_provider(self, provider_id: str) -> IntrospectionResult:
         normalized = str(provider_id or "").strip()
-        generation = self.runtime_provider_generations.get(normalized)
-        if generation is None:
+        discovered = self.discovered_runtime_providers.get(normalized)
+        if discovered is None:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="channel provider does not support runtime reload",
@@ -664,9 +779,25 @@ class ChannelEndpointProviderManager:
                 llm_text="channel provider does not support runtime reload",
             )
         manifest_path = (
-            Path(generation.manifest.filesystem_path) / CHANNEL_PROVIDER_MANIFEST_FILENAME
+            Path(discovered.manifest.filesystem_path) / CHANNEL_PROVIDER_MANIFEST_FILENAME
         )
+        endpoint_ids = self._provider_hub_ids(normalized)
+        previously_attached = {
+            endpoint_id
+            for endpoint_id in endpoint_ids
+            if self.runtime.get_endpoint(endpoint_id) is not None
+        }
+        for endpoint_id in endpoint_ids:
+            self.runtime.withdraw_endpoint(endpoint_id)
+        stop_errors: list[str] = []
         try:
+            _stopped, stop_errors = self._stop_provider_transports(
+                normalized,
+                reason="provider_reload",
+            )
+            unload_errors = self._unload_runtime_provider(normalized)
+            if unload_errors:
+                raise RuntimeError("; ".join(unload_errors))
             manifest = _read_runtime_provider_manifest(manifest_path)
             if manifest.provider_id != normalized:
                 raise RuntimeError(
@@ -675,15 +806,32 @@ class ChannelEndpointProviderManager:
                 )
             if not manifest.enabled:
                 raise RuntimeError(f"channel provider is disabled: {normalized}")
-            candidate = self._build_runtime_provider_generation(
-                manifest,
-                fingerprint=_runtime_provider_source_fingerprint(manifest),
+            candidate = self._build_runtime_provider_handle(manifest)
+            replacement = DiscoveredChannelProvider(
+                manifest=manifest,
+                endpoint_types=tuple(candidate.provider.endpoint_types),
             )
-            transition = self._activate_runtime_provider_generation(
-                candidate,
-                include_configured_endpoints=True,
+            self._replace_discovered_provider(normalized, replacement)
+            self._activate_runtime_provider_handle(candidate)
+            attached: list[str] = []
+            removed_endpoint_ids = sorted(
+                endpoint_id
+                for endpoint_id in previously_attached
+                if self.runtime.get_endpoint_hub(endpoint_id) is None
             )
+            for endpoint_id in sorted(previously_attached - set(removed_endpoint_ids)):
+                result = self.attach_endpoint(endpoint_id)
+                if result.status != RuntimeStatus.OK:
+                    raise RuntimeError(result.text)
+                attached.append(endpoint_id)
         except Exception as exc:
+            for endpoint_id in endpoint_ids:
+                self.runtime.withdraw_endpoint(endpoint_id)
+            self._stop_provider_transports(normalized, reason="provider_reload_failed")
+            self._unload_runtime_provider(normalized)
+            for endpoint_id in endpoint_ids:
+                if self.runtime.get_endpoint_hub(endpoint_id) is not None:
+                    self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
                 text=f"channel provider reload failed: {exc}",
@@ -700,7 +848,9 @@ class ChannelEndpointProviderManager:
             {
                 "provider_id": normalized,
                 "reloaded": True,
-                **transition,
+                "restored_endpoint_ids": attached,
+                "removed_endpoint_ids": removed_endpoint_ids,
+                "transport_stop_errors": stop_errors,
             },
         )
 
@@ -735,12 +885,10 @@ class ChannelEndpointProviderManager:
             "errors": errors,
         }
 
-    def _build_runtime_provider_generation(
+    def _build_runtime_provider_handle(
         self,
         manifest: RuntimeChannelProviderManifest,
-        *,
-        fingerprint: str,
-    ) -> RuntimeChannelProviderGeneration:
+    ) -> RuntimeChannelProviderHandle:
         provider_id = str(manifest.provider_id or "").strip()
         if not provider_id:
             raise ValueError("provider_id is required")
@@ -754,7 +902,6 @@ class ChannelEndpointProviderManager:
             entrypoint_path,
             root=self.runtime_root,
             provider_id=provider_id,
-            generation=f"{fingerprint[:12]}_{uuid4().hex[:12]}",
         )
         modules_before = set(sys.modules)
         build_context = ChannelProviderBuildContext(
@@ -791,7 +938,7 @@ class ChannelEndpointProviderManager:
                     )
         except Exception:
             _run_cleanup_callbacks(build_context.cleanup_callbacks, runtime=self.runtime)
-            _remove_generation_modules(
+            _remove_provider_modules(
                 tuple(
                     name
                     for name in set(sys.modules) - modules_before
@@ -808,187 +955,178 @@ class ChannelEndpointProviderManager:
                 or _module_loaded_from(name, provider_dir)
             )
         )
-        return RuntimeChannelProviderGeneration(
+        return RuntimeChannelProviderHandle(
             manifest=manifest,
             provider=provider,
-            fingerprint=fingerprint,
             module_names=module_names,
             cleanup_callbacks=build_context.cleanup_callbacks,
             lifecycle_context=build_context,
         )
 
-    def _activate_runtime_provider_generation(
-        self,
-        candidate: RuntimeChannelProviderGeneration,
-        *,
-        include_configured_endpoints: bool,
-    ) -> dict[str, list[str]]:
-        provider_id = candidate.manifest.provider_id
-        old_generation = self.runtime_provider_generations.get(provider_id)
-        old_provider = old_generation.provider if old_generation is not None else None
-        old_types = set(getattr(old_provider, "endpoint_types", ()) or ())
-        candidate_types = set(candidate.provider.endpoint_types)
-        old_endpoints = {
-            endpoint.endpoint.endpoint_id: endpoint
-            for endpoint in self.runtime.list_endpoints()
-            if endpoint.endpoint.channel_kind in old_types
-        }
-        target_records: dict[str, ChannelEndpointModel] = {}
-        for endpoint_id in old_endpoints:
-            record = self.repository.get(endpoint_id)
-            if (
-                record is not None
-                and bool(record.enabled)
-                and record.detached_at is None
-                and record.channel_kind in candidate_types
-            ):
-                target_records[endpoint_id] = record
-        if include_configured_endpoints:
-            for record in self.repository.list_all():
-                if (
-                    record.channel_kind in candidate_types
-                    and bool(record.enabled)
-                    and record.detached_at is None
-                ):
-                    target_records[record.endpoint_id] = record
-        affected_ids = sorted(set(old_endpoints) | set(target_records))
-        self.runtime.begin_provider_reload(affected_ids, provider_id=provider_id)
-        replaced_ids: list[str] = []
-        removed_ids: list[str] = []
-        previous_providers = dict(self.providers)
-        previous_type_map = dict(self.endpoint_type_to_provider)
-        try:
-            lifecycle_context = candidate.lifecycle_context
-            if lifecycle_context is None:
-                raise RuntimeError(
-                    f"provider '{provider_id}' candidate has no lifecycle context"
+    def _provider_endpoint_types(self, provider_id: str) -> tuple[str, ...]:
+        provider = self.providers.get(provider_id)
+        if provider is not None:
+            return tuple(provider.endpoint_types)
+        discovered = self.discovered_runtime_providers.get(provider_id)
+        return discovered.endpoint_types if discovered is not None else ()
+
+    def _provider_hub_ids(self, provider_id: str) -> list[str]:
+        return sorted(
+            hub.endpoint_id
+            for hub in self.runtime.list_endpoint_hubs()
+            if hub.provider_id == provider_id
+        )
+
+    def _register_discovered_provider(self, discovered: DiscoveredChannelProvider) -> None:
+        provider_id = discovered.manifest.provider_id
+        for endpoint_type in discovered.endpoint_types:
+            owner_id = self.endpoint_type_to_provider.get(endpoint_type)
+            if owner_id and owner_id != provider_id:
+                raise ValueError(
+                    f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'"
                 )
-            lifecycle_cleanup = _invoke_provider_lifecycle(
-                candidate.provider,
+        self.discovered_runtime_providers[provider_id] = discovered
+        for endpoint_type in discovered.endpoint_types:
+            self.endpoint_type_to_provider[endpoint_type] = provider_id
+
+    def _replace_discovered_provider(
+        self,
+        provider_id: str,
+        replacement: DiscoveredChannelProvider,
+    ) -> None:
+        old = self.discovered_runtime_providers.get(provider_id)
+        old_types = set(old.endpoint_types if old is not None else ())
+        new_types = set(replacement.endpoint_types)
+        for endpoint_type in old_types - new_types:
+            if self.endpoint_type_to_provider.get(endpoint_type) == provider_id:
+                self.endpoint_type_to_provider.pop(endpoint_type, None)
+        self._register_discovered_provider(replacement)
+        self._ensure_provider_hubs(provider_id, replacement.endpoint_types)
+        for hub in tuple(self.runtime.list_endpoint_hubs()):
+            if hub.provider_id == provider_id and hub.channel_kind not in new_types:
+                self.runtime.remove_endpoint_hub(hub.endpoint_id)
+
+    def _activate_runtime_provider_handle(self, handle: RuntimeChannelProviderHandle) -> None:
+        provider_id = handle.manifest.provider_id
+        context = handle.lifecycle_context
+        if context is None:
+            raise RuntimeError(f"provider '{provider_id}' has no lifecycle context")
+        try:
+            cleanup = _invoke_provider_lifecycle(
+                handle.provider,
                 "attach",
-                lifecycle_context,
+                context,
                 runtime=self.runtime,
             )
-            if callable(lifecycle_cleanup):
-                lifecycle_context.register_cleanup(lifecycle_cleanup)
-            for endpoint_id in sorted(target_records):
-                result = candidate.provider.attach_endpoint(endpoint_id, self.context())
-                if result.status != RuntimeStatus.OK:
-                    raise RuntimeError(
-                        f"provider '{provider_id}' could not attach endpoint "
-                        f"'{endpoint_id}': {result.text or result.status}"
-                    )
-                endpoint = self.runtime.get_endpoint(endpoint_id)
-                if endpoint is None:
-                    raise RuntimeError(
-                        f"provider '{provider_id}' reported attach success without "
-                        f"publishing endpoint '{endpoint_id}'"
-                    )
-                replaced_ids.append(endpoint_id)
-            for endpoint_id in sorted(set(old_endpoints) - set(target_records)):
-                if self.runtime.remove_endpoint(endpoint_id):
-                    removed_ids.append(endpoint_id)
-            self.unregister_provider(provider_id)
-            self.register_provider(candidate.provider)
-            self.runtime_provider_generations[provider_id] = candidate
-            self.runtime_provider_ids.add(provider_id)
-            self.runtime_provider_manifests[provider_id] = candidate.manifest
-            self.runtime_module_names.update(candidate.module_names)
-        except Exception as exc:
-            self.providers.clear()
-            self.providers.update(previous_providers)
-            self.endpoint_type_to_provider.clear()
-            self.endpoint_type_to_provider.update(previous_type_map)
-            rollback_errors: list[str] = []
-            for endpoint_id in reversed(replaced_ids):
-                old_endpoint = old_endpoints.get(endpoint_id)
-                try:
-                    if old_endpoint is None:
-                        self.runtime.remove_endpoint(endpoint_id)
-                    else:
-                        self.runtime.replace_endpoint(old_endpoint, manage_reload=False)
-                except Exception as rollback_exc:
-                    rollback_errors.append(
-                        f"{endpoint_id}: {rollback_exc.__class__.__name__}: {rollback_exc}"
-                    )
-            for endpoint_id in removed_ids:
-                old_endpoint = old_endpoints.get(endpoint_id)
-                if old_endpoint is not None:
-                    try:
-                        self.runtime.replace_endpoint(old_endpoint, manage_reload=False)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(
-                            f"{endpoint_id}: {rollback_exc.__class__.__name__}: {rollback_exc}"
-                        )
-            _dispose_runtime_provider_generation(candidate, runtime=self.runtime)
-            if rollback_errors:
-                rollback_reason = "; ".join(rollback_errors)
-                for endpoint_id in affected_ids:
-                    self.runtime.fail_endpoint_reload(endpoint_id, rollback_reason)
-                raise RuntimeError(
-                    f"provider '{provider_id}' reload failed and rollback was incomplete: "
-                    f"{rollback_reason}"
-                ) from exc
-            self.runtime.complete_provider_reload(sorted(old_endpoints))
-            for endpoint_id in sorted(set(affected_ids) - set(old_endpoints)):
-                self.runtime.mark_endpoint_detached(
-                    endpoint_id,
-                    reason=f"provider_reload_rolled_back: {exc}",
-                )
+            if callable(cleanup):
+                context.register_cleanup(cleanup)
+            handle.attached = True
+            self.register_provider(handle.provider)
+            self.runtime_provider_handles[provider_id] = handle
+        except Exception:
+            _dispose_runtime_provider_handle(handle, runtime=self.runtime)
             raise
-        if old_generation is not None:
-            _dispose_runtime_provider_generation(old_generation, runtime=self.runtime)
-            self.runtime_module_names.difference_update(old_generation.module_names)
-        self.runtime.complete_provider_reload(sorted(target_records))
-        for endpoint_id in removed_ids:
-            self.runtime.mark_endpoint_detached(
-                endpoint_id,
-                reason="provider_endpoint_type_removed",
-            )
-        return {
-            "hydrated_endpoint_ids": sorted(set(target_records) - set(old_endpoints)),
-            "restored_endpoint_ids": sorted(set(target_records) & set(old_endpoints)),
-            "removed_endpoint_ids": removed_ids,
-        }
 
-    def _deactivate_runtime_provider_generation(self, provider_id: str, *, reason: str) -> None:
-        generation = self.runtime_provider_generations.get(provider_id)
-        if generation is None:
-            return
-        endpoint_types = set(generation.provider.endpoint_types)
-        endpoint_ids = sorted(
-            endpoint.endpoint.endpoint_id
-            for endpoint in self.runtime.list_endpoints()
-            if endpoint.endpoint.channel_kind in endpoint_types
-        )
-        self.runtime.begin_provider_reload(endpoint_ids, provider_id=provider_id)
-        for endpoint_id in endpoint_ids:
-            self.runtime.remove_endpoint(endpoint_id)
+    def _ensure_provider_loaded(self, provider_id: str) -> ChannelProvider:
+        provider = self.providers.get(provider_id)
+        if provider is not None:
+            return provider
+        discovered = self.discovered_runtime_providers.get(provider_id)
+        if discovered is None:
+            raise RuntimeError(f"channel provider is not physically available: {provider_id}")
+        handle = self._build_runtime_provider_handle(discovered.manifest)
+        if tuple(handle.provider.endpoint_types) != discovered.endpoint_types:
+            _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+            raise RuntimeError(
+                f"provider '{provider_id}' endpoint contract changed; run provider reload"
+            )
+        self._activate_runtime_provider_handle(handle)
+        return handle.provider
+
+    def _stop_provider_transports(self, provider_id: str, *, reason: str) -> tuple[list[str], list[str]]:
+        stopped: list[str] = []
+        errors: list[str] = []
+        for endpoint_id in self._provider_hub_ids(provider_id):
+            self.runtime.withdraw_endpoint(endpoint_id)
+            self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
+            try:
+                if self.runtime.remove_endpoint(endpoint_id):
+                    stopped.append(endpoint_id)
+                self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
+            except Exception as exc:
+                self.runtime.endpoint_registry.unregister(endpoint_id)
+                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+                errors.append(f"{endpoint_id}: {exc}")
+        return stopped, errors
+
+    def _unload_runtime_provider(self, provider_id: str) -> list[str]:
+        handle = self.runtime_provider_handles.pop(provider_id, None)
+        if handle is None:
+            return []
         self.unregister_provider(provider_id)
-        self.runtime_provider_generations.pop(provider_id, None)
-        self.runtime_provider_ids.discard(provider_id)
-        self.runtime_provider_manifests.pop(provider_id, None)
-        self.runtime_module_names.difference_update(generation.module_names)
-        _dispose_runtime_provider_generation(generation, runtime=self.runtime)
+        discovered = self.discovered_runtime_providers.get(provider_id)
+        if discovered is not None:
+            for endpoint_type in discovered.endpoint_types:
+                self.endpoint_type_to_provider[endpoint_type] = provider_id
+        return _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+
+    def _unload_provider_if_idle(self, provider_id: str) -> None:
+        if provider_id not in self.runtime_provider_handles:
+            return
+        if any(
+            self.runtime.get_endpoint(endpoint_id) is not None
+            for endpoint_id in self._provider_hub_ids(provider_id)
+        ):
+            return
+        errors = self._unload_runtime_provider(provider_id)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def _remove_discovered_provider(self, provider_id: str, *, reason: str) -> None:
+        discovered = self.discovered_runtime_providers.get(provider_id)
+        if discovered is None:
+            return
+        endpoint_ids = self._provider_hub_ids(provider_id)
         for endpoint_id in endpoint_ids:
-            self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
+            self.runtime.withdraw_endpoint(endpoint_id)
+        _stopped, stop_errors = self._stop_provider_transports(provider_id, reason=reason)
+        unload_errors = self._unload_runtime_provider(provider_id)
+        for endpoint_type in discovered.endpoint_types:
+            if self.endpoint_type_to_provider.get(endpoint_type) == provider_id:
+                self.endpoint_type_to_provider.pop(endpoint_type, None)
+        self.discovered_runtime_providers.pop(provider_id, None)
+        for endpoint_id in endpoint_ids:
+            self.runtime.remove_endpoint_hub(endpoint_id)
+        lifecycle_errors = stop_errors + unload_errors
+        if lifecycle_errors:
+            raise RuntimeError("; ".join(lifecycle_errors))
 
     def _clear_runtime_providers(self) -> None:
-        for provider_id in sorted(self.runtime_provider_ids):
-            self._deactivate_runtime_provider_generation(
-                provider_id,
-                reason="provider_manager_clear",
-            )
+        for provider_id in sorted(tuple(self.discovered_runtime_providers)):
+            self._remove_discovered_provider(provider_id, reason="provider_manager_clear")
 
-    def _load_runtime_provider_manifest(self, manifest: RuntimeChannelProviderManifest) -> None:
-        candidate = self._build_runtime_provider_generation(
-            manifest,
-            fingerprint=_runtime_provider_source_fingerprint(manifest),
-        )
-        self._activate_runtime_provider_generation(
-            candidate,
-            include_configured_endpoints=True,
-        )
+    async def stop_async(self) -> None:
+        errors: list[str] = []
+        for hub in self.runtime.list_endpoint_hubs():
+            try:
+                self.runtime.withdraw_endpoint(hub.endpoint_id)
+            except Exception as exc:
+                errors.append(
+                    f"withdraw {hub.endpoint_id}: {exc.__class__.__name__}: {exc}"
+                )
+        try:
+            await self.runtime.stop_async()
+        except Exception as exc:
+            errors.append(f"transports: {exc.__class__.__name__}: {exc}")
+        for provider_id in sorted(tuple(self.runtime_provider_handles)):
+            handle = self.runtime_provider_handles.pop(provider_id)
+            self.unregister_provider(provider_id)
+            discovered = self.discovered_runtime_providers.get(provider_id)
+            if discovered is not None:
+                for endpoint_type in discovered.endpoint_types:
+                    self.endpoint_type_to_provider[endpoint_type] = provider_id
+            errors.extend(await _dispose_runtime_provider_handle_async(handle))
+        self.shutdown_errors = errors
 
 
 def build_default_channel_provider_manager(
@@ -1029,10 +1167,23 @@ def _iter_runtime_provider_manifest_paths(providers_dir: Path) -> tuple[Path, ..
     if root_manifest.is_file():
         paths.append(root_manifest)
     for item in sorted(providers_dir.iterdir(), key=lambda path: path.name):
+        if _is_provider_archive_directory(item.name):
+            continue
         manifest_path = item / CHANNEL_PROVIDER_MANIFEST_FILENAME
         if item.is_dir() and manifest_path.is_file():
             paths.append(manifest_path)
     return tuple(paths)
+
+
+def _is_provider_archive_directory(name: str) -> bool:
+    normalized = str(name or "").lower()
+    return (
+        normalized.startswith(".")
+        or ".bak" in normalized
+        or ".backup" in normalized
+        or "-backup-" in normalized
+        or ".packaged-backup-" in normalized
+    )
 
 
 def _read_runtime_provider_manifest(manifest_path: Path) -> RuntimeChannelProviderManifest:
@@ -1081,15 +1232,10 @@ def _runtime_provider_module_name(
     *,
     root: Path,
     provider_id: str,
-    generation: str = "default",
 ) -> str:
     provider_stem = re.sub(r"[^0-9A-Za-z_]+", "_", provider_id)
     module_stem = re.sub(r"[^0-9A-Za-z_]+", "_", entrypoint_path.stem)
-    generation_stem = re.sub(r"[^0-9A-Za-z_]+", "_", generation)
-    return (
-        f"_pal_runtime_channel_provider_{provider_stem}_{generation_stem}."
-        f"{module_stem}"
-    )
+    return f"_pal_runtime_channel_provider_{provider_stem}.{module_stem}"
 
 
 def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType:
@@ -1124,42 +1270,6 @@ def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType
             sys.modules.pop(package_name, None)
         raise
     return module
-
-
-_PROVIDER_FINGERPRINT_IGNORED_NAMES = {
-    ".git",
-    "__pycache__",
-    "build",
-    "dist",
-    ".pal-provider-install.json",
-    ".desktop-avatar-install.json",
-}
-
-
-def _runtime_provider_source_fingerprint(
-    manifest: RuntimeChannelProviderManifest,
-) -> str:
-    provider_dir = Path(manifest.filesystem_path).resolve()
-    digest = hashlib.sha256()
-    for path in sorted(
-        (item for item in provider_dir.rglob("*") if item.is_file()),
-        key=lambda item: item.relative_to(provider_dir).as_posix(),
-    ):
-        relative = path.relative_to(provider_dir)
-        if any(
-            part in _PROVIDER_FINGERPRINT_IGNORED_NAMES or part.endswith(".egg-info")
-            for part in relative.parts
-        ):
-            continue
-        if path.suffix in {".pyc", ".pyo"} or any(
-            part.startswith(".tmp") or ".bak" in part for part in relative.parts
-        ):
-            continue
-        digest.update(relative.as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def _resolve_provider_awaitable(value: Any, *, runtime: ChannelRuntime) -> Any:
@@ -1207,39 +1317,85 @@ def _run_cleanup_callbacks(
     callbacks: list[Callable[[], Any]],
     *,
     runtime: ChannelRuntime,
-) -> None:
+) -> list[str]:
+    errors: list[str] = []
     while callbacks:
         callback = callbacks.pop()
         try:
             _resolve_provider_awaitable(callback(), runtime=runtime)
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"cleanup: {exc.__class__.__name__}: {exc}")
+    return errors
 
 
-def _remove_generation_modules(module_names: tuple[str, ...]) -> None:
+def _remove_provider_modules(module_names: tuple[str, ...]) -> None:
     importlib.invalidate_caches()
     for module_name in sorted(set(module_names), key=lambda item: (-item.count("."), item)):
         sys.modules.pop(module_name, None)
 
 
-def _dispose_runtime_provider_generation(
-    generation: RuntimeChannelProviderGeneration,
+def _dispose_runtime_provider_handle(
+    handle: RuntimeChannelProviderHandle,
     *,
     runtime: ChannelRuntime,
-) -> None:
-    context = generation.lifecycle_context
-    if context is not None:
+) -> list[str]:
+    errors: list[str] = []
+    context = handle.lifecycle_context
+    if context is not None and handle.attached:
         try:
             _invoke_provider_lifecycle(
-                generation.provider,
+                handle.provider,
                 "detach",
                 context,
                 runtime=runtime,
             )
-        except Exception:
-            pass
-    _run_cleanup_callbacks(generation.cleanup_callbacks, runtime=runtime)
-    _remove_generation_modules(generation.module_names)
+        except Exception as exc:
+            errors.append(f"detach: {exc.__class__.__name__}: {exc}")
+    errors.extend(_run_cleanup_callbacks(handle.cleanup_callbacks, runtime=runtime))
+    _remove_provider_modules(handle.module_names)
+    handle.attached = False
+    return errors
+
+
+async def _resolve_provider_awaitable_async(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _dispose_runtime_provider_handle_async(
+    handle: RuntimeChannelProviderHandle,
+) -> list[str]:
+    errors: list[str] = []
+    context = handle.lifecycle_context
+    if context is not None and handle.attached:
+        hook = getattr(handle.provider, "detach", None)
+        if callable(hook):
+            try:
+                signature = inspect.signature(hook)
+                accepts_context = any(
+                    parameter.kind
+                    in {
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.VAR_POSITIONAL,
+                    }
+                    for parameter in signature.parameters.values()
+                )
+                await _resolve_provider_awaitable_async(
+                    hook(context) if accepts_context else hook()
+                )
+            except Exception as exc:
+                errors.append(f"detach: {exc.__class__.__name__}: {exc}")
+    while handle.cleanup_callbacks:
+        callback = handle.cleanup_callbacks.pop()
+        try:
+            await _resolve_provider_awaitable_async(callback())
+        except Exception as exc:
+            errors.append(f"cleanup: {exc.__class__.__name__}: {exc}")
+    _remove_provider_modules(handle.module_names)
+    handle.attached = False
+    return errors
 
 
 def channel_endpoint_data_root(runtime_root: Path, endpoint_id: str) -> Path:
@@ -1378,7 +1534,7 @@ def commit_channel_endpoint_attach(
     endpoint: ChannelEndpointBase,
     context: ChannelProviderContext,
 ) -> ChannelEndpointModel:
-    """Publish a started endpoint, then atomically commit its attached row."""
+    """Install a transport and commit its row behind the manager's hub fence."""
     old_endpoint = context.runtime.get_endpoint(endpoint_id)
     context.runtime.replace_endpoint(endpoint)
     try:
@@ -1398,7 +1554,7 @@ def commit_channel_endpoint_detach(
     endpoint_id: str,
     context: ChannelProviderContext,
 ) -> tuple[ChannelEndpointModel | None, ChannelEndpointBase | None, bool]:
-    """Stop the runtime endpoint before committing its detached row."""
+    """Stop the transport and commit its row after capability withdrawal."""
     endpoint = context.runtime.get_endpoint(endpoint_id)
     original_record = context.repository.get(endpoint_id)
     removed = context.runtime.remove_endpoint(endpoint_id) if endpoint is not None else False
@@ -1448,6 +1604,30 @@ def _provider_missing_for_endpoint(endpoint_id: str) -> IntrospectionResult:
         text="channel provider not found",
         structured={"endpoint_id": endpoint_id},
         llm_text="channel provider not found",
+    )
+
+
+def _provider_lifecycle_error(
+    action: str,
+    provider_id: str,
+    endpoint_id: str,
+    exc: Exception,
+) -> IntrospectionResult:
+    payload = {
+        "action": action,
+        "provider_id": provider_id,
+        "endpoint_id": endpoint_id,
+        "error_type": exc.__class__.__name__,
+        "error": str(exc),
+    }
+    return IntrospectionResult(
+        status=RuntimeStatus.ERROR,
+        text=f"channel endpoint {action} failed: {exc}",
+        structured=payload,
+        llm_text=render_titled_structured_for_llm(
+            f"Channel endpoint {action} failed",
+            payload,
+        ),
     )
 
 

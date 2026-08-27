@@ -33,8 +33,8 @@ from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
 from pal.channel.ingress import ChannelIngressCompiler
 
 
-ENDPOINT_RELOAD_BUFFER_MAX_ITEMS = 1024
-ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES = 4 * 1024 * 1024
+ENDPOINT_HUB_BUFFER_MAX_ITEMS = 1024
+ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -59,30 +59,40 @@ class BufferedChannelDelivery:
 
 
 @dataclass
-class ChannelEndpointSlot:
-    """Stable delivery ownership that survives endpoint generation swaps."""
+class ChannelEndpointHub:
+    """Physical endpoint identity and backpressure buffer.
+
+    A hub exists for as long as its provider is physically discoverable.  The
+    transport instance and the LLM-visible capability may come and go without
+    destroying this delivery boundary.
+    """
 
     endpoint_id: str
     provider_id: str = ""
-    state: str = "active"
-    reload_epoch: int = 0
+    channel_kind: str = ""
+    binding_key: str = ""
+    physical_present: bool = True
+    published: bool = False
+    publish_when_ready: bool = False
+    state: str = "discovered"
+    transition_epoch: int = 0
     next_sequence: int = 1
     buffer: deque[BufferedChannelDelivery] = field(default_factory=deque)
     buffered_text_bytes: int = 0
     overflowed: bool = False
-    last_reload_error: str = ""
+    last_error: str = ""
 
-    def begin_reload(self, *, provider_id: str = "") -> int:
-        if self.state != "reloading":
-            self.reload_epoch += 1
+    def begin_transition(self, *, provider_id: str = "") -> int:
+        if self.state != "transitioning":
+            self.transition_epoch += 1
         self.provider_id = str(provider_id or self.provider_id)
-        self.state = "reloading"
+        self.state = "transitioning"
         self.overflowed = (
-            len(self.buffer) > ENDPOINT_RELOAD_BUFFER_MAX_ITEMS
-            or self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
+            len(self.buffer) > ENDPOINT_HUB_BUFFER_MAX_ITEMS
+            or self.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES
         )
-        self.last_reload_error = ""
-        return self.reload_epoch
+        self.last_error = ""
+        return self.transition_epoch
 
     def append(
         self,
@@ -102,8 +112,8 @@ class ChannelEndpointSlot:
         self.buffer.append(delivery)
         self.buffered_text_bytes += delivery.text_bytes
         if (
-            len(self.buffer) > ENDPOINT_RELOAD_BUFFER_MAX_ITEMS
-            or self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
+            len(self.buffer) > ENDPOINT_HUB_BUFFER_MAX_ITEMS
+            or self.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES
         ):
             self.overflowed = True
 
@@ -152,7 +162,7 @@ class ChannelEndpointSlot:
                 )
                 self.buffer[-1] = replacement
                 self.buffered_text_bytes += replacement.text_bytes
-                if self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES:
+                if self.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES:
                     self.overflowed = True
                 return True
         if delivery.delivery_kind == "status" and previous.delivery_kind == "status":
@@ -178,7 +188,7 @@ class ChannelEndpointSlot:
                 )
                 self.buffer[-1] = replacement
                 self.buffered_text_bytes += replacement.text_bytes
-                if self.buffered_text_bytes > ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES:
+                if self.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES:
                     self.overflowed = True
                 return True
         return False
@@ -224,7 +234,9 @@ class ChannelRuntime(ChannelRuntimePort):
     attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_update_outbox: deque[QueuedStreamUpdate] = field(default_factory=deque)
-    delivery_slots: dict[str, ChannelEndpointSlot] = field(default_factory=dict)
+    endpoint_hubs: dict[str, ChannelEndpointHub] = field(default_factory=dict)
+    recovery_endpoint_id: str = ""
+    on_hub_visibility_changed: Callable[[], None] | None = None
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
     ingress_compiler: ChannelIngressCompiler | None = None
@@ -241,25 +253,170 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
         self._bind_endpoint_ready(endpoint)
-        slot = self._slot(endpoint.endpoint.endpoint_id)
+        hub = self.ensure_endpoint_hub(
+            endpoint.endpoint.endpoint_id,
+            channel_kind=endpoint.endpoint.channel_kind,
+            binding_key=endpoint.endpoint.binding_key,
+        )
         self.endpoint_registry.register(endpoint)
-        if slot.state == "detached":
-            slot.state = "active"
-            slot.last_reload_error = ""
+        if hub.state in {"discovered", "detached", "degraded"}:
+            hub.state = "attached"
+            hub.last_error = ""
 
     def _bind_endpoint_ready(self, endpoint: ChannelEndpointBase) -> None:
         endpoint_id = endpoint.endpoint.endpoint_id
         endpoint.on_ready = lambda: self._notify_endpoint_ready(endpoint_id)
 
-    def _slot(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointSlot:
+    def ensure_endpoint_hub(
+        self,
+        endpoint_id: str,
+        *,
+        provider_id: str = "",
+        channel_kind: str = "",
+        binding_key: str = "",
+    ) -> ChannelEndpointHub:
         normalized = str(endpoint_id or "").strip()
-        slot = self.delivery_slots.get(normalized)
-        if slot is None:
-            slot = ChannelEndpointSlot(endpoint_id=normalized, provider_id=str(provider_id or ""))
-            self.delivery_slots[normalized] = slot
-        elif provider_id:
-            slot.provider_id = str(provider_id)
-        return slot
+        if not normalized:
+            raise ValueError("channel endpoint_id is required")
+        hub = self.endpoint_hubs.get(normalized)
+        if hub is None:
+            hub = ChannelEndpointHub(
+                endpoint_id=normalized,
+                provider_id=str(provider_id or ""),
+                channel_kind=str(channel_kind or ""),
+                binding_key=str(binding_key or ""),
+            )
+            self.endpoint_hubs[normalized] = hub
+        else:
+            if provider_id:
+                hub.provider_id = str(provider_id)
+            if channel_kind:
+                hub.channel_kind = str(channel_kind)
+            if binding_key:
+                hub.binding_key = str(binding_key)
+            hub.physical_present = True
+        return hub
+
+    def get_endpoint_hub(self, endpoint_id: str) -> ChannelEndpointHub | None:
+        return self.endpoint_hubs.get(str(endpoint_id or "").strip())
+
+    def list_endpoint_hubs(self, *, published_only: bool = False) -> tuple[ChannelEndpointHub, ...]:
+        hubs = self.endpoint_hubs.values()
+        if published_only:
+            hubs = (hub for hub in hubs if hub.published)
+        return tuple(sorted(hubs, key=lambda hub: (hub.channel_kind, hub.endpoint_id)))
+
+    def set_endpoint_published(self, endpoint_id: str, published: bool) -> None:
+        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+        if hub is None:
+            raise KeyError(endpoint_id)
+        hub.published = bool(published)
+
+    def set_recovery_endpoint(self, endpoint_id: str) -> None:
+        self.recovery_endpoint_id = str(endpoint_id or "").strip()
+
+    def publish_endpoint(self, endpoint_id: str) -> bool:
+        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+        if hub is None or hub.state != "attached" or not hub.physical_present:
+            return False
+        changed = not hub.published
+        hub.published = True
+        if changed and self.on_hub_visibility_changed is not None:
+            self.on_hub_visibility_changed()
+        return True
+
+    def publish_endpoint_when_ready(self, endpoint_id: str) -> bool:
+        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+        if hub is None:
+            return False
+        hub.publish_when_ready = True
+        if hub.state == "attached":
+            return self.publish_endpoint(endpoint_id)
+        return False
+
+    def withdraw_endpoint(self, endpoint_id: str) -> bool:
+        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+        if hub is None:
+            return False
+        changed = hub.published
+        hub.published = False
+        hub.publish_when_ready = False
+        if changed and self.on_hub_visibility_changed is not None:
+            self.on_hub_visibility_changed()
+        return changed
+
+    def remove_endpoint_hub(self, endpoint_id: str) -> bool:
+        """Delete physical topology and reroute its backlog to recovery."""
+        normalized = str(endpoint_id or "").strip()
+        hub = self.endpoint_hubs.get(normalized)
+        if hub is None or normalized == self.recovery_endpoint_id:
+            return False
+        self.withdraw_endpoint(normalized)
+        hub.physical_present = False
+        hub.state = "removing"
+        recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
+        if recovery is not None:
+            while hub.buffer:
+                delivery = hub.popleft()
+                recovery.append(
+                    delivery.delivery_kind,
+                    delivery.delivery_id,
+                    self._reroute_item(delivery.item, recovery, original_endpoint_id=normalized),
+                )
+            if recovery.state == "attached":
+                self._flush_hub(recovery)
+        self.endpoint_hubs.pop(normalized, None)
+        self._notify_ready()
+        return True
+
+    def _hub(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointHub:
+        normalized = str(endpoint_id or "").strip()
+        hub = self.endpoint_hubs.get(normalized)
+        if hub is not None:
+            if provider_id:
+                hub.provider_id = str(provider_id)
+            return hub
+        recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
+        if recovery is not None:
+            return recovery
+        return self.ensure_endpoint_hub(normalized, provider_id=provider_id)
+
+    def _delivery_hub(self, endpoint_id: str) -> ChannelEndpointHub:
+        normalized = str(endpoint_id or "").strip()
+        hub = self.endpoint_hubs.get(normalized)
+        if hub is not None:
+            return hub
+        recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
+        if recovery is not None:
+            return recovery
+        # Legacy adapters may emit to routes that are not provider-managed.
+        # Do not pollute physical topology for that compatibility path.
+        return ChannelEndpointHub(
+            endpoint_id=normalized,
+            physical_present=False,
+            state="attached",
+        )
+
+    def _reroute_item(
+        self,
+        item: QueuedReply | QueuedStreamUpdate | QueuedStatus | QueuedAttachment,
+        hub: ChannelEndpointHub,
+        *,
+        original_endpoint_id: str,
+    ) -> QueuedReply | QueuedStreamUpdate | QueuedStatus | QueuedAttachment:
+        endpoint = self.get_endpoint(hub.endpoint_id)
+        if endpoint is None:
+            return item
+        handle = endpoint.build_response_handle(
+            reply_target=endpoint.derive_default_reply_target()
+        )
+        if isinstance(item, QueuedReply):
+            notice = (
+                f"[Delivery rerouted from removed channel {original_endpoint_id!r} "
+                "to the recovery socket.]\n\n"
+            )
+            return replace(item, response_handle=handle, endpoint=endpoint.endpoint, text=f"{notice}{item.text}")
+        return replace(item, response_handle=handle, endpoint=endpoint.endpoint)
 
     def _call_on_owner_loop(
         self,
@@ -283,32 +440,32 @@ class ChannelRuntime(ChannelRuntimePort):
         future = asyncio.run_coroutine_threadsafe(_invoke(), loop)
         return future.result(timeout=timeout_seconds)
 
-    def begin_endpoint_reload(self, endpoint_id: str, *, provider_id: str = "") -> int:
+    def begin_endpoint_transition(self, endpoint_id: str, *, provider_id: str = "") -> int:
         return int(
             self._call_on_owner_loop(
-                lambda: self._begin_endpoint_reload(endpoint_id, provider_id=provider_id)
+                lambda: self._begin_endpoint_transition(endpoint_id, provider_id=provider_id)
             )
         )
 
-    def _begin_endpoint_reload(self, endpoint_id: str, *, provider_id: str = "") -> int:
-        slot = self._slot(endpoint_id, provider_id=provider_id)
-        epoch = slot.begin_reload(provider_id=provider_id)
+    def _begin_endpoint_transition(self, endpoint_id: str, *, provider_id: str = "") -> int:
+        hub = self._hub(endpoint_id, provider_id=provider_id)
+        epoch = hub.begin_transition(provider_id=provider_id)
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is not None:
-            self._absorb_endpoint_outboxes(slot, endpoint)
+            self._absorb_endpoint_outboxes(hub, endpoint)
         return epoch
 
     def bind_endpoint_provider(self, endpoint_id: str, provider_id: str) -> None:
         self._call_on_owner_loop(
-            lambda: self._slot(endpoint_id, provider_id=provider_id)
+            lambda: self.ensure_endpoint_hub(endpoint_id, provider_id=provider_id)
         )
 
-    def begin_provider_reload(self, endpoint_ids: tuple[str, ...] | list[str], *, provider_id: str) -> dict[str, int]:
+    def begin_provider_transition(self, endpoint_ids: tuple[str, ...] | list[str], *, provider_id: str) -> dict[str, int]:
         normalized_ids = tuple(endpoint_ids)
         return dict(
             self._call_on_owner_loop(
                 lambda: {
-                    endpoint_id: self._begin_endpoint_reload(
+                    endpoint_id: self._begin_endpoint_transition(
                         endpoint_id,
                         provider_id=provider_id,
                     )
@@ -317,66 +474,69 @@ class ChannelRuntime(ChannelRuntimePort):
             )
         )
 
-    def complete_endpoint_reload(self, endpoint_id: str) -> None:
-        self._call_on_owner_loop(lambda: self._complete_endpoint_reload(endpoint_id))
+    def complete_endpoint_transition(self, endpoint_id: str) -> None:
+        self._call_on_owner_loop(lambda: self._complete_endpoint_transition(endpoint_id))
 
-    def _complete_endpoint_reload(self, endpoint_id: str) -> None:
-        slot = self._slot(endpoint_id)
-        slot.state = "draining"
-        slot.last_reload_error = ""
-        self._flush_slot(slot)
+    def _complete_endpoint_transition(self, endpoint_id: str) -> None:
+        hub = self._hub(endpoint_id)
+        hub.state = "draining"
+        hub.last_error = ""
+        self._flush_hub(hub)
 
-    def complete_provider_reload(self, endpoint_ids: tuple[str, ...] | list[str]) -> None:
+    def complete_provider_transition(self, endpoint_ids: tuple[str, ...] | list[str]) -> None:
         normalized_ids = tuple(endpoint_ids)
 
         def _complete_all() -> None:
             for endpoint_id in normalized_ids:
-                self._complete_endpoint_reload(endpoint_id)
+                self._complete_endpoint_transition(endpoint_id)
 
         self._call_on_owner_loop(_complete_all)
 
-    def fail_endpoint_reload(self, endpoint_id: str, error: str) -> None:
+    def fail_endpoint_transition(self, endpoint_id: str, error: str) -> None:
         def _fail() -> None:
-            slot = self._slot(endpoint_id)
-            slot.last_reload_error = str(error or "provider reload failed")
-            slot.state = "degraded"
+            hub = self._hub(endpoint_id)
+            hub.last_error = str(error or "endpoint transition failed")
+            hub.state = "degraded"
 
         self._call_on_owner_loop(_fail)
 
     def mark_endpoint_detached(self, endpoint_id: str, *, reason: str = "") -> None:
         def _mark_detached() -> None:
-            slot = self._slot(endpoint_id)
-            slot.state = "detached"
-            slot.last_reload_error = str(reason or "")
+            hub = self._hub(endpoint_id)
+            hub.state = "detached"
+            hub.last_error = str(reason or "")
 
         self._call_on_owner_loop(_mark_detached)
 
-    def inspect_delivery_slot(self, endpoint_id: str) -> dict[str, Any]:
-        slot = self.delivery_slots.get(str(endpoint_id or "").strip())
-        if slot is None:
+    def inspect_endpoint_hub(self, endpoint_id: str) -> dict[str, Any]:
+        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+        if hub is None:
             return {
                 "lifecycle_state": "missing",
-                "reload_epoch": 0,
+                "transition_epoch": 0,
                 "buffered_delivery_count": 0,
                 "buffered_text_bytes": 0,
                 "buffer_overflowed": False,
                 "oldest_buffered_seconds": 0.0,
-                "last_reload_error": "",
+                "last_error": "",
             }
         oldest_age = (
-            max(0.0, time.monotonic() - slot.buffer[0].queued_at)
-            if slot.buffer
+            max(0.0, time.monotonic() - hub.buffer[0].queued_at)
+            if hub.buffer
             else 0.0
         )
         return {
-            "lifecycle_state": slot.state,
-            "reload_epoch": slot.reload_epoch,
-            "provider_id": slot.provider_id,
-            "buffered_delivery_count": len(slot.buffer),
-            "buffered_text_bytes": slot.buffered_text_bytes,
-            "buffer_overflowed": slot.overflowed,
+            "lifecycle_state": hub.state,
+            "transition_epoch": hub.transition_epoch,
+            "provider_id": hub.provider_id,
+            "physical_present": hub.physical_present,
+            "published": hub.published,
+            "publish_when_ready": hub.publish_when_ready,
+            "buffered_delivery_count": len(hub.buffer),
+            "buffered_text_bytes": hub.buffered_text_bytes,
+            "buffer_overflowed": hub.overflowed,
             "oldest_buffered_seconds": oldest_age,
-            "last_reload_error": slot.last_reload_error,
+            "last_error": hub.last_error,
         }
 
     async def start_async(self) -> None:
@@ -388,18 +548,27 @@ class ChannelRuntime(ChannelRuntimePort):
                 await starter()
 
     async def stop_async(self) -> None:
+        errors: list[str] = []
         for endpoint in self.list_endpoints():
             stopper = getattr(endpoint, "stop_async", None)
             if callable(stopper):
-                await stopper()
+                try:
+                    await stopper()
+                except Exception as exc:
+                    errors.append(
+                        f"{endpoint.endpoint.endpoint_id}: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
         self._started = False
         self._loop = None
+        if errors:
+            raise RuntimeError("channel endpoint shutdown failed: " + "; ".join(errors))
 
     async def replace_endpoint_async(
         self,
         endpoint: ChannelEndpointBase,
         *,
-        manage_reload: bool = True,
+        manage_transition: bool = True,
     ) -> None:
         old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
         endpoint_id = endpoint.endpoint.endpoint_id
@@ -407,32 +576,45 @@ class ChannelRuntime(ChannelRuntimePort):
             if self._started:
                 self._queue_cached_control_catalog(endpoint)
             return
-        slot = self._slot(endpoint_id)
-        owns_reload = manage_reload and slot.state != "reloading"
-        if owns_reload:
-            self.begin_endpoint_reload(endpoint_id, provider_id=slot.provider_id)
+        hub = self._hub(endpoint_id)
+        owns_transition = manage_transition and hub.state != "transitioning"
+        if owns_transition:
+            self.begin_endpoint_transition(endpoint_id, provider_id=hub.provider_id)
         self._bind_endpoint_ready(endpoint)
         preparer = getattr(endpoint, "prepare_replacement", None)
-        if old_endpoint is not None and callable(preparer):
-            preparation = preparer(old_endpoint)
-            if inspect.isawaitable(preparation):
-                await preparation
+        try:
+            if old_endpoint is not None and callable(preparer):
+                preparation = preparer(old_endpoint)
+                if inspect.isawaitable(preparation):
+                    await preparation
+        except Exception as exc:
+            if owns_transition:
+                hub.last_error = str(exc)
+                hub.state = "attached" if old_endpoint is not None else "degraded"
+                if hub.state == "attached":
+                    self._flush_hub(hub)
+            raise
         if not self._started:
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.endpoint_registry.register(endpoint)
-            if owns_reload:
-                self.complete_endpoint_reload(endpoint_id)
+            if owns_transition:
+                self.complete_endpoint_transition(endpoint_id)
             return
 
         old_stopper = getattr(old_endpoint, "stop_async", None)
         if old_endpoint is not None and callable(old_stopper):
-            await old_stopper()
-            if slot.state == "reloading":
+            try:
+                await old_stopper()
+            except Exception as exc:
+                if owns_transition:
+                    self.fail_endpoint_transition(endpoint_id, str(exc))
+                raise
+            if hub.state == "transitioning":
                 # A transport may return scheduled-but-unconfirmed work to its
                 # local outboxes while stopping. Pull it behind the same fence
                 # before publishing the replacement so later arrivals cannot
                 # overtake it.
-                self._absorb_endpoint_outboxes(slot, old_endpoint)
+                self._absorb_endpoint_outboxes(hub, old_endpoint)
         try:
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
@@ -454,25 +636,25 @@ class ChannelRuntime(ChannelRuntimePort):
                 await old_starter()
                 self._bind_endpoint_ready(old_endpoint)
                 self.endpoint_registry.register(old_endpoint)
-            if owns_reload:
-                slot.last_reload_error = "replacement startup failed"
-                self.complete_endpoint_reload(endpoint_id)
+            if owns_transition:
+                hub.last_error = "replacement startup failed"
+                self.complete_endpoint_transition(endpoint_id)
             raise
         _transfer_endpoint_runtime_state(old_endpoint, endpoint)
         self.endpoint_registry.register(endpoint)
         self._queue_cached_control_catalog(endpoint)
-        if owns_reload:
-            self.complete_endpoint_reload(endpoint_id)
+        if owns_transition:
+            self.complete_endpoint_transition(endpoint_id)
 
     def replace_endpoint(
         self,
         endpoint: ChannelEndpointBase,
         *,
         timeout_seconds: float = 10.0,
-        manage_reload: bool = True,
+        manage_transition: bool = True,
     ) -> None:
         async def _replace() -> None:
-            await self.replace_endpoint_async(endpoint, manage_reload=manage_reload)
+            await self.replace_endpoint_async(endpoint, manage_transition=manage_transition)
 
         loop = self._loop
         if loop is not None and loop.is_running():
@@ -487,10 +669,10 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         if not self._started:
             old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
-            slot = self._slot(endpoint.endpoint.endpoint_id)
-            owns_reload = manage_reload and slot.state != "reloading"
-            if owns_reload:
-                self.begin_endpoint_reload(endpoint.endpoint.endpoint_id)
+            hub = self._hub(endpoint.endpoint.endpoint_id)
+            owns_transition = manage_transition and hub.state != "transitioning"
+            if owns_transition:
+                self.begin_endpoint_transition(endpoint.endpoint.endpoint_id)
             preparer = getattr(endpoint, "prepare_replacement", None)
             if old_endpoint is not None and callable(preparer):
                 preparation = preparer(old_endpoint)
@@ -500,8 +682,8 @@ class ChannelRuntime(ChannelRuntimePort):
                     )
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.register_endpoint(endpoint)
-            if owns_reload:
-                self.complete_endpoint_reload(endpoint.endpoint.endpoint_id)
+            if owns_transition:
+                self.complete_endpoint_transition(endpoint.endpoint.endpoint_id)
             return
         asyncio.run(_replace())
 
@@ -513,9 +695,9 @@ class ChannelRuntime(ChannelRuntimePort):
         if callable(stopper):
             await stopper()
         self.endpoint_registry.unregister(endpoint_id)
-        slot = self.delivery_slots.get(endpoint_id)
-        if slot is not None and slot.state != "reloading":
-            slot.state = "detached"
+        hub = self.endpoint_hubs.get(endpoint_id)
+        if hub is not None and hub.state != "transitioning":
+            hub.state = "detached"
         return True
 
     def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
@@ -534,9 +716,9 @@ class ChannelRuntime(ChannelRuntimePort):
             return bool(future.result(timeout=timeout_seconds))
         if not self._started:
             removed = self.endpoint_registry.unregister(endpoint_id) is not None
-            slot = self.delivery_slots.get(endpoint_id)
-            if removed and slot is not None and slot.state != "reloading":
-                slot.state = "detached"
+            hub = self.endpoint_hubs.get(endpoint_id)
+            if removed and hub is not None and hub.state != "transitioning":
+                hub.state = "detached"
             return removed
         return bool(asyncio.run(_remove()))
 
@@ -601,15 +783,15 @@ class ChannelRuntime(ChannelRuntimePort):
     def sync_endpoints(self) -> None:
         for endpoint in self.list_endpoints():
             endpoint_id = endpoint.endpoint.endpoint_id
-            slot = self._slot(endpoint_id)
+            hub = self._hub(endpoint_id)
             for envelope in endpoint.poll():
                 self.emit(envelope)
-            if slot.state == "reloading":
-                self._absorb_endpoint_outboxes(slot, endpoint)
+            if hub.state == "transitioning":
+                self._absorb_endpoint_outboxes(hub, endpoint)
                 continue
-            if slot.buffer:
-                self._flush_slot(slot)
-                if slot.buffer:
+            if hub.buffer:
+                self._flush_hub(hub)
+                if hub.buffer:
                     continue
             endpoint.flush_status_outbox()
             for event in endpoint.flush_attachment_outbox():
@@ -649,8 +831,8 @@ class ChannelRuntime(ChannelRuntimePort):
         # is handled later by flush_outbox and surfaced as channel diagnostics.
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
-        slot = self._slot(endpoint_id)
-        if endpoint is not None and slot.state == "active":
+        hub = self._delivery_hub(endpoint_id)
+        if endpoint is not None and hub.state == "attached":
             return endpoint.queue_reply(message, response_handle=envelope.response_handle)
         normalized = message if isinstance(message, ChannelMessage) else ChannelMessage(text=str(message or ""))
         reply_id = str(uuid4())
@@ -662,19 +844,25 @@ class ChannelRuntime(ChannelRuntimePort):
             tag=normalized.tag,
             payload=dict(normalized.payload),
         )
-        if slot.state == "active":
+        if hub.endpoint_id != endpoint_id:
+            item = self._reroute_item(item, hub, original_endpoint_id=endpoint_id)
+            hub.append("reply", reply_id, item)
+            self._flush_hub(hub)
+            self._notify_ready()
+            return reply_id
+        if hub.state == "attached":
             self.outbox.append(item)
             self._notify_ready()
             return reply_id
-        slot.append("reply", reply_id, item)
+        hub.append("reply", reply_id, item)
         self._notify_ready()
         return reply_id
 
     def queue_stream_update(self, envelope: TurnDeliveryBinding, update: ChannelStreamUpdate) -> str:
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
-        slot = self._slot(endpoint_id)
-        if endpoint is not None and slot.state == "active":
+        hub = self._delivery_hub(endpoint_id)
+        if endpoint is not None and hub.state == "attached":
             return endpoint.queue_stream_update(update, response_handle=envelope.response_handle)
         update_id = str(uuid4())
         item = QueuedStreamUpdate(
@@ -683,19 +871,25 @@ class ChannelRuntime(ChannelRuntimePort):
             endpoint=envelope.endpoint,
             update=update,
         )
-        if slot.state == "active":
+        if hub.endpoint_id != endpoint_id:
+            item = self._reroute_item(item, hub, original_endpoint_id=endpoint_id)
+            hub.append("stream", update_id, item)
+            self._flush_hub(hub)
+            self._notify_ready()
+            return update_id
+        if hub.state == "attached":
             self.stream_update_outbox.append(item)
             self._notify_ready()
             return update_id
-        slot.append("stream", update_id, item)
+        hub.append("stream", update_id, item)
         self._notify_ready()
         return update_id
 
     def queue_attachment(self, envelope: TurnDeliveryBinding, attachment: AttachmentSpec) -> str:
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
-        slot = self._slot(endpoint_id)
-        if endpoint is not None and slot.state == "active":
+        hub = self._delivery_hub(endpoint_id)
+        if endpoint is not None and hub.state == "attached":
             return endpoint.queue_attachment(attachment, response_handle=envelope.response_handle)
         attachment_id = str(uuid4())
         item = QueuedAttachment(
@@ -704,11 +898,17 @@ class ChannelRuntime(ChannelRuntimePort):
             endpoint=envelope.endpoint,
             attachment=attachment,
         )
-        if slot.state == "active":
+        if hub.endpoint_id != endpoint_id:
+            item = self._reroute_item(item, hub, original_endpoint_id=endpoint_id)
+            hub.append("attachment", attachment_id, item)
+            self._flush_hub(hub)
+            self._notify_ready()
+            return attachment_id
+        if hub.state == "attached":
             self.attachment_outbox.append(item)
             self._notify_ready()
             return attachment_id
-        slot.append("attachment", attachment_id, item)
+        hub.append("attachment", attachment_id, item)
         self._notify_ready()
         return attachment_id
 
@@ -717,11 +917,11 @@ class ChannelRuntime(ChannelRuntimePort):
             if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
                 endpoint.abort_stream(response_handle, reason=reason)
                 break
-        slot = self.delivery_slots.get(str(response_handle.endpoint_id or ""))
-        if slot is not None and slot.buffer:
+        hub = self.endpoint_hubs.get(str(response_handle.endpoint_id or ""))
+        if hub is not None and hub.buffer:
             retained: deque[BufferedChannelDelivery] = deque()
-            while slot.buffer:
-                delivery = slot.popleft()
+            while hub.buffer:
+                delivery = hub.popleft()
                 item = delivery.item
                 if (
                     delivery.delivery_kind == "stream"
@@ -730,8 +930,8 @@ class ChannelRuntime(ChannelRuntimePort):
                 ):
                     continue
                 retained.append(delivery)
-                slot.buffered_text_bytes += delivery.text_bytes
-            slot.buffer = retained
+                hub.buffered_text_bytes += delivery.text_bytes
+            hub.buffer = retained
         if not self.stream_update_outbox:
             return
         remaining: deque[QueuedStreamUpdate] = deque()
@@ -753,8 +953,8 @@ class ChannelRuntime(ChannelRuntimePort):
     ) -> str:
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
-        slot = self._slot(endpoint_id)
-        if endpoint is not None and slot.state == "active":
+        hub = self._delivery_hub(endpoint_id)
+        if endpoint is not None and hub.state == "attached":
             return endpoint.queue_status(
                 kind,
                 response_handle=envelope.response_handle,
@@ -768,11 +968,17 @@ class ChannelRuntime(ChannelRuntimePort):
             kind=str(kind),
             payload=dict(payload or {}),
         )
-        if slot.state == "active":
+        if hub.endpoint_id != endpoint_id:
+            item = self._reroute_item(item, hub, original_endpoint_id=endpoint_id)
+            hub.append("status", status_id, item)
+            self._flush_hub(hub)
+            self._notify_ready()
+            return status_id
+        if hub.state == "attached":
             self.status_outbox.append(item)
             self._notify_ready()
             return status_id
-        slot.append("status", status_id, item)
+        hub.append("status", status_id, item)
         self._notify_ready()
         return status_id
 
@@ -791,8 +997,8 @@ class ChannelRuntime(ChannelRuntimePort):
             return None
         target = dict(reply_target or endpoint.derive_default_reply_target())
         handle = endpoint.build_response_handle(reply_target=target)
-        slot = self._slot(endpoint_id)
-        if slot.state == "active":
+        hub = self._hub(endpoint_id)
+        if hub.state == "attached":
             return endpoint.queue_status(kind, response_handle=handle, payload=dict(payload or {}))
         status_id = str(uuid4())
         item = QueuedStatus(
@@ -802,7 +1008,7 @@ class ChannelRuntime(ChannelRuntimePort):
             kind=str(kind),
             payload=dict(payload or {}),
         )
-        slot.append("status", status_id, item)
+        hub.append("status", status_id, item)
         self._notify_ready()
         return status_id
 
@@ -810,11 +1016,11 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:
             return False
-        slot = self._slot(endpoint_id)
-        if slot.state == "active":
+        hub = self._hub(endpoint_id)
+        if hub.state == "attached":
             endpoint.flush_status_outbox()
         else:
-            self._absorb_endpoint_outboxes(slot, endpoint)
+            self._absorb_endpoint_outboxes(hub, endpoint)
         return True
 
     def _queue_cached_control_catalog(self, endpoint: ChannelEndpointBase) -> None:
@@ -823,12 +1029,12 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         endpoint_id = endpoint.endpoint.endpoint_id
         handle = endpoint.build_response_handle(reply_target=endpoint.derive_default_reply_target())
-        slot = self._slot(endpoint_id)
-        if slot.state == "active":
+        hub = self._hub(endpoint_id)
+        if hub.state == "attached":
             endpoint.queue_status("control_catalog", response_handle=handle, payload=dict(payload))
             return
         status_id = str(uuid4())
-        slot.append(
+        hub.append(
             "status",
             status_id,
             QueuedStatus(
@@ -842,55 +1048,57 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def _absorb_endpoint_outboxes(
         self,
-        slot: ChannelEndpointSlot,
+        hub: ChannelEndpointHub,
         endpoint: ChannelEndpointBase,
     ) -> None:
         # Match the legacy sync order for work that predates the reload fence.
         for item in tuple(endpoint.status_outbox):
-            slot.append("status", item.status_id, item)
+            hub.append("status", item.status_id, item)
         endpoint.status_outbox.clear()
         for item in tuple(endpoint.attachment_outbox):
-            slot.append("attachment", item.attachment_id, item)
+            hub.append("attachment", item.attachment_id, item)
         endpoint.attachment_outbox.clear()
         for item in tuple(endpoint.stream_update_outbox):
-            slot.append("stream", item.update_id, item)
+            hub.append("stream", item.update_id, item)
         endpoint.stream_update_outbox.clear()
         for item in tuple(endpoint.outbox):
-            slot.append("reply", item.reply_id, item)
+            hub.append("reply", item.reply_id, item)
         endpoint.outbox.clear()
 
-    def _flush_slot(self, slot: ChannelEndpointSlot) -> None:
-        if slot.state in {"reloading", "detached", "degraded"}:
+    def _flush_hub(self, hub: ChannelEndpointHub) -> None:
+        if hub.state in {"transitioning", "detached", "degraded", "discovered"}:
             return
-        endpoint = self.get_endpoint(slot.endpoint_id)
+        endpoint = self.get_endpoint(hub.endpoint_id)
         if endpoint is None or not endpoint.attached or not endpoint.enabled:
             return
-        while slot.buffer:
-            delivery = slot.buffer[0]
+        while hub.buffer:
+            delivery = hub.buffer[0]
             try:
                 confirmed = self._deliver_buffered(endpoint, delivery)
             except Exception as exc:
-                slot.last_reload_error = str(exc)
+                hub.last_error = str(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(
                     getattr(exc, "permanent", False)
                 )
-                # A generation swap owns this gap. Keep the head item and wait
-                # for the replacement transport's ready notification.
-                if slot.state == "draining" and not permanent:
+                if hub.endpoint_id == self.recovery_endpoint_id:
+                    permanent = False
+                # The hub owns this lifecycle gap. Keep the head item and wait
+                # for the transport's ready notification.
+                if hub.state == "draining" and not permanent:
                     return
                 self._emit_delivery_failure(
-                    slot,
+                    hub,
                     delivery,
                     exc,
                     permanent=permanent,
                     expected_lifecycle=False,
                 )
                 if permanent:
-                    slot.popleft()
+                    hub.popleft()
                     continue
                 return
-            slot.popleft()
-            slot.last_reload_error = ""
+            hub.popleft()
+            hub.last_error = ""
             if confirmed and delivery.delivery_kind != "status":
                 self.mailbox.put(
                     EventEnvelope(
@@ -899,14 +1107,16 @@ class ChannelRuntime(ChannelRuntimePort):
                         payload={
                             "reply_id": delivery.delivery_id,
                             "delivery_kind": delivery.delivery_kind,
-                            "endpoint_id": slot.endpoint_id,
-                            "provider_id": slot.provider_id,
-                            "reload_epoch": slot.reload_epoch,
+                            "endpoint_id": hub.endpoint_id,
+                            "provider_id": hub.provider_id,
+                            "transition_epoch": hub.transition_epoch,
                         },
                     )
                 )
         if self._replacement_delivery_ready(endpoint):
-            slot.state = "active"
+            hub.state = "attached"
+            if hub.publish_when_ready:
+                self.publish_endpoint(hub.endpoint_id)
 
     def _deliver_buffered(
         self,
@@ -914,6 +1124,17 @@ class ChannelRuntime(ChannelRuntimePort):
         delivery: BufferedChannelDelivery,
     ) -> bool:
         item = delivery.item
+        if endpoint.endpoint.endpoint_id == self.recovery_endpoint_id:
+            sessions = getattr(endpoint, "sessions", None)
+            if isinstance(sessions, dict) and len(sessions) == 1:
+                session_id = str(next(iter(sessions)))
+                item = replace(
+                    item,
+                    response_handle=endpoint.build_response_handle(
+                        reply_target={"session_id": session_id, "request_id": ""}
+                    ),
+                    endpoint=endpoint.endpoint,
+                )
         if isinstance(item, QueuedReply):
             prepared = endpoint.prepare_final_reply(item.response_handle, item.text)
             if prepared is None:
@@ -1006,14 +1227,14 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def _emit_delivery_failure(
         self,
-        slot: ChannelEndpointSlot,
+        hub: ChannelEndpointHub,
         delivery: BufferedChannelDelivery,
         reason: Exception | str,
         *,
         permanent: bool,
         expected_lifecycle: bool,
     ) -> None:
-        endpoint = self.get_endpoint(slot.endpoint_id)
+        endpoint = self.get_endpoint(hub.endpoint_id)
         self.mailbox.put(
             EventEnvelope(
                 event_kind=EventKind.REPLY_FAILED,
@@ -1021,12 +1242,12 @@ class ChannelRuntime(ChannelRuntimePort):
                 payload={
                     "reply_id": delivery.delivery_id,
                     "delivery_kind": delivery.delivery_kind,
-                    "endpoint_id": slot.endpoint_id,
+                    "endpoint_id": hub.endpoint_id,
                     "channel_kind": (
                         endpoint.endpoint.channel_kind if endpoint is not None else ""
                     ),
-                    "provider_id": slot.provider_id,
-                    "reload_epoch": slot.reload_epoch,
+                    "provider_id": hub.provider_id,
+                    "transition_epoch": hub.transition_epoch,
                     "reason": str(reason or "delivery_failed"),
                     "reason_code": getattr(reason, "reason", "delivery_failed"),
                     "permanent": permanent,
@@ -1065,8 +1286,8 @@ class ChannelRuntime(ChannelRuntimePort):
         for item in pending:
             endpoint = self.get_endpoint(item.endpoint.endpoint_id)
             if endpoint is not None:
-                # Replies accepted while a provider generation was between
-                # unload and restore belong to the endpoint queue once it is
+                # Replies accepted while an endpoint was between transports
+                # belong to the endpoint queue once it is
                 # available again.  The legacy adapter registry cannot deliver
                 # provider-owned endpoints.
                 endpoint.queue_reply(
@@ -1170,9 +1391,9 @@ class ChannelRuntime(ChannelRuntimePort):
             self.on_ready()
 
     def _notify_endpoint_ready(self, endpoint_id: str) -> None:
-        slot = self.delivery_slots.get(str(endpoint_id or ""))
-        if slot is not None and slot.state == "draining":
-            self._flush_slot(slot)
+        hub = self.endpoint_hubs.get(str(endpoint_id or ""))
+        if hub is not None and hub.buffer and hub.state in {"attached", "draining"}:
+            self._flush_hub(hub)
         self._notify_ready()
 
 

@@ -43,6 +43,7 @@ class StubRuntimeHandle:
     database: PalV2Database
     core: PalCore
     channel_runtime: ChannelRuntime
+    channel_provider_manager: object
     identity_service: IdentityService
     llm_runtime: LLMRuntime
     memory_service: MemoryService
@@ -57,7 +58,11 @@ class StubRuntimeHandle:
     failure_runtime: FailureRuntime
 
     async def stop_async(self) -> None:
-        await self.channel_runtime.stop_async()
+        provider_stopper = getattr(self.channel_provider_manager, "stop_async", None)
+        if callable(provider_stopper):
+            await provider_stopper()
+        else:
+            await self.channel_runtime.stop_async()
         for handle in tuple(self.core.context.module_registry.modules.values()):
             shutdown_async = getattr(handle, "shutdown_async", None)
             shutdown_sync = getattr(handle, "shutdown_sync", None)
@@ -164,7 +169,7 @@ def compose_runtime(
     plugin_host.bootstrap()
     channel_provider_manager = core.context.require_port("channel:provider_manager")
     channel_provider_manager.plugin_host = plugin_host
-    channel_provider_manager.rescan_providers(attach_enabled_endpoints=True)
+    channel_provider_manager.rescan_providers()
 
     for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "checklist", "plugins", "proactive", "control", "failure"):
         core.publish_module_capabilities(module_id)
@@ -175,6 +180,7 @@ def compose_runtime(
         database=database,
         core=core,
         channel_runtime=channel_runtime,
+        channel_provider_manager=channel_provider_manager,
         identity_service=identity_service,
         llm_runtime=llm_runtime,
         memory_service=memory_service,

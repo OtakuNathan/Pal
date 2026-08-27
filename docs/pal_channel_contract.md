@@ -125,10 +125,10 @@ Provider 至少应表达：
 - `inspect_backlog(endpoint_id, context)`
 - `inspect_health(endpoint_id, context)`
 
-Runtime-root provider 还可以实现 generation 级 `attach(context)` /
+Runtime-root provider 还可以实现代码生命周期级 `attach(context)` /
 `detach(context)`，或在 build context 上调用 `register_cleanup(callback)`。
-这些资源由 manager 以 RAII 方式管理：candidate 失败时逆序清理 candidate，
-提交成功后才清理旧 generation。
+这些资源由 manager 以 RAII 方式管理：加载时建立资源，卸载时逆序清理；
+进程正常 shutdown 也必须经过同一边界。
 
 这些方法返回统一 `IntrospectionResult`，但结果内容由 provider 自己决定。
 
@@ -171,24 +171,32 @@ def build_channel_provider(context):
 `channel_provider_rescan` 的语义是：
 
 - 重新扫描 `runtime_root/channel/providers`
-- 按源码 fingerprint 做完整 diff；unchanged provider 是 no-op
+- 只比较物理新增、删除、enable/disable；不 fingerprint 源码，也不热重载 unchanged provider
+- 新增 provider 先完成 entrypoint/contract 检查，随即为匹配的持久化 row 创建 EndpointHub
 - 新增 provider 自动 attach 已配置的 enabled/attached endpoints
-- changed provider 只原子替换自己的 generation 和 endpoints
-- removed/disabled provider 只从 runtime detach，不改持久化 endpoint 行
-- manifest 或 candidate 加载失败时保留该 provider 的上一 working generation
+- removed/disabled provider 先退出 LLM execution registry，再停 transport、卸载代码
+- 物理删除最后删除 EndpointHub，并把 hub backlog 改投不可 detach 的 recovery socket
+- 持久化 endpoint row 不随 provider 物理删除而删除，provider 回归后可重新发现
+- manifest 解析失败不应把一个已知 provider 误判为物理删除
 - 不替 provider 决定 endpoint 的具体 attach 机制
 
-`channel_reload_provider(provider_id)` 强制对一个 runtime-root provider 执行同样的
-generation 事务；它不接受 endpoint id，也不能 reload core recovery socket。
+`channel_reload_provider(provider_id)` 是显式的 detach → unload → load → attach；
+它不接受 endpoint id，也不能 reload core recovery socket。失败时如实报告，Hub 与
+backlog 保留且 capability 保持撤回，不创建并行代码代次或隐式 rollback runtime。
 `channel_restart_endpoint(endpoint_id)` 只重建一个 endpoint/transport，不重新导入
 provider code。
 
-每个 endpoint id 在 `ChannelRuntime` 中有稳定 delivery slot。provider reload 开始时
-slot 进入 `reloading` 并接管旧 endpoint outbox；reload 期间的新 reply、stream、status
-和 attachment 进入同一有序缓冲。candidate 可投递后 slot 进入 `draining`，按序清空后
-才回到 `active`。1024 items / 4 MiB 是可观测 soft high-water mark；critical delivery
+每个物理 endpoint id 在 `ChannelRuntime` 中有稳定 `EndpointHub`。Hub 是内部
+registry：rescan 成功发现物理 provider 后立即创建，detach 不删除，只有物理删除才销毁。
+Hub 接管旧 endpoint outbox；transport 不可用期间的新 reply、stream、status 和 attachment
+进入同一有序缓冲。新 transport 可投递后 Hub 进入 `draining`，按序清空后才进入
+`attached` 并发布到 LLM execution registry。detach 的顺序相反：先撤 capability，再停
+transport 和卸载最后一个 provider handle。也就是“registry 迟到早退，内部早来晚走”。
+
+1024 items / 4 MiB 是可观测 soft high-water mark；critical delivery
 不会因超过该阈值而被静默丢弃。可合并的 ephemeral status 和相邻纯文本 delta 会被
-coalesce。generation 切换造成的预期 transport gap 不会上升为 Safe Mode failure。
+coalesce。预期 lifecycle gap 不会上升为 Safe Mode failure。队列只保存在进程内；
+跨进程 restart 是明确硬边界，不引入持久化队列或复杂 runtime generation。
 
 ### `EndpointConfig`
 

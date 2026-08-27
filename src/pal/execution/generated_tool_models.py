@@ -280,9 +280,7 @@ ChannelCapabilitiesChannelIntrospectionProviderDetachInput = _strict_model(
 
 ChannelCapabilitiesChannelIntrospectionProviderRescanInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderRescanInput',
-    {
-        'attach_enabled_endpoints': (bool, Field(None, description='Whether to attach enabled endpoints after provider discovery.')),
-    },
+    {},
 )
 
 ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput = _strict_model(

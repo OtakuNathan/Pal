@@ -7,8 +7,8 @@ Owns:
 - active text delivery resolved by configured endpoint id
 - adapter registry for legacy/transport compatibility
 - provider manager for runtime-root channel providers
-- stable per-endpoint delivery slots across provider generations
-- delivery diagnostics for queued replies and reload-buffer pressure
+- stable per-endpoint hubs across transport attach/detach
+- delivery diagnostics for queued replies and hub-buffer pressure
 - channel-neutral interaction status and callback mapping
 
 Does not own:
@@ -70,19 +70,16 @@ Interaction rule:
   - it registers channel providers
   - maps persisted endpoint type keys (`channel_kind`) to providers
   - dispatches attach/detach/endpoint restart and introspection by `endpoint_id`
-  - reloads one runtime-root provider generation by `provider_id`
-  - rescans providers as an added/changed/removed/disabled fingerprint diff
-    without touching plugins or unrelated channel providers
+  - explicitly unloads and reloads one runtime-root provider by `provider_id`
+  - rescans physical provider additions/removals without touching unchanged
+    source, plugins, or unrelated channel providers
 - runtime-root channel providers live under:
   - `runtime_root/channel/providers/<provider_id>/provider.toml`
   - the manifest points at provider-owned Python code, usually `entrypoint = "runtime.py"`
-  - rescan loads that directory as a Python package through `importlib`, so
-    provider-owned modules may use relative imports without entering Pal's wheel
-  - each candidate loads in a unique generation namespace and is published only
-    after its endpoints start successfully; the previous generation remains the
-    rollback target until commit
-  - build code may register reverse-order cleanup callbacks; optional
-    generation `attach`/`detach` hooks have the same RAII lifetime
+  - discovery validates the entrypoint and endpoint contract, then creates the
+    physical endpoint hubs immediately
+  - build code may register reverse-order cleanup callbacks; optional provider
+    `attach`/`detach` hooks share the loaded-code RAII lifetime
 - provider-owned mutable state lives under:
   - `runtime_root/data/channel/<endpoint_id>/`
   - providers choose their private representation inside that directory
@@ -101,14 +98,17 @@ Interaction rule:
 - endpoint nodes do **not** expose `attach/detach`; those are channel-parent
   management actions
 - channel root and the recovery socket endpoint are core runtime components and
-  are not hot-reloaded; every other provider/endpoint implementation is a
-  runtime-root hot-reload boundary
+  cannot be detached
 - `channel_restart_endpoint` refreshes one endpoint connection without evicting
-  provider modules; `channel_reload_provider` atomically reloads one provider;
-  `channel_provider_rescan` discovers the provider-tree diff
-- endpoint delivery slots fence generation changes. They absorb old transport
-  queues, buffer reload-time output, and drain it in order through the committed
-  endpoint. Lifecycle gaps are retryable and do not trigger Safe Mode
+  provider modules; `channel_reload_provider` explicitly performs provider
+  detach/unload/load/attach; `channel_provider_rescan` discovers only physical
+  additions/removals
+- EndpointHub is the internal registry and comes early/leaves late. It owns
+  endpoint identity and ordered backpressure while transports and code are
+  absent. The LLM execution registry comes late/leaves early: detach withdraws
+  capability first; attach publishes only after transport startup and backlog
+  drain. Physical removal reroutes remaining backlog to the recovery socket and
+  deletes the hub. Lifecycle gaps are retryable and do not trigger Safe Mode
 - detachable providers are not imported from `site-packages`; deployment,
   replacement, and removal happen entirely within the selected runtime root
 - only channel-neutral operations are exposed to `Pal/LLM`; provider-specific

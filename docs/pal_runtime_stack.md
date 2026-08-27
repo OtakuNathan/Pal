@@ -151,7 +151,9 @@ channel provider 可以来自 builtin，也可以来自 runtime root：
   runtime.py
 ```
 
-`ChannelEndpointProviderManager` 负责注册、扫描、rescan 和 capability 入口。
+`ChannelEndpointProviderManager` 负责物理 provider 发现、代码 RAII、endpoint hub
+拓扑和 capability 入口。内部 hub registry 早来晚走；LLM execution registry
+迟到早退。
 
 Provider 自己负责：
 

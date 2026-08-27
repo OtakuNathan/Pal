@@ -15,7 +15,7 @@ from pal.channel import ChannelRuntime, register_with_core as register_channel_w
 from pal.channel.ingress import ChannelIngressCompiler
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
-from pal.channel.runtime import ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES
+from pal.channel.runtime import ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES
 from pal.control import (
     ControlAction,
     ControlCommandSpec,
@@ -1361,9 +1361,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             replacement.sent_replies,
             [("queued before reload", dict(self.route.reply_target))],
         )
-        slot = self.channel_runtime.inspect_delivery_slot("socket_main")
-        self.assertEqual(slot["lifecycle_state"], "active")
-        self.assertEqual(slot["buffered_delivery_count"], 0)
+        hub = self.channel_runtime.inspect_endpoint_hub("socket_main")
+        self.assertEqual(hub["lifecycle_state"], "attached")
+        self.assertEqual(hub["buffered_delivery_count"], 0)
         delivered = [
             event
             for event in self.channel_runtime.mailbox.items
@@ -1372,9 +1372,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(delivered), 1)
 
-    async def test_provider_reload_fence_buffers_delivery_until_generation_commit(self) -> None:
+    async def test_endpoint_hub_buffers_delivery_until_transition_completes(self) -> None:
         await self.channel_runtime.start_async()
-        self.channel_runtime.begin_provider_reload(
+        self.channel_runtime.begin_provider_transition(
             ["socket_main"],
             provider_id="socket",
         )
@@ -1393,7 +1393,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(getattr(self.endpoint, "sent_replies", []))
         self.assertEqual(
-            self.channel_runtime.inspect_delivery_slot("socket_main")[
+            self.channel_runtime.inspect_endpoint_hub("socket_main")[
                 "buffered_delivery_count"
             ],
             1,
@@ -1407,11 +1407,11 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.channel_runtime.replace_endpoint_async(
             replacement,
-            manage_reload=False,
+            manage_transition=False,
         )
         self.assertFalse(getattr(replacement, "sent_replies", []))
 
-        self.channel_runtime.complete_provider_reload(["socket_main"])
+        self.channel_runtime.complete_provider_transition(["socket_main"])
 
         self.assertEqual(
             replacement.sent_replies,
@@ -1423,10 +1423,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(
-            self.channel_runtime.inspect_delivery_slot("socket_main")[
+            self.channel_runtime.inspect_endpoint_hub("socket_main")[
                 "lifecycle_state"
             ],
-            "active",
+            "attached",
         )
         failures = [
             event
@@ -1436,7 +1436,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertFalse(failures)
 
-    async def test_provider_reload_commit_from_worker_drains_on_owner_loop(self) -> None:
+    async def test_hub_transition_commit_from_worker_drains_on_owner_loop(self) -> None:
         owner_loop = asyncio.get_running_loop()
 
         class LoopCheckingEndpoint(_StubEndpoint):
@@ -1448,7 +1448,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         await self.channel_runtime.start_async()
         await asyncio.to_thread(
-            self.channel_runtime.begin_provider_reload,
+            self.channel_runtime.begin_provider_transition,
             ["socket_main"],
             provider_id="socket",
         )
@@ -1472,18 +1472,18 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.channel_runtime.replace_endpoint_async(
             replacement,
-            manage_reload=False,
+            manage_transition=False,
         )
 
         await asyncio.to_thread(
-            self.channel_runtime.complete_provider_reload,
+            self.channel_runtime.complete_provider_transition,
             ["socket_main"],
         )
 
         self.assertIs(replacement.delivery_loop, owner_loop)
         self.assertEqual(replacement.sent_replies[0][0], "drain on channel owner")
 
-    def test_reload_buffer_coalesces_ephemeral_updates_and_keeps_critical_overflow(self) -> None:
+    def test_hub_buffer_coalesces_ephemeral_updates_and_keeps_critical_overflow(self) -> None:
         envelope = self._make_channel_envelope(
             turn_id="turn-reload-buffer",
             request_id="req-buffer",
@@ -1492,7 +1492,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             envelope,
             control_scope_key=self.route.control_scope_key,
         )
-        self.channel_runtime.begin_provider_reload(
+        self.channel_runtime.begin_provider_transition(
             ["socket_main"],
             provider_id="socket",
         )
@@ -1517,15 +1517,57 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         reply_id = self.channel_runtime.queue_reply(
             binding,
-            "x" * (ENDPOINT_RELOAD_BUFFER_MAX_TEXT_BYTES + 1),
+            "x" * (ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES + 1),
         )
 
-        slot = self.channel_runtime.delivery_slots["socket_main"]
-        self.assertEqual(len(slot.buffer), 3)
-        self.assertEqual(slot.buffer[0].item.update.text, "hello world")
-        self.assertEqual(slot.buffer[1].item.payload, {"phase": 2})
-        self.assertEqual(slot.buffer[2].delivery_id, reply_id)
-        self.assertTrue(slot.overflowed)
+        hub = self.channel_runtime.endpoint_hubs["socket_main"]
+        self.assertEqual(len(hub.buffer), 3)
+        self.assertEqual(hub.buffer[0].item.update.text, "hello world")
+        self.assertEqual(hub.buffer[1].item.payload, {"phase": 2})
+        self.assertEqual(hub.buffer[2].delivery_id, reply_id)
+        self.assertTrue(hub.overflowed)
+
+    def test_physical_hub_removal_reroutes_backlog_to_recovery_endpoint(self) -> None:
+        recovery = _StubEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_recovery",
+                channel_kind="socket",
+                binding_key="recovery.sock",
+            )
+        )
+        self.channel_runtime.register_endpoint(recovery)
+        self.channel_runtime.set_recovery_endpoint("socket_recovery")
+        self.channel_runtime.begin_endpoint_transition(
+            "socket_main",
+            provider_id="demo",
+        )
+        envelope = self._make_channel_envelope(
+            turn_id="turn-provider-removed",
+            request_id="req-provider-removed",
+        )
+        reply_id = self.channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(
+                envelope,
+                control_scope_key=self.route.control_scope_key,
+            ),
+            "survive physical removal",
+        )
+        self.channel_runtime.endpoint_registry.unregister("socket_main")
+
+        removed = self.channel_runtime.remove_endpoint_hub("socket_main")
+
+        self.assertTrue(removed)
+        self.assertIsNone(self.channel_runtime.get_endpoint_hub("socket_main"))
+        self.assertFalse(self.channel_runtime.get_endpoint_hub("socket_recovery").buffer)
+        self.assertEqual(len(recovery.sent_replies), 1)
+        self.assertIn("rerouted from removed channel", recovery.sent_replies[0][0])
+        self.assertIn("survive physical removal", recovery.sent_replies[0][0])
+        delivered_ids = {
+            event.payload.get("reply_id")
+            for event in self.channel_runtime.mailbox.items
+            if event.event_kind == EventKind.REPLY_DELIVERED
+        }
+        self.assertIn(reply_id, delivered_ids)
 
     async def test_channel_replace_from_running_channel_loop_requires_async_api(self) -> None:
         await self.channel_runtime.start_async()
@@ -1581,9 +1623,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             self.endpoint.sent_replies,
             [("preserve me", dict(self.route.reply_target))],
         )
-        slot = self.channel_runtime.inspect_delivery_slot("socket_main")
-        self.assertEqual(slot["lifecycle_state"], "active")
-        self.assertEqual(slot["buffered_delivery_count"], 0)
+        hub = self.channel_runtime.inspect_endpoint_hub("socket_main")
+        self.assertEqual(hub["lifecycle_state"], "attached")
+        self.assertEqual(hub["buffered_delivery_count"], 0)
 
     async def test_channel_remove_stop_failure_preserves_endpoint(self) -> None:
         class FailingStopEndpoint(_StubEndpoint):

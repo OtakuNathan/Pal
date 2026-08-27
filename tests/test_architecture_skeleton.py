@@ -2888,7 +2888,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 binding_key=str(runtime_root / "pal.sock"),
                 enabled=True,
             )
-            register_channel_with_core(core.context, channel_runtime)
+            register_channel_with_core(
+                core.context,
+                channel_runtime,
+                runtime_root=runtime_root,
+            )
             core.publish_module_capabilities("channel")
 
             descriptor = core.context.capability_registry.descriptors["channel_endpoint_inspect"]
@@ -3154,6 +3158,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key=str(runtime_root / "runtime.sock"))
             )
             channel_runtime.register_endpoint(endpoint)
+            channel_runtime.publish_endpoint_when_ready("socket_main")
             register_channel_with_core(core.context, channel_runtime)
 
             published = core.publish_module_capabilities("channel")

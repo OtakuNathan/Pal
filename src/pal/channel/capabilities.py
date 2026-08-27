@@ -150,38 +150,43 @@ class ChannelIntrospectionProvider:
                 repository=self.repository,
                 runtime_root=self.runtime_root or Path.cwd(),
             )
+        self.runtime.on_hub_visibility_changed = self._republish_capabilities
 
     def iter_endpoints(self) -> list[ChannelEndpointTarget]:
-        targets: dict[str, ChannelEndpointTarget] = {}
-        try:
-            records = self.repository.list_all()
-        except Exception:
-            records = []
-        for record in records:
-            runtime_endpoint = self.runtime.get_endpoint(record.endpoint_id)
-            attached = runtime_endpoint.attached if runtime_endpoint is not None else record.detached_at is None
-            targets[record.endpoint_id] = ChannelEndpointTarget(
-                endpoint_id=record.endpoint_id,
-                channel_kind=record.channel_kind,
-                binding_key=record.binding_key,
-                enabled=record.enabled,
-                attached=attached,
-                model=record,
-                runtime_endpoint=runtime_endpoint,
+        return self._targets_from_hubs(published_only=True)
+
+    def iter_internal_endpoints(self) -> list[ChannelEndpointTarget]:
+        """Management topology; unlike capability hydration, includes detached hubs."""
+        return self._targets_from_hubs(published_only=False)
+
+    def _targets_from_hubs(self, *, published_only: bool) -> list[ChannelEndpointTarget]:
+        targets: list[ChannelEndpointTarget] = []
+        for hub in self.runtime.list_endpoint_hubs(published_only=published_only):
+            try:
+                record = self.repository.get(hub.endpoint_id)
+            except Exception:
+                record = None
+            runtime_endpoint = self.runtime.get_endpoint(hub.endpoint_id)
+            targets.append(
+                ChannelEndpointTarget(
+                    endpoint_id=hub.endpoint_id,
+                    channel_kind=(
+                        record.channel_kind if record is not None else hub.channel_kind
+                    ),
+                    binding_key=(
+                        record.binding_key if record is not None else hub.binding_key
+                    ),
+                    enabled=(
+                        bool(runtime_endpoint.enabled)
+                        if runtime_endpoint is not None
+                        else bool(record.enabled) if record is not None else False
+                    ),
+                    attached=runtime_endpoint is not None and bool(runtime_endpoint.attached),
+                    model=record,
+                    runtime_endpoint=runtime_endpoint,
+                )
             )
-        for endpoint in self.runtime.list_endpoints():
-            endpoint_id = endpoint.endpoint.endpoint_id
-            if endpoint_id in targets:
-                continue
-            targets[endpoint_id] = ChannelEndpointTarget(
-                endpoint_id=endpoint.endpoint.endpoint_id,
-                channel_kind=endpoint.endpoint.channel_kind,
-                binding_key=endpoint.endpoint.binding_key,
-                enabled=endpoint.enabled,
-                attached=endpoint.attached,
-                runtime_endpoint=endpoint,
-            )
-        return list(sorted(targets.values(), key=lambda item: (item.channel_kind, item.endpoint_id)))
+        return targets
 
     def resolve_endpoint_id(self, endpoint: ChannelEndpointTarget) -> str:
         return endpoint.endpoint_id
@@ -454,23 +459,22 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         guidance=ToolGuidance(
-            purpose="Diff runtime-root channel providers and add, atomically reload, or runtime-detach only affected providers.",
-            use_when="Channel provider source, manifest, or configuration changed. New providers were installed. Discovering newly available endpoints.",
-            do_not_use_when="Restarting one specific endpoint (use channel_restart_endpoint) or forcing one known provider reload (use channel_reload_provider).",
-            failure_next_steps="If scan_errors occur, previous provider generation is preserved. Check provider configuration and rescan again.",
+            purpose="Discover physical provider additions and removals in the runtime root.",
+            use_when="A provider was installed, removed, enabled, or disabled.",
+            do_not_use_when="Provider source changed in place (use channel_reload_provider) or one transport is stuck (use channel_restart_endpoint).",
+            failure_next_steps="A malformed manifest is reported without treating an already-known provider as physically removed. Fix it and rescan.",
         ),
         aliases=("channel_provider_rescan",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
         execution=INDIRECT_CONTROL,
     )
     def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
-        attach_enabled = bool(call.args.get("attach_enabled_endpoints", False))
-        payload = self._manager().rescan_providers(attach_enabled_endpoints=attach_enabled)
+        _ = call
+        payload = self._manager().rescan_providers()
         payload["republished_capability_names"] = self._republish_capabilities()
         status = RuntimeStatus.ERROR if payload.get("scan_errors") else RuntimeStatus.OK
         text = (
-            "channel provider rescan completed with errors; failed providers kept "
-            "their previous generation"
+            "channel provider rescan completed with errors"
             if status == RuntimeStatus.ERROR
             else "channel providers rescanned"
         )
@@ -487,10 +491,10 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="reload_provider",
         guidance=ToolGuidance(
-            purpose="Atomically reload one runtime-root channel provider generation and rebuild only its endpoints.",
-            use_when="A known provider's source, manifest, or provider-wide resources need an explicit fresh generation.",
+            purpose="Explicitly detach, unload, load, and reattach one runtime-root provider.",
+            use_when="A known provider's source, manifest, or provider-wide resources changed in place.",
             do_not_use_when="Only one endpoint connection is stuck (use channel_restart_endpoint). Discovering provider additions/removals/changes (use channel_provider_rescan).",
-            failure_next_steps="The previous provider generation is restored on failure. Fix the reported provider error and retry.",
+            failure_next_steps="The endpoint hubs retain queued delivery while code stays unloaded and capabilities remain withdrawn. Fix the provider and retry.",
         ),
         aliases=("channel_reload_provider",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
