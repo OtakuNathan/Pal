@@ -16,6 +16,9 @@ class _OutboundQueue:
     def put_nowait(self, item: dict[str, object]) -> None:
         self.items.append(item)
 
+    def empty(self) -> bool:
+        return not self.items
+
 
 class _Session:
     def __init__(self, session_id: str) -> None:
@@ -23,6 +26,9 @@ class _Session:
         self.request_ids: set[str] = set()
         self.outbound = _OutboundQueue()
         self.closed = False
+        self.ready_notified = True
+        self.inflight_payload = None
+        self.delivery_ack_waiters: dict[str, object] = {}
 
 
 class SocketInteractionProjectionTests(unittest.TestCase):
