@@ -98,8 +98,19 @@ def _context(
     repository: _FakeRepository,
     runtime_root: Path,
 ) -> ChannelProviderContext:
+    runtime = ChannelRuntime()
+    # Provider lifecycle hooks run behind manager discovery in production.
+    # Reproduce that physical lifecycle boundary before invoking the provider
+    # directly in these contract tests.
+    for record in repository.rows.values():
+        runtime.ensure_endpoint_hub(
+            record.endpoint_id,
+            provider_id=provider.provider_id,
+            channel_kind=record.channel_kind,
+            binding_key=record.binding_key,
+        )
     return ChannelProviderContext(
-        runtime=ChannelRuntime(),
+        runtime=runtime,
         repository=repository,  # type: ignore[arg-type]
         runtime_root=runtime_root,
     )

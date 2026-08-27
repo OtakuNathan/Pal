@@ -91,8 +91,18 @@ def _context(
     repository: _FakeRepository,
     runtime_root: Path,
 ) -> ChannelProviderContext:
+    runtime = ChannelRuntime()
+    # Direct provider tests must model the rescan step that creates the
+    # physical EndpointHub before any transport lifecycle action is legal.
+    for record in repository.rows.values():
+        runtime.ensure_endpoint_hub(
+            record.endpoint_id,
+            provider_id=provider.provider_id,
+            channel_kind=record.channel_kind,
+            binding_key=record.binding_key,
+        )
     return ChannelProviderContext(
-        runtime=ChannelRuntime(),
+        runtime=runtime,
         repository=repository,  # type: ignore[arg-type]
         runtime_root=runtime_root,
     )
