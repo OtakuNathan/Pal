@@ -141,7 +141,8 @@ class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
         async def read_message(_reader):
             return next(events)
 
-        session = SocketSession(object(), _FakeWriter(), read_message, lambda: "r1")
+        writer = _FakeWriter()
+        session = SocketSession(object(), writer, read_message, lambda: "r1")
 
         async def collect_notification() -> list[dict[str, object]]:
             result = []
@@ -157,6 +158,7 @@ class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(notification[0]["text"], "Task finished.")
         self.assertEqual(response[0]["text"], "reply")
+        self.assertIn(b"session_ready", writer.written)
 
     async def test_demuxes_requests_and_tool_call_finish_is_not_terminal(self) -> None:
         events = iter(

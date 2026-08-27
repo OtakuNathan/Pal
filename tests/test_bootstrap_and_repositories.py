@@ -3396,6 +3396,33 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_socket_transport_backlog_waits_for_explicit_session_readiness(self) -> None:
+        self.endpoint.accept_transport_backlog((
+            {
+                "type": "text_delta",
+                "request_id": "task-notification:recovery:test",
+                "text": "preserve",
+            },
+        ))
+        await self.endpoint.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(read_socket_message(reader), timeout=0.1)
+
+            writer.write(
+                pack_socket_message(
+                    {"type": "session_ready", "delivery_ack_v1": True}
+                )
+            )
+            await writer.drain()
+            frame = await asyncio.wait_for(read_socket_message(reader), timeout=1.0)
+            self.assertEqual(frame["text"], "preserve")
+            self.assertTrue(frame.get("_pal_delivery_id"))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
     async def test_socket_endpoint_replays_frames_not_acked_before_disconnect(self) -> None:
         await self.endpoint.start_async()
         reader, writer = await asyncio.open_unix_connection(str(self.socket_path))

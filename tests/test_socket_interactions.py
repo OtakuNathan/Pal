@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
+from types import SimpleNamespace
 
-from pal.channel.contracts import ChannelStreamUpdate, EndpointConfig, ResponseHandle
-from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
+from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
+from pal.channel.endpoints.socket_endpoint import (
+    SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS,
+    SocketChannelEndpoint,
+)
 from pal.channel.runtime import ChannelRuntime
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
 from pal.shared import ChannelStreamUpdateKind, EventKind
@@ -12,12 +17,16 @@ from pal.shared import ChannelStreamUpdateKind, EventKind
 class _OutboundQueue:
     def __init__(self) -> None:
         self.items: list[dict[str, object]] = []
+        self.maxsize = 0
 
     def put_nowait(self, item: dict[str, object]) -> None:
         self.items.append(item)
 
     def empty(self) -> bool:
         return not self.items
+
+    def qsize(self) -> int:
+        return len(self.items)
 
 
 class _Session:
@@ -208,6 +217,60 @@ class SocketInteractionProjectionTests(unittest.TestCase):
             self.session.outbound.items[0]["type"],
             "interactive_update",
         )
+
+    def test_socket_frame_groups_apply_backpressure_atomically(self) -> None:
+        session = SimpleNamespace(outbound=asyncio.Queue(maxsize=2))
+        frames = ({"type": "text_delta"}, {"type": "done"})
+
+        self.endpoint._enqueue_frames(session, frames)
+
+        with self.assertRaisesRegex(ChannelDeliveryError, "queue is full"):
+            self.endpoint._enqueue_frames(session, ({"type": "text_delta"},))
+        self.assertEqual(session.outbound.qsize(), 2)
+
+    def test_stream_backpressure_does_not_advance_delivery_tracking(self) -> None:
+        outbound: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=1)
+        outbound.put_nowait({"type": "occupied"})
+        self.session.outbound = outbound
+        update = ChannelStreamUpdate(
+            kind=ChannelStreamUpdateKind.TEXT_DELTA,
+            text="once",
+        )
+
+        with self.assertRaisesRegex(ChannelDeliveryError, "queue is full"):
+            self.endpoint.send_stream_update(self.response_handle, update)
+
+        self.assertNotIn(id(self.response_handle), self.endpoint._stream_sessions)
+        outbound.get_nowait()
+        self.endpoint.send_stream_update(self.response_handle, update)
+        self.assertEqual(
+            self.endpoint._stream_sessions[id(self.response_handle)]["text"],
+            "once",
+        )
+
+    def test_transport_overflow_remains_owned_by_hub(self) -> None:
+        endpoint = SocketChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_bounded",
+                channel_kind="socket",
+                binding_key="bounded.sock",
+            )
+        )
+        runtime = ChannelRuntime()
+        runtime.register_endpoint(endpoint)
+        hub = runtime.get_endpoint_hub("socket_bounded")
+        hub.transport_backlog.extend(
+            {"type": "text_delta", "text": str(index)}
+            for index in range(SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS + 1)
+        )
+
+        runtime._flush_hub(hub)
+
+        self.assertEqual(
+            len(endpoint._unacknowledged_frames),
+            SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS,
+        )
+        self.assertEqual(len(hub.transport_backlog), 1)
 
     def test_other_socket_session_cannot_answer_interaction(self) -> None:
         self.endpoint.send_status(

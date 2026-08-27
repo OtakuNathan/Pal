@@ -430,7 +430,12 @@ class ChannelRuntime(ChannelRuntimePort):
                 delivery.delivery_id,
                 self._reroute_item(delivery.item, recovery, original_endpoint_id=normalized),
             )
-        recovery.transport_backlog.extend(hub.transport_backlog)
+        recovery.transport_backlog.extend(
+            self._reroute_transport_backlog(
+                tuple(hub.transport_backlog),
+                original_endpoint_id=normalized,
+            )
+        )
         hub.transport_backlog.clear()
         recovery_endpoint = self.get_endpoint(self.recovery_endpoint_id)
         if recovery_endpoint is not None:
@@ -441,6 +446,40 @@ class ChannelRuntime(ChannelRuntimePort):
         self.endpoint_hubs.pop(normalized, None)
         self._notify_ready()
         return True
+
+    @staticmethod
+    def _reroute_transport_backlog(
+        frames: tuple[dict[str, Any], ...],
+        *,
+        original_endpoint_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Turn orphaned provider frames into recovery-socket notifications."""
+
+        request_targets: dict[str, str] = {}
+        announced: set[str] = set()
+        rerouted: list[dict[str, Any]] = []
+        for source in frames:
+            frame = dict(source)
+            original_request_id = str(frame.get("request_id") or "<empty-request>")
+            request_id = request_targets.setdefault(
+                original_request_id,
+                f"task-notification:recovery:{uuid4().hex}",
+            )
+            frame["request_id"] = request_id
+            frame["_pal_recovery_from"] = original_endpoint_id
+            frame_type = str(frame.get("type") or "")
+            if frame_type == "tagged_message" and str(frame.get("text") or ""):
+                frame["type"] = "text_delta"
+                frame_type = "text_delta"
+            if frame_type == "text_delta" and request_id not in announced:
+                notice = (
+                    f"[Delivery rerouted from removed channel "
+                    f"{original_endpoint_id!r} to the recovery socket.]\n\n"
+                )
+                frame["text"] = f"{notice}{str(frame.get('text') or '')}"
+                announced.add(request_id)
+            rerouted.append(frame)
+        return tuple(rerouted)
 
     def _require_hub(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointHub:
         normalized = str(endpoint_id or "").strip()
@@ -1235,8 +1274,16 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         acceptor = getattr(endpoint, "accept_transport_backlog", None)
         if callable(acceptor):
-            acceptor(tuple(hub.transport_backlog))
-            hub.transport_backlog.clear()
+            accepted = acceptor(tuple(hub.transport_backlog))
+            if accepted is None:
+                hub.transport_backlog.clear()
+                return
+            accepted_count = max(
+                0,
+                min(int(accepted), len(hub.transport_backlog)),
+            )
+            for _ in range(accepted_count):
+                hub.transport_backlog.popleft()
             return
         pending = getattr(endpoint, "_unacknowledged_frames", None)
         if not isinstance(pending, deque):
@@ -1255,6 +1302,7 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint = self.get_endpoint(hub.endpoint_id)
         if endpoint is None or not endpoint.attached or not endpoint.enabled:
             return
+        self._restore_endpoint_transport_backlog(hub, endpoint)
         while hub.buffer:
             delivery = hub.buffer[0]
             try:
@@ -1582,7 +1630,7 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def _notify_endpoint_ready(self, endpoint_id: str) -> None:
         hub = self.endpoint_hubs.get(str(endpoint_id or ""))
-        if hub is not None and hub.buffer and hub.state in {
+        if hub is not None and (hub.buffer or hub.transport_backlog) and hub.state in {
             EndpointHubState.ATTACHED,
             EndpointHubState.DRAINING,
         }:

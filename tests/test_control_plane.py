@@ -1554,6 +1554,23 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             "survive physical removal",
         )
         self.channel_runtime.endpoint_registry.unregister("socket_main")
+        origin_hub = self.channel_runtime.get_endpoint_hub("socket_main")
+        origin_hub.transport_backlog.extend(
+            (
+                {
+                    "type": "text_delta",
+                    "request_id": "provider-request",
+                    "text": "raw transport reply",
+                    "_pal_delivery_id": "transport-1",
+                },
+                {
+                    "type": "done",
+                    "request_id": "provider-request",
+                    "finish_reason": "stop",
+                    "_pal_delivery_id": "transport-2",
+                },
+            )
+        )
 
         removed = self.channel_runtime.remove_endpoint_hub("socket_main")
 
@@ -1569,6 +1586,24 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             if event.event_kind == EventKind.REPLY_DELIVERED
         }
         self.assertIn(reply_id, delivered_ids)
+        recovery_transport = list(
+            self.channel_runtime.get_endpoint_hub("socket_recovery").transport_backlog
+        )
+        self.assertEqual([frame["_pal_delivery_id"] for frame in recovery_transport], [
+            "transport-1",
+            "transport-2",
+        ])
+        self.assertTrue(
+            all(
+                str(frame["request_id"]).startswith("task-notification:recovery:")
+                for frame in recovery_transport
+            )
+        )
+        self.assertEqual(
+            {frame["request_id"] for frame in recovery_transport},
+            {recovery_transport[0]["request_id"]},
+        )
+        self.assertIn("rerouted from removed channel", recovery_transport[0]["text"])
 
     async def test_channel_replace_from_running_channel_loop_requires_async_api(self) -> None:
         await self.channel_runtime.start_async()

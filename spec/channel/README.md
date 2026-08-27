@@ -6,6 +6,12 @@ capability publication, ordered in-process backlog ownership, transport
 acknowledgement before replacement/removal, physical removal, and delivery-only
 fallback to the socket. Unacknowledged transport work returns to the hub before
 detach, so a later attach can replay it without a transport generation object.
+The model's `buffer` count abstracts both typed hub deliveries and raw frames
+that have returned from a stopped transport; physical removal rewrites the
+latter as recovery-socket notifications before transferring ownership.
+Likewise, the model's `delivered` counter advances only on transport ownership
+acknowledgement. It is intentionally stricter than the runtime diagnostic
+`EventKind.REPLY_DELIVERED`, which records endpoint acceptance.
 
 `EndpointHubImplementationReducer.tla` is generated from the executable Python
 reducer in `pal.channel.lifecycle`. Each relation row contains the lifecycle

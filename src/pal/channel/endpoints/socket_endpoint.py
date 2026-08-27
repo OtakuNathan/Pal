@@ -23,6 +23,9 @@ from pal.shared import EventKind, ChannelStreamUpdateKind
 
 logger = logging.getLogger(__name__)
 
+SOCKET_SESSION_OUTBOUND_MAX_ITEMS = 1024
+SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS = 1024
+
 
 class SocketSessionClosed(ChannelDeliveryError):
     def __init__(
@@ -38,16 +41,19 @@ class SocketSessionClosed(ChannelDeliveryError):
 class _SocketSession:
     session_id: str
     writer: asyncio.StreamWriter
-    outbound: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    outbound: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=SOCKET_SESSION_OUTBOUND_MAX_ITEMS)
+    )
     request_ids: set[str] = field(default_factory=set)
     closed: bool = False
     writer_task: asyncio.Task[None] | None = None
-    ready_task: asyncio.Task[None] | None = None
     delivery_ack_enabled: bool = False
     delivery_ack_waiters: dict[str, asyncio.Future[None]] = field(default_factory=dict)
     ready_notified: bool = False
     inflight_payload: dict[str, Any] | None = None
     outbound_recovered: bool = False
+
+
 def _stream_payload(response_handle: ResponseHandle, update: ChannelStreamUpdate) -> dict[str, Any]:
     payload_type = str(update.kind)
     if update.kind == ChannelStreamUpdateKind.DONE:
@@ -134,9 +140,6 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             if session.writer_task is not None:
                 session.writer_task.cancel()
                 session_tasks.append(session.writer_task)
-            if session.ready_task is not None:
-                session.ready_task.cancel()
-                session_tasks.append(session.ready_task)
             session.writer.close()
         client_tasks = [
             task
@@ -203,7 +206,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         if not self.socket_path.exists():
             return
         if await self._socket_in_use():
-                raise RuntimeError(f"socket already in use: {self.socket_path}")
+            raise RuntimeError(f"socket already in use: {self.socket_path}")
         os.unlink(self.socket_path)
 
     async def _socket_in_use(self) -> bool:
@@ -224,7 +227,6 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session_id = str(uuid4())
         session = _SocketSession(session_id=session_id, writer=writer)
         session.writer_task = asyncio.create_task(self._writer_loop(session))
-        session.ready_task = asyncio.create_task(self._mark_legacy_session_ready(session))
         self.sessions[session_id] = session
         logger.info("socket session %s connected (%d active)", session_id, len(self.sessions))
         try:
@@ -278,9 +280,6 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             if session.writer_task is not None:
                 session.writer_task.cancel()
                 await asyncio.gather(session.writer_task, return_exceptions=True)
-            if session.ready_task is not None:
-                session.ready_task.cancel()
-                await asyncio.gather(session.ready_task, return_exceptions=True)
             self._recover_session_outbound(session)
             await self._close_writer_async(writer)
             if client_task is not None:
@@ -311,28 +310,43 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         if self.on_ready is not None:
             self.on_ready()
 
-    async def _mark_legacy_session_ready(self, session: _SocketSession) -> None:
-        await asyncio.sleep(0.05)
-        if (
-            not session.ready_notified
-            and not session.closed
-            and self.sessions.get(session.session_id) is session
-        ):
-            self._mark_session_ready(session)
-
-    def accept_transport_backlog(self, frames: tuple[dict[str, Any], ...]) -> None:
-        self._unacknowledged_frames.extend(dict(frame) for frame in frames)
+    def accept_transport_backlog(self, frames: tuple[dict[str, Any], ...]) -> int:
         ready_sessions = [
             session
             for session in self.sessions.values()
             if session.ready_notified and not session.closed
         ]
-        if len(ready_sessions) == 1:
-            self._drain_replay_frames_to(ready_sessions[0])
+        replay_session = ready_sessions[0] if len(ready_sessions) == 1 else None
+        if replay_session is not None:
+            self._drain_replay_frames_to(replay_session)
+        accepted = 0
+        for frame in frames:
+            if len(self._unacknowledged_frames) >= SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS:
+                break
+            self._unacknowledged_frames.append(dict(frame))
+            accepted += 1
+            if replay_session is not None:
+                self._drain_replay_frames_to(replay_session)
+        return accepted
 
     def _drain_replay_frames_to(self, session: _SocketSession) -> None:
-        while self._unacknowledged_frames:
+        while self._unacknowledged_frames and not session.outbound.full():
             session.outbound.put_nowait(self._unacknowledged_frames.popleft())
+
+    @staticmethod
+    def _enqueue_frames(
+        session: _SocketSession,
+        frames: tuple[dict[str, Any], ...],
+    ) -> None:
+        available = session.outbound.maxsize - session.outbound.qsize()
+        if session.outbound.maxsize > 0 and available < len(frames):
+            raise ChannelDeliveryError(
+                "socket delivery queue is full",
+                permanent=False,
+                reason="transport_backpressure",
+            )
+        for frame in frames:
+            session.outbound.put_nowait(frame)
 
     def _recover_session_outbound(self, session: _SocketSession) -> None:
         if session.outbound_recovered:
@@ -392,6 +406,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     if delivery_id:
                         session.delivery_ack_waiters.pop(delivery_id, None)
                     session.outbound.task_done()
+                    if not session.closed:
+                        self._drain_replay_frames_to(session)
                     if self.on_ready is not None:
                         self.on_ready()
         except (asyncio.CancelledError, ConnectionError, OSError, SocketSessionClosed):
@@ -418,9 +434,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
-        session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
+        frames = [{"type": "text_delta", "request_id": request_id, "text": text}]
         if not bool(response_handle.reply_target.get("_pal_turn_continues")):
-            session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
+            frames.append({"type": "done", "request_id": request_id, "finish_reason": "stop"})
+        self._enqueue_frames(session, tuple(frames))
 
     def open_or_update_interaction(
         self,
@@ -505,8 +522,9 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 )
             if projected_row:
                 rows.append(projected_row)
-        session.outbound.put_nowait(
-            {
+        self._enqueue_frames(
+            session,
+            ({
                 "type": kind,
                 "request_id": request_id,
                 "interaction": {
@@ -516,14 +534,11 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     "buttons": rows,
                     "expires_at": spec.expires_at,
                 },
-            }
-        )
-        session.outbound.put_nowait(
-            {
+            }, {
                 "type": "done",
                 "request_id": request_id,
                 "finish_reason": "stop",
-            }
+            }),
         )
 
     def _accept_interaction_result(
@@ -553,13 +568,14 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 button_token,
             )
         if result is None:
-            session.outbound.put_nowait(
-                {
+            self._enqueue_frames(
+                session,
+                ({
                     "type": "error",
                     "request_id": request_id,
                     "error_text": "interaction is unavailable or the selection is invalid",
                     "finish_reason": "error",
-                }
+                },),
             )
             return
         self.emit_interaction_result(
@@ -594,24 +610,26 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         session = self._require_session(response_handle)
         if update.kind == ChannelStreamUpdateKind.PROGRESS:
-            session.outbound.put_nowait(_stream_payload(response_handle, update))
+            self._enqueue_frames(session, (_stream_payload(response_handle, update),))
             return
         if update.kind == ChannelStreamUpdateKind.MESSAGE:
             # Generic socket clients receive the required text fallback. A
             # specialized socket-backed endpoint may override this method and
             # project the tagged message into its own wire protocol.
-            session.outbound.put_nowait(
-                _stream_payload(
+            self._enqueue_frames(
+                session,
+                (_stream_payload(
                     response_handle,
                     ChannelStreamUpdate(
                         kind=ChannelStreamUpdateKind.PROGRESS,
                         text=(update.message.text if update.message is not None else update.text),
                     ),
-                )
+                ),),
             )
             return
         stream_session = self._stream_sessions.get(id(response_handle)) or {}
         prior_text = str(stream_session.get("text") or "")
+        frames: list[dict[str, Any]] = []
         if (
             update.kind == ChannelStreamUpdateKind.DONE
             and update.text
@@ -619,7 +637,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         ):
             missing = update.text[len(prior_text):]
             if missing:
-                session.outbound.put_nowait(
+                frames.append(
                     _stream_payload(
                         response_handle,
                         ChannelStreamUpdate(
@@ -628,9 +646,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                         ),
                     )
                 )
+        frames.append(_stream_payload(response_handle, update))
+        self._enqueue_frames(session, tuple(frames))
         super().send_stream_update(response_handle, update)
         self._mark_stream_update_queued(response_handle, update)
-        session.outbound.put_nowait(_stream_payload(response_handle, update))
         if update.kind == ChannelStreamUpdateKind.TEXT_DELTA:
             self.mark_stream_text_delivered(response_handle, update)
         if update.kind in {
@@ -642,15 +661,16 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
-        session.outbound.put_nowait(
-            {
+        self._enqueue_frames(
+            session,
+            ({
                 "type": "attachment",
                 "request_id": request_id,
                 "path": attachment.path,
                 "file_name": attachment.file_name,
                 "caption": attachment.caption,
                 "mime_type": attachment.mime_type,
-            }
+            },),
         )
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
@@ -660,8 +680,13 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         with contextlib.suppress(SocketSessionClosed):
             session = self._require_session(response_handle)
             request_id = str(response_handle.reply_target.get("request_id") or "")
-            session.outbound.put_nowait({"type": "llm_error", "request_id": request_id, "error_text": str(reason)})
-            session.outbound.put_nowait({"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)})
+            self._enqueue_frames(
+                session,
+                (
+                    {"type": "llm_error", "request_id": request_id, "error_text": str(reason)},
+                    {"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)},
+                ),
+            )
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
         stream_key = self._stream_key(response_handle)

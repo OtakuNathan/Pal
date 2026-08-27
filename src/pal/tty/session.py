@@ -75,13 +75,7 @@ class SocketSession:
 
     async def _write(self, payload: dict[str, Any]) -> None:
         try:
-            if not self._delivery_ack_advertised:
-                self.writer.write(
-                    self.pack_message(
-                        {"type": "session_ready", "delivery_ack_v1": True}
-                    )
-                )
-                self._delivery_ack_advertised = True
+            self._advertise_delivery_ack()
             self.writer.write(self.pack_message(payload))
             await self.writer.drain()
         except (ConnectionError, OSError) as exc:
@@ -117,6 +111,7 @@ class SocketSession:
             yield payload
 
     def _ensure_reader(self) -> None:
+        self._advertise_delivery_ack()
         if self._reader_task is None or self._reader_task.done():
             self._reader_task = asyncio.create_task(
                 self._reader_loop(),
@@ -128,17 +123,17 @@ class SocketSession:
             while True:
                 payload = await self._read()
                 delivery_id = str(payload.get("_pal_delivery_id") or "")
-                if delivery_id:
-                    await self._write_delivery_ack(delivery_id)
                 request_id = str(payload.get("request_id") or "")
                 if request_id.startswith("task-notification:"):
                     await self._notifications.put(payload)
-                    continue
-                queue = self._response_queues.setdefault(
-                    request_id,
-                    asyncio.Queue(),
-                )
-                await queue.put(payload)
+                else:
+                    queue = self._response_queues.setdefault(
+                        request_id,
+                        asyncio.Queue(),
+                    )
+                    await queue.put(payload)
+                if delivery_id:
+                    await self._write_delivery_ack(delivery_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -157,6 +152,16 @@ class SocketSession:
             await self.writer.drain()
         except (ConnectionError, OSError) as exc:
             raise SocketDisconnected(f"socket acknowledgement failed: {exc}") from exc
+
+    def _advertise_delivery_ack(self) -> None:
+        if self._delivery_ack_advertised:
+            return
+        self.writer.write(
+            self.pack_message(
+                {"type": "session_ready", "delivery_ack_v1": True}
+            )
+        )
+        self._delivery_ack_advertised = True
 
     @staticmethod
     def _raise_reader_error(payload: dict[str, Any]) -> None:
