@@ -811,10 +811,20 @@ class ChannelIntrospectionProvider:
         handle = context.module_registry.get(self.module_id)
         if handle is None:
             return []
-        context.execution_runtime.unmount_subtree(handle)
-        handle.mounted_subtree = None
-        context.execution_runtime.hydrate_module_handle(handle)
-        published = context.execution_runtime.mount_subtree(handle)
+        previous_subtree = handle.mounted_subtree
+        try:
+            handle.mounted_subtree = None
+            context.execution_runtime.hydrate_module_handle(handle)
+            # mount_subtree compiles and swaps one immutable registry
+            # generation under its lock. Keeping the previous subtree mounted
+            # until this call succeeds avoids a transient empty capability
+            # registry during channel publication changes.
+            published = context.execution_runtime.mount_subtree(handle)
+        except Exception:
+            handle.mounted_subtree = previous_subtree
+            raise
+        if previous_subtree is not None:
+            previous_subtree.mounted = False
         handle.published_capabilities = published
         return published
 

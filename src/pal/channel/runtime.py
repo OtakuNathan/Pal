@@ -31,6 +31,15 @@ from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
 from pal.channel.ingress import ChannelIngressCompiler
+from pal.channel.lifecycle import (
+    ABSENT_ENDPOINT_HUB_SNAPSHOT,
+    EndpointHubAction,
+    EndpointHubInvariantError,
+    EndpointHubSnapshot,
+    EndpointHubState,
+    reduce_endpoint_hub,
+    validate_endpoint_hub_snapshot,
+)
 
 
 ENDPOINT_HUB_BUFFER_MAX_ITEMS = 1024
@@ -71,10 +80,11 @@ class ChannelEndpointHub:
     provider_id: str = ""
     channel_kind: str = ""
     binding_key: str = ""
-    physical_present: bool = True
+    physical_present: bool = False
+    transport_present: bool = False
     published: bool = False
     publish_when_ready: bool = False
-    state: str = "discovered"
+    state: EndpointHubState = EndpointHubState.ABSENT
     transition_epoch: int = 0
     next_sequence: int = 1
     buffer: deque[BufferedChannelDelivery] = field(default_factory=deque)
@@ -82,17 +92,38 @@ class ChannelEndpointHub:
     overflowed: bool = False
     last_error: str = ""
 
-    def begin_transition(self, *, provider_id: str = "") -> int:
-        if self.state != "transitioning":
-            self.transition_epoch += 1
-        self.provider_id = str(provider_id or self.provider_id)
-        self.state = "transitioning"
-        self.overflowed = (
-            len(self.buffer) > ENDPOINT_HUB_BUFFER_MAX_ITEMS
-            or self.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES
+    @property
+    def snapshot(self) -> EndpointHubSnapshot:
+        return EndpointHubSnapshot(
+            state=self.state,
+            physical_present=self.physical_present,
+            transport_present=self.transport_present,
+            published=self.published,
+            publish_when_ready=self.publish_when_ready,
         )
-        self.last_error = ""
-        return self.transition_epoch
+
+    def apply(self, action: EndpointHubAction | str) -> EndpointHubSnapshot:
+        target = reduce_endpoint_hub(
+            self.snapshot,
+            action,
+            buffer_empty=not self.buffer,
+        )
+        self.state = target.state
+        self.physical_present = target.physical_present
+        self.transport_present = target.transport_present
+        self.published = target.published
+        self.publish_when_ready = target.publish_when_ready
+        return target
+
+    def restore(self, snapshot: EndpointHubSnapshot) -> None:
+        """Restore a pre-action snapshot after an atomic projection abort."""
+
+        validate_endpoint_hub_snapshot(snapshot, buffer_empty=not self.buffer)
+        self.state = snapshot.state
+        self.physical_present = snapshot.physical_present
+        self.transport_present = snapshot.transport_present
+        self.published = snapshot.published
+        self.publish_when_ready = snapshot.publish_when_ready
 
     def append(
         self,
@@ -258,10 +289,13 @@ class ChannelRuntime(ChannelRuntimePort):
             channel_kind=endpoint.endpoint.channel_kind,
             binding_key=endpoint.endpoint.binding_key,
         )
+        owns_transition = hub.state != EndpointHubState.TRANSITIONING
+        if owns_transition:
+            self._begin_endpoint_transition(hub.endpoint_id, provider_id=hub.provider_id)
         self.endpoint_registry.register(endpoint)
-        if hub.state in {"discovered", "detached", "degraded"}:
-            hub.state = "attached"
-            hub.last_error = ""
+        self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
+        if owns_transition:
+            self._complete_endpoint_transition(hub.endpoint_id)
 
     def _bind_endpoint_ready(self, endpoint: ChannelEndpointBase) -> None:
         endpoint_id = endpoint.endpoint.endpoint_id
@@ -286,6 +320,9 @@ class ChannelRuntime(ChannelRuntimePort):
                 channel_kind=str(channel_kind or ""),
                 binding_key=str(binding_key or ""),
             )
+            if hub.snapshot != ABSENT_ENDPOINT_HUB_SNAPSHOT:
+                raise EndpointHubInvariantError("new endpoint hub did not start absent")
+            hub.apply(EndpointHubAction.DISCOVER)
             self.endpoint_hubs[normalized] = hub
         else:
             if provider_id:
@@ -294,7 +331,6 @@ class ChannelRuntime(ChannelRuntimePort):
                 hub.channel_kind = str(channel_kind)
             if binding_key:
                 hub.binding_key = str(binding_key)
-            hub.physical_present = True
         return hub
 
     def get_endpoint_hub(self, endpoint_id: str) -> ChannelEndpointHub | None:
@@ -307,43 +343,65 @@ class ChannelRuntime(ChannelRuntimePort):
         return tuple(sorted(hubs, key=lambda hub: (hub.channel_kind, hub.endpoint_id)))
 
     def set_endpoint_published(self, endpoint_id: str, published: bool) -> None:
-        hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
-        if hub is None:
-            raise KeyError(endpoint_id)
-        hub.published = bool(published)
+        if published:
+            if not self.publish_endpoint(endpoint_id):
+                hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
+                if hub is None or not hub.published:
+                    raise EndpointHubInvariantError(
+                        f"cannot publish endpoint outside attached lifecycle: {endpoint_id!r}"
+                    )
+            return
+        self.withdraw_endpoint(endpoint_id)
 
     def set_recovery_endpoint(self, endpoint_id: str) -> None:
-        self.recovery_endpoint_id = str(endpoint_id or "").strip()
+        normalized = str(endpoint_id or "").strip()
+        if normalized not in self.endpoint_hubs:
+            raise EndpointHubInvariantError(
+                f"recovery endpoint hub must exist before registration: {normalized!r}"
+            )
+        self.recovery_endpoint_id = normalized
 
     def publish_endpoint(self, endpoint_id: str) -> bool:
         hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
-        if hub is None or hub.state != "attached" or not hub.physical_present:
+        if hub is None:
             return False
-        changed = not hub.published
-        hub.published = True
-        if changed and self.on_hub_visibility_changed is not None:
-            self.on_hub_visibility_changed()
-        return True
+        self._apply_hub_action(hub, EndpointHubAction.REQUEST_PUBLISH)
+        return hub.published
 
     def publish_endpoint_when_ready(self, endpoint_id: str) -> bool:
         hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
         if hub is None:
             return False
-        hub.publish_when_ready = True
-        if hub.state == "attached":
-            return self.publish_endpoint(endpoint_id)
-        return False
+        before = hub.published
+        self._apply_hub_action(hub, EndpointHubAction.REQUEST_PUBLISH)
+        return not before and hub.published
 
     def withdraw_endpoint(self, endpoint_id: str) -> bool:
         hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
         if hub is None:
             return False
-        changed = hub.published
-        hub.published = False
-        hub.publish_when_ready = False
-        if changed and self.on_hub_visibility_changed is not None:
-            self.on_hub_visibility_changed()
-        return changed
+        before = hub.published
+        self._apply_hub_action(hub, EndpointHubAction.WITHDRAW)
+        return before
+
+    def _apply_hub_action(
+        self,
+        hub: ChannelEndpointHub,
+        action: EndpointHubAction | str,
+    ) -> EndpointHubSnapshot:
+        before = hub.snapshot
+        before_published = hub.published
+        target = hub.apply(action)
+        if before_published != target.published and self.on_hub_visibility_changed is not None:
+            try:
+                self.on_hub_visibility_changed()
+            except Exception:
+                # The execution registry keeps its previous generation when
+                # projection fails. Restore the reducer snapshot to make the
+                # hub and registry one atomic publication boundary.
+                hub.restore(before)
+                raise
+        return target
 
     def remove_endpoint_hub(self, endpoint_id: str) -> bool:
         """Delete physical topology and reroute its backlog to recovery."""
@@ -351,35 +409,43 @@ class ChannelRuntime(ChannelRuntimePort):
         hub = self.endpoint_hubs.get(normalized)
         if hub is None or normalized == self.recovery_endpoint_id:
             return False
-        self.withdraw_endpoint(normalized)
-        hub.physical_present = False
-        hub.state = "removing"
         recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
-        if recovery is not None:
-            while hub.buffer:
-                delivery = hub.popleft()
-                recovery.append(
-                    delivery.delivery_kind,
-                    delivery.delivery_id,
-                    self._reroute_item(delivery.item, recovery, original_endpoint_id=normalized),
+        if recovery is None:
+            raise EndpointHubInvariantError(
+                "cannot remove a physical endpoint without a recovery endpoint hub"
+            )
+        if hub.transport_present:
+            if self.endpoint_registry.get(normalized) is not None:
+                raise EndpointHubInvariantError(
+                    f"cannot remove physical endpoint while transport is registered: {normalized!r}"
                 )
-            if recovery.state == "attached":
-                self._flush_hub(recovery)
+            self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
+        self.withdraw_endpoint(normalized)
+        self._apply_hub_action(hub, EndpointHubAction.BEGIN_REMOVE)
+        while hub.buffer:
+            delivery = hub.popleft()
+            recovery.append(
+                delivery.delivery_kind,
+                delivery.delivery_id,
+                self._reroute_item(delivery.item, recovery, original_endpoint_id=normalized),
+            )
+        if recovery.state == EndpointHubState.ATTACHED:
+            self._flush_hub(recovery)
+        self._apply_hub_action(hub, EndpointHubAction.REMOVE_COMPLETE)
         self.endpoint_hubs.pop(normalized, None)
         self._notify_ready()
         return True
 
-    def _hub(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointHub:
+    def _require_hub(self, endpoint_id: str, *, provider_id: str = "") -> ChannelEndpointHub:
         normalized = str(endpoint_id or "").strip()
         hub = self.endpoint_hubs.get(normalized)
-        if hub is not None:
-            if provider_id:
-                hub.provider_id = str(provider_id)
-            return hub
-        recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
-        if recovery is not None:
-            return recovery
-        return self.ensure_endpoint_hub(normalized, provider_id=provider_id)
+        if hub is None:
+            raise EndpointHubInvariantError(
+                f"endpoint hub is outside the physical lifecycle: {normalized!r}"
+            )
+        if provider_id:
+            hub.provider_id = str(provider_id)
+        return hub
 
     def _delivery_hub(self, endpoint_id: str) -> ChannelEndpointHub:
         normalized = str(endpoint_id or "").strip()
@@ -393,8 +459,9 @@ class ChannelRuntime(ChannelRuntimePort):
         # Do not pollute physical topology for that compatibility path.
         return ChannelEndpointHub(
             endpoint_id=normalized,
-            physical_present=False,
-            state="attached",
+            physical_present=True,
+            transport_present=True,
+            state=EndpointHubState.ATTACHED,
         )
 
     def _reroute_item(
@@ -448,12 +515,21 @@ class ChannelRuntime(ChannelRuntimePort):
         )
 
     def _begin_endpoint_transition(self, endpoint_id: str, *, provider_id: str = "") -> int:
-        hub = self._hub(endpoint_id, provider_id=provider_id)
-        epoch = hub.begin_transition(provider_id=provider_id)
+        hub = self._require_hub(endpoint_id, provider_id=provider_id)
+        advance_epoch = hub.state != EndpointHubState.TRANSITIONING
+        hub.provider_id = str(provider_id or hub.provider_id)
+        self._apply_hub_action(hub, EndpointHubAction.BEGIN_TRANSITION)
+        if advance_epoch:
+            hub.transition_epoch += 1
+        hub.overflowed = (
+            len(hub.buffer) > ENDPOINT_HUB_BUFFER_MAX_ITEMS
+            or hub.buffered_text_bytes > ENDPOINT_HUB_BUFFER_MAX_TEXT_BYTES
+        )
+        hub.last_error = ""
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is not None:
             self._absorb_endpoint_outboxes(hub, endpoint)
-        return epoch
+        return hub.transition_epoch
 
     def bind_endpoint_provider(self, endpoint_id: str, provider_id: str) -> None:
         self._call_on_owner_loop(
@@ -478,8 +554,8 @@ class ChannelRuntime(ChannelRuntimePort):
         self._call_on_owner_loop(lambda: self._complete_endpoint_transition(endpoint_id))
 
     def _complete_endpoint_transition(self, endpoint_id: str) -> None:
-        hub = self._hub(endpoint_id)
-        hub.state = "draining"
+        hub = self._require_hub(endpoint_id)
+        self._apply_hub_action(hub, EndpointHubAction.BEGIN_DRAIN)
         hub.last_error = ""
         self._flush_hub(hub)
 
@@ -494,19 +570,39 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def fail_endpoint_transition(self, endpoint_id: str, error: str) -> None:
         def _fail() -> None:
-            hub = self._hub(endpoint_id)
+            hub = self._require_hub(endpoint_id)
             hub.last_error = str(error or "endpoint transition failed")
-            hub.state = "degraded"
+            if hub.state == EndpointHubState.ATTACHED:
+                # Publication projection can fail before a transition commits.
+                # The reducer has already restored the attached snapshot, so
+                # preserve that working endpoint and the original diagnostic.
+                return
+            self._apply_hub_action(hub, EndpointHubAction.TRANSITION_FAILED)
 
         self._call_on_owner_loop(_fail)
 
     def mark_endpoint_detached(self, endpoint_id: str, *, reason: str = "") -> None:
         def _mark_detached() -> None:
-            hub = self._hub(endpoint_id)
-            hub.state = "detached"
+            hub = self._require_hub(endpoint_id)
+            self._apply_hub_action(hub, EndpointHubAction.DETACH_COMPLETE)
             hub.last_error = str(reason or "")
 
         self._call_on_owner_loop(_mark_detached)
+
+    def rollback_endpoint_transition(self, endpoint_id: str, *, attached: bool) -> None:
+        def _rollback() -> None:
+            hub = self._require_hub(endpoint_id)
+            action = (
+                EndpointHubAction.ROLLBACK_TRANSPORT
+                if attached
+                else EndpointHubAction.DETACH_COMPLETE
+            )
+            self._apply_hub_action(hub, action)
+            hub.last_error = ""
+            if attached:
+                self._flush_hub(hub)
+
+        self._call_on_owner_loop(_rollback)
 
     def inspect_endpoint_hub(self, endpoint_id: str) -> dict[str, Any]:
         hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
@@ -530,6 +626,7 @@ class ChannelRuntime(ChannelRuntimePort):
             "transition_epoch": hub.transition_epoch,
             "provider_id": hub.provider_id,
             "physical_present": hub.physical_present,
+            "transport_present": hub.transport_present,
             "published": hub.published,
             "publish_when_ready": hub.publish_when_ready,
             "buffered_delivery_count": len(hub.buffer),
@@ -576,8 +673,12 @@ class ChannelRuntime(ChannelRuntimePort):
             if self._started:
                 self._queue_cached_control_catalog(endpoint)
             return
-        hub = self._hub(endpoint_id)
-        owns_transition = manage_transition and hub.state != "transitioning"
+        hub = self._require_hub(endpoint_id)
+        if not manage_transition and hub.state != EndpointHubState.TRANSITIONING:
+            raise EndpointHubInvariantError(
+                f"external endpoint replacement requires an active transition: {endpoint_id!r}"
+            )
+        owns_transition = manage_transition and hub.state != EndpointHubState.TRANSITIONING
         if owns_transition:
             self.begin_endpoint_transition(endpoint_id, provider_id=hub.provider_id)
         self._bind_endpoint_ready(endpoint)
@@ -590,8 +691,13 @@ class ChannelRuntime(ChannelRuntimePort):
         except Exception as exc:
             if owns_transition:
                 hub.last_error = str(exc)
-                hub.state = "attached" if old_endpoint is not None else "degraded"
-                if hub.state == "attached":
+                self._apply_hub_action(
+                    hub,
+                    EndpointHubAction.ROLLBACK_TRANSPORT
+                    if old_endpoint is not None
+                    else EndpointHubAction.TRANSITION_FAILED,
+                )
+                if hub.state == EndpointHubState.DRAINING:
                     self._flush_hub(hub)
             raise
         if not self._started:
@@ -609,7 +715,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 if owns_transition:
                     self.fail_endpoint_transition(endpoint_id, str(exc))
                 raise
-            if hub.state == "transitioning":
+            if hub.state == EndpointHubState.TRANSITIONING:
                 # A transport may return scheduled-but-unconfirmed work to its
                 # local outboxes while stopping. Pull it behind the same fence
                 # before publishing the replacement so later arrivals cannot
@@ -624,7 +730,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 validation = validator()
                 if inspect.isawaitable(validation):
                     await validation
-        except Exception:
+        except Exception as exc:
             failed_stopper = getattr(endpoint, "stop_async", None)
             if callable(failed_stopper):
                 try:
@@ -636,12 +742,17 @@ class ChannelRuntime(ChannelRuntimePort):
                 await old_starter()
                 self._bind_endpoint_ready(old_endpoint)
                 self.endpoint_registry.register(old_endpoint)
+                self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
             if owns_transition:
-                hub.last_error = "replacement startup failed"
-                self.complete_endpoint_transition(endpoint_id)
+                if old_endpoint is not None:
+                    hub.last_error = "replacement startup failed; restored previous transport"
+                    self.complete_endpoint_transition(endpoint_id)
+                else:
+                    self.fail_endpoint_transition(endpoint_id, str(exc))
             raise
         _transfer_endpoint_runtime_state(old_endpoint, endpoint)
         self.endpoint_registry.register(endpoint)
+        self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
         self._queue_cached_control_catalog(endpoint)
         if owns_transition:
             self.complete_endpoint_transition(endpoint_id)
@@ -669,8 +780,8 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         if not self._started:
             old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
-            hub = self._hub(endpoint.endpoint.endpoint_id)
-            owns_transition = manage_transition and hub.state != "transitioning"
+            hub = self._require_hub(endpoint.endpoint.endpoint_id)
+            owns_transition = manage_transition and hub.state != EndpointHubState.TRANSITIONING
             if owns_transition:
                 self.begin_endpoint_transition(endpoint.endpoint.endpoint_id)
             preparer = getattr(endpoint, "prepare_replacement", None)
@@ -694,10 +805,10 @@ class ChannelRuntime(ChannelRuntimePort):
         stopper = getattr(endpoint, "stop_async", None)
         if callable(stopper):
             await stopper()
-        self.endpoint_registry.unregister(endpoint_id)
         hub = self.endpoint_hubs.get(endpoint_id)
-        if hub is not None and hub.state != "transitioning":
-            hub.state = "detached"
+        if hub is not None:
+            self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
+        self.endpoint_registry.unregister(endpoint_id)
         return True
 
     def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
@@ -715,12 +826,27 @@ class ChannelRuntime(ChannelRuntimePort):
             future = asyncio.run_coroutine_threadsafe(_remove(), loop)
             return bool(future.result(timeout=timeout_seconds))
         if not self._started:
-            removed = self.endpoint_registry.unregister(endpoint_id) is not None
+            endpoint = self.endpoint_registry.get(endpoint_id)
+            removed = endpoint is not None
             hub = self.endpoint_hubs.get(endpoint_id)
-            if removed and hub is not None and hub.state != "transitioning":
-                hub.state = "detached"
+            if removed and hub is not None:
+                self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
+            if removed:
+                self.endpoint_registry.unregister(endpoint_id)
             return removed
         return bool(asyncio.run(_remove()))
+
+    def discard_endpoint_transport(self, endpoint_id: str) -> bool:
+        """Forget a failed transport without invoking its shutdown hook again."""
+
+        endpoint = self.endpoint_registry.get(endpoint_id)
+        hub = self.endpoint_hubs.get(endpoint_id)
+        if endpoint is None:
+            return False
+        if hub is not None:
+            self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
+        self.endpoint_registry.unregister(endpoint_id)
+        return True
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
         return self.endpoint_registry.get(endpoint_id)
@@ -783,10 +909,10 @@ class ChannelRuntime(ChannelRuntimePort):
     def sync_endpoints(self) -> None:
         for endpoint in self.list_endpoints():
             endpoint_id = endpoint.endpoint.endpoint_id
-            hub = self._hub(endpoint_id)
+            hub = self._require_hub(endpoint_id)
             for envelope in endpoint.poll():
                 self.emit(envelope)
-            if hub.state == "transitioning":
+            if hub.state == EndpointHubState.TRANSITIONING:
                 self._absorb_endpoint_outboxes(hub, endpoint)
                 continue
             if hub.buffer:
@@ -832,7 +958,7 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
         hub = self._delivery_hub(endpoint_id)
-        if endpoint is not None and hub.state == "attached":
+        if endpoint is not None and hub.state == EndpointHubState.ATTACHED:
             return endpoint.queue_reply(message, response_handle=envelope.response_handle)
         normalized = message if isinstance(message, ChannelMessage) else ChannelMessage(text=str(message or ""))
         reply_id = str(uuid4())
@@ -850,7 +976,7 @@ class ChannelRuntime(ChannelRuntimePort):
             self._flush_hub(hub)
             self._notify_ready()
             return reply_id
-        if hub.state == "attached":
+        if hub.state == EndpointHubState.ATTACHED:
             self.outbox.append(item)
             self._notify_ready()
             return reply_id
@@ -862,7 +988,7 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
         hub = self._delivery_hub(endpoint_id)
-        if endpoint is not None and hub.state == "attached":
+        if endpoint is not None and hub.state == EndpointHubState.ATTACHED:
             return endpoint.queue_stream_update(update, response_handle=envelope.response_handle)
         update_id = str(uuid4())
         item = QueuedStreamUpdate(
@@ -877,7 +1003,7 @@ class ChannelRuntime(ChannelRuntimePort):
             self._flush_hub(hub)
             self._notify_ready()
             return update_id
-        if hub.state == "attached":
+        if hub.state == EndpointHubState.ATTACHED:
             self.stream_update_outbox.append(item)
             self._notify_ready()
             return update_id
@@ -889,7 +1015,7 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
         hub = self._delivery_hub(endpoint_id)
-        if endpoint is not None and hub.state == "attached":
+        if endpoint is not None and hub.state == EndpointHubState.ATTACHED:
             return endpoint.queue_attachment(attachment, response_handle=envelope.response_handle)
         attachment_id = str(uuid4())
         item = QueuedAttachment(
@@ -904,7 +1030,7 @@ class ChannelRuntime(ChannelRuntimePort):
             self._flush_hub(hub)
             self._notify_ready()
             return attachment_id
-        if hub.state == "attached":
+        if hub.state == EndpointHubState.ATTACHED:
             self.attachment_outbox.append(item)
             self._notify_ready()
             return attachment_id
@@ -954,7 +1080,7 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint_id = envelope.endpoint.endpoint_id
         endpoint = self.get_endpoint(endpoint_id)
         hub = self._delivery_hub(endpoint_id)
-        if endpoint is not None and hub.state == "attached":
+        if endpoint is not None and hub.state == EndpointHubState.ATTACHED:
             return endpoint.queue_status(
                 kind,
                 response_handle=envelope.response_handle,
@@ -974,7 +1100,7 @@ class ChannelRuntime(ChannelRuntimePort):
             self._flush_hub(hub)
             self._notify_ready()
             return status_id
-        if hub.state == "attached":
+        if hub.state == EndpointHubState.ATTACHED:
             self.status_outbox.append(item)
             self._notify_ready()
             return status_id
@@ -997,8 +1123,8 @@ class ChannelRuntime(ChannelRuntimePort):
             return None
         target = dict(reply_target or endpoint.derive_default_reply_target())
         handle = endpoint.build_response_handle(reply_target=target)
-        hub = self._hub(endpoint_id)
-        if hub.state == "attached":
+        hub = self._require_hub(endpoint_id)
+        if hub.state == EndpointHubState.ATTACHED:
             return endpoint.queue_status(kind, response_handle=handle, payload=dict(payload or {}))
         status_id = str(uuid4())
         item = QueuedStatus(
@@ -1016,8 +1142,8 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:
             return False
-        hub = self._hub(endpoint_id)
-        if hub.state == "attached":
+        hub = self._require_hub(endpoint_id)
+        if hub.state == EndpointHubState.ATTACHED:
             endpoint.flush_status_outbox()
         else:
             self._absorb_endpoint_outboxes(hub, endpoint)
@@ -1029,8 +1155,8 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         endpoint_id = endpoint.endpoint.endpoint_id
         handle = endpoint.build_response_handle(reply_target=endpoint.derive_default_reply_target())
-        hub = self._hub(endpoint_id)
-        if hub.state == "attached":
+        hub = self._require_hub(endpoint_id)
+        if hub.state == EndpointHubState.ATTACHED:
             endpoint.queue_status("control_catalog", response_handle=handle, payload=dict(payload))
             return
         status_id = str(uuid4())
@@ -1066,7 +1192,12 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint.outbox.clear()
 
     def _flush_hub(self, hub: ChannelEndpointHub) -> None:
-        if hub.state in {"transitioning", "detached", "degraded", "discovered"}:
+        if hub.state in {
+            EndpointHubState.TRANSITIONING,
+            EndpointHubState.DETACHED,
+            EndpointHubState.DEGRADED,
+            EndpointHubState.DISCOVERED,
+        }:
             return
         endpoint = self.get_endpoint(hub.endpoint_id)
         if endpoint is None or not endpoint.attached or not endpoint.enabled:
@@ -1084,7 +1215,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     permanent = False
                 # The hub owns this lifecycle gap. Keep the head item and wait
                 # for the transport's ready notification.
-                if hub.state == "draining" and not permanent:
+                if hub.state == EndpointHubState.DRAINING and not permanent:
                     return
                 self._emit_delivery_failure(
                     hub,
@@ -1114,9 +1245,15 @@ class ChannelRuntime(ChannelRuntimePort):
                     )
                 )
         if self._replacement_delivery_ready(endpoint):
-            hub.state = "attached"
-            if hub.publish_when_ready:
-                self.publish_endpoint(hub.endpoint_id)
+            if hub.state == EndpointHubState.DRAINING:
+                self._apply_hub_action(hub, EndpointHubAction.DRAIN_COMPLETE)
+            elif (
+                hub.state == EndpointHubState.ATTACHED
+                and hub.publish_when_ready
+                and not hub.published
+                and not hub.buffer
+            ):
+                self._apply_hub_action(hub, EndpointHubAction.REQUEST_PUBLISH)
 
     def _deliver_buffered(
         self,
@@ -1392,7 +1529,10 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def _notify_endpoint_ready(self, endpoint_id: str) -> None:
         hub = self.endpoint_hubs.get(str(endpoint_id or ""))
-        if hub is not None and hub.buffer and hub.state in {"attached", "draining"}:
+        if hub is not None and hub.buffer and hub.state in {
+            EndpointHubState.ATTACHED,
+            EndpointHubState.DRAINING,
+        }:
             self._flush_hub(hub)
         self._notify_ready()
 

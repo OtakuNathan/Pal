@@ -22,6 +22,14 @@ from pal.foundation.attachment import AttachmentSpec
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase, ChannelEndpointQueueBase
 from pal.channel.capabilities import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
 from pal.channel.models import ChannelEndpointModel
+from pal.channel.lifecycle import (
+    EndpointHubAction,
+    EndpointHubInvariantError,
+    EndpointHubSnapshot,
+    EndpointHubState,
+    reduce_endpoint_hub,
+    validate_endpoint_hub_snapshot,
+)
 from pal.channel.provider_manager import (
     ChannelProviderBuildContext,
     ChannelEndpointProviderManager,
@@ -43,6 +51,10 @@ __all__ = [
     "ChannelEndpointFactory",
     "ChannelEndpointFactoryRegistry",
     "ChannelEndpointModel",
+    "EndpointHubAction",
+    "EndpointHubInvariantError",
+    "EndpointHubSnapshot",
+    "EndpointHubState",
     "ChannelEndpointProviderManager",
     "ChannelProvider",
     "ChannelProviderContext",
@@ -75,4 +87,6 @@ __all__ = [
     "channel_endpoint_data_root",
     "inspect_channel",
     "register_with_core",
+    "reduce_endpoint_hub",
+    "validate_endpoint_hub_snapshot",
 ]

@@ -530,11 +530,12 @@ class ChannelEndpointProviderManager:
             self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
             result = provider.detach_endpoint(endpoint_id, self.context())
             if result.status != RuntimeStatus.OK:
-                hub = self.runtime.get_endpoint_hub(endpoint_id)
-                if hub is not None:
-                    hub.state = "attached" if endpoint is not None else "detached"
-                    if endpoint is not None:
-                        self.runtime.publish_endpoint(endpoint_id)
+                self.runtime.rollback_endpoint_transition(
+                    endpoint_id,
+                    attached=endpoint is not None,
+                )
+                if endpoint is not None:
+                    self.runtime.publish_endpoint(endpoint_id)
                 return result
             self.runtime.mark_endpoint_detached(endpoint_id)
             self._unload_provider_if_idle(provider_id)
@@ -1054,7 +1055,7 @@ class ChannelEndpointProviderManager:
                     stopped.append(endpoint_id)
                 self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
             except Exception as exc:
-                self.runtime.endpoint_registry.unregister(endpoint_id)
+                self.runtime.discard_endpoint_transport(endpoint_id)
                 self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
                 errors.append(f"{endpoint_id}: {exc}")
         return stopped, errors

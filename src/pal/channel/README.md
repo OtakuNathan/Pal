@@ -109,6 +109,12 @@ Interaction rule:
   capability first; attach publishes only after transport startup and backlog
   drain. Physical removal reroutes remaining backlog to the recovery socket and
   deletes the hub. Lifecycle gaps are retryable and do not trigger Safe Mode
+- `lifecycle.py` is the executable EndpointHub reducer source of truth. The
+  reducer owns lifecycle state, physical/transport presence, capability
+  publication, publication intent, and buffer guards as one snapshot. Its
+  complete generated relation and the origin/socket protocol model live in
+  `spec/channel`; run `scripts/check_channel_tla.sh tla2tools.jar` after changing
+  lifecycle or fallback semantics
 - detachable providers are not imported from `site-packages`; deployment,
   replacement, and removal happen entirely within the selected runtime root
 - only channel-neutral operations are exposed to `Pal/LLM`; provider-specific
