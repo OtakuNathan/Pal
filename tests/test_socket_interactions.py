@@ -272,6 +272,29 @@ class SocketInteractionProjectionTests(unittest.TestCase):
         )
         self.assertEqual(len(hub.transport_backlog), 1)
 
+    def test_replay_drains_when_session_topology_becomes_unambiguous(self) -> None:
+        first = SimpleNamespace(
+            ready_notified=True,
+            closed=False,
+            outbound=asyncio.Queue(maxsize=2),
+        )
+        second = SimpleNamespace(
+            ready_notified=True,
+            closed=False,
+            outbound=asyncio.Queue(maxsize=2),
+        )
+        self.endpoint.sessions = {"first": first, "second": second}
+
+        self.endpoint.accept_transport_backlog(({"type": "text_delta"},))
+        self.assertTrue(first.outbound.empty())
+        self.assertTrue(second.outbound.empty())
+
+        self.endpoint.sessions.pop("second")
+        self.endpoint._notify_session_topology_changed()
+
+        self.assertEqual(first.outbound.get_nowait(), {"type": "text_delta"})
+        self.assertFalse(self.endpoint._unacknowledged_frames)
+
     def test_other_socket_session_cannot_answer_interaction(self) -> None:
         self.endpoint.send_status(
             self.response_handle,

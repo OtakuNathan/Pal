@@ -281,6 +281,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 session.writer_task.cancel()
                 await asyncio.gather(session.writer_task, return_exceptions=True)
             self._recover_session_outbound(session)
+            self._notify_session_topology_changed()
             await self._close_writer_async(writer)
             if client_task is not None:
                 self._client_tasks.discard(client_task)
@@ -306,7 +307,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             return
         session.ready_notified = True
         self._adopt_single_replacement_session(session.session_id)
-        self._drain_replay_frames_to(session)
+        self._notify_session_topology_changed()
+
+    def _notify_session_topology_changed(self) -> None:
+        self._drain_replay_frames_to_unique_ready_session()
         if self.on_ready is not None:
             self.on_ready()
 
@@ -328,6 +332,15 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             if replay_session is not None:
                 self._drain_replay_frames_to(replay_session)
         return accepted
+
+    def _drain_replay_frames_to_unique_ready_session(self) -> None:
+        ready_sessions = [
+            session
+            for session in self.sessions.values()
+            if session.ready_notified and not session.closed
+        ]
+        if len(ready_sessions) == 1:
+            self._drain_replay_frames_to(ready_sessions[0])
 
     def _drain_replay_frames_to(self, session: _SocketSession) -> None:
         while self._unacknowledged_frames and not session.outbound.full():
