@@ -15,6 +15,7 @@ class ProactiveTriggerHandler(EventHandler):
     manager: ProactiveManager
     runner: ProactiveRunner | None = None
     tasks: set[asyncio.Task] = field(default_factory=set)
+    lifecycle_gate: object | None = None
 
     def can_handle(self, event_kind: str) -> bool:
         return event_kind == EventKind.PROACTIVE_TRIGGER
@@ -41,6 +42,11 @@ class ProactiveTriggerHandler(EventHandler):
         return []
 
     async def _run_trigger_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> str:
+        gate = self.lifecycle_gate or core.context.execution_runtime.lifecycle_gate
+        async with gate.read_async():
+            return await self._run_trigger_guarded_async(core, trigger, continuation)
+
+    async def _run_trigger_guarded_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> str:
         proactive_run_id = self.runner.begin_run(trigger) if self.runner is not None else None
         try:
             outcome = await core.run_turn_continuation_async(continuation)

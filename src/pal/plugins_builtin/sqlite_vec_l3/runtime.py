@@ -12,21 +12,23 @@ from pal.plugins.l3 import SQLiteVecL3Plugin, register_with_core as register_l3_
 
 @dataclass
 class SQLiteVecL3BuiltinBundle:
-    memory_service: MemoryService
     runtime_root: Path | None = None
     plugin_id: str = "sqlite_vec_l3"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
+    def start(self, scope):
+        memory_service: MemoryService = scope.core_context.require_port("memory:memory")
         config = RuntimeConfig.load(self.runtime_root) if self.runtime_root is not None else RuntimeConfig.defaults()
         plugin = SQLiteVecL3Plugin(
-            service=self.memory_service,
+            service=memory_service,
             embedding_provider=build_ollama_embedding_provider_from_config(config),
         )
-        self.memory_service.l3_selector.active_provider_id = plugin.provider_id
-        return register_l3_with_core(context, plugin)
+        previous_provider_id = memory_service.l3_selector.active_provider_id
+        memory_service.l3_selector.active_provider_id = plugin.provider_id
+        scope.defer(lambda: setattr(memory_service.l3_selector, "active_provider_id", previous_provider_id))
+        return register_l3_with_core(scope.context, plugin)
 
 
-def build_plugin(*, memory_service: MemoryService, context: PluginBuildContext | None = None) -> SQLiteVecL3BuiltinBundle:
+def build_plugin(*, context: PluginBuildContext | None = None) -> SQLiteVecL3BuiltinBundle:
     runtime_root = context.runtime_root if context is not None else None
-    return SQLiteVecL3BuiltinBundle(memory_service=memory_service, runtime_root=runtime_root)
+    return SQLiteVecL3BuiltinBundle(runtime_root=runtime_root)

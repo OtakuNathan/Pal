@@ -465,11 +465,10 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         provider._ensure_manager_started = fail_startup  # type: ignore[method-assign]
 
-        result = provider.attach()
+        with self.assertRaisesRegex(RuntimeError, "sidecar unavailable"):
+            provider.start_manager()
 
-        self.assertEqual(result.status, RuntimeStatus.ERROR)
-        self.assertEqual(result.text, "mcp manager attach failed")
-        self.assertIn("sidecar unavailable", str(result.structured))
+        self.assertIn("sidecar unavailable", provider.last_error)
         self.assertEqual(refreshed, [True])
 
     def test_attach_success_republishes_the_rebuilt_projection(self) -> None:
@@ -485,9 +484,9 @@ class McpPluginSidecarTests(unittest.TestCase):
         manager_client.rescan_sync.return_value = {"status": RuntimeStatus.OK}
 
         with patch("pal.mcp.plugin.McpManagerClient", return_value=manager_client):
-            result = provider.attach()
+            provider.start_manager()
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(provider.last_error, "")
         self.assertEqual(refreshed, [True])
         manager_client.rescan_sync.assert_called_once_with()
 
@@ -497,6 +496,7 @@ class McpPluginSidecarTests(unittest.TestCase):
         handle = build_mcp_plugin(runtime_root=self.root).register_with_core(core.context)
         host = PluginHost(context=core.context, runtime_root=self.root)
 
+        handle.ports["mcp"].start_manager()
         host._do_attach(handle)
         try:
             search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "alpha"}))
@@ -540,6 +540,8 @@ class McpPluginSidecarTests(unittest.TestCase):
                     'entrypoint = "pal.plugins_builtin.mcp.runtime"',
                     'version = "0.1.0"',
                     "enabled_by_default = false",
+                    'lifecycle_protocol = "raii.v1"',
+                    'module_id = "mcp"',
                 ]
             ),
             encoding="utf-8",
@@ -549,14 +551,9 @@ class McpPluginSidecarTests(unittest.TestCase):
         host.rescan()
         attached = host.attach("mcp")
 
-        self.assertEqual(attached["status"], RuntimeStatus.OK)
+        self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
         self.assertFalse(attached["enabled"])
-        self.assertTrue(attached["attached"])
-        self.assertTrue(attached["temporary_attach"])
-        self.assertIn("mcp_show", core.context.capability_registry.descriptors)
-        self.assertIn("mcp_image_prepare", core.context.capability_registry.descriptors)
-
-        host.detach("mcp")
+        self.assertNotIn("mcp_show", core.context.capability_registry.descriptors)
 
         enabled = host.enable("mcp")
         try:
@@ -580,6 +577,8 @@ class McpPluginSidecarTests(unittest.TestCase):
                     'entrypoint = "pal.plugins_builtin.mcp.runtime"',
                     'version = "0.1.0"',
                     "enabled_by_default = true",
+                    'lifecycle_protocol = "raii.v1"',
+                    'module_id = "mcp"',
                 ]
             ),
             encoding="utf-8",

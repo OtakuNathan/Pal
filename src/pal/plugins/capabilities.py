@@ -234,14 +234,19 @@ class PluginsIntrospectionProvider:
         )
 
 
-def register_with_core(context, host: PluginHost) -> ModuleHandle:
+def build_management_handle(host: PluginHost) -> ModuleHandle:
     provider = PluginsIntrospectionProvider(host=host)
-    handle = ModuleHandle(
+    return ModuleHandle(
         module_id="plugins",
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
         ports={"plugins": host},
     )
+
+
+def register_with_core(context, host: PluginHost) -> ModuleHandle:
+    """Compatibility helper for isolated tests; production mounts this on Core."""
+    handle = build_management_handle(host)
     context.register_module(handle)
     return handle

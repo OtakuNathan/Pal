@@ -136,7 +136,7 @@ class ProactiveIntrospectionProvider:
             purpose="Show proactive module status.",
             use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
             do_not_use_when="Listing specific tasks (use proactive_list). Checking one task's details (use proactive_show).",
-            failure_next_steps="Read-only diagnostic. If mounted=false, use proactive_attach.",
+            failure_next_steps="If absent, use plugin_attach with name='proactive'.",
         ),
         aliases=("proactive_status",),
     )
@@ -593,42 +593,6 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive schedule updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
-        guidance=ToolGuidance(
-            purpose="Attach proactive module — resume scheduled task processing.",
-            use_when="Reconnecting a detached proactive module.",
-            do_not_use_when="Enabling one specific task (use proactive_enable). The module is already attached.",
-            failure_next_steps="No external dependencies. If still degraded after attach, check proactive_status.",
-        ), aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
-    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.mounted = True
-        self.degraded = False
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="proactive attached",
-            structured={"mounted": True, "degraded": False},
-            llm_text=render_titled_structured_for_llm("Proactive attached", {"mounted": True, "degraded": False}),
-        )
-
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
-        guidance=ToolGuidance(
-            purpose="Detach proactive module — stop all scheduled task processing.",
-            use_when="Temporarily stopping all proactive tasks (e.g. maintenance). Rarely needed.",
-            do_not_use_when="Stopping one task (use proactive_disable). Detaching a channel endpoint (use channel_detach).",
-            failure_next_steps="Re-attach with proactive_attach when ready to resume.",
-        ), aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
-    def detach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.mounted = False
-        self.degraded = False
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="proactive detached",
-            structured={"mounted": False, "degraded": False},
-            llm_text=render_titled_structured_for_llm("Proactive detached", {"mounted": False, "degraded": False}),
-        )
-
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
@@ -807,7 +771,6 @@ def register_with_core(
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        supports_lifecycle_capabilities=True,
         event_sources=[source],
         event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
         ports={"proactive_manager": manager, "proactive_runner": runner},

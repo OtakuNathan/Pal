@@ -33,7 +33,6 @@ class PluginBundleRepository:
         instance.version = version
         instance.filesystem_path = filesystem_path
         instance.updated_at = now
-        instance.attached = False
         instance.save()
         return instance
 
@@ -73,6 +72,15 @@ class PluginBundleRepository:
             return None
         instance.last_load_status = status
         instance.last_error = error_text
+        instance.updated_at = utc_now()
+        instance.save()
+        return instance
+
+    def set_config(self, plugin_id: str, config: dict) -> PluginBundleModel | None:
+        instance = self.get(plugin_id)
+        if instance is None:
+            return None
+        instance.config_blob = dict(config)
         instance.updated_at = utc_now()
         instance.save()
         return instance

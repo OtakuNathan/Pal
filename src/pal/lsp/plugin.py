@@ -269,7 +269,7 @@ class LspManagerPluginProvider:
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
             do_not_use_when="Checking workspace readiness (use lsp_status). Running server health check (use lsp_doctor).",
-            failure_next_steps="Read-only. If last_error is set, the LSP sidecar failed — try lsp_attach.",
+            failure_next_steps="If last_error is set, reload with plugin_attach name='lsp'.",
         ), aliases=("lsp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -443,15 +443,7 @@ class LspManagerPluginProvider:
     def workspace_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP workspace symbols", self._request_or_error("workspace_symbols", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="attach",
-        guidance=ToolGuidance(
-            purpose="Attach LSP manager — start sidecar and discover servers.",
-            use_when="Reconnecting a detached LSP manager.",
-            do_not_use_when="The manager is already attached. Preparing a workspace (use lsp_prepare_workspace).",
-            failure_next_steps="Inspect lsp_show to reconcile manager state. If the sidecar is not running, correct LSP config or binary availability before retrying.",
-        ), aliases=("lsp_attach",), execution=INDIRECT_CONTROL)
-    def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
+    def start_manager(self) -> None:
         try:
             self._ensure_manager_started()
             self.last_health = self.client.rescan_sync()
@@ -459,34 +451,16 @@ class LspManagerPluginProvider:
         except Exception as exc:
             self.last_error = f"{exc.__class__.__name__}: {exc}"
             self.last_health = {"healthy": False, "startup_error": self.last_error}
-        payload = self._status_payload()
-        attached = not self.last_error
-        title = "LSP manager attached" if attached else "LSP manager attach failed"
-        return IntrospectionResult(
-            status=RuntimeStatus.OK if attached else RuntimeStatus.ERROR,
-            text=title.lower(),
-            structured=payload,
-            llm_text=render_titled_structured_for_llm(title, payload),
-        )
+            raise
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="detach",
-        guidance=ToolGuidance(
-            purpose="Detach LSP manager — stop sidecar.",
-            use_when="Temporarily stopping all LSP functionality.",
-            do_not_use_when="Individual navigation still needed. Detaching a channel (use channel_detach).",
-            failure_next_steps="Re-attach with lsp_attach.",
-        ), aliases=("lsp_detach",), execution=INDIRECT_CONTROL)
-    def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
+    def stop_manager(self) -> None:
         self._stop_manager()
-        payload = self._status_payload()
-        return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager detached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager detached", payload))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan",
         guidance=ToolGuidance(
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
-            do_not_use_when="Restarting the manager (use lsp_detach then lsp_attach).",
+            do_not_use_when="Restarting the manager (use plugin_attach with name='lsp').",
             failure_next_steps="Inspect lsp_show and lsp_status to reconcile manager readiness. Correct LSP config syntax or server availability before retrying.",
         ), aliases=("lsp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
@@ -677,9 +651,8 @@ class LspManagerPluginBundle:
             detachable=True,
             mounted=False,
             introspection_provider=provider,
-            supports_lifecycle_capabilities=True,
             ports={"lsp": provider},
-            shutdown_sync=provider._stop_manager,
+            shutdown_sync=provider.stop_manager,
         )
         context.register_module(handle)
         return handle

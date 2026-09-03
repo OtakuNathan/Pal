@@ -57,6 +57,7 @@ from pal.execution.tool_registry import (
 from pal.shared import ToolExecutionResult
 from pal.plugins.l3.registry import L3PluginRegistry
 from pal.plugins.l3.stubs import NullL3Plugin
+from pal.plugins.lifecycle import WriterPreferredRWGate
 from pal.execution.tool_result_pager import (
     DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
     ToolResultPage,
@@ -87,6 +88,21 @@ _FAILURE_MEMORY_NEXT_STEP = (
     "fixes as leads, verify them against the current state, and do not repeat the same "
     "call unchanged."
 )
+
+
+def _is_plugin_lifecycle_tool(name: object) -> bool:
+    normalized = str(name or "").strip()
+    aliases = {
+        "plugin_attach",
+        "plugin_detach",
+        "plugin_enable",
+        "plugin_disable",
+        "plugin_rescan",
+        "plugin_rescan_and_attach_new_first_party",
+    }
+    if normalized in aliases:
+        return True
+    return normalized in {f"op_plugin_mgmt_{alias.removeprefix('plugin_')}" for alias in aliases}
 
 
 def _merge_explicit_model_fields(
@@ -125,6 +141,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     )
     tool_result_pager: ToolResultPagerStore = field(default_factory=ToolResultPagerStore)
     lifecycle_controller: Any | None = None
+    lifecycle_gate: WriterPreferredRWGate = field(default_factory=WriterPreferredRWGate)
     sync_executor_max_workers: int = 4
     sync_executor: ThreadPoolExecutor | None = None
     _interrupt_handles: dict[str, set[Any]] = field(default_factory=dict)
@@ -554,11 +571,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         binding = self._resolve_record_binding(generation, record, validated)
         if isinstance(binding, RejectedResult):
             return binding
-        lifecycle = self._maybe_handle_lifecycle_action(binding.descriptor)
         try:
-            raw = lifecycle if lifecycle is not None else self._call_record_sync(
-                record, binding, call, validated, turn_id, budget, allow_tools
-            )
+            gate = self.lifecycle_gate.write() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read()
+            with gate:
+                raw = self._call_record_sync(
+                    record, binding, call, validated, turn_id, budget, allow_tools
+                )
             return self._normalize_invocation_result(
                 record,
                 call,
@@ -608,11 +626,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         binding = self._resolve_record_binding(generation, record, validated)
         if isinstance(binding, RejectedResult):
             return binding
-        lifecycle = self._maybe_handle_lifecycle_action(binding.descriptor)
         try:
-            raw = lifecycle if lifecycle is not None else await self._call_record_async(
-                record, binding, call, validated, turn_id, budget, allow_tools
-            )
+            gate = self.lifecycle_gate.write_async() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read_async()
+            async with gate:
+                raw = await self._call_record_async(
+                    record, binding, call, validated, turn_id, budget, allow_tools
+                )
             return self._normalize_invocation_result(
                 record,
                 call,
@@ -1581,36 +1600,34 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return min(candidates)
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
+        gate = self.lifecycle_gate.write() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read()
+        with gate:
+            return self._call_registered_unlocked(call)
+
+    def _call_registered_unlocked(self, call: CapabilityCall) -> CapabilityResult:
         generation = self._registry_generation
         canonical_path = generation.capability_index.canonical_path_for(call.name)
         call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
         bound = self._resolve_binding(call, generation=generation)
         if isinstance(bound, CapabilityResult):
             return bound
-        lifecycle_result = self._maybe_handle_lifecycle_action(bound.descriptor)
-        if lifecycle_result is not None:
-            return lifecycle_result
         result = bound.callable(call)
         if inspect.isawaitable(result):
             raise RuntimeError(f"capability requires async execution: {canonical_path}")
         return result
 
     async def call_registered_async(self, call: CapabilityCall) -> CapabilityResult:
+        gate = self.lifecycle_gate.write_async() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read_async()
+        async with gate:
+            return await self._call_registered_async_unlocked(call)
+
+    async def _call_registered_async_unlocked(self, call: CapabilityCall) -> CapabilityResult:
         generation = self._registry_generation
         canonical_path = generation.capability_index.canonical_path_for(call.name)
         call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
         bound = self._resolve_binding(call, generation=generation)
         if isinstance(bound, CapabilityResult):
             return bound
-        lifecycle_result = None
-        if self._is_lifecycle_action(bound.descriptor):
-            loop = asyncio.get_running_loop()
-            lifecycle_result = await loop.run_in_executor(
-                self.sync_executor,
-                lambda: self._maybe_handle_lifecycle_action(bound.descriptor),
-            )
-        if lifecycle_result is not None:
-            return lifecycle_result
         if bound.async_callable is not None:
             result = bound.async_callable(call)
             return await result if inspect.isawaitable(result) else result
@@ -1673,57 +1690,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
             text=f"unknown capability: {call.name}",
             llm_text=f"unknown capability: {call.name}",
         )
-
-    def _maybe_handle_lifecycle_action(self, descriptor: CapabilityDescriptor) -> CapabilityResult | None:
-        if not self._is_lifecycle_action(descriptor):
-            return None
-        metadata = dict(descriptor.metadata or {})
-        action = str(metadata.get("action") or "").strip()
-        controller = self.lifecycle_controller
-        if controller is None:
-            return None
-        module_id = str(descriptor.module_id or "").strip()
-        if not module_id:
-            return None
-        if action == "detach":
-            status = controller.detach_module(module_id)
-            verb = "detached"
-        else:
-            status = controller.reattach_module(module_id)
-            verb = "attached"
-        payload = {
-            "module_id": module_id,
-            "action": action,
-            "status": status,
-            "lifecycle_controller": "core",
-        }
-        return CapabilityResult(
-            status=status,
-            text=f"module {verb}: {module_id}",
-            structured=payload,
-            llm_text=f"Module {module_id} {verb} via core lifecycle.",
-            effect_receipt=EffectReceipt(
-                outcome=(
-                    EffectOutcome.APPLIED
-                    if status == RuntimeStatus.OK
-                    else EffectOutcome.NOT_APPLIED
-                ),
-                receipt=payload,
-            ),
-        )
-
-    @staticmethod
-    def _is_lifecycle_action(descriptor: CapabilityDescriptor) -> bool:
-        if not descriptor.detachable:
-            return False
-        metadata = dict(descriptor.metadata or {})
-        if metadata.get("namespace") != "operation":
-            return False
-        if str(metadata.get("action") or "").strip() not in {"attach", "detach"}:
-            return False
-        if metadata.get("target_argument"):
-            return False
-        return not descriptor.target_id or descriptor.target_id == SINGLETON_TARGET
 
     def _resolve_descriptor(self, name: str) -> CapabilityDescriptor | CapabilityResult | None:
         candidates: list[CapabilityDescriptor] = []

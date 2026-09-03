@@ -560,6 +560,26 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
         self.assertIn("sqlite_vec_l3", handle.core.context.execution_runtime.l3_plugin_registry.plugins)
 
+    def test_only_core_execution_llm_and_channel_are_pinned_modules(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+
+        for module_id in ("core", "execution", "llm", "channel"):
+            self.assertNotIn(module_id, handle.plugin_host.module_to_plugin)
+            self.assertEqual(handle.core.detach_module(module_id), RuntimeStatus.FORBIDDEN)
+
+        for plugin_id in ("identity", "memory", "control", "failure"):
+            original = handle.plugin_host.generations[plugin_id].instance
+            self.assertTrue(handle.core.context.module_registry.require(plugin_id).detachable)
+            self.assertEqual(handle.plugin_host.detach(plugin_id)["status"], RuntimeStatus.OK)
+            self.assertIsNone(handle.core.context.module_registry.get(plugin_id))
+            self.assertEqual(handle.plugin_host.attach(plugin_id)["status"], RuntimeStatus.OK)
+            self.assertIsNot(handle.plugin_host.generations[plugin_id].instance, original)
+
     def test_wizard_seeds_default_web_providers_and_active_settings(self) -> None:
         self.wizard.seed_defaults(self.registration)
 
@@ -682,6 +702,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                     'entrypoint = "demo_plugin.runtime"',
                     'version = "0.1.0"',
                     "enabled_by_default = true",
+                    'lifecycle_protocol = "raii.v1"',
+                    'module_id = "demo_plugin"',
                 ]
             ),
             encoding="utf-8",
@@ -712,6 +734,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                     'entrypoint = "demo_builtin.runtime"',
                     'version = "0.1.0"',
                     "enabled_by_default = true",
+                    'lifecycle_protocol = "raii.v1"',
+                    'module_id = "demo_builtin"',
                 ]
             ),
             encoding="utf-8",
@@ -731,9 +755,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                     '    plugin_id: str = \"demo_builtin\"',
                     '    version: str = \"0.1.0\"',
                     "",
-                    "    def register_with_core(self, context):",
+                    "    def start(self, scope):",
                     "        handle = ModuleHandle(module_id=\"demo_builtin\", tier=MODULE_TIER_DETACHABLE, detachable=True)",
-                    "        context.register_module(handle)",
+                    "        scope.context.register_module(handle)",
                     "        return handle",
                     "",
                     "def build_plugin():",
@@ -817,6 +841,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                     'entrypoint = "demo_reload.runtime"',
                     'version = "0.1.0"',
                     "enabled_by_default = true",
+                    'lifecycle_protocol = "raii.v1"',
+                    'module_id = "demo_reload"',
                     'reload_modules = ["demo_reload.impl"]',
                 ]
             ),
@@ -850,9 +876,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                         "class DemoBundle:",
                         "    plugin_id: str = 'demo_reload'",
                         "    version: str = '0.1.0'",
-                        "    def register_with_core(self, context):",
+                        "    def start(self, scope):",
                         "        handle = ModuleHandle(module_id='demo_reload', tier=MODULE_TIER_DETACHABLE, detachable=True, introspection_provider=DemoProvider())",
-                        "        context.register_module(handle)",
+                        "        scope.context.register_module(handle)",
                         "        return handle",
                         "",
                         "def build_plugin():",
@@ -903,6 +929,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             "sqlite_vec_l3": "pal.plugins.l3",
             "web_fetch": "pal.web_fetch",
             "web_search": "pal.web_search",
+            "identity": "pal.identity",
+            "memory": "pal.memory",
+            "control": "pal.control",
+            "failure": "pal.failure",
         }
 
         for plugin_id, prefix in expected.items():
@@ -925,6 +955,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show"),
             "web_fetch": ("pal.web_fetch", "web_fetch_show"),
             "web_search": ("pal.web_search", "web_search_show"),
+            "identity": ("pal.identity", "identity_show"),
+            "memory": ("pal.memory", "memory_show"),
+            "control": ("pal.control", "control_show"),
+            "failure": ("pal.failure", "failure_show"),
         }
         owned_prefixes = tuple(prefix for prefix, _ in expectations.values())
         wrapper_prefixes = tuple(f"pal.plugins_builtin.{plugin_id}" for plugin_id in expectations)
@@ -1059,7 +1093,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(calls, ["cleanup"])
         self.assertEqual(module.cleanup_callbacks, [])
 
-    def test_failed_plugin_detach_preserves_attached_runtime_generation(self) -> None:
+    def test_failed_plugin_cleanup_retains_withdrawn_runtime_generation_for_retry(self) -> None:
         self.wizard.seed_defaults(self.registration)
         runtime = self._compose_runtime(
             wizard=self.wizard,
@@ -1067,28 +1101,31 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         module = runtime.core.context.module_registry.require("l3.sqlite_vec_l3")
-        provider = module.introspection_provider
-        self.assertIsNotNone(provider)
         record = runtime.plugin_host.first_party_records["sqlite_vec_l3"]
         cleanup_calls: list[str] = []
-        module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
+
+        def fail_cleanup() -> None:
+            cleanup_calls.append("cleanup")
+            raise RuntimeError("cleanup failed")
+
+        module.cleanup_callbacks.append(fail_cleanup)
         published = tuple(module.published_capabilities)
 
-        with patch.object(provider, "detach", side_effect=RuntimeError("detach failed")):
-            result = runtime.plugin_host.detach("sqlite_vec_l3")
-            disabled = runtime.plugin_host.disable("sqlite_vec_l3")
+        result = runtime.plugin_host.detach("sqlite_vec_l3")
+        disabled = runtime.plugin_host.disable("sqlite_vec_l3")
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(disabled["status"], "error")
         self.assertTrue(disabled["enabled"])
-        self.assertTrue(record.attached)
+        self.assertFalse(record.attached)
         self.assertTrue(record.enabled)
         self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.first_party_disabled)
-        self.assertTrue(module.mounted)
-        self.assertEqual(cleanup_calls, [])
-        self.assertEqual(tuple(module.published_capabilities), published)
+        self.assertFalse(module.mounted)
+        self.assertEqual(cleanup_calls, ["cleanup", "cleanup"])
+        self.assertEqual(tuple(module.published_capabilities), ())
+        self.assertIn("sqlite_vec_l3", runtime.plugin_host.generations)
         for alias in published:
-            self.assertIn(alias, runtime.core.context.capability_registry.descriptors)
+            self.assertNotIn(alias, runtime.core.context.capability_registry.descriptors)
 
     def test_failed_plugin_attach_rolls_back_every_runtime_projection(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -2847,7 +2884,9 @@ class PalV2BootstrapTests(unittest.TestCase):
             captured["timeout"] = timeout
             return FakeResponse()
 
-        with patch("pal.web_fetch.browser_service.urlopen", fake_urlopen):
+        # Earlier hot-reload tests intentionally evict pal.web_fetch modules;
+        # patch the imported function's own globals so test order is irrelevant.
+        with patch.dict(plain_http_fetch.__globals__, {"urlopen": fake_urlopen}):
             document = plain_http_fetch("https://example.test", timeout_ms=2500, max_chars=20, max_raw_chars=30)
 
         self.assertIn("Chrome/", captured["user_agent"])

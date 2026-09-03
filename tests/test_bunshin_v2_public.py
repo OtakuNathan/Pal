@@ -4712,20 +4712,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         return task_id
 
-    def test_public_provider_binds_sidecar_to_attach_and_detach(self) -> None:
-        calls: list[str] = []
-        provider = BunshinV2PublicProvider(
-            runtime_root=self.runtime_root,
-            attach_manager=lambda: calls.append("attach") or {"ok": True, "manager_pid": 42},
-            detach_manager=lambda: calls.append("detach"),
-        )
+    def test_public_provider_does_not_own_module_lifecycle(self) -> None:
+        provider = BunshinV2PublicProvider(runtime_root=self.runtime_root)
 
-        attached = provider.attach()
-        detached = provider.detach()
-
-        self.assertEqual(calls, ["attach", "detach"])
-        self.assertTrue(attached.structured["manager_running"])
-        self.assertFalse(detached.structured["manager_running"])
+        self.assertFalse(hasattr(provider, "attach"))
+        self.assertFalse(hasattr(provider, "detach"))
 
     def test_manager_lifecycle_is_eager_on_attach_and_never_lazy_on_status(self) -> None:
         provider = BunshinManagerProvider(self.runtime_root)

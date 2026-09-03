@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import CapabilityCall
@@ -19,12 +21,11 @@ def test_attach_failure_is_reported_as_failure_not_applied_success() -> None:
 
     provider._ensure_manager_started = fail_startup  # type: ignore[method-assign]
 
-    result = provider.attach()
+    with pytest.raises(RuntimeError, match="sidecar unavailable"):
+        provider.start_manager()
 
-    assert result.status == RuntimeStatus.ERROR
-    assert result.text == "lsp manager attach failed"
-    assert result.structured is not None
-    assert "sidecar unavailable" in str(result.structured)
+    assert "sidecar unavailable" in provider.last_error
+    assert provider.last_health["healthy"] is False
 
 
 def test_prepare_workspace_result_points_to_indirect_lsp_tools() -> None:

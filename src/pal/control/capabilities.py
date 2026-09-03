@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from pal.control.handler import ControlEventHandler
 from pal.control.service import ControlPlane
-from pal.core.module_registry import MODULE_TIER_MANAGED_ESSENTIAL, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -63,7 +63,7 @@ class ControlIntrospectionProvider:
             purpose="Show control module status.",
             use_when="Diagnosing whether the control plane is mounted or in degraded mode.",
             do_not_use_when="Checking core runtime state (use core_observe). Checking execution tool count (use exec_show).",
-            failure_next_steps="Read-only diagnostic. If degraded, use control_attach to recover.",
+            failure_next_steps="Read-only diagnostic. If control must be restarted, use plugin_attach with name=control.",
         ),
         aliases=("control_show",),
     )
@@ -77,42 +77,6 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
-        guidance=ToolGuidance(
-            purpose="Re-attach control module — recover from degraded mode.",
-            use_when="The control plane was degraded (via control_detach) and needs to resume normal operation.",
-            do_not_use_when="Attaching a channel endpoint (use channel_attach). The control module is already mounted.",
-            failure_next_steps="No external dependencies. If still degraded after attach, check control_show.",
-        ), aliases=("control_attach",), execution=INDIRECT_CONTROL)
-    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.mounted = True
-        self.degraded = False
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="control re-attached",
-            structured={"mounted": True, "degraded": False},
-            llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
-        )
-
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
-        guidance=ToolGuidance(
-            purpose="Degrade control module — enter degraded mode where the control plane stops active management.",
-            use_when="Rarely needed. Only when explicitly instructed to put the control plane into degraded mode.",
-            do_not_use_when="Detaching a channel endpoint (use channel_detach). Normal operation — degrading control is disruptive.",
-            failure_next_steps="Recover with control_attach when ready to resume normal operation.",
-        ), aliases=("control_detach",), execution=INDIRECT_CONTROL)
-    def detach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.mounted = False
-        self.degraded = True
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="control entered degraded mode",
-            structured={"mounted": False, "degraded": True},
-            llm_text=render_titled_structured_for_llm("Control entered degraded mode", {"mounted": False, "degraded": True}),
-        )
-
 
 def inspect_control(provider: ControlIntrospectionProvider) -> ControlSnapshot:
     return ControlSnapshot(deterministic=True, mounted=provider.mounted, degraded=provider.degraded)
@@ -123,17 +87,21 @@ def register_with_core(context: MainContext, control_plane: ControlPlane) -> Mod
 
     provider = ControlIntrospectionProvider(control_plane=control_plane)
     prompt_provider = ControlPromptFragmentProvider(provider=provider)
+    event_handler = ControlEventHandler(control_plane=control_plane)
     handle = ModuleHandle(
         module_id="control",
-        tier=MODULE_TIER_MANAGED_ESSENTIAL,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
-        supports_lifecycle_capabilities=True,
+        event_handlers={
+            EventKind.SLASH_COMMAND: [event_handler],
+            EventKind.INTERACTION_RESULT: [event_handler],
+        },
         ports={"control": control_plane},
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)
-    context.event_handler_registry.register(EventKind.SLASH_COMMAND, ControlEventHandler(control_plane=control_plane))
-    context.event_handler_registry.register(EventKind.INTERACTION_RESULT, ControlEventHandler(control_plane=control_plane))
+    context.event_handler_registry.register(EventKind.SLASH_COMMAND, event_handler, module_id="control")
+    context.event_handler_registry.register(EventKind.INTERACTION_RESULT, event_handler, module_id="control")
     return handle

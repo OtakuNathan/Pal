@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pal.control.contracts import ControlAction
-from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall
 from pal.memory.candidates import l3_commit_args_from_memory_candidate, memory_star_from_args, star_text_fields
 from pal.memory.contracts import L3CommitRequest, L3CorrectRequest, L3DeleteRequest, MemoryQuery
@@ -559,8 +559,8 @@ def register_with_core(
     prompt_provider = MemoryPromptFragmentProvider()
     handle = ModuleHandle(
         module_id="memory",
-        tier=MODULE_TIER_CORE_FOUNDATION,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         control_action_handlers={

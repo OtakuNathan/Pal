@@ -1,0 +1,9 @@
+plugin_id = "checklist"
+entrypoint = "pal.plugins_builtin.checklist.runtime"
+version = "1.0.0"
+enabled_by_default = true
+lifecycle_protocol = "raii.v1"
+module_id = "checklist"
+requires_plugins = []
+requires_ports = []
+reload_modules = ["pal.checklist"]

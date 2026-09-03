@@ -750,8 +750,6 @@ def register_with_core(
         runtime_root=resolved_root,
         context=context,
         wake_manager=manager.wake_v2,
-        attach_manager=manager.attach_manager,
-        detach_manager=manager.detach_manager,
         manager_request=manager.client.request_sync,
     )
     manager.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
@@ -771,7 +769,6 @@ def register_with_core(
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=public,
-        supports_lifecycle_capabilities=True,
         event_sources=[source],
         event_handlers={kind: [handler] for kind in event_kinds},
         control_action_handlers={

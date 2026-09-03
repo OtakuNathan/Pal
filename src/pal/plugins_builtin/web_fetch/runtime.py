@@ -13,13 +13,13 @@ class WebFetchBuiltinBundle:
     plugin_id: str = "web_fetch"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
+    def start(self, scope):
         service = WebFetchService(
             repository=WebFetchProviderRepository(),
             settings_repository=RuntimeSettingRepository(),
             browser_manager=BrowserServiceManager(runtime_root=self.runtime_root),
         )
-        return register_web_fetch_with_core(context, service)
+        return register_web_fetch_with_core(scope.context, service)
 
 
 def build_plugin(*, runtime_root: Path) -> WebFetchBuiltinBundle:

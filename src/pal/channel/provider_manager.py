@@ -1376,6 +1376,17 @@ async def _resolve_provider_awaitable_async(value: Any) -> Any:
     return value
 
 
+async def _resolve_provider_awaitable_bounded(value: Any, *, timeout_seconds: float = 5.0) -> Any:
+    if not inspect.isawaitable(value):
+        return value
+    task = asyncio.ensure_future(value)
+    done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+    if task not in done:
+        task.cancel()
+        raise TimeoutError(f"provider shutdown exceeded {timeout_seconds:g}s")
+    return task.result()
+
+
 async def _dispose_runtime_provider_handle_async(
     handle: RuntimeChannelProviderHandle,
 ) -> list[str]:
@@ -1395,7 +1406,7 @@ async def _dispose_runtime_provider_handle_async(
                     }
                     for parameter in signature.parameters.values()
                 )
-                await _resolve_provider_awaitable_async(
+                await _resolve_provider_awaitable_bounded(
                     hook(context) if accepts_context else hook()
                 )
             except Exception as exc:
@@ -1403,7 +1414,7 @@ async def _dispose_runtime_provider_handle_async(
     while handle.cleanup_callbacks:
         callback = handle.cleanup_callbacks.pop()
         try:
-            await _resolve_provider_awaitable_async(callback())
+            await _resolve_provider_awaitable_bounded(callback())
         except Exception as exc:
             errors.append(f"cleanup: {exc.__class__.__name__}: {exc}")
     _remove_provider_modules(handle.module_names)

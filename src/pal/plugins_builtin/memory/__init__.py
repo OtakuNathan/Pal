@@ -1,0 +1,1 @@
+"""First-party memory plugin."""

@@ -23,7 +23,7 @@ from pal.behavior.tools import (
     AffordanceUpdateTool,
     BehaviorAdviceTool,
 )
-from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -176,8 +176,8 @@ def register_with_core(context: "MainContext", service: BehaviorService) -> Modu
     prompt_provider = BehaviorPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="behavior",
-        tier=MODULE_TIER_CORE_FOUNDATION,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"behavior": service},

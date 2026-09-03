@@ -273,36 +273,10 @@ class BunshinV2PublicProvider:
     runtime_root: Path
     context: MainContext | None = None
     wake_manager: Callable[[], None] | None = None
-    attach_manager: Callable[[], dict[str, Any]] | None = None
-    detach_manager: Callable[[], None] | None = None
     manager_request: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         self.service = BunshinV2WorkflowService(Path(self.runtime_root))
-
-    def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
-        if self.attach_manager is None:
-            raise RuntimeError("bunshin sidecar lifecycle is not configured")
-        health = self.attach_manager()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="bunshin sidecar attached",
-            structured={"manager_running": bool(health.get("ok")), **dict(health)},
-            llm_text="Bunshin sidecar attached.",
-        )
-
-    def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
-        if self.detach_manager is None:
-            raise RuntimeError("bunshin sidecar lifecycle is not configured")
-        self.detach_manager()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="bunshin sidecar detached",
-            structured={"manager_running": False},
-            llm_text="Bunshin sidecar detached.",
-        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,

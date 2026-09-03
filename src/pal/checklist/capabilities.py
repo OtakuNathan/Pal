@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field
 
 from pal.checklist.service import ChecklistService
-from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import NextToolHint, StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import (
@@ -335,8 +335,8 @@ def register_with_core(context: "MainContext", service: ChecklistService) -> Mod
     prompt_provider = ChecklistPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="checklist",
-        tier=MODULE_TIER_CORE_FOUNDATION,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"checklist": service},

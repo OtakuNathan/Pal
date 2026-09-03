@@ -19,6 +19,9 @@ PLUGIN_STATUS_DETACHED = "detached"
 PLUGIN_STATUS_DISABLED = "disabled"
 PLUGIN_STATUS_LOAD_FAILED = "load_failed"
 PLUGIN_STATUS_UNSUPPORTED = "unsupported"
+PLUGIN_STATUS_CLEANUP_FAILED = "cleanup_failed"
+
+PLUGIN_LIFECYCLE_RAII_V1 = "raii.v1"
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,10 @@ class PluginManifest:
     filesystem_path: str = ""
     subscribed_events: tuple[str, ...] = ()
     reload_modules: tuple[str, ...] = ()
+    lifecycle_protocol: str = ""
+    module_id: str = ""
+    requires_plugins: tuple[str, ...] = ()
+    requires_ports: tuple[str, ...] = ()
 
 
 @dataclass
@@ -45,14 +52,23 @@ class PluginRecord:
     last_error: str | None = None
     module_id: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    generation: int = 0
+    lifecycle_protocol: str = ""
+    requires_plugins: tuple[str, ...] = ()
+    requires_ports: tuple[str, ...] = ()
+    blocked_by: tuple[str, ...] = ()
+    suspended_by: tuple[str, ...] = ()
 
 
-class FirstPartyPluginBundle(Protocol):
+class PluginInstance(Protocol):
     plugin_id: str
     version: str
 
-    def register_with_core(self, context: "MainContext") -> "ModuleHandle":
+    def start(self, scope: Any) -> "ModuleHandle":
         ...
+
+
+FirstPartyPluginBundle = PluginInstance
 
 
 @dataclass(frozen=True)

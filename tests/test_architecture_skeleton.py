@@ -2339,7 +2339,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(descriptor.target_label, "channel")
         self.assertEqual(descriptor.aliases, ("channel_list",))
 
-    def test_identity_is_always_on_and_query_only(self) -> None:
+    def test_identity_is_query_only_and_declares_detachable_plugin_tier(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -2354,8 +2354,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("identity.lifecycle.attach", published)
             self.assertNotIn("identity.lifecycle.detach", published)
             handle = core.context.module_registry.require("identity")
-            self.assertEqual(handle.tier, "core-foundation")
-            self.assertFalse(handle.supports_lifecycle_capabilities)
+            self.assertEqual(handle.tier, "detachable")
+            self.assertTrue(handle.detachable)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -2367,10 +2367,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         result = core.detach_module("control")
 
-        self.assertEqual(result, "ok")
+        self.assertEqual(result, RuntimeStatus.FORBIDDEN)
         self.assertIn("control_show", core.context.capability_registry.descriptors)
         observed = core.context.execution_runtime.execute(CapabilityCall(name="control_show"))
-        self.assertTrue(observed.structured["degraded"])
+        self.assertFalse(observed.structured["degraded"])
 
     def test_detachable_module_detach_withdraws_capabilities_and_reattach_restores_them(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_bunshin_lifecycle_test_") as tmp:
@@ -2382,12 +2382,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.assertIn("bunshin.manager", core.context.event_source_registry.sources)
 
                 detached = core.detach_module("bunshin")
-                self.assertEqual(detached, "ok")
-                self.assertNotIn("bunshin_task_status", core.context.capability_registry.descriptors)
-                self.assertNotIn("bunshin.manager", core.context.event_source_registry.sources)
+                self.assertEqual(detached, RuntimeStatus.FORBIDDEN)
+                self.assertIn("bunshin_task_status", core.context.capability_registry.descriptors)
+                self.assertIn("bunshin.manager", core.context.event_source_registry.sources)
 
                 reattached = core.reattach_module("bunshin")
-                self.assertEqual(reattached, "ok")
+                self.assertEqual(reattached, RuntimeStatus.FORBIDDEN)
                 self.assertIn("bunshin_task_status", core.context.capability_registry.descriptors)
                 self.assertIn("bunshin.manager", core.context.event_source_registry.sources)
                 observed = core.context.execution_runtime.execute(
@@ -2460,13 +2460,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         detached = core.detach_module(mock_l3.module_id)
 
-        self.assertEqual(detached, "ok")
-        self.assertIsNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
-        self.assertNotIn("memory_provider_show", core.context.capability_registry.descriptors)
+        self.assertEqual(detached, RuntimeStatus.FORBIDDEN)
+        self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
+        self.assertIn("memory_provider_show", core.context.capability_registry.descriptors)
 
         reattached = core.reattach_module(mock_l3.module_id)
 
-        self.assertEqual(reattached, "ok")
+        self.assertEqual(reattached, RuntimeStatus.FORBIDDEN)
         self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
 
     def test_l3_recall_query_supports_summary_and_origin_views(self) -> None:
@@ -2684,14 +2684,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("proactive_set_output_channel", core.context.capability_registry.descriptors)
         self.assertIn("proactive_set_output_target", core.context.capability_registry.descriptors)
         self.assertIn("proactive_update_schedule", core.context.capability_registry.descriptors)
-        self.assertIn("proactive_attach", core.context.capability_registry.descriptors)
-        self.assertIn("proactive_detach", core.context.capability_registry.descriptors)
+        self.assertNotIn("proactive_attach", core.context.capability_registry.descriptors)
+        self.assertNotIn("proactive_detach", core.context.capability_registry.descriptors)
         self.assertIn("proactive.triggers", core.context.event_source_registry.sources)
         self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
-        self.assertEqual(core.detach_module("proactive"), RuntimeStatus.OK)
-        self.assertNotIn("proactive.triggers", core.context.event_source_registry.sources)
-        self.assertNotIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
+        self.assertEqual(core.detach_module("proactive"), RuntimeStatus.FORBIDDEN)
+        self.assertIn("proactive.triggers", core.context.event_source_registry.sources)
+        self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
     def test_proactive_management_capabilities_create_update_and_delete(self) -> None:
         runtime_root, database = self._create_database()

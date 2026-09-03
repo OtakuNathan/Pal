@@ -108,12 +108,12 @@ that client — the daemon, its turn queue, and its sessions keep running, and
 `pal tty --runtime-root <dir>` reconnects at any time. This is a connection
 lifecycle, **not** a detach.
 
-**Detach / attach (plugin lifecycle).** Real detach is a plugin/module
-operation: a subsystem such as the Telegram channel can be taken out of the
-running daemon (`plugin_detach`) and put back in (`plugin_attach`) without
-restarting anything else. That's how you hot-replace or partially restart a
-broken component — fix a channel plugin, re-attach it, and the rest of the
-daemon never notices.
+**Detach / attach (plugin lifecycle).** Real detach is a plugin operation.
+`artifact`, `behavior`, `checklist`, `proactive`, `skill`, Bunshin, LSP, MCP,
+L3 providers, and web integrations can be replaced with `plugin_detach` /
+`plugin_attach`. Core, execution, LLM, channel (including the recovery
+socket), memory, identity, control, and failure are resident and cannot be
+unloaded. Channel endpoints retain their own target-level lifecycle.
 
 **Reboot the brain — you do it, not Pal.** Pal cannot restart itself. A
 session reset is a slash command (`/reset`); a full daemon restart is
@@ -226,17 +226,24 @@ Control actions (`/interrupt`, `/reset`) bypass the turn queue.
 Plugins are how Pal grows new abilities without touching core. First-party
 plugins live in `{runtime_root}/plugins/_builtin/`; community plugins in
 `{runtime_root}/plugins/community/<plugin_id>/`. A plugin is a `plugin.toml`
-manifest + an entrypoint exposing `build_plugin`, which registers
-capabilities, tools, affordances, prompt fragments, or turn-event handlers
-through a `ModuleHandle` — and can be **hot-attached/detached** at runtime
+manifest + an entrypoint exposing a side-effect-free `build_plugin`. Every
+manifest declares `lifecycle_protocol = "raii.v1"`, `module_id`, and optional
+plugin/port dependencies. The returned instance acquires resources in
+`start(scope)` and returns a `ModuleHandle`; the host publishes ports, events,
+prompts and capabilities only after start succeeds, then releases everything
+in reverse order on detach. Plugins can be **hot-attached/detached** at runtime
 (`plugin_rescan` / `plugin_attach` / `plugin_detach` / `plugin_enable`), no
 daemon restart needed.
 
+Only `core`, `execution`, `llm`, and `channel` (including the socket entrypoint)
+are pinned. Identity, memory, control, failure handling, and all other feature
+modules are first-party or community plugins governed by the same lifecycle.
+
 **Pal ships with a built-in plugin development manual as a skill**
 (`pal.plugin.development`): it covers when to prefer a plugin (optional,
-detachable, hot-refreshable, domain-owned) vs. when not to (runtime bus,
-shared contracts, control plane), the plugin directory layout, the
-`build_plugin` dependency-injection contract, `ModuleHandle` lifecycle rules,
+detachable, hot-refreshable, domain-owned) vs. when not to (the pinned runtime
+bus and shared contracts), the plugin directory layout, the
+`build_plugin` / `start(scope)` contract, `ModuleHandle` lifecycle rules,
 and the guardrail that `build_plugin` must never start background work, touch
 hardware, mutate secrets, or do irreversible I/O. Pal consults it every time
 it writes or repairs a plugin.
@@ -250,8 +257,9 @@ and a `sidecar.py` + `ssd1306.py` driver that talk to the OLED over a Unix
 socket — the hardware runs in a sidecar process, exactly the boundary the
 development manual demands.
 
-Built-in plugins include Bunshin, LSP, MCP, SQLite-vec L3 memory, web search
-(Brave + DuckDuckGo), and web fetch (Playwright + HTTP). Enabled built-ins are
+Built-in plugins include artifact, behavior, checklist, proactive, skill,
+Bunshin, LSP, MCP, SQLite-vec L3 memory, web search (Brave + DuckDuckGo), and
+web fetch (Playwright + HTTP). Enabled built-ins are
 attached automatically during startup; users do not assemble the runtime by
 hand.
 

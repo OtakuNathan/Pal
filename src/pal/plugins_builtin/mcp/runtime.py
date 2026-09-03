@@ -12,8 +12,10 @@ class McpBuiltinBundle:
     plugin_id: str = "mcp"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
-        return build_mcp_plugin(runtime_root=self.runtime_root).register_with_core(context)
+    def start(self, scope):
+        handle = build_mcp_plugin(runtime_root=self.runtime_root).register_with_core(scope.context)
+        handle.ports["mcp"].start_manager()
+        return handle
 
 
 def build_plugin(context: PluginBuildContext) -> McpBuiltinBundle:

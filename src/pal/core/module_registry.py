@@ -28,7 +28,6 @@ class ModuleHandle:
     event_handlers: dict[str, list[Any]] = field(default_factory=dict)
     control_action_handlers: dict[str, Any] = field(default_factory=dict)
     provider_refs: list[str] = field(default_factory=list)
-    supports_lifecycle_capabilities: bool = False
     ports: dict[str, Any] = field(default_factory=dict)
     published_capabilities: list[str] = field(default_factory=list)
     mounted_subtree: "MountedSubtreeHandle | None" = None
@@ -36,7 +35,6 @@ class ModuleHandle:
     shutdown_sync: Callable[[], None] | None = None
     shutdown_async: Callable[[], Awaitable[None]] | None = None
     runtime_state_port: "RuntimeStatePort | None" = None
-
 
 @dataclass
 class ModuleRegistry:

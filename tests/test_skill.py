@@ -548,7 +548,7 @@ Run the workflow.
             self.assertIn("plugins/lsp/servers", injected.structured["manual_text"])
 
             core.detach_module("lsp")
-            self.assertIsNone(self.skill_repository.get_skill("pal.lsp.template.development"))
+            self.assertIsNotNone(self.skill_repository.get_skill("pal.lsp.template.development"))
         finally:
             handle.shutdown_sync()
 
@@ -623,7 +623,7 @@ Run the workflow.
             after_lsp = asyncio.run(
                 behavior_service.advise_async(BehaviorAdviceRequest(scenario="add new language lsp template and language server config", top_k=5))
             )
-            self.assertNotIn("declared.skill.pal_lsp_template_development", {candidate.affordance_id for candidate in after_lsp.candidates})
+            self.assertIn("declared.skill.pal_lsp_template_development", {candidate.affordance_id for candidate in after_lsp.candidates})
         finally:
             lsp_handle.shutdown_sync()
 

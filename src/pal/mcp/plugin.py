@@ -118,7 +118,7 @@ class McpManagerPluginProvider:
             purpose="Show MCP manager status.",
             use_when="Diagnosing MCP system health — manager process, projection, server count.",
             do_not_use_when="Listing servers (use mcp_server_list). Checking one server (use mcp_server_read).",
-            failure_next_steps="Read-only. If last_error is set, the manager sidecar failed to start — check mcp_attach.",
+            failure_next_steps="If the manager failed, reload the MCP plugin; mcp_attach only targets one configured server.",
         ), aliases=("mcp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -159,15 +159,7 @@ class McpManagerPluginProvider:
         result = self._request_or_error("read_server", {"server_id": str(call.args.get("name") or "")})
         return _introspection_from_rpc("MCP server", result)
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach",
-        guidance=ToolGuidance(
-            purpose="Attach MCP manager — start sidecar and discover servers.",
-            use_when="Reconnecting a detached MCP manager.",
-            do_not_use_when="Attaching one server (use mcp_server_attach). The manager is already attached; use mcp_rescan after config changes.",
-            failure_next_steps="Inspect mcp_show to reconcile manager and projection state. If the manager is running but projection is absent, use mcp_rescan; otherwise correct MCP config or binary availability before retrying.",
-        ), aliases=("mcp_attach",), execution=INDIRECT_CONTROL)
-    def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
+    def start_manager(self) -> None:
         try:
             self._ensure_manager_started()
             McpManagerClient(
@@ -183,41 +175,18 @@ class McpManagerPluginProvider:
             self.last_health = {"healthy": False, "startup_error": self.last_error}
             with contextlib.suppress(Exception):
                 self._refresh_module_capabilities()
-        payload = self._status_payload()
-        attached = not self.last_error
-        text = "mcp manager attached" if attached else "mcp manager attach failed"
-        return IntrospectionResult(
-            status=RuntimeStatus.OK if attached else RuntimeStatus.ERROR,
-            text=text,
-            structured=payload,
-            llm_text=render_titled_structured_for_llm(text, payload),
-        )
+            raise
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach",
-        guidance=ToolGuidance(
-            purpose="Detach MCP manager — stop sidecar and withdraw all MCP capabilities.",
-            use_when="Temporarily stopping all MCP server connections.",
-            do_not_use_when="Detaching one server (use mcp_server_detach).",
-            failure_next_steps="If detach outcome is uncertain, inspect mcp_show first. Re-attach with mcp_attach only when the manager is confirmed detached and should be restored.",
-        ), aliases=("mcp_detach",), execution=INDIRECT_CONTROL)
-    def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
+    def stop_manager(self) -> None:
         self._stop_manager()
         self.projection = None
         self._refresh_module_capabilities()
-        payload = self._status_payload()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="mcp manager detached",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("MCP manager detached", payload),
-        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
-            do_not_use_when="Restarting the manager (use mcp_detach then mcp_attach). Attaching one server (use mcp_server_attach).",
+            do_not_use_when="Restarting the manager (use plugin_attach with name='mcp'). Attaching one server (use mcp_attach).",
             failure_next_steps="Inspect mcp_show and mcp_server_list to reconcile current manager and server state. Correct config syntax or projection errors before retrying.",
         ), aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -239,11 +208,11 @@ class McpManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Attach one configured MCP server inside the manager.",
             use_when="Enabling a specific MCP server's tools without affecting others.",
-            do_not_use_when="Attaching the whole manager (use mcp_attach). Detaching a server (use mcp_server_detach).",
+            do_not_use_when="Attaching the whole MCP plugin (use plugin_attach). Detaching a server (use mcp_detach).",
             failure_next_steps="Inspect mcp_server_list to reconcile whether the server attached. If absent, verify its name and run mcp_rescan after config changes before retrying.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderAttachInput,
-        aliases=("mcp_server_attach",),
+        aliases=("mcp_attach",),
         execution=INDIRECT_CONTROL,
     )
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -264,11 +233,11 @@ class McpManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Detach one MCP server inside the manager.",
             use_when="Temporarily disabling one MCP server's tools.",
-            do_not_use_when="Detaching the whole manager (use mcp_detach). Attaching a server (use mcp_server_attach).",
+            do_not_use_when="Detaching the whole MCP plugin (use plugin_detach). Attaching a server (use mcp_attach).",
             failure_next_steps="Inspect mcp_server_list to reconcile whether the server detached. Retry only if it is still attached; verify the exact server name first.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderDetachInput,
-        aliases=("mcp_server_detach",),
+        aliases=("mcp_detach",),
         execution=INDIRECT_CONTROL,
     )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -592,9 +561,8 @@ class McpManagerPluginBundle:
             detachable=True,
             mounted=False,
             introspection_provider=provider,
-            supports_lifecycle_capabilities=True,
             ports={"mcp": provider},
-            shutdown_sync=provider._stop_manager,
+            shutdown_sync=provider.stop_manager,
         )
         context.register_module(handle)
         return handle

@@ -538,35 +538,6 @@ class WebFetchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web fetch provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach",
-        guidance=ToolGuidance(
-            purpose="Attach web fetch module.",
-            use_when="Reconnecting a detached web fetch module.",
-            do_not_use_when="Enabling one provider (use web_fetch_provider_enable). Already attached.",
-            failure_next_steps="This attach is idempotent. If the module still appears detached or degraded, inspect web_fetch_show and provider health before retrying.",
-        ), aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
-    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.mounted = True
-        self.degraded = False
-        payload = {"mounted": True, "degraded": False}
-        return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch attached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch attached", payload))
-
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach",
-        guidance=ToolGuidance(
-            purpose="Detach web fetch module.",
-            use_when="Temporarily stopping all web fetch functionality.",
-            do_not_use_when="Disabling one provider (use web_fetch_provider_disable).",
-            failure_next_steps="Re-attach with web_fetch_attach.",
-        ), aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
-    def detach(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        self.service.shutdown_sync()
-        self.mounted = False
-        self.degraded = False
-        payload = {"mounted": False, "degraded": False}
-        return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch detached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch detached", payload))
-
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         provider = self._require_provider(call)
         if provider is None:
@@ -633,7 +604,6 @@ def register_with_core(
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        supports_lifecycle_capabilities=True,
         ports={"web_fetch": service},
         shutdown_sync=service.shutdown_sync,
         shutdown_async=service.shutdown_async,

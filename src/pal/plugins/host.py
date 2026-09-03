@@ -16,17 +16,20 @@ from pal.plugins.contracts import (
     PLUGIN_SOURCE_FIRST_PARTY,
     PLUGIN_SOURCE_THIRD_PARTY,
     PLUGIN_STATUS_ATTACHED,
+    PLUGIN_STATUS_CLEANUP_FAILED,
     PLUGIN_STATUS_DETACHED,
     PLUGIN_STATUS_DISABLED,
     PLUGIN_STATUS_DISCOVERED,
     PLUGIN_STATUS_LOAD_FAILED,
     PLUGIN_STATUS_UNSUPPORTED,
+    PLUGIN_LIFECYCLE_RAII_V1,
     PluginBuildContext,
     PluginManifest,
     PluginRecord,
 )
+from pal.plugins.lifecycle import PluginGeneration, PluginScope, _run_awaitable
 from pal.plugins.repository import PluginBundleRepository
-from pal.shared import IntrospectionCall, RuntimeStatus
+from pal.shared import RuntimeStatus
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -102,11 +105,16 @@ class PluginHost:
     first_party_records: dict[str, PluginRecord] = field(default_factory=dict)
     first_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
     third_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
+    generations: dict[str, PluginGeneration] = field(default_factory=dict)
+    manifests: dict[str, PluginManifest] = field(default_factory=dict)
     module_to_plugin: dict[str, str] = field(default_factory=dict)
     owner_id: str = "plugins"
     first_party_disabled: set[str] = field(default_factory=set)
     scan_errors: list[str] = field(default_factory=list)
     last_scan_status: str = PLUGIN_STATUS_DISCOVERED
+    _generation_counter: int = 0
+    _management_handle: ModuleHandle | None = None
+    _attaching: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.builtin_root is None:
@@ -118,17 +126,45 @@ class PluginHost:
 
     def bootstrap(self) -> None:
         self.rescan()
-        for plugin_id, record in list(self.first_party_records.items()):
-            if record.enabled:
-                self._load_and_attach_first_party(plugin_id)
-        for row in self.third_party_repository.list_all():
-            if row.enabled:
-                self._load_and_attach_community(row.plugin_id)
+        try:
+            order = self._topological_order()
+        except ValueError:
+            order = sorted(self.manifests)
+        for plugin_id in order:
+            record = self._record(plugin_id)
+            if record is not None and record.enabled:
+                self._attach_with_dependencies(plugin_id)
+
+    def publish_management_capabilities(self) -> ModuleHandle:
+        if self._management_handle is not None:
+            return self._management_handle
+        from pal.plugins.capabilities import build_management_handle
+
+        handle = build_management_handle(self)
+        self.context.execution_runtime.hydrate_module_handle(handle)
+        handle.published_capabilities = self.context.execution_runtime.mount_subtree(handle)
+        self.context.port_registry["core:plugins"] = self
+        self._management_handle = handle
+        return handle
+
+    def shutdown(self) -> None:
+        for plugin_id in reversed(self._topological_order(attached_only=True)):
+            with contextlib.suppress(Exception):
+                self._detach_generation(plugin_id)
+        if self._management_handle is not None:
+            self.context.execution_runtime.unmount_subtree(self._management_handle)
+            self._management_handle = None
+        if self.context.port_registry.get("core:plugins") is self:
+            self.context.port_registry.pop("core:plugins", None)
 
     def rescan(self) -> dict[str, Any]:
         self.scan_errors = []
         first_party = self._scan_first_party_manifests()
         third_party = self._scan_third_party_manifests()
+        try:
+            self._topological_order()
+        except ValueError as exc:
+            self.scan_errors.append(str(exc))
         self.last_scan_status = RuntimeStatus.OK if not self.scan_errors else RuntimeStatus.ERROR
         return {
             "first_party_discovered": len(first_party),
@@ -155,7 +191,7 @@ class PluginHost:
             record = self.first_party_records.get(plugin_id)
             if record is None or not record.enabled or plugin_id in attached_before:
                 continue
-            status = self._load_and_attach_first_party(plugin_id)
+            status = self._attach_with_dependencies(plugin_id)
             if status == RuntimeStatus.OK:
                 attached_now.append(plugin_id)
                 continue
@@ -200,39 +236,48 @@ class PluginHost:
                     config=dict(row.config_blob or {}),
                 ).__dict__
             )
+        for item in items:
+            manifest = self.manifests.get(str(item["plugin_id"]))
+            generation = self.generations.get(str(item["plugin_id"]))
+            item.update(
+                {
+                    "generation": generation.number if generation is not None else 0,
+                    "lifecycle_protocol": manifest.lifecycle_protocol if manifest else "",
+                    "requires_plugins": list(manifest.requires_plugins) if manifest else [],
+                    "requires_ports": list(manifest.requires_ports) if manifest else [],
+                    "blocked_by": list(self._blocked_by(str(item["plugin_id"]))),
+                    "suspended_by": list(item.get("config", {}).get("suspended_by", [])),
+                    "lifecycle_state": item.get("last_load_status"),
+                }
+            )
         return sorted(items, key=lambda item: (item["source"], item["plugin_id"]))
 
     def attach(self, plugin_id: str) -> dict[str, Any]:
-        if plugin_id in self.first_party_records:
-            record = self.first_party_records[plugin_id]
-            if not record.enabled and plugin_id in self.first_party_disabled:
-                return _plugin_disabled_result(plugin_id)
-            status = self._attach_first_party(plugin_id, refresh=True)
-            return {
-                "status": status,
-                "plugin_id": plugin_id,
-                "enabled": bool(record.enabled),
-                "attached": bool(record.attached),
-                "temporary_attach": bool(record.attached) and not bool(record.enabled),
-            }
-        if plugin_id in self.third_party_handles:
-            return {"status": self._attach_community(plugin_id, refresh=True), "plugin_id": plugin_id}
-        row = self.third_party_repository.get(plugin_id)
-        if row is None:
+        record = self._record(plugin_id)
+        if record is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        status = self._load_and_attach_community(plugin_id, refresh=True)
-        return {"status": status, "plugin_id": plugin_id}
+        if not record.enabled:
+            return _plugin_disabled_result(plugin_id)
+        status = self._reload_plugin(plugin_id) if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
+        current = self._record(plugin_id) or record
+        return {
+            "status": status,
+            "plugin_id": plugin_id,
+            "enabled": current.enabled,
+            "attached": current.attached,
+        }
 
     def detach(self, plugin_id: str) -> dict[str, Any]:
-        if plugin_id in self.first_party_records:
-            return {"status": self._detach_first_party(plugin_id), "plugin_id": plugin_id}
-        if plugin_id in self.third_party_handles:
-            return {"status": self._detach_community(plugin_id), "plugin_id": plugin_id}
-        row = self.third_party_repository.set_attached(plugin_id, False)
-        if row is None:
+        if self._record(plugin_id) is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
-        return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "attached": False}
+        affected = self._dependents_of(plugin_id, transitive=True, attached_only=True)
+        for dependent in reversed(self._topological_subset(affected)):
+            self._mark_suspended(dependent, plugin_id)
+            status = self._detach_generation(dependent)
+            if status != RuntimeStatus.OK:
+                return {"status": status, "plugin_id": plugin_id, "blocked_by": dependent}
+        status = self._detach_generation(plugin_id)
+        return {"status": status, "plugin_id": plugin_id, "attached": False}
 
     # --- module lifecycle owner ---
 
@@ -265,7 +310,7 @@ class PluginHost:
             record.enabled = True
             if record.attached:
                 return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
-            status = self._load_and_attach_first_party(plugin_id)
+            status = self._attach_with_dependencies(plugin_id)
             if status != RuntimeStatus.OK:
                 record.enabled = previous_enabled
                 if was_disabled:
@@ -278,11 +323,7 @@ class PluginHost:
         row = self.third_party_repository.set_enabled(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        status = (
-            self._load_and_attach_community(plugin_id)
-            if plugin_id not in self.third_party_handles
-            else self._attach_community(plugin_id)
-        )
+        status = self._attach_with_dependencies(plugin_id)
         if status != RuntimeStatus.OK:
             self.third_party_repository.set_enabled(plugin_id, previous_enabled)
         return {
@@ -294,8 +335,8 @@ class PluginHost:
     def disable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
             record = self.first_party_records[plugin_id]
-            if record.attached:
-                status = self._detach_first_party(plugin_id)
+            if plugin_id in self.generations:
+                status = self.detach(plugin_id)["status"]
                 if status != RuntimeStatus.OK:
                     return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
             self.first_party_disabled.add(plugin_id)
@@ -305,8 +346,8 @@ class PluginHost:
         row = self.third_party_repository.get(plugin_id)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        if plugin_id in self.third_party_handles:
-            status = self._detach_community(plugin_id)
+        if plugin_id in self.generations:
+            status = self.detach(plugin_id)["status"]
             if status != RuntimeStatus.OK:
                 return {"status": status, "plugin_id": plugin_id, "enabled": bool(row.enabled)}
         row = self.third_party_repository.set_enabled(plugin_id, False)
@@ -327,6 +368,7 @@ class PluginHost:
             except Exception as exc:
                 self.scan_errors.append(f"{manifest_path}:{exc}")
                 continue
+            self.manifests[manifest.plugin_id] = manifest
             record = self.first_party_records.get(manifest.plugin_id)
             if record is None:
                 self.first_party_records[manifest.plugin_id] = PluginRecord(
@@ -338,13 +380,22 @@ class PluginHost:
                     enabled=manifest.enabled_by_default,
                     attached=False,
                     last_load_status=PLUGIN_STATUS_DISCOVERED,
-                    config={"reload_modules": list(manifest.reload_modules)},
+                    config={
+                        "reload_modules": list(manifest.reload_modules),
+                        "suspended_by": [],
+                    },
+                    lifecycle_protocol=manifest.lifecycle_protocol,
+                    requires_plugins=manifest.requires_plugins,
+                    requires_ports=manifest.requires_ports,
                 )
             else:
                 record.entrypoint = manifest.entrypoint
                 record.version = manifest.version
                 record.filesystem_path = manifest.filesystem_path
                 record.config["reload_modules"] = list(manifest.reload_modules)
+                record.lifecycle_protocol = manifest.lifecycle_protocol
+                record.requires_plugins = manifest.requires_plugins
+                record.requires_ports = manifest.requires_ports
             manifests.append(manifest)
         return manifests
 
@@ -357,6 +408,23 @@ class PluginHost:
                 manifest = self._read_manifest(manifest_path)
             except Exception as exc:
                 self.scan_errors.append(f"{manifest_path}:{exc}")
+                try:
+                    raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+                    plugin_id = str(raw.get("plugin_id") or manifest_path.parent.name)
+                    self.third_party_repository.upsert_discovered(
+                        plugin_id=plugin_id,
+                        entrypoint=str(raw.get("entrypoint") or ""),
+                        version=str(raw.get("version") or ""),
+                        filesystem_path=str(manifest_path.parent),
+                        enabled_by_default=False,
+                    )
+                    self.third_party_repository.set_load_status(
+                        plugin_id,
+                        status=PLUGIN_STATUS_UNSUPPORTED,
+                        error_text=str(exc),
+                    )
+                except Exception:
+                    pass
                 continue
             if manifest.plugin_id in self.first_party_records:
                 self.third_party_repository.upsert_discovered(
@@ -372,6 +440,7 @@ class PluginHost:
                     error_text="plugin_id conflicts with first-party plugin",
                 )
             else:
+                self.manifests[manifest.plugin_id] = manifest
                 self.third_party_repository.upsert_discovered(
                     plugin_id=manifest.plugin_id,
                     entrypoint=manifest.entrypoint,
@@ -379,12 +448,31 @@ class PluginHost:
                     filesystem_path=manifest.filesystem_path,
                     enabled_by_default=manifest.enabled_by_default,
                 )
+                row = self.third_party_repository.get(manifest.plugin_id)
+                prior = dict(row.config_blob or {}) if row is not None else {}
+                self.third_party_repository.set_config(
+                    manifest.plugin_id,
+                    {
+                        **prior,
+                        "reload_modules": list(manifest.reload_modules),
+                        "lifecycle_protocol": manifest.lifecycle_protocol,
+                        "module_id": manifest.module_id,
+                        "requires_plugins": list(manifest.requires_plugins),
+                        "requires_ports": list(manifest.requires_ports),
+                    },
+                )
             manifests.append(manifest)
         return manifests
 
     def _read_manifest(self, manifest_path: Path) -> PluginManifest:
         payload = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
         subscribed = payload.get("subscribed_events", [])
+        protocol = str(payload.get("lifecycle_protocol") or "").strip()
+        if protocol != PLUGIN_LIFECYCLE_RAII_V1:
+            raise ValueError(f"unsupported lifecycle_protocol: {protocol or '<missing>'}")
+        module_id = str(payload.get("module_id") or payload.get("plugin_id") or "").strip()
+        if not module_id:
+            raise ValueError("module_id is required")
         return PluginManifest(
             plugin_id=str(payload["plugin_id"]),
             entrypoint=str(payload["entrypoint"]),
@@ -395,193 +483,383 @@ class PluginHost:
             reload_modules=tuple(str(e) for e in payload.get("reload_modules", []) if str(e).strip())
             if isinstance(payload.get("reload_modules"), list)
             else (),
+            lifecycle_protocol=protocol,
+            module_id=module_id,
+            requires_plugins=tuple(str(e).strip() for e in payload.get("requires_plugins", []) if str(e).strip()),
+            requires_ports=tuple(str(e).strip() for e in payload.get("requires_ports", []) if str(e).strip()),
         )
+
+    # --- RAII v1 lifecycle ---
+
+    def _record(self, plugin_id: str) -> PluginRecord | None:
+        record = self.first_party_records.get(plugin_id)
+        if record is not None:
+            return record
+        row = self.third_party_repository.get(plugin_id)
+        if row is None:
+            return None
+        config = dict(row.config_blob or {})
+        manifest = self.manifests.get(plugin_id)
+        return PluginRecord(
+            plugin_id=plugin_id,
+            source=PLUGIN_SOURCE_THIRD_PARTY,
+            entrypoint=row.entrypoint,
+            version=row.version,
+            filesystem_path=row.filesystem_path,
+            enabled=bool(row.enabled),
+            attached=bool(row.attached),
+            last_load_status=row.last_load_status,
+            last_error=row.last_error,
+            module_id=(manifest.module_id if manifest else str(config.get("module_id") or "")) or None,
+            config=config,
+            lifecycle_protocol=manifest.lifecycle_protocol if manifest else str(config.get("lifecycle_protocol") or ""),
+            requires_plugins=manifest.requires_plugins if manifest else tuple(config.get("requires_plugins") or ()),
+            requires_ports=manifest.requires_ports if manifest else tuple(config.get("requires_ports") or ()),
+        )
+
+    def _set_state(self, plugin_id: str, *, attached: bool, status: str, error: str | None = None) -> None:
+        record = self.first_party_records.get(plugin_id)
+        if record is not None:
+            record.attached = attached
+            record.last_load_status = status
+            record.last_error = error
+            generation = self.generations.get(plugin_id)
+            record.generation = generation.number if generation is not None else record.generation
+            return
+        self.third_party_repository.set_attached(plugin_id, attached)
+        self.third_party_repository.set_load_status(plugin_id, status=status, error_text=error)
+
+    def _blocked_by(self, plugin_id: str) -> tuple[str, ...]:
+        manifest = self.manifests.get(plugin_id)
+        if manifest is None:
+            return ("manifest",)
+        blocked = [dep for dep in manifest.requires_plugins if dep not in self.manifests]
+        blocked.extend(port for port in manifest.requires_ports if port not in self.context.port_registry)
+        return tuple(dict.fromkeys(blocked))
+
+    def _topological_order(self, *, attached_only: bool = False) -> list[str]:
+        nodes = {
+            plugin_id
+            for plugin_id in self.manifests
+            if not attached_only or plugin_id in self.generations
+        }
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        order: list[str] = []
+
+        def visit(plugin_id: str) -> None:
+            if plugin_id in visited:
+                return
+            if plugin_id in visiting:
+                raise ValueError(f"plugin dependency cycle at {plugin_id}")
+            visiting.add(plugin_id)
+            manifest = self.manifests[plugin_id]
+            for dependency in manifest.requires_plugins:
+                if dependency not in self.manifests:
+                    raise ValueError(f"unknown plugin dependency: {plugin_id} -> {dependency}")
+                if dependency in nodes:
+                    visit(dependency)
+            visiting.remove(plugin_id)
+            visited.add(plugin_id)
+            if plugin_id in nodes:
+                order.append(plugin_id)
+
+        for item in sorted(nodes):
+            visit(item)
+        return order
+
+    def _topological_subset(self, plugin_ids: set[str]) -> list[str]:
+        return [plugin_id for plugin_id in self._topological_order() if plugin_id in plugin_ids]
+
+    def _dependents_of(self, plugin_id: str, *, transitive: bool, attached_only: bool) -> set[str]:
+        result: set[str] = set()
+        frontier = {plugin_id}
+        while frontier:
+            next_frontier: set[str] = set()
+            for candidate, manifest in self.manifests.items():
+                if candidate in result or candidate == plugin_id:
+                    continue
+                if any(dep in frontier for dep in manifest.requires_plugins):
+                    if not attached_only or candidate in self.generations:
+                        result.add(candidate)
+                    next_frontier.add(candidate)
+            if not transitive:
+                break
+            frontier = next_frontier
+        return result
+
+    def _mark_suspended(self, plugin_id: str, dependency: str) -> None:
+        record = self.first_party_records.get(plugin_id)
+        if record is not None:
+            suspended = set(record.config.get("suspended_by", []))
+            suspended.add(dependency)
+            record.config["suspended_by"] = sorted(suspended)
+            return
+        row = self.third_party_repository.get(plugin_id)
+        if row is not None:
+            config = dict(row.config_blob or {})
+            suspended = set(config.get("suspended_by", []))
+            suspended.add(dependency)
+            config["suspended_by"] = sorted(suspended)
+            self.third_party_repository.set_config(plugin_id, config)
+
+    def _clear_suspended(self, plugin_id: str, dependency: str) -> bool:
+        record = self._record(plugin_id)
+        if record is None:
+            return False
+        suspended = set(record.config.get("suspended_by", []))
+        was_suspended = dependency in suspended
+        suspended.discard(dependency)
+        if plugin_id in self.first_party_records:
+            self.first_party_records[plugin_id].config["suspended_by"] = sorted(suspended)
+        else:
+            config = dict(record.config)
+            config["suspended_by"] = sorted(suspended)
+            self.third_party_repository.set_config(plugin_id, config)
+        return was_suspended and not suspended
+
+    def _attach_with_dependencies(self, plugin_id: str) -> str:
+        if plugin_id in self._attaching:
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"plugin dependency cycle at {plugin_id}")
+            return RuntimeStatus.ERROR
+        manifest = self.manifests.get(plugin_id)
+        if manifest is None:
+            return RuntimeStatus.NOT_FOUND
+        self._attaching.add(plugin_id)
+        try:
+            for dependency in manifest.requires_plugins:
+                record = self._record(dependency)
+                if record is None or not record.enabled:
+                    self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"dependency disabled or missing: {dependency}")
+                    return RuntimeStatus.ERROR
+                if dependency not in self.generations:
+                    status = self._attach_with_dependencies(dependency)
+                    if status != RuntimeStatus.OK:
+                        dependency_record = self._record(dependency)
+                        detail = (
+                            dependency_record.last_error
+                            if dependency_record is not None
+                            else str(status)
+                        )
+                        self._set_state(
+                            plugin_id,
+                            attached=False,
+                            status=PLUGIN_STATUS_LOAD_FAILED,
+                            error=f"dependency failed: {dependency}: {detail}",
+                        )
+                        return status
+            if self._blocked_by(plugin_id):
+                blocked = ", ".join(self._blocked_by(plugin_id))
+                self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"blocked by: {blocked}")
+                return RuntimeStatus.ERROR
+            status = self._attach_plugin(plugin_id)
+            if status == RuntimeStatus.OK:
+                for dependent in self._dependents_of(plugin_id, transitive=True, attached_only=False):
+                    dependent_record = self._record(dependent)
+                    if dependent_record and dependent_record.enabled and self._clear_suspended(dependent, plugin_id):
+                        self._attach_with_dependencies(dependent)
+            return status
+        finally:
+            self._attaching.discard(plugin_id)
+
+    def _attach_plugin(self, plugin_id: str) -> str:
+        if plugin_id in self.generations:
+            return RuntimeStatus.OK
+        record = self._record(plugin_id)
+        manifest = self.manifests.get(plugin_id)
+        if record is None or manifest is None:
+            return RuntimeStatus.NOT_FOUND
+        plugin_dir = Path(record.filesystem_path) if record.filesystem_path else None
+        try:
+            if record.source == PLUGIN_SOURCE_THIRD_PARTY:
+                if plugin_dir is None or not plugin_dir.exists():
+                    raise FileNotFoundError(f"plugin directory not found: {plugin_dir}")
+                if str(plugin_dir) not in sys.path:
+                    sys.path.insert(0, str(plugin_dir))
+            self._drop_plugin_import_cache(
+                record.entrypoint,
+                plugin_id=plugin_id,
+                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
+                extra_prefixes=_record_reload_prefixes(record),
+                plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
+            )
+            module = importlib.import_module(record.entrypoint)
+            factory = getattr(module, "build_plugin")
+            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
+            start = getattr(instance, "start", None)
+            if not callable(start) or callable(getattr(instance, "register_with_core", None)):
+                raise TypeError("plugin must implement raii.v1 start(scope) and must not expose register_with_core")
+            scope = PluginScope(self.context, plugin_id)
+            handle = start(scope)
+            if inspect.isawaitable(handle):
+                handle = _run_awaitable(handle)
+            if not isinstance(handle, ModuleHandle):
+                raise TypeError("plugin start(scope) must return ModuleHandle")
+            if scope.handle is not None and scope.handle is not handle:
+                raise ValueError("plugin returned a different handle than it staged")
+            if handle.module_id != manifest.module_id:
+                raise ValueError(f"manifest module_id {manifest.module_id!r} != handle {handle.module_id!r}")
+            scope.handle = handle
+            scope.absorb_handle_cleanups(handle)
+            handle.mounted = True
+            handle.degraded = False
+            self.context.register_module(handle)
+            scope.published = True
+            self._restore_provider_refs(handle)
+            self._restore_prompt_fragment_providers(handle)
+            self._restore_event_sources(handle)
+            self._restore_event_handlers(handle)
+            self._restore_control_action_handlers(handle)
+            self._publish_module_capabilities(handle.module_id)
+            self._generation_counter += 1
+            generation = PluginGeneration(self._generation_counter, instance, scope, handle)
+            self.generations[plugin_id] = generation
+            target = self.first_party_handles if record.source == PLUGIN_SOURCE_FIRST_PARTY else self.third_party_handles
+            target[plugin_id] = handle
+            self._bind_plugin_module(plugin_id, handle)
+            self._replay_optional_contributions(plugin_id)
+            self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED)
+            return RuntimeStatus.OK
+        except Exception as exc:
+            if "scope" in locals():
+                candidate = getattr(scope, "handle", None)
+                if candidate is not None:
+                    scope.absorb_handle_cleanups(candidate)
+                    with contextlib.suppress(Exception):
+                        self._withdraw_generation_surface(candidate)
+                    with contextlib.suppress(Exception):
+                        self.context.unregister_module(candidate)
+                scope.close()
+            self._drop_plugin_import_cache(
+                record.entrypoint,
+                plugin_id=plugin_id,
+                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
+                extra_prefixes=_record_reload_prefixes(record),
+                plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
+            )
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"{exc.__class__.__name__}: {exc}")
+            return RuntimeStatus.ERROR
+
+    def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
+        self._withdraw_module_capabilities(handle.module_id)
+        self.context.prompt_fragment_registry.unregister_module(handle.module_id)
+        self.context.event_source_registry.detach_module(handle.module_id)
+        self.context.event_handler_registry.detach_module(handle.module_id)
+        self.context.control_action_registry.unregister_module(handle.module_id)
+        for provider_id in list(handle.provider_refs):
+            self.context.execution_runtime.unregister_provider_ref(provider_id)
+            self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
+        handle.mounted = False
+
+    def _replay_optional_contributions(self, plugin_id: str) -> None:
+        behavior = self.context.port_registry.get("behavior:behavior")
+        skill = self.context.port_registry.get("skill:skill")
+        if behavior is not None:
+            register = getattr(behavior, "register_declared_module", None)
+            if callable(register):
+                for generation in self.generations.values():
+                    register(generation.handle)
+        if skill is not None:
+            register = getattr(skill, "register_declared_module", None)
+            if callable(register):
+                for generation in self.generations.values():
+                    register(generation.handle)
+        if behavior is not None and skill is not None:
+            skill.behavior_repository = getattr(behavior, "repository", None)
+            behavior.skill_repository = getattr(skill, "repository", None)
+
+    def _detach_generation(self, plugin_id: str) -> str:
+        generation = self.generations.get(plugin_id)
+        record = self._record(plugin_id)
+        if generation is None:
+            if record is not None:
+                self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
+                return RuntimeStatus.OK
+            return RuntimeStatus.NOT_FOUND
+        handle = generation.handle
+        errors: list[str] = []
+        try:
+            self._withdraw_generation_surface(handle)
+        except Exception as exc:
+            errors.append(f"surface: {exc.__class__.__name__}: {exc}")
+        with contextlib.suppress(Exception):
+            self.context.unregister_module(handle)
+        try:
+            if plugin_id == "behavior":
+                skill = self.context.port_registry.get("skill:skill")
+                if skill is not None:
+                    skill.behavior_repository = None
+            elif plugin_id == "skill":
+                behavior = self.context.port_registry.get("behavior:behavior")
+                if behavior is not None:
+                    behavior.skill_repository = None
+            generation.scope.absorb_handle_cleanups(handle)
+        except Exception as exc:
+            errors.append(f"provider: {exc.__class__.__name__}: {exc}")
+        errors.extend(generation.scope.close())
+        if errors:
+            generation.cleanup_errors = tuple(errors)
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error="; ".join(errors))
+            return RuntimeStatus.ERROR
+        try:
+            self.generations.pop(plugin_id, None)
+            self.first_party_handles.pop(plugin_id, None)
+            self.third_party_handles.pop(plugin_id, None)
+            assert record is not None
+            self._drop_plugin_import_cache(
+                record.entrypoint,
+                plugin_id=plugin_id,
+                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
+                extra_prefixes=_record_reload_prefixes(record),
+                plugin_dir=Path(record.filesystem_path) if record.source == PLUGIN_SOURCE_THIRD_PARTY and record.filesystem_path else None,
+            )
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
+            return RuntimeStatus.OK
+        except Exception as exc:
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error=f"{exc.__class__.__name__}: {exc}")
+            return RuntimeStatus.ERROR
+
+    def _reload_plugin(self, plugin_id: str) -> str:
+        status = self.detach(plugin_id)["status"]
+        if status != RuntimeStatus.OK:
+            return status
+        return self._attach_with_dependencies(plugin_id)
 
     # --- first-party lifecycle ---
 
     def _load_and_attach_first_party(self, plugin_id: str) -> str:
-        if plugin_id in self.first_party_disabled:
-            return RuntimeStatus.FORBIDDEN
-        status = self._instantiate_first_party(plugin_id)
-        if status != RuntimeStatus.OK:
-            return status
-        return self._attach_first_party(plugin_id)
+        return self._attach_with_dependencies(plugin_id)
 
     def _instantiate_first_party(self, plugin_id: str) -> str:
-        if plugin_id in self.first_party_handles:
-            return RuntimeStatus.OK
-        record = self.first_party_records.get(plugin_id)
-        if record is None:
-            return RuntimeStatus.NOT_FOUND
-        try:
-            module = importlib.import_module(record.entrypoint)
-            factory = getattr(module, "build_plugin")
-            plugin_dir = Path(record.filesystem_path) if record.filesystem_path else None
-            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
-            handle = instance.register_with_core(self.context)
-        except Exception as exc:
-            record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
-            record.last_error = f"{exc.__class__.__name__}: {exc}"
-            return RuntimeStatus.ERROR
-        self._bind_plugin_module(plugin_id, handle)
-        record.last_load_status = "loaded"
-        record.last_error = None
-        self.first_party_handles[plugin_id] = handle
-        return RuntimeStatus.OK
+        return RuntimeStatus.OK if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
 
     def _attach_first_party(self, plugin_id: str, *, refresh: bool = False) -> str:
-        record = self.first_party_records.get(plugin_id)
-        if record is None:
-            return RuntimeStatus.NOT_FOUND
-        try:
-            if refresh:
-                self._forget_first_party_handle(plugin_id)
-            if plugin_id not in self.first_party_handles:
-                status = self._instantiate_first_party(plugin_id)
-                if status != RuntimeStatus.OK:
-                    return status
-            handle = self.first_party_handles[plugin_id]
-            self._do_attach(handle)
-        except Exception as exc:
-            failed_handle = self.first_party_handles.get(plugin_id)
-            if failed_handle is not None and not failed_handle.mounted:
-                self.first_party_handles.pop(plugin_id, None)
-                self._forget_module_handle(failed_handle)
-            record.attached = bool(failed_handle is not None and failed_handle.mounted)
-            record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
-            record.last_error = f"{exc.__class__.__name__}: {exc}"
-            return RuntimeStatus.ERROR
-        record.attached = True
-        record.last_load_status = PLUGIN_STATUS_ATTACHED
-        record.last_error = None
-        return RuntimeStatus.OK
+        if refresh and plugin_id in self.generations:
+            return self._reload_plugin(plugin_id)
+        return self._attach_with_dependencies(plugin_id)
 
     def _detach_first_party(self, plugin_id: str) -> str:
-        handle = self.first_party_handles.get(plugin_id)
-        record = self.first_party_records.get(plugin_id)
-        if handle is None or record is None:
-            return RuntimeStatus.NOT_FOUND
-        try:
-            self._do_detach(handle)
-        except Exception as exc:
-            record.last_error = f"{exc.__class__.__name__}: {exc}"
-            return RuntimeStatus.ERROR
-        record.attached = False
-        record.last_load_status = PLUGIN_STATUS_DETACHED
-        record.last_error = None
-        return RuntimeStatus.OK
+        return self._detach_generation(plugin_id)
 
     # --- community (third-party) lifecycle ---
 
     def _load_and_attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
-        if not refresh:
-            status = self._instantiate_community(plugin_id)
-            if status != RuntimeStatus.OK:
-                return status
-        return self._attach_community(plugin_id, refresh=refresh)
+        return self._reload_plugin(plugin_id) if refresh and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
 
     def _instantiate_community(self, plugin_id: str) -> str:
-        if plugin_id in self.third_party_handles:
-            return RuntimeStatus.OK
-        row = self.third_party_repository.get(plugin_id)
-        if row is None:
-            return RuntimeStatus.NOT_FOUND
-        plugin_dir = Path(row.filesystem_path)
-        if not plugin_dir.exists():
-            self.third_party_repository.set_load_status(
-                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
-                error_text=f"plugin directory not found: {plugin_dir}",
-            )
-            return RuntimeStatus.NOT_FOUND
-        try:
-            dir_str = str(plugin_dir)
-            if dir_str not in sys.path:
-                sys.path.insert(0, dir_str)
-            module = importlib.import_module(row.entrypoint)
-            factory = getattr(module, "build_plugin")
-            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
-            handle = instance.register_with_core(self.context)
-        except Exception as exc:
-            self.third_party_repository.set_load_status(
-                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
-                error_text=f"{exc.__class__.__name__}: {exc}",
-            )
-            return RuntimeStatus.ERROR
-        self.third_party_repository.set_load_status(plugin_id, status="loaded", error_text=None)
-        self._bind_plugin_module(plugin_id, handle)
-        self.third_party_handles[plugin_id] = handle
-        return RuntimeStatus.OK
+        return RuntimeStatus.OK if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
 
     def _attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
-        try:
-            if refresh:
-                self._forget_community_handle(plugin_id)
-            if plugin_id not in self.third_party_handles:
-                status = self._instantiate_community(plugin_id)
-                if status != RuntimeStatus.OK:
-                    return status
-            handle = self.third_party_handles[plugin_id]
-            self._do_attach(handle)
-        except Exception as exc:
-            failed_handle = self.third_party_handles.get(plugin_id)
-            if failed_handle is not None and not failed_handle.mounted:
-                self.third_party_handles.pop(plugin_id, None)
-                self._forget_module_handle(failed_handle)
-            self.third_party_repository.set_load_status(
-                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
-                error_text=f"{exc.__class__.__name__}: {exc}",
-            )
-            return RuntimeStatus.ERROR
-        self.third_party_repository.set_attached(plugin_id, True)
-        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_ATTACHED, error_text=None)
-        return RuntimeStatus.OK
+        return self._reload_plugin(plugin_id) if refresh and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
 
     def _detach_community(self, plugin_id: str) -> str:
-        handle = self.third_party_handles.get(plugin_id)
-        if handle is None:
-            return RuntimeStatus.NOT_FOUND
-        try:
-            self._do_detach(handle)
-        except Exception as exc:
-            self.third_party_repository.set_load_status(
-                plugin_id,
-                status=PLUGIN_STATUS_LOAD_FAILED,
-                error_text=f"{exc.__class__.__name__}: {exc}",
-            )
-            return RuntimeStatus.ERROR
-        self.third_party_repository.set_attached(plugin_id, False)
-        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
-        return RuntimeStatus.OK
+        return self._detach_generation(plugin_id)
 
     def _forget_first_party_handle(self, plugin_id: str) -> None:
-        record = self.first_party_records.get(plugin_id)
-        handle = self.first_party_handles.get(plugin_id)
-        if handle is not None:
-            self._do_detach(handle)
-            self.first_party_handles.pop(plugin_id, None)
-            self._forget_module_handle(handle)
-        if record is not None:
-            self._drop_plugin_import_cache(
-                record.entrypoint,
-                plugin_id=plugin_id,
-                first_party=True,
-                extra_prefixes=_record_reload_prefixes(record),
-            )
+        self._detach_generation(plugin_id)
 
     def _forget_community_handle(self, plugin_id: str) -> None:
-        handle = self.third_party_handles.get(plugin_id)
-        if handle is not None:
-            self._do_detach(handle)
-            self.third_party_handles.pop(plugin_id, None)
-            self._forget_module_handle(handle)
-        row = self.third_party_repository.get(plugin_id)
-        if row is not None:
-            self._drop_plugin_import_cache(
-                row.entrypoint,
-                plugin_id=plugin_id,
-                first_party=False,
-                plugin_dir=Path(row.filesystem_path) if row.filesystem_path else None,
-            )
+        self._detach_generation(plugin_id)
 
     def _bind_plugin_module(self, plugin_id: str, handle: ModuleHandle) -> None:
         module_id = str(handle.module_id)
@@ -658,10 +936,7 @@ class PluginHost:
     # --- shared attach/detach logic ---
 
     def _do_attach(self, handle: ModuleHandle) -> None:
-        provider = handle.introspection_provider
         try:
-            if provider is not None and hasattr(provider, "attach"):
-                provider.attach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.attach"))
             handle.mounted = True
             handle.degraded = False
             self._restore_provider_refs(handle)
@@ -675,19 +950,6 @@ class PluginHost:
             raise
 
     def _do_detach(self, handle: ModuleHandle) -> None:
-        provider = handle.introspection_provider
-        if provider is not None and hasattr(provider, "detach"):
-            # The provider owns its resources and must close them before the
-            # globally visible projections are removed.  On failure the old
-            # generation and bookkeeping remain intact and retryable.
-            provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
-        for cleanup in reversed(list(handle.cleanup_callbacks)):
-            try:
-                cleanup()
-            except Exception:
-                pass
-        handle.cleanup_callbacks.clear()
-        handle.mounted = False
         self._withdraw_module_capabilities(handle.module_id)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         self.context.event_source_registry.detach_module(handle.module_id)
@@ -697,6 +959,20 @@ class PluginHost:
             self.context.execution_runtime.unregister_provider_ref(provider_id)
             if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
                 self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
+        if callable(handle.shutdown_async):
+            _run_awaitable(handle.shutdown_async())
+            handle.shutdown_async = None
+            handle.shutdown_sync = None
+        elif callable(handle.shutdown_sync):
+            handle.shutdown_sync()
+            handle.shutdown_sync = None
+        for cleanup in reversed(list(handle.cleanup_callbacks)):
+            try:
+                cleanup()
+            except Exception:
+                pass
+        handle.cleanup_callbacks.clear()
+        handle.mounted = False
 
     # --- factory ---
 
@@ -810,10 +1086,15 @@ class PluginHost:
             with contextlib.suppress(Exception):
                 if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
                     self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
-        provider = handle.introspection_provider
-        if provider is not None and hasattr(provider, "detach"):
+        if callable(handle.shutdown_async):
             with contextlib.suppress(Exception):
-                provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
+                _run_awaitable(handle.shutdown_async())
+            handle.shutdown_async = None
+            handle.shutdown_sync = None
+        elif callable(handle.shutdown_sync):
+            with contextlib.suppress(Exception):
+                handle.shutdown_sync()
+            handle.shutdown_sync = None
         for cleanup in reversed(list(handle.cleanup_callbacks)):
             with contextlib.suppress(Exception):
                 cleanup()
@@ -826,6 +1107,8 @@ def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
     return {
         "status": RuntimeStatus.FORBIDDEN,
         "plugin_id": plugin_id,
+        "enabled": False,
+        "attached": False,
         "reason": "plugin_disabled",
         "summary": f"plugin is disabled: {plugin_id}",
         "next_action": "plugin_enable",

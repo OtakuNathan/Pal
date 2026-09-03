@@ -23,7 +23,6 @@ def register_with_core(context: MainContext, plugin: L3ProviderPort) -> ModuleHa
         detachable=True,
         introspection_provider=plugin,
         provider_refs=[plugin.provider_id],
-        supports_lifecycle_capabilities=True,
         ports={f"provider:{plugin.provider_id}": plugin},
     )
     context.execution_runtime.l3_plugin_registry.register(plugin)

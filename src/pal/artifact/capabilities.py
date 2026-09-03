@@ -36,7 +36,7 @@ from pal.artifact.tools import (
     ArtifactSelectTool,
     ArtifactTranscribeTool,
 )
-from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -262,11 +262,12 @@ def register_with_core(context: "MainContext", service: ArtifactManager) -> Modu
     prompt_provider = ArtifactPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="artifact",
-        tier=MODULE_TIER_CORE_FOUNDATION,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
-        ports={"artifact": service},
+        provider_refs=["artifact:artifact"],
+        ports={"artifact": service, "provider:artifact:artifact": service},
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.behavior.decorators import affordance
-from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall
 from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
 from pal.shared import (
@@ -376,8 +376,8 @@ def register_with_core(context: "MainContext", service: SkillService) -> ModuleH
     prompt_provider = SkillPromptFragmentProvider()
     handle = ModuleHandle(
         module_id="skill",
-        tier=MODULE_TIER_CORE_FOUNDATION,
-        detachable=False,
+        tier=MODULE_TIER_DETACHABLE,
+        detachable=True,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"skill": service},

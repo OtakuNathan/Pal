@@ -697,7 +697,12 @@ class ChannelRuntime(ChannelRuntimePort):
             stopper = getattr(endpoint, "stop_async", None)
             if callable(stopper):
                 try:
-                    await stopper()
+                    task = asyncio.ensure_future(stopper())
+                    done, _pending = await asyncio.wait({task}, timeout=5.0)
+                    if task not in done:
+                        task.cancel()
+                        raise TimeoutError("endpoint shutdown exceeded 5s")
+                    task.result()
                 except Exception as exc:
                     errors.append(
                         f"{endpoint.endpoint.endpoint_id}: "

@@ -16,7 +16,7 @@ Use this skill when Pal needs to create, review, repair, or explain a Pal plugin
 
 A Pal plugin is a sidecar extension that adds capabilities, prompt fragments, providers, event sources, event handlers, or control handlers without editing Pal core. Prefer a plugin when the requested feature is optional, detachable, hot-refreshable, or owned by a domain boundary outside core.
 
-Do not make a plugin for behavior that belongs in the runtime bus itself, the shared message contracts, or the security/control plane. Core should stay a coordinator; plugins should own feature behavior.
+Do not make a plugin for behavior that belongs in the pinned runtime bus itself or the shared message contracts. Only core, execution, llm, and channel (including the socket entrypoint) are pinned; control and other feature modules are first-party plugins. Core should stay a coordinator; plugins should own feature behavior.
 
 ## Community Plugin Layout
 
@@ -39,6 +39,10 @@ plugin_id = "demo_tools"
 entrypoint = "runtime"
 version = "0.1.0"
 enabled_by_default = true
+lifecycle_protocol = "raii.v1"
+module_id = "demo_tools"
+requires_plugins = []
+requires_ports = []
 ```
 
 Optional:
@@ -56,7 +60,7 @@ The entrypoint module must expose `build_plugin`. Pal calls it by name-aware dep
 - `context`: a `PluginBuildContext` containing `runtime_root`, `services`, and `plugin_dir`.
 - `runtime_root`: the Pal runtime root path.
 - `plugin_dir`: this plugin directory.
-- any service name present in the plugin host service map, such as `memory_service`.
+- any service name present in the plugin host service map, such as `runtime_db_path`.
 
 Example `runtime.py`:
 
@@ -72,16 +76,18 @@ class DemoPluginBundle:
     plugin_id: str = "demo_tools"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
+    def start(self, scope):
         provider = DemoProvider()
         handle = ModuleHandle(
             module_id="demo_tools",
             tier=MODULE_TIER_DETACHABLE,
             detachable=True,
             introspection_provider=provider,
-            supports_lifecycle_capabilities=True,
         )
-        context.register_module(handle)
+        # Resource acquisition belongs here. Register cleanup immediately so
+        # rollback and detach both release it in reverse order.
+        # scope.defer(resource.close)
+        scope.context.register_module(handle)
         return handle
 
 

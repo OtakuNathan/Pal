@@ -67,22 +67,8 @@ class ModuleLifecycle:
             if result.status == RuntimeStatus.OK:
                 self.state.detached_modules.add(module_id)
             return result.status
-        handle = self.context.module_registry.require(module_id)
-        if handle.tier == MODULE_TIER_CORE_FOUNDATION or not handle.supports_lifecycle_capabilities:
-            return RuntimeStatus.FORBIDDEN
-        provider = handle.introspection_provider
-        if provider is not None and hasattr(provider, "detach"):
-            try:
-                provider.detach(IntrospectionCall(name=f"{module_id}.lifecycle.detach"))
-            except Exception:
-                return RuntimeStatus.ERROR
-        handle.mounted = False
-        if handle.tier == MODULE_TIER_DETACHABLE:
-            self._detach_detachable_runtime_entries(handle)
-        elif handle.tier == MODULE_TIER_MANAGED_ESSENTIAL:
-            handle.degraded = True
-        self.state.detached_modules.add(module_id)
-        return RuntimeStatus.OK
+        self.context.module_registry.require(module_id)
+        return RuntimeStatus.FORBIDDEN
 
     def reattach_module(self, module_id: str) -> str:
         owner = self.context.lifecycle_owner_registry.resolve(module_id)
@@ -92,35 +78,8 @@ class ModuleLifecycle:
             if result.status == RuntimeStatus.OK:
                 self.state.detached_modules.discard(module_id)
             return result.status
-        handle = self.context.module_registry.require(module_id)
-        if handle.tier == MODULE_TIER_CORE_FOUNDATION or not handle.supports_lifecycle_capabilities:
-            return RuntimeStatus.FORBIDDEN
-        provider = handle.introspection_provider
-        try:
-            if provider is not None and hasattr(provider, "attach"):
-                provider.attach(IntrospectionCall(name=f"{module_id}.lifecycle.attach"))
-            if handle.tier == MODULE_TIER_DETACHABLE:
-                self._restore_provider_refs(handle)
-                self._restore_prompt_fragment_providers(handle)
-                self._restore_event_sources(handle)
-                self._restore_event_handlers(handle)
-                self._restore_control_action_handlers(handle)
-                # Capability publication is the externally visible commit.
-                self.publish_module_capabilities(module_id)
-            handle.mounted = True
-            handle.degraded = False
-            self.state.detached_modules.discard(module_id)
-            return RuntimeStatus.OK
-        except Exception:
-            with contextlib.suppress(Exception):
-                self._detach_detachable_runtime_entries(handle)
-            if provider is not None and hasattr(provider, "detach"):
-                with contextlib.suppress(Exception):
-                    provider.detach(IntrospectionCall(name=f"{module_id}.lifecycle.detach"))
-            handle.mounted = False
-            handle.degraded = True
-            self.state.detached_modules.add(module_id)
-            return RuntimeStatus.ERROR
+        self.context.module_registry.require(module_id)
+        return RuntimeStatus.FORBIDDEN
 
     def _restore_provider_refs(self, handle) -> None:
         for provider_id in handle.provider_refs:

@@ -12,8 +12,10 @@ class LspBuiltinBundle:
     plugin_id: str = "lsp"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
-        return build_lsp_plugin(runtime_root=self.runtime_root).register_with_core(context)
+    def start(self, scope):
+        handle = build_lsp_plugin(runtime_root=self.runtime_root).register_with_core(scope.context)
+        handle.ports["lsp"].start_manager()
+        return handle
 
 
 def build_plugin(context: PluginBuildContext) -> LspBuiltinBundle:

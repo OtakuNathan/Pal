@@ -351,12 +351,7 @@ class FailureOrchestrator:
         )
 
     def failure_runtime(self) -> FailureRuntime:
-        try:
-            return self.context.require_port("failure:failure")
-        except KeyError:
-            runtime = FailureRuntime()
-            self.context.port_registry["failure:failure"] = runtime
-            return runtime
+        return self.context.require_port("failure:failure")
 
     def render_failure_feedback_text(self, feedback: FailureUserFeedback) -> str:
         parts = [feedback.summary.strip()]

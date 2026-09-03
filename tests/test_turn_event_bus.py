@@ -169,19 +169,19 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
         for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
             self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
 
-        provider.attach(None)
+        provider._subscribe_turn_events()
         for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
             self.assertEqual(len(context.turn_event_bus.subscribers_for(topic)), 1)
 
-        provider.detach(None)
+        provider._unsubscribe_turn_events()
         for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
             self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
 
-        provider.attach(None)
+        provider._subscribe_turn_events()
         for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
             self.assertEqual(len(context.turn_event_bus.subscribers_for(topic)), 1)
 
-        provider.detach(None)
+        provider._unsubscribe_turn_events()
         for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
             self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
 

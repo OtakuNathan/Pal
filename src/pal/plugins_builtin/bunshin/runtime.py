@@ -14,13 +14,15 @@ class BunshinBuiltinBundle:
     plugin_id: str = "bunshin"
     version: str = "0.1.0"
 
-    def register_with_core(self, context):
-        return register_with_core(
-            context,
+    def start(self, scope):
+        handle = register_with_core(
+            scope.context,
             runtime_root=self.runtime_root,
             runtime_db_path=self.runtime_db_path,
             harness_registry=self.harness_registry,
         )
+        handle.ports["bunshin"].attach_manager()
+        return handle
 
 
 def build_plugin(context: PluginBuildContext) -> BunshinBuiltinBundle:
