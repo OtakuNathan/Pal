@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.tool_facade import ToolGuidance
 from pal.identity.service import IdentityService
 from pal.shared import (
@@ -86,8 +86,8 @@ def register_with_core(context: MainContext, service: IdentityService) -> Module
     prompt_provider = IdentityPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="identity",
-        tier=MODULE_TIER_DETACHABLE,
-        detachable=True,
+        tier=MODULE_TIER_CORE_FOUNDATION,
+        detachable=False,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"identity": service},

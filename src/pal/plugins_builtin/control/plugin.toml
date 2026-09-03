@@ -1,9 +1,0 @@
-plugin_id = "control"
-entrypoint = "pal.plugins_builtin.control.runtime"
-version = "1.0.0"
-enabled_by_default = true
-lifecycle_protocol = "raii.v1"
-module_id = "control"
-requires_plugins = []
-requires_ports = []
-reload_modules = ["pal.control"]

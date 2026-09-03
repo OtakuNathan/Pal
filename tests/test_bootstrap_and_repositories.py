@@ -145,6 +145,18 @@ class PalV2BootstrapTests(unittest.TestCase):
                 return item
         self.fail(f"search result did not include alias {alias}")
 
+    def test_builtin_provision_removes_stale_resident_module_manifests(self) -> None:
+        builtin_root = self.registration.runtime.runtime_root / "plugins" / "_builtin"
+        for module_id in ("identity", "memory", "control", "failure"):
+            stale_dir = builtin_root / module_id
+            stale_dir.mkdir(parents=True, exist_ok=True)
+            (stale_dir / "plugin.toml").write_text('plugin_id = "stale"\n', encoding="utf-8")
+
+        self.wizard.provision_builtin_plugins(self.registration)
+
+        for module_id in ("identity", "memory", "control", "failure"):
+            self.assertFalse((builtin_root / module_id / "plugin.toml").exists())
+
     def _write_demo_runtime_channel_provider(self) -> None:
         provider_dir = self.runtime_root / "channel" / "providers" / "demo_runtime"
         provider_dir.mkdir(parents=True, exist_ok=True)
@@ -560,7 +572,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
         self.assertIn("sqlite_vec_l3", handle.core.context.execution_runtime.l3_plugin_registry.plugins)
 
-    def test_only_core_execution_llm_and_channel_are_pinned_modules(self) -> None:
+    def test_resident_foundation_is_not_owned_by_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = self._compose_runtime(
             wizard=self.wizard,
@@ -568,17 +580,18 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
 
-        for module_id in ("core", "execution", "llm", "channel"):
+        for module_id in (
+            "core",
+            "execution",
+            "llm",
+            "channel",
+            "identity",
+            "memory",
+            "control",
+            "failure",
+        ):
             self.assertNotIn(module_id, handle.plugin_host.module_to_plugin)
             self.assertEqual(handle.core.detach_module(module_id), RuntimeStatus.FORBIDDEN)
-
-        for plugin_id in ("identity", "memory", "control", "failure"):
-            original = handle.plugin_host.generations[plugin_id].instance
-            self.assertTrue(handle.core.context.module_registry.require(plugin_id).detachable)
-            self.assertEqual(handle.plugin_host.detach(plugin_id)["status"], RuntimeStatus.OK)
-            self.assertIsNone(handle.core.context.module_registry.get(plugin_id))
-            self.assertEqual(handle.plugin_host.attach(plugin_id)["status"], RuntimeStatus.OK)
-            self.assertIsNot(handle.plugin_host.generations[plugin_id].instance, original)
 
     def test_wizard_seeds_default_web_providers_and_active_settings(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -929,10 +942,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             "sqlite_vec_l3": "pal.plugins.l3",
             "web_fetch": "pal.web_fetch",
             "web_search": "pal.web_search",
-            "identity": "pal.identity",
-            "memory": "pal.memory",
-            "control": "pal.control",
-            "failure": "pal.failure",
         }
 
         for plugin_id, prefix in expected.items():
@@ -955,10 +964,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show"),
             "web_fetch": ("pal.web_fetch", "web_fetch_show"),
             "web_search": ("pal.web_search", "web_search_show"),
-            "identity": ("pal.identity", "identity_show"),
-            "memory": ("pal.memory", "memory_show"),
-            "control": ("pal.control", "control_show"),
-            "failure": ("pal.failure", "failure_show"),
         }
         owned_prefixes = tuple(prefix for prefix, _ in expectations.values())
         wrapper_prefixes = tuple(f"pal.plugins_builtin.{plugin_id}" for plugin_id in expectations)

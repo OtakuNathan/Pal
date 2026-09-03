@@ -1,1 +1,0 @@
-"""First-party identity plugin."""

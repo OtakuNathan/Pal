@@ -2339,7 +2339,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(descriptor.target_label, "channel")
         self.assertEqual(descriptor.aliases, ("channel_list",))
 
-    def test_identity_is_query_only_and_declares_detachable_plugin_tier(self) -> None:
+    def test_identity_is_resident_and_query_only(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -2354,8 +2354,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("identity.lifecycle.attach", published)
             self.assertNotIn("identity.lifecycle.detach", published)
             handle = core.context.module_registry.require("identity")
-            self.assertEqual(handle.tier, "detachable")
-            self.assertTrue(handle.detachable)
+            self.assertEqual(handle.tier, "core-foundation")
+            self.assertFalse(handle.detachable)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

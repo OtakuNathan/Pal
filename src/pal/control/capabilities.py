@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from pal.control.handler import ControlEventHandler
 from pal.control.service import ControlPlane
-from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_MANAGED_ESSENTIAL, ModuleHandle
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -90,8 +90,8 @@ def register_with_core(context: MainContext, control_plane: ControlPlane) -> Mod
     event_handler = ControlEventHandler(control_plane=control_plane)
     handle = ModuleHandle(
         module_id="control",
-        tier=MODULE_TIER_DETACHABLE,
-        detachable=True,
+        tier=MODULE_TIER_MANAGED_ESSENTIAL,
+        detachable=False,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         event_handlers={

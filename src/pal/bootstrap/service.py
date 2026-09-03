@@ -7,10 +7,13 @@ from pal.channel import (
     ChannelRuntime,
     register_with_core as register_channel_with_core,
 )
+from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
+from pal.failure import FailureRuntime, register_with_core as register_failure_with_core
 from pal.foundation import PalV2Database
+from pal.identity import IdentityRepository, IdentityService, register_with_core as register_identity_with_core
 from pal.llm import (
     EndpointResolver,
     LLMEndpointRepository,
@@ -21,6 +24,7 @@ from pal.llm import (
     register_with_core as register_llm_with_core,
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
+from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.plugins import PluginHost
 from pal.shared.text_search import warmup_jieba
@@ -35,30 +39,15 @@ class StubRuntimeHandle:
     core: PalCore
     channel_runtime: ChannelRuntime
     channel_provider_manager: object
+    identity_service: IdentityService
     llm_runtime: LLMRuntime
+    memory_service: MemoryService
     plugin_host: PluginHost
+    control_plane: ControlPlane
+    failure_runtime: FailureRuntime
 
     def _optional_port(self, key: str):
         return self.core.context.port_registry.get(key)
-
-    def _required_port(self, key: str):
-        return self.core.context.require_port(key)
-
-    @property
-    def identity_service(self):
-        return self._required_port("identity:identity")
-
-    @property
-    def memory_service(self):
-        return self._required_port("memory:memory")
-
-    @property
-    def control_plane(self):
-        return self._required_port("control:control")
-
-    @property
-    def failure_runtime(self):
-        return self._required_port("failure:failure")
 
     @property
     def proactive_manager(self):
@@ -119,6 +108,7 @@ def compose_runtime(
     # Bootstrap only wires the in-process runtime graph. Any first-run
     # provisioning and database-file ownership live in wizard.
     warmup_jieba()
+    identity_service = IdentityService(repository=IdentityRepository())
     llm_repository = LLMEndpointRepository()
     runtime_settings_repository = RuntimeSettingRepository()
 
@@ -138,16 +128,22 @@ def compose_runtime(
         ),
         config=config,
     )
+    memory_service = MemoryService(
+        l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
+    )
     bunshin_harness_registry = BunshinHarnessRegistry()
     runtime_settings_repository.ensure_defaults()
     plugin_host = PluginHost(
         context=core.context,
         runtime_root=registration.runtime.runtime_root,
         services={
+            "memory_service": memory_service,
             "bunshin_harness_registry": bunshin_harness_registry,
             "runtime_db_path": registration.runtime.db_path,
         },
     )
+    control_plane = ControlPlane()
+    failure_runtime = FailureRuntime()
     register_core_with_core(core)
     register_execution_with_core(core.context)
     register_channel_with_core(
@@ -155,14 +151,18 @@ def compose_runtime(
         channel_runtime,
         runtime_root=registration.runtime.runtime_root,
     )
+    register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
+    register_memory_with_core(core.context, memory_service)
+    register_control_with_core(core.context, control_plane)
+    register_failure_with_core(core, failure_runtime)
     plugin_host.publish_management_capabilities()
     plugin_host.bootstrap()
     channel_provider_manager = core.context.require_port("channel:provider_manager")
     channel_provider_manager.plugin_host = plugin_host
     channel_provider_manager.rescan_providers()
 
-    for module_id in ("core", "execution", "channel", "llm"):
+    for module_id in ("core", "execution", "channel", "identity", "llm", "memory", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(
@@ -172,8 +172,12 @@ def compose_runtime(
         core=core,
         channel_runtime=channel_runtime,
         channel_provider_manager=channel_provider_manager,
+        identity_service=identity_service,
         llm_runtime=llm_runtime,
+        memory_service=memory_service,
         plugin_host=plugin_host,
+        control_plane=control_plane,
+        failure_runtime=failure_runtime,
     )
 
 

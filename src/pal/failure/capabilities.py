@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.tool_facade import ToolGuidance
 from pal.failure.runtime import FailureRuntime
 from pal.shared import (
@@ -68,21 +68,20 @@ class FailureIntrospectionProvider:
         )
 
 
-def register_with_core(core, runtime: FailureRuntime, *, context=None) -> ModuleHandle:
+def register_with_core(core, runtime: FailureRuntime) -> ModuleHandle:
     from pal.failure.handler import FailureEventHandler
     from pal.shared import EventKind
 
-    target_context = context or core.context
     provider = FailureIntrospectionProvider(runtime=runtime)
     event_handler = FailureEventHandler(core=core)
     handle = ModuleHandle(
         module_id="failure",
-        tier=MODULE_TIER_DETACHABLE,
-        detachable=True,
+        tier=MODULE_TIER_CORE_FOUNDATION,
+        detachable=False,
         introspection_provider=provider,
         event_handlers={EventKind.REPLY_FAILED: [event_handler]},
         ports={"failure": runtime},
     )
-    target_context.register_module(handle)
-    target_context.event_handler_registry.register(EventKind.REPLY_FAILED, event_handler, module_id="failure")
+    core.context.register_module(handle)
+    core.context.event_handler_registry.register(EventKind.REPLY_FAILED, event_handler, module_id="failure")
     return handle

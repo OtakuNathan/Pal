@@ -1,9 +1,0 @@
-plugin_id = "failure"
-entrypoint = "pal.plugins_builtin.failure.runtime"
-version = "1.0.0"
-enabled_by_default = true
-lifecycle_protocol = "raii.v1"
-module_id = "failure"
-requires_plugins = []
-requires_ports = ["core:core"]
-reload_modules = ["pal.failure"]

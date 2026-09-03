@@ -4,6 +4,6 @@ version = "0.1.0"
 enabled_by_default = true
 lifecycle_protocol = "raii.v1"
 module_id = "l3.sqlite_vec_l3"
-requires_plugins = ["memory"]
+requires_plugins = []
 requires_ports = ["memory:memory"]
 reload_modules = ["pal.plugins.l3"]

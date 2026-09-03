@@ -234,6 +234,18 @@ class WizardService(WizardServicePort):
         builtin_root = registration.runtime.runtime_root / "plugins" / "_builtin"
         builtin_root.mkdir(parents=True, exist_ok=True)
 
+        # One-release correction: these domains are resident foundation
+        # modules, not plugins. Remove only their managed manifests so a
+        # runtime started briefly on the misclassified release cannot keep
+        # discovering duplicate plugin identities after upgrading.
+        for resident_id in ("identity", "memory", "control", "failure"):
+            stale_dir = builtin_root / resident_id
+            (stale_dir / "plugin.toml").unlink(missing_ok=True)
+            try:
+                stale_dir.rmdir()
+            except OSError:
+                pass
+
         for source_dir in sorted(source_root.iterdir()):
             if not source_dir.is_dir():
                 continue

@@ -16,7 +16,7 @@ Use this skill when Pal needs to create, review, repair, or explain a Pal plugin
 
 A Pal plugin is a sidecar extension that adds capabilities, prompt fragments, providers, event sources, event handlers, or control handlers without editing Pal core. Prefer a plugin when the requested feature is optional, detachable, hot-refreshable, or owned by a domain boundary outside core.
 
-Do not make a plugin for behavior that belongs in the pinned runtime bus itself or the shared message contracts. Only core, execution, llm, and channel (including the socket entrypoint) are pinned; control and other feature modules are first-party plugins. Core should stay a coordinator; plugins should own feature behavior.
+Do not make a plugin for behavior that belongs in the pinned runtime bus itself or the shared message contracts. Core, execution, llm, channel (including the socket entrypoint), identity, memory, control, and failure are resident; other feature modules are plugins. Core should stay a coordinator; plugins should own feature behavior.
 
 ## Community Plugin Layout
 
@@ -60,7 +60,7 @@ The entrypoint module must expose `build_plugin`. Pal calls it by name-aware dep
 - `context`: a `PluginBuildContext` containing `runtime_root`, `services`, and `plugin_dir`.
 - `runtime_root`: the Pal runtime root path.
 - `plugin_dir`: this plugin directory.
-- any service name present in the plugin host service map, such as `runtime_db_path`.
+- any service name present in the plugin host service map, such as `memory_service` or `runtime_db_path`.
 
 Example `runtime.py`:
 

@@ -235,9 +235,10 @@ in reverse order on detach. Plugins can be **hot-attached/detached** at runtime
 (`plugin_rescan` / `plugin_attach` / `plugin_detach` / `plugin_enable`), no
 daemon restart needed.
 
-Only `core`, `execution`, `llm`, and `channel` (including the socket entrypoint)
-are pinned. Identity, memory, control, failure handling, and all other feature
-modules are first-party or community plugins governed by the same lifecycle.
+The resident foundation is `core`, `execution`, `llm`, `channel` (including
+the socket entrypoint), `identity`, `memory`, `control`, and `failure`.
+Everything else is a first-party or community plugin governed by the same
+lifecycle.
 
 **Pal ships with a built-in plugin development manual as a skill**
 (`pal.plugin.development`): it covers when to prefer a plugin (optional,
