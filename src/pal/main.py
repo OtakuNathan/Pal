@@ -83,6 +83,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tools_eval_parser.add_argument("--runtime-root", type=Path, required=True)
     tools_eval_parser.add_argument("--manifest", type=Path, default=None)
     tools_eval_parser.add_argument("--output", type=Path, default=None)
+    tools_eval_parser.add_argument(
+        "--endpoint-id",
+        default=None,
+        help="Require one enabled LLM endpoint and disable endpoint fallback",
+    )
 
     # -- bunshin --------------------------------------------------------------
     from pal.bunshin.efficiency_cli import register_bunshin_subparser
@@ -157,6 +162,7 @@ def main() -> int:
             runtime_root=args.runtime_root,
             manifest_path=args.manifest or DEFAULT_TOOLS_BENCHMARK,
             output_path=args.output,
+            endpoint_id=args.endpoint_id,
         )
     if args.command == "bunshin" and args.bunshin_command == "efficiency":
         import sys

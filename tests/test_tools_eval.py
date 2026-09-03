@@ -89,6 +89,8 @@ def test_eval_report_enforces_primary_thresholds_and_zero_dangerous_retries() ->
         "first_result_kind": "complete",
         "calls": [{"provider_alias": "run_shell"}],
         "transcript": [],
+        "actual_endpoint_ids": ["fixed-endpoint"],
+        "actual_model_ids": ["fixed-model"],
     }
     report = _build_report(
         manifest={
@@ -108,6 +110,8 @@ def test_eval_report_enforces_primary_thresholds_and_zero_dangerous_retries() ->
         generation_hash="generation-hash",
         tool_contracts=[],
         runs=[run],
+        requested_endpoint_id="fixed-endpoint",
+        expected_model_id="fixed-model",
     )
 
     assert report["metrics"]["top_1_accuracy"] == 1.0
@@ -119,6 +123,12 @@ def test_eval_report_enforces_primary_thresholds_and_zero_dangerous_retries() ->
     assert report["checks"]["confusable_pair_accuracy_vs_baseline"]
     assert report["checks"]["first_pass_argument_rate_vs_baseline"]
     assert report["registry_generation_hash"] == "generation-hash"
+    assert report["endpoint_id"] == "fixed-endpoint"
+    assert report["model"] == "fixed-model"
+    assert report["actual_endpoint_ids"] == ["fixed-endpoint"]
+    assert report["actual_model_ids"] == ["fixed-model"]
+    assert report["checks"]["endpoint_provenance"]
+    assert report["checks"]["model_provenance"]
 
 
 def test_dangerous_retry_detection_covers_unknown_effect_and_manifest_forbidden_alias() -> None:
@@ -149,8 +159,10 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
     class FakeLLMRuntime:
         def __init__(self) -> None:
             self.index = 0
+            self.requests = []
 
-        async def agenerate(self, _request):
+        async def agenerate(self, request):
+            self.requests.append(request)
             outcomes = [
                 generation_result_from_values(tool_calls=[new_tool_call(name="read_tool", args={"name": "search_tools"})]),
                 generation_result_from_values(
@@ -165,7 +177,12 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
             ]
             outcome = outcomes[self.index]
             self.index += 1
-            return outcome
+            return SimpleNamespace(
+                response=outcome.response,
+                tool_calls=outcome.tool_calls,
+                preferred_endpoint_id="fixed-endpoint",
+                preferred_model_id="fixed-model",
+            )
 
     class FakeExecutionRuntime:
         async def execute_tool_async(self, call, *, turn_id):
@@ -182,6 +199,7 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
                 llm_text="invalid namespace; use read_tool" if rejected else "ok",
             )
 
+    llm_runtime = FakeLLMRuntime()
     run = asyncio.run(
         _run_case(
             case=EvalCase(
@@ -201,11 +219,19 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
             temperature=0,
             reasoning="medium",
             tool_contracts=[],
-            llm_runtime=FakeLLMRuntime(),
+            llm_runtime=llm_runtime,
             execution_runtime=FakeExecutionRuntime(),
+            endpoint_id="fixed-endpoint",
         )
     )
 
     assert run["seed_call"]["result_kind"] == "rejected"
     assert run["top_1_correct"]
     assert run["enum_repaired"]
+    assert run["actual_endpoint_ids"] == ["fixed-endpoint"]
+    assert run["actual_model_ids"] == ["fixed-model"]
+    assert all(
+        request.metadata["preferred_endpoint_id"] == "fixed-endpoint"
+        and request.metadata["endpoint_fallback_policy"] == "none"
+        for request in llm_runtime.requests
+    )

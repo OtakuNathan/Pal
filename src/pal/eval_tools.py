@@ -88,6 +88,7 @@ async def run_tools_eval(
     runtime_root: Path,
     manifest_path: Path = DEFAULT_TOOLS_BENCHMARK,
     output_path: Path | None = None,
+    endpoint_id: str | None = None,
 ) -> dict[str, Any]:
     manifest, cases = load_tools_benchmark(manifest_path)
     handle = open_runtime(runtime_root)
@@ -99,6 +100,25 @@ async def run_tools_eval(
         temperature = float(manifest.get("temperature", 0))
         reasoning = str(manifest.get("reasoning") or "medium")
         repetitions = int(manifest.get("repetitions") or 3)
+        requested_endpoint_id = str(
+            endpoint_id
+            or manifest.get("endpoint_id")
+            or handle.llm_runtime.active_endpoint_id
+            or ""
+        ).strip() or None
+        expected_model_id: str | None = None
+        if requested_endpoint_id is not None:
+            target_endpoint = next(
+                (
+                    item
+                    for item in handle.llm_runtime.endpoint_resolver.endpoints
+                    if item.endpoint_id == requested_endpoint_id
+                ),
+                None,
+            )
+            if target_endpoint is None:
+                raise ValueError(f"tools eval endpoint is not enabled: {requested_endpoint_id}")
+            expected_model_id = str(target_endpoint.model_id)
         runs: list[dict[str, Any]] = []
         for case in cases:
             for repetition in range(1, repetitions + 1):
@@ -112,6 +132,7 @@ async def run_tools_eval(
                         tool_contracts=tool_contracts,
                         llm_runtime=handle.llm_runtime,
                         execution_runtime=execution,
+                        endpoint_id=requested_endpoint_id,
                     )
                 )
         report = _build_report(
@@ -120,6 +141,8 @@ async def run_tools_eval(
             generation_hash=generation.generation_hash,
             tool_contracts=tool_contracts,
             runs=runs,
+            requested_endpoint_id=requested_endpoint_id,
+            expected_model_id=expected_model_id,
         )
         target = output_path or _default_report_path(runtime_root)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +163,7 @@ async def _run_case(
     tool_contracts: list[dict[str, Any]],
     llm_runtime: Any,
     execution_runtime: Any,
+    endpoint_id: str | None = None,
 ) -> dict[str, Any]:
     messages: list[LLMMessageIR] = [
         message_ir_from_dict({
@@ -153,6 +177,8 @@ async def _run_case(
         message_ir_from_dict({"role": "user", "content": case.prompt}),
     ]
     calls: list[dict[str, Any]] = []
+    actual_endpoint_ids: list[str] = []
+    actual_model_ids: list[str] = []
     seed_call_trace: dict[str, Any] | None = None
     if case.seed_call is not None:
         seeded_tool_call = new_tool_call(
@@ -183,20 +209,33 @@ async def _run_case(
         ))
     first_result_kind = ""
     for round_index in range(case.max_rounds):
+        metadata: dict[str, Any] = {
+            "eval": "tools",
+            "case_id": case.case_id,
+            "repetition": repetition,
+            "think_level": reasoning,
+        }
+        if endpoint_id is not None:
+            metadata.update({
+                "preferred_endpoint_id": endpoint_id,
+                "preferred_endpoint_source": "tools_eval",
+                "endpoint_fallback_policy": "none",
+            })
         outcome = await llm_runtime.agenerate(
             LLMRequestIR(
                 messages=tuple(messages),
                 policy=GenerationPolicyIR(max_output_tokens=1024, temperature=temperature),
                 model_hint=model,
                 tools=tuple(tool_definition_ir_from_dict(item) for item in tool_contracts),
-                metadata={
-                    "eval": "tools",
-                    "case_id": case.case_id,
-                    "repetition": repetition,
-                    "think_level": reasoning,
-                },
+                metadata=metadata,
             )
         )
+        actual_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", None) or "").strip()
+        actual_model_id = str(getattr(outcome, "preferred_model_id", None) or "").strip()
+        if actual_endpoint_id:
+            actual_endpoint_ids.append(actual_endpoint_id)
+        if actual_model_id:
+            actual_model_ids.append(actual_model_id)
         tool_calls = list(outcome.tool_calls or [])
         if not tool_calls:
             messages.append(outcome.response.message)
@@ -259,6 +298,8 @@ async def _run_case(
         "dangerous_retry": dangerous_retry,
         "additional_rounds": max(0, len({item["round"] for item in calls}) - 1),
         "first_result_kind": first_result_kind,
+        "actual_endpoint_ids": sorted(set(actual_endpoint_ids)),
+        "actual_model_ids": sorted(set(actual_model_ids)),
         "seed_call": seed_call_trace,
         "calls": calls,
         "transcript": _redact(messages),
@@ -310,6 +351,8 @@ def _build_report(
     generation_hash: str,
     tool_contracts: list[dict[str, Any]],
     runs: list[dict[str, Any]],
+    requested_endpoint_id: str | None = None,
+    expected_model_id: str | None = None,
 ) -> dict[str, Any]:
     def rate(predicate: Any, subset: list[dict[str, Any]] | None = None) -> float:
         values = subset if subset is not None else runs
@@ -332,6 +375,7 @@ def _build_report(
     )
     metrics = {
         "top_1_accuracy": rate(lambda item: item["top_1_correct"]),
+        "eventual_accuracy": rate(lambda item: item["eventual_correct"]),
         "confusable_pair_accuracy": rate(lambda item: item["top_1_correct"], confusable),
         "first_pass_argument_rate": rate(lambda item: item["first_pass_arguments"], first_pass_cases),
         "enum_repair_rate": rate(lambda item: item["enum_repaired"], enum_cases),
@@ -342,6 +386,7 @@ def _build_report(
     }
     thresholds = {
         "top_1_accuracy": 0.90,
+        "eventual_accuracy": 0.90,
         "confusable_pair_accuracy": 0.85,
         "first_pass_argument_rate": 0.90,
         "enum_repair_rate": 0.90,
@@ -357,6 +402,28 @@ def _build_report(
         )
         for key, limit in thresholds.items()
     }
+    actual_endpoint_ids = sorted({
+        str(endpoint_id)
+        for run in runs
+        for endpoint_id in list(run.get("actual_endpoint_ids") or [])
+        if str(endpoint_id).strip()
+    })
+    actual_model_ids = sorted({
+        str(model_id)
+        for run in runs
+        for model_id in list(run.get("actual_model_ids") or [])
+        if str(model_id).strip()
+    })
+    if requested_endpoint_id is not None:
+        checks["endpoint_provenance"] = all(
+            run.get("actual_endpoint_ids") == [requested_endpoint_id]
+            for run in runs
+        )
+    if expected_model_id is not None:
+        checks["model_provenance"] = all(
+            run.get("actual_model_ids") == [expected_model_id]
+            for run in runs
+        )
     baseline = dict(manifest.get("baseline") or {})
     if baseline.get("tool_description_tokens"):
         checks["description_tokens_vs_baseline"] = (
@@ -370,7 +437,11 @@ def _build_report(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "manifest_version": manifest.get("version"),
         "manifest_path": str(manifest_path),
-        "model": manifest.get("model"),
+        "endpoint_id": requested_endpoint_id,
+        "model": expected_model_id or manifest.get("model"),
+        "manifest_model": manifest.get("model"),
+        "actual_endpoint_ids": actual_endpoint_ids,
+        "actual_model_ids": actual_model_ids,
         "temperature": manifest.get("temperature", 0),
         "reasoning": manifest.get("reasoning", "medium"),
         "repetitions": manifest.get("repetitions", 3),
@@ -418,7 +489,13 @@ def _is_sensitive_key(key: Any) -> bool:
     )
 
 
-def run_tools_eval_cli(*, runtime_root: Path, manifest_path: Path, output_path: Path | None) -> int:
+def run_tools_eval_cli(
+    *,
+    runtime_root: Path,
+    manifest_path: Path,
+    output_path: Path | None,
+    endpoint_id: str | None = None,
+) -> int:
     import asyncio
 
     report = asyncio.run(
@@ -426,9 +503,22 @@ def run_tools_eval_cli(*, runtime_root: Path, manifest_path: Path, output_path: 
             runtime_root=runtime_root,
             manifest_path=manifest_path,
             output_path=output_path,
+            endpoint_id=endpoint_id,
         )
     )
-    print(json.dumps({key: report[key] for key in ("passed", "metrics", "checks", "report_path")}, indent=2))
+    print(json.dumps({
+        key: report[key]
+        for key in (
+            "passed",
+            "endpoint_id",
+            "model",
+            "actual_endpoint_ids",
+            "actual_model_ids",
+            "metrics",
+            "checks",
+            "report_path",
+        )
+    }, indent=2))
     return 0 if report["passed"] else 2
 
 
