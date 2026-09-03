@@ -19,6 +19,15 @@ from pal.bunshin.ipc import BunshinManagerClient
 from pal.bunshin.lsp_prewarm import DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS, lsp_prewarm_plan, prewarm_workspace_lsp
 
 
+def _patch_lsp_connector(connector_type):
+    """Patch the generation actually referenced by the imported manager."""
+
+    return patch.dict(
+        LspManager._ensure_attached.__globals__,
+        {"AsyncLspConnector": connector_type},
+    )
+
+
 class LspConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_lsp_test_"))
@@ -532,7 +541,7 @@ language_ids = ["foo"]
             config_path=self.root / "clangd.toml",
         )
         self.manager.states = {state.server_id: state}
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             prepared = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -673,7 +682,7 @@ language_ids = ["foo"]
         )
         self.manager.states = {state.server_id: state}
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             prepared = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -759,7 +768,7 @@ language_ids = ["foo"]
         )
         self.manager.states = {state.server_id: state}
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             prepared = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -836,7 +845,7 @@ language_ids = ["foo"]
         )
         self.manager.states = {state.server_id: state}
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             first = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -908,7 +917,7 @@ language_ids = ["foo"]
         )
         self.manager.states = {state.server_id: state}
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             prepared = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -1010,7 +1019,7 @@ language_ids = ["foo"]
         )
         self.manager.states = {state.server_id: state}
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             prepared = await self.manager.prepare_workspace(
                 {
                     "workspace_root": str(workspace),
@@ -1190,7 +1199,7 @@ language_ids = ["foo"]
         )
         self.manager.states[state.server_id] = state
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             first = await self.manager.run_lsp_operation(
                 "workspace_symbols",
                 {"server_id": "fake_python", "workspace_root": str(workspace_a), "query": "A"},
@@ -1264,7 +1273,7 @@ language_ids = ["foo"]
         )
         self.manager.states[state.server_id] = state
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+        with _patch_lsp_connector(FakeConnector):
             await self.manager.run_lsp_operation(
                 "workspace_symbols",
                 {"server_id": "fake_python", "workspace_root": str(workspace_a), "query": "A"},
@@ -1321,7 +1330,7 @@ language_ids = ["foo"]
         )
         self.manager.states[state.server_id] = state
 
-        with patch("pal.lsp.manager.AsyncLspConnector", FailingConnector):
+        with _patch_lsp_connector(FailingConnector):
             first = await self.manager.run_lsp_operation("diagnostics", {"file": str(sample)})
             second = await self.manager.run_lsp_operation("diagnostics", {"file": str(sample)})
 
@@ -1375,7 +1384,7 @@ language_ids = ["foo"]
         )
         self.manager.states[state.server_id] = state
 
-        with patch("pal.lsp.manager.AsyncLspConnector", RestartingConnector):
+        with _patch_lsp_connector(RestartingConnector):
             result = await self.manager.run_lsp_operation(
                 "workspace_symbols",
                 {

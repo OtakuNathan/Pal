@@ -12,7 +12,13 @@ from pal.core.turns import _render_failure_primary_input
 from pal.execution import CapabilityResult
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_NONE
-from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
+from pal.failure import (
+    FAILURE_VERIFICATION_FAILED,
+    FailureDraft,
+    FailureRuntime,
+    FailureSignal,
+    register_with_core as register_failure_with_core,
+)
 from pal.failure.handler import FailureEventHandler
 from pal.foundation import EventEnvelope
 from pal.llm import generation_result_from_values
@@ -97,6 +103,13 @@ def _unknown_effect_failure_program(draft, *, allowed_tools):
     yield object()
 
 
+def _core_with_failure_runtime() -> PalCore:
+    core = PalCore()
+    register_core_with_core(core)
+    register_failure_with_core(core, FailureRuntime())
+    return core
+
+
 class FailureFlowTests(unittest.TestCase):
     def test_expected_lifecycle_delivery_failure_does_not_enter_safe_mode(self) -> None:
         core = _RecordingFailureCore()
@@ -122,8 +135,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertFalse(core.calls)
 
     def test_persistence_failure_stops_without_invoking_safe_mode_llm(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         llm = _RecordingFailureLLM()
         core.context.port_registry["llm:llm"] = llm
 
@@ -147,8 +159,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertIn("back up the runtime database", result.user_feedback.next_step)
 
     def test_failure_flow_uses_isolated_safe_mode_prompt(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         llm = _RecordingFailureLLM()
         core.context.port_registry["llm:llm"] = llm
 
@@ -214,8 +225,7 @@ class FailureFlowTests(unittest.TestCase):
         )
 
     def test_failure_flows_use_distinct_safe_mode_cache_scopes(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         llm = _RecordingFailureLLM()
         core.context.port_registry["llm:llm"] = llm
         signal = FailureSignal(
@@ -351,8 +361,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertFalse(boundary_duplicate)
 
     def test_failure_flow_llm_exception_returns_failed_verification(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         llm = _ExplodingFailureLLM()
         core.context.port_registry["llm:llm"] = llm
 
@@ -380,8 +389,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertNotIn("SECRET USER REQUEST", request.messages[1].text)
 
     def test_failure_flow_outer_guard_catches_orchestration_exception(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
 
         async def explode(draft, *, allowed_tools):
             _ = (draft, allowed_tools)
@@ -408,8 +416,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertIsNotNone(result.report)
 
     def test_failure_flow_program_exception_returns_failed_verification(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         core.context.port_registry["llm:llm"] = _RecordingFailureLLM()
         draft = core.failure_orchestrator.failure_runtime().begin_draft(
             FailureSignal(
@@ -429,8 +436,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertIn("Failure safe-mode flow crashed during program", outcome.verification.reason)
 
     def test_failure_flow_unknown_effect_returns_failed_verification(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         core.context.port_registry["llm:llm"] = _RecordingFailureLLM()
         draft = core.failure_orchestrator.failure_runtime().begin_draft(
             FailureSignal(
@@ -450,8 +456,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertIn("Failure flow yielded unsupported effect: object", outcome.verification.reason)
 
     def test_failure_flow_tool_loop_stays_inside_safe_mode_projection(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+        core = _core_with_failure_runtime()
         llm = _ToolLoopFailureLLM()
         core.context.port_registry["llm:llm"] = llm
 

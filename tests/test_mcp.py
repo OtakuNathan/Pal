@@ -483,7 +483,10 @@ class McpPluginSidecarTests(unittest.TestCase):
         manager_client = Mock()
         manager_client.rescan_sync.return_value = {"status": RuntimeStatus.OK}
 
-        with patch("pal.mcp.plugin.McpManagerClient", return_value=manager_client):
+        with patch.dict(
+            McpManagerPluginProvider.start_manager.__globals__,
+            {"McpManagerClient": Mock(return_value=manager_client)},
+        ):
             provider.start_manager()
 
         self.assertEqual(provider.last_error, "")
