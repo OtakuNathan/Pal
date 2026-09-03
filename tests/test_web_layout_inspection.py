@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import threading
+from subprocess import CompletedProcess
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from pal.shared import IntrospectionCall, RuntimeStatus
 from pal.shared.tool_routing import TOOL_ROUTING_SYSTEM_GUIDANCE
@@ -12,6 +14,7 @@ from pal.web_fetch import (
     WebLayoutInspectionRequest,
     WebLayoutInspectionResult,
 )
+from pal.web_fetch import browser_service
 
 
 class _Settings:
@@ -65,6 +68,63 @@ class _LayoutProvider:
                 }
             ],
         }
+
+
+def test_browser_missing_executable_self_heals_once_and_retries_launch() -> None:
+    worker = browser_service._BrowserFetchWorker(max_concurrency=1)
+    chromium = Mock()
+    browser = object()
+    chromium.launch.side_effect = [
+        RuntimeError("Executable doesn't exist; run playwright install"),
+        browser,
+    ]
+
+    with patch.object(browser_service, "self_heal_install_browsers", return_value=True) as install:
+        launched = worker._launch_chromium(SimpleNamespace(chromium=chromium), {})
+
+    assert launched is browser
+    assert chromium.launch.call_count == 2
+    install.assert_called_once_with(reason="chromium build missing")
+    assert worker.last_launch_error == ""
+
+
+def test_browser_self_heal_install_is_single_flight_per_process() -> None:
+    original = dict(browser_service._BROWSER_SELF_HEAL_STATE)
+    browser_service._BROWSER_SELF_HEAL_STATE.update(
+        attempted=False,
+        install_ok=False,
+        last_result="",
+    )
+    try:
+        completed = CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        with patch.object(browser_service.subprocess, "run", return_value=completed) as run:
+            assert browser_service.self_heal_install_browsers(reason="test")
+            assert browser_service.self_heal_install_browsers(reason="test again")
+        run.assert_called_once()
+        assert browser_service.browser_self_heal_state()["last_result"] == "ok"
+    finally:
+        browser_service._BROWSER_SELF_HEAL_STATE.clear()
+        browser_service._BROWSER_SELF_HEAL_STATE.update(original)
+
+
+def test_browser_manager_health_propagates_launch_failure(tmp_path) -> None:
+    manager = BrowserServiceManager(runtime_root=tmp_path)
+    manager._process = object()  # type: ignore[assignment]
+    manager._process_running = lambda _resource=None: True  # type: ignore[method-assign]
+    manager._request_json = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+        "ok": True,
+        "healthy": False,
+        "reason": "last_launch_failed",
+        "last_launch_error": "missing chromium",
+        "self_heal": {"attempted": True, "last_result": "failed"},
+    }
+
+    health = manager.health()
+
+    assert health["healthy"] is False
+    assert health["reason"] == "last_launch_failed"
+    assert health["last_launch_error"] == "missing chromium"
+    assert health["self_heal"]["attempted"] is True
 
 
 def test_browser_manager_sends_bounded_layout_request(tmp_path) -> None:

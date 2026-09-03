@@ -67,6 +67,70 @@ def playwright_python_available() -> bool:
     return importlib.util.find_spec("playwright") is not None
 
 
+_BROWSER_SELF_HEAL_LOCK = threading.Lock()
+_BROWSER_SELF_HEAL_STATE: dict[str, Any] = {"attempted": False, "install_ok": False, "last_result": ""}
+
+
+def _is_missing_browser_executable(exc: Exception) -> bool:
+    text = str(exc)
+    return "Executable doesn't exist" in text or "playwright install" in text
+
+
+def browser_self_heal_state() -> dict[str, Any]:
+    return dict(_BROWSER_SELF_HEAL_STATE)
+
+
+def self_heal_install_browsers(*, reason: str = "") -> bool:
+    """Ensure the chromium build the current playwright package expects exists.
+
+    At most one install runs per sidecar process. Returns True when a completed
+    install — run by this caller or by a concurrent earlier caller in the same
+    process — makes a launch retry worthwhile. Returns False only when the one
+    install attempt already ran and failed (no retry-storm loops)."""
+    with _BROWSER_SELF_HEAL_LOCK:
+        if _BROWSER_SELF_HEAL_STATE.get("install_ok"):
+            return True
+        if _BROWSER_SELF_HEAL_STATE["attempted"]:
+            return False
+        _BROWSER_SELF_HEAL_STATE["attempted"] = True
+        _BROWSER_SELF_HEAL_STATE["last_result"] = f"installing ({reason or 'unspecified'})"
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                timeout=420,
+                check=False,
+            )
+        except Exception as exc:
+            _BROWSER_SELF_HEAL_STATE["last_result"] = f"failed: {exc}"[-500:]
+            return False
+        if completed.returncode == 0:
+            _BROWSER_SELF_HEAL_STATE["install_ok"] = True
+            _BROWSER_SELF_HEAL_STATE["last_result"] = "ok"
+            return True
+        detail = (completed.stderr or completed.stdout or b"").decode("utf-8", errors="replace")[-400:]
+        _BROWSER_SELF_HEAL_STATE["last_result"] = f"failed rc={completed.returncode}: {detail}"[-500:]
+        return False
+
+
+def _sidecar_health_payload(worker: Any) -> dict[str, Any]:
+    """Honest sidecar health: process liveness (ok) is separate from launch
+    capability (healthy). A non-empty last_launch_error means the browser
+    pipeline is broken even though the HTTP service is alive."""
+    last_launch_error = str(getattr(worker, "last_launch_error", "") or "")
+    healthy = not last_launch_error
+    return {
+        "ok": True,
+        "service": "playwright_fetch",
+        "playwright_available": playwright_python_available(),
+        "in_flight": int(getattr(worker, "in_flight", 0) or 0),
+        "healthy": healthy,
+        "reason": "running" if healthy else "last_launch_failed",
+        "last_launch_error": last_launch_error,
+        "self_heal": browser_self_heal_state(),
+    }
+
+
 def _coerce_charset(content_type: str) -> str:
     for part in str(content_type or "").split(";"):
         key, _, value = part.strip().partition("=")
@@ -232,6 +296,7 @@ class _BrowserFetchWorker:
         self.last_activity_at = time.monotonic()
         self.in_flight = 0
         self._lock = threading.Lock()
+        self.last_launch_error: str = ""
 
     def fetch(
         self,
@@ -319,6 +384,33 @@ class _BrowserFetchWorker:
                     self.in_flight = max(0, self.in_flight - 1)
                     self.last_activity_at = time.monotonic()
 
+    @staticmethod
+    def _raw_launch(playwright: Any, launch_opts: dict[str, Any]) -> Any:
+        return playwright.chromium.launch(**launch_opts)
+
+    def _launch_chromium(self, playwright: Any, launch_opts: dict[str, Any]) -> Any:
+        """Launch chromium; on a missing-build error self-heal once, then retry.
+
+        Keeps ``last_launch_error`` current so /health reports launch-level
+        truth instead of only import-level availability."""
+        try:
+            browser = self._raw_launch(playwright, launch_opts)
+            self.last_launch_error = ""
+            return browser
+        except Exception as exc:
+            self.last_launch_error = f"{type(exc).__name__}: {exc}"[-500:]
+            if not _is_missing_browser_executable(exc):
+                raise
+            if not self_heal_install_browsers(reason="chromium build missing"):
+                raise
+            try:
+                browser = self._raw_launch(playwright, launch_opts)
+            except Exception as retry_exc:
+                self.last_launch_error = f"{type(retry_exc).__name__}: {retry_exc}"[-500:]
+                raise
+            self.last_launch_error = ""
+            return browser
+
     def _fetch_playwright(
         self,
         url: str,
@@ -339,7 +431,7 @@ class _BrowserFetchWorker:
             proxy_url = os.environ.get("https_proxy") or os.environ.get("http_proxy") or ""
             if proxy_url:
                 launch_opts["proxy"] = {"server": proxy_url}
-            browser = playwright.chromium.launch(**launch_opts)
+            browser = self._launch_chromium(playwright, launch_opts)
             context = browser.new_context(user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT))
             page = context.new_page()
             try:
@@ -445,7 +537,7 @@ class _BrowserFetchWorker:
             proxy_url = os.environ.get("https_proxy") or os.environ.get("http_proxy") or ""
             if proxy_url:
                 launch_opts["proxy"] = {"server": proxy_url}
-            browser = playwright.chromium.launch(**launch_opts)
+            browser = self._launch_chromium(playwright, launch_opts)
             context = browser.new_context(
                 user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
                 viewport={
@@ -499,7 +591,7 @@ class _BrowserFetchWorker:
             proxy_url = os.environ.get("https_proxy") or os.environ.get("http_proxy") or ""
             if proxy_url:
                 launch_opts["proxy"] = {"server": proxy_url}
-            browser = playwright.chromium.launch(**launch_opts)
+            browser = self._launch_chromium(playwright, launch_opts)
             context = browser.new_context(
                 user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
                 viewport={"width": width, "height": height},
@@ -635,16 +727,7 @@ def run_browser_service_cli(
                 _json_response(self, 404, {"ok": False, "error": "not_found"})
                 return
             worker.last_activity_at = time.monotonic()
-            _json_response(
-                self,
-                200,
-                {
-                    "ok": True,
-                    "service": "playwright_fetch",
-                    "playwright_available": playwright_python_available(),
-                    "in_flight": worker.in_flight,
-                },
-            )
+            _json_response(self, 200, _sidecar_health_payload(worker))
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._authorized():
@@ -890,9 +973,15 @@ class BrowserServiceManager:
                 timeout_seconds=0.5,
                 resource=resource,
             )
-            payload["healthy"] = bool(health.get("ok"))
+            payload["healthy"] = bool(health.get("ok")) and bool(health.get("healthy", True))
             payload["in_flight"] = int(health.get("in_flight") or 0)
-            payload["reason"] = "running"
+            payload["reason"] = str(health.get("reason") or "running")
+            last_launch_error = str(health.get("last_launch_error") or "")
+            if last_launch_error:
+                payload["last_launch_error"] = last_launch_error
+            self_heal = health.get("self_heal")
+            if isinstance(self_heal, dict):
+                payload["self_heal"] = self_heal
             self.last_error = ""
         except Exception as exc:
             self.last_error = str(exc)
