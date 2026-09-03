@@ -358,7 +358,14 @@ class BunshinManager:
         configured = config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", _DEFAULT_MAX_PARALLEL_NODES))
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
         self.v2_service = BunshinV2WorkflowService(Path(self.runtime_root))
-        self.v2_service.repository.reconcile_role_session_checkpoints()
+        try:
+            self.v2_service.repository.reconcile_terminal_role_runtime()
+            self.v2_service.repository.reconcile_role_session_checkpoints()
+        except Exception:
+            # Reconciliation is a leak repair, never a reason to make the
+            # Manager unavailable. Durable state remains authoritative and a
+            # later startup can retry the idempotent cleanup.
+            self.logger.exception("bunshin terminal runtime reconciliation failed")
         self.events = BunshinEventDelivery(
             load_backlog=self._pending_task_delivery_events,
         )

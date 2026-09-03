@@ -28,6 +28,7 @@ from pal.bunshin.v2.contracts import (
 )
 from pal.bunshin.v2.engine import TransitionEngine
 from pal.bunshin.v2.machines import build_default_transition_engine
+from pal.bunshin.v2.paths import cleanup_role_runtime, reconcile_role_runtime_spool
 from pal.bunshin.v2.schema import ensure_bunshin_v2_schema
 from pal.bunshin.v2.role_protocol import (
     RoleAssignmentAction,
@@ -2168,6 +2169,50 @@ class BunshinV2Repository:
             retired.append(session_id)
         return tuple(retired)
 
+    def reconcile_terminal_role_runtime(self) -> tuple[str, ...]:
+        """Close terminal-workflow sessions and sweep disposable role state."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            workflows = connection.execute(
+                """
+                SELECT aggregate_id AS workflow_id, state AS workflow_state
+                FROM bunshin_v2_aggregate_snapshots
+                WHERE aggregate_type = ?
+                  AND state IN ('COMPLETED', 'REJECTED', 'CANCELLED')
+                ORDER BY aggregate_id
+                """,
+                (AggregateType.WORKFLOW.value,),
+            ).fetchall()
+        for workflow in workflows:
+            state = str(workflow["workflow_state"])
+            self.complete_workflow_role_sessions(
+                str(workflow["workflow_id"]),
+                status="cancelled" if state == "CANCELLED" else "completed",
+            )
+        return self.reconcile_role_runtime_spool()
+
+    def reconcile_role_runtime_spool(self) -> tuple[str, ...]:
+        """Sweep role runtime trees that have no resumable session owner."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id FROM bunshin_v2_role_sessions
+                WHERE status IN (?, ?)
+                """,
+                (
+                    RoleSessionState.ACTIVE.value,
+                    RoleSessionState.SUSPENDED.value,
+                ),
+            ).fetchall()
+        resumable = {str(row["session_id"]) for row in rows}
+        return reconcile_role_runtime_spool(
+            self.runtime_root,
+            resumable_session_ids=resumable,
+        )
+
     def list_role_sessions(
         self,
         *,
@@ -3476,6 +3521,10 @@ class BunshinV2Repository:
         if completed:
             LogicalCoroutineCheckpointStore(self.runtime_root).delete(
                 str(session_id)
+            )
+            cleanup_role_runtime(
+                self.runtime_root,
+                invocation_id=str(session_id),
             )
         return completed
 

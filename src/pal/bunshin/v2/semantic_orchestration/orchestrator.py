@@ -133,6 +133,7 @@ from pal.bunshin.v2.swe_verification import (
 from pal.bunshin.v2.delivery import DeliveryService
 from pal.bunshin.v2.paths import (
     invocation_root,
+    role_run_id,
     resolve_project_git_layout,
     standalone_review_root,
     verification_scratch_root,
@@ -6447,7 +6448,7 @@ class SemanticOrchestrator:
                 "coder_report.json",
                 "producer_report.json",
             ]
-        run_id = f"run_{invocation_id.removeprefix('inv_')[:16]}"
+        run_id = role_run_id(invocation_id)
         workspace, uses_bound_durable_workspace = _prepare_role_workspace_before_environment(
             self.service.runtime_root,
             workspace,

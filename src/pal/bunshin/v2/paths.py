@@ -38,8 +38,93 @@ def role_workspace_root(runtime_root: Path) -> Path:
     return runtime_spool_root(runtime_root) / "role-workspaces"
 
 
+def role_run_id(invocation_id: str) -> str:
+    """Return the process/workspace identity derived from one invocation."""
+
+    normalized = str(invocation_id).strip()
+    return f"run_{normalized.removeprefix('inv_')[:16]}"
+
+
+def cleanup_role_runtime(
+    runtime_root: Path,
+    *,
+    invocation_id: str,
+) -> tuple[str, ...]:
+    """Delete terminal, reproducible runtime state for one role session.
+
+    Invocation/session rows and durable artifacts remain the audit authority.
+    These directories only contain attempt-local logs, staging areas, build
+    scratch, and disposable role-workspace clones.
+    """
+
+    normalized = str(invocation_id).strip()
+    if not normalized or _path_component(normalized, fallback="") != normalized:
+        raise ValueError(f"invalid role invocation id: {invocation_id!r}")
+    candidates = (
+        invocation_root(runtime_root) / normalized,
+        role_workspace_root(runtime_root) / role_run_id(normalized),
+    )
+    removed: list[str] = []
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink() or candidate.is_file():
+            candidate.unlink()
+        else:
+            shutil.rmtree(candidate)
+        removed.append(str(candidate))
+    return tuple(removed)
+
+
+def reconcile_role_runtime_spool(
+    runtime_root: Path,
+    *,
+    resumable_session_ids: set[str],
+) -> tuple[str, ...]:
+    """Remove terminal or orphaned role runtime trees after Manager restart."""
+
+    resumable = {str(item) for item in resumable_session_ids}
+    resumable_runs = {role_run_id(item) for item in resumable}
+    removed: list[str] = []
+    for root, retained, prefix in (
+        (invocation_root(runtime_root), resumable, "inv_"),
+        (role_workspace_root(runtime_root), resumable_runs, "run_"),
+    ):
+        if not root.is_dir():
+            continue
+        for candidate in root.iterdir():
+            if not candidate.name.startswith(prefix) or candidate.name in retained:
+                continue
+            if candidate.is_symlink() or candidate.is_file():
+                candidate.unlink()
+            else:
+                shutil.rmtree(candidate)
+            removed.append(str(candidate))
+    return tuple(sorted(removed))
+
+
 def artifact_epoch_root(runtime_root: Path) -> Path:
     return runtime_spool_root(runtime_root) / "artifact-epochs"
+
+
+def cleanup_workflow_runtime(
+    runtime_root: Path,
+    *,
+    workflow_id: str,
+) -> tuple[str, ...]:
+    """Delete workflow-owned scratch that is reproducible from durable state."""
+
+    normalized = str(workflow_id).strip()
+    if not normalized or _path_component(normalized, fallback="") != normalized:
+        raise ValueError(f"invalid workflow id: {workflow_id!r}")
+    candidate = artifact_epoch_root(runtime_root) / normalized
+    if not candidate.exists() and not candidate.is_symlink():
+        return ()
+    if candidate.is_symlink() or candidate.is_file():
+        candidate.unlink()
+    else:
+        shutil.rmtree(candidate)
+    return (str(candidate),)
 
 
 def verification_scratch_root(runtime_root: Path) -> Path:

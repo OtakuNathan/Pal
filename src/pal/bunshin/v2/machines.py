@@ -506,13 +506,13 @@ def _workflow_cancelled_effects(
     action: ActionEnvelope,
     target_state: str,
 ) -> tuple[EffectDraft, ...]:
-    if target_state != str(WorkflowState.RESTARTING):
-        return ()
-    return _effect("start_replacement_workflow_from_architecture")(
-        payload,
-        action,
-        target_state,
-    )
+    if target_state == str(WorkflowState.RESTARTING):
+        return _effect("start_replacement_workflow_from_architecture")(
+            payload,
+            action,
+            target_state,
+        )
+    return _effect("cleanup_terminal_runtime")(payload, action, target_state)
 
 
 def _workflow_triage_resume_effects(
@@ -660,8 +660,21 @@ def _workflow_transitions() -> list[TransitionSpec]:
         _spec(kind, S.ACTIVE, "LINK_ARCHITECTURE_REVISION", S.ACTIVE, guard=_required("architecture_revision_id")),
         _spec(kind, S.ACTIVE, "LINK_EXECUTION_EPOCH", S.ACTIVE, guard=_required("execution_epoch_id")),
         _spec(kind, S.ACTIVE, "LINK_STANDALONE_REVIEW", S.ACTIVE, guard=_required("standalone_review_id")),
-        _spec(kind, S.ACTIVE, "MARK_COMPLETED", S.COMPLETED, guard=_required("result_artifact_ref")),
-        _spec(kind, S.ACTIVE, "REJECT_WORKFLOW", S.REJECTED),
+        _spec(
+            kind,
+            S.ACTIVE,
+            "MARK_COMPLETED",
+            S.COMPLETED,
+            guard=_required("result_artifact_ref"),
+            effects=_effect("cleanup_terminal_runtime"),
+        ),
+        _spec(
+            kind,
+            S.ACTIVE,
+            "REJECT_WORKFLOW",
+            S.REJECTED,
+            effects=_effect("cleanup_terminal_runtime"),
+        ),
         _spec(kind, S.PAUSE_REQUESTED, "CHILDREN_PAUSED", S.PAUSED),
         _spec(
             kind,
@@ -684,12 +697,14 @@ def _workflow_transitions() -> list[TransitionSpec]:
             "REPLACEMENT_WORKFLOW_STARTED",
             S.CANCELLED,
             guard=_required("replacement_workflow_id"),
+            effects=_effect("cleanup_terminal_runtime"),
         ),
         _spec(
             kind,
             S.RESTARTING,
             "REPLACEMENT_WORKFLOW_ABORTED",
             S.CANCELLED,
+            effects=_effect("cleanup_terminal_runtime"),
         ),
     ]
     for state in active:
@@ -1109,10 +1124,7 @@ def _execution_transitions() -> list[TransitionSpec]:
             "FINAL_DELIVERABLE_PUBLISHED",
             S.COMPLETED,
             guard=_required("published_deliverable_ref"),
-            effects=_effects(
-                "submit_workflow_completion",
-                "cleanup_terminal_worktrees",
-            ),
+            effects=_effect("submit_workflow_completion"),
         ),
         _spec(
             kind,

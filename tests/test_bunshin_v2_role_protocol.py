@@ -9,6 +9,7 @@ from pal.bunshin.checkpoint import LogicalCoroutineCheckpointStore
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.v2.paths import role_run_id
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.service import BunshinV2WorkflowService
 from pal.bunshin.v2.semantic_orchestration import SemanticOrchestrator
@@ -124,6 +125,38 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(retired, ("orphan-session",))
         self.assertTrue(store.current_path("session-router").is_file())
         self.assertFalse(store.current_path("orphan-session").exists())
+
+    def test_runtime_reconciliation_keeps_only_resumable_role_sessions(self) -> None:
+        runtime = self.runtime_root / "data" / "bunshin" / "runtime"
+        active_invocation = runtime / "invocations" / "session-router"
+        active_workspace = runtime / "role-workspaces" / role_run_id("session-router")
+        orphan_invocation = runtime / "invocations" / "inv_orphan"
+        orphan_workspace = runtime / "role-workspaces" / role_run_id("inv_orphan")
+        reserved_invocation = runtime / "invocations" / "future-metadata"
+        reserved_workspace = runtime / "role-workspaces" / "future-metadata"
+        for path in (
+            active_invocation,
+            active_workspace,
+            orphan_invocation,
+            orphan_workspace,
+            reserved_invocation,
+            reserved_workspace,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "scratch.txt").write_text("derived", encoding="utf-8")
+
+        retired = self.repository.reconcile_terminal_role_runtime()
+
+        self.assertEqual(
+            set(retired),
+            {str(orphan_invocation), str(orphan_workspace)},
+        )
+        self.assertTrue(active_invocation.is_dir())
+        self.assertTrue(active_workspace.is_dir())
+        self.assertFalse(orphan_invocation.exists())
+        self.assertFalse(orphan_workspace.exists())
+        self.assertTrue(reserved_invocation.is_dir())
+        self.assertTrue(reserved_workspace.is_dir())
 
     def test_architecture_reviewer_cannot_retire_before_cycle_is_terminal(self) -> None:
         revision_id = "arch-reviewer-root"
@@ -403,6 +436,11 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 payload={"result_artifact_ref": self.submission_ref.to_dict()},
             )
         )
+        runtime = self.runtime_root / "data" / "bunshin" / "runtime"
+        invocation_dir = runtime / "invocations" / session_id
+        workspace_dir = runtime / "role-workspaces" / role_run_id(session_id)
+        invocation_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
         completed_sessions = self.repository.complete_workflow_role_sessions(
             "workflow-router"
         )
@@ -411,6 +449,8 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             self.repository.read_role_session(session_id)["status"],
             RoleSessionState.COMPLETED.value,
         )
+        self.assertFalse(invocation_dir.exists())
+        self.assertFalse(workspace_dir.exists())
 
     def test_deleted_module_can_retire_its_logical_session(self) -> None:
         self.repository.dispatch(

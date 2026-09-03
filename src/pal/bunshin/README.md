@@ -76,6 +76,12 @@ Interaction rule:
   compaction calls do not advance it
 - one logical role session owns file snapshots and pager handles; they expire
   at semantic input `N+5` and become inaccessible when that role session exits
+- invocation directories and prepared role-workspace clones are disposable
+  session-owned runtime state. A completed or cancelled session deletes them
+  after its durable database transition; Manager startup reconciles terminal
+  and orphaned spool while preserving active and suspended resumable sessions.
+  Terminal workflow cleanup also retires workflow worktrees and artifact-module
+  scratch; content-addressed artifacts, audit rows, and deliveries remain
 - checkpoint schema v8 stores a non-sensitive routing/fencing header plus one
   authenticated encrypted logical-process payload. Module-owned state is
   serialized behind that envelope; Manager routes it opaquely and only the

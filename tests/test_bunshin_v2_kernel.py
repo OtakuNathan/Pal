@@ -49,7 +49,10 @@ from pal.bunshin.v2.machines import (
     all_machine_specs,
     all_transition_specs,
 )
-from pal.bunshin.v2.orchestration import MECHANICAL_EFFECT_TYPES
+from pal.bunshin.v2.orchestration import (
+    LEGACY_MECHANICAL_EFFECT_TYPES,
+    MECHANICAL_EFFECT_TYPES,
+)
 from pal.bunshin.v2.formal import (
     STATE_CLASSIFICATIONS,
     STATE_ENUMS,
@@ -168,6 +171,10 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
             cancelled.snapshot.payload["replacement_workflow_id"],
             "wf_replacement",
         )
+        self.assertEqual(
+            [effect.effect_type for effect in cancelled.effects],
+            ["cleanup_terminal_runtime"],
+        )
 
     def test_ordinary_workflow_cancel_does_not_enter_restarting(self) -> None:
         created = self.engine.transition(
@@ -195,7 +202,10 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
 
         self.assertEqual(cancelled.snapshot.state, WorkflowState.CANCELLED)
         self.assertNotIn("restart_execution_request", cancelled.snapshot.payload)
-        self.assertEqual(cancelled.effects, ())
+        self.assertEqual(
+            [effect.effect_type for effect in cancelled.effects],
+            ["cleanup_terminal_runtime"],
+        )
 
     def test_workflow_restart_cancel_waits_for_replacement_effect_receipt(self) -> None:
         created = self.engine.transition(
@@ -253,6 +263,10 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         self.assertTrue(cancel_requested.snapshot.payload["restart_cancel_requested"])
         self.assertEqual(cancel_requested.effects, ())
         self.assertEqual(cancelled.snapshot.state, WorkflowState.CANCELLED)
+        self.assertEqual(
+            [effect.effect_type for effect in cancelled.effects],
+            ["cleanup_terminal_runtime"],
+        )
 
     def test_task_family_is_bound_and_task_archival_is_terminal(self) -> None:
         created = self.engine.transition(
@@ -2029,7 +2043,11 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
                     for effect in spec.effect_builder({}, action, str(target))
                 )
         self.assertFalse(MECHANICAL_EFFECT_TYPES & SEMANTIC_EFFECT_TYPES)
-        self.assertEqual(declared, MECHANICAL_EFFECT_TYPES | SEMANTIC_EFFECT_TYPES)
+        self.assertFalse(declared & LEGACY_MECHANICAL_EFFECT_TYPES)
+        self.assertEqual(
+            declared | LEGACY_MECHANICAL_EFFECT_TYPES,
+            MECHANICAL_EFFECT_TYPES | SEMANTIC_EFFECT_TYPES,
+        )
 
 
 class BunshinV2PersistenceTests(unittest.TestCase):

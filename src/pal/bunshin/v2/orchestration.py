@@ -23,7 +23,11 @@ from pal.bunshin.v2.human_review import (
     human_review_card_is_current,
 )
 from pal.bunshin.v2.machines import machine_spec_for
-from pal.bunshin.v2.paths import cleanup_workflow_worktrees
+from pal.bunshin.v2.paths import (
+    cleanup_workflow_runtime,
+    cleanup_workflow_worktrees,
+    resolve_project_git_layout,
+)
 from pal.bunshin.v2.replan import collect_architecture_finding_batch
 from pal.bunshin.v2.service import BunshinV2WorkflowService, workflow_request_from_snapshot
 from pal.bunshin.v2.sessions import (
@@ -45,7 +49,10 @@ class RejectingSemanticEffectPort:
         raise RuntimeError(f"no V2 semantic worker is configured for effect {effect.get('effect_type')}")
 
 
-MECHANICAL_EFFECT_TYPES = frozenset({
+LEGACY_MECHANICAL_EFFECT_TYPES = frozenset({"cleanup_terminal_worktrees"})
+
+
+MECHANICAL_EFFECT_TYPES = LEGACY_MECHANICAL_EFFECT_TYPES | frozenset({
     "submit_action",
     "route_workflow",
     "create_architecture_revision",
@@ -65,7 +72,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "freeze_epoch_for_replan",
     "create_replan_revision",
     "submit_workflow_completion",
-    "cleanup_terminal_worktrees",
+    "cleanup_terminal_runtime",
     "submit_standalone_completion",
     "start_review_repair_execution",
     "submit_workflow_rejection",
@@ -414,6 +421,36 @@ class BunshinV2OutboxProcessor:
                     self.service.runtime_root,
                     repository_layout=repository_layout,
                 )
+            cleanup_workflow_runtime(
+                self.service.runtime_root,
+                workflow_id=epoch.workflow_id,
+            )
+            return {}
+        if effect_type == "cleanup_terminal_runtime":
+            workflow = self._effect_snapshot(effect)
+            if (
+                workflow.aggregate_type != AggregateType.WORKFLOW
+                or workflow.state not in {"COMPLETED", "REJECTED", "CANCELLED"}
+            ):
+                raise RuntimeError(
+                    "terminal runtime cleanup requires a terminal workflow"
+                )
+            self.repository.complete_workflow_role_sessions(
+                workflow.workflow_id,
+                status="cancelled" if workflow.state == "CANCELLED" else "completed",
+            )
+            self.repository.reconcile_role_session_checkpoints()
+            self.repository.reconcile_role_runtime_spool()
+            repository_layout = self._terminal_repository_layout(workflow)
+            if repository_layout:
+                cleanup_workflow_worktrees(
+                    self.service.runtime_root,
+                    repository_layout=repository_layout,
+                )
+            cleanup_workflow_runtime(
+                self.service.runtime_root,
+                workflow_id=workflow.workflow_id,
+            )
             return {}
         if effect_type == "submit_standalone_completion":
             review = self._effect_snapshot(effect)
@@ -465,6 +502,39 @@ class BunshinV2OutboxProcessor:
         if effect_type == "reconcile_workflow":
             return self._reconcile_workflow(effect)
         raise ValueError(f"unsupported mechanical V2 effect: {effect_type}")
+
+    def _terminal_repository_layout(
+        self,
+        workflow: AggregateSnapshot,
+    ) -> dict[str, Any]:
+        for snapshot in reversed(
+            self.repository.list_workflow_snapshots(workflow.workflow_id)
+        ):
+            manifest_ref = dict(
+                snapshot.payload.get("architecture_manifest_ref") or {}
+            )
+            if not manifest_ref:
+                continue
+            manifest = dict(self.service.artifacts.read_json(manifest_ref))
+            repository_layout = dict(manifest.get("repository_layout") or {})
+            if repository_layout:
+                return repository_layout
+        if not dict(workflow.payload.get("request_ref") or {}):
+            return {}
+        request = workflow_request_from_snapshot(self.service, workflow)
+        workspace = dict(request.get("workspace") or {})
+        if not str(workspace.get("repo_path") or workspace.get("cwd") or "").strip():
+            return {}
+        return resolve_project_git_layout(
+            self.service.runtime_root,
+            workspace=workspace,
+            workflow_id=workflow.workflow_id,
+            workflow_name=str(
+                request.get("workflow_name")
+                or workflow.payload.get("workflow_name")
+                or workflow.workflow_id
+            ),
+        ).to_artifact_dict()
 
     async def _reconcile_execution_epoch(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self._effect_snapshot(effect)

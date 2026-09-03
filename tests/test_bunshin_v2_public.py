@@ -3694,6 +3694,54 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             expected,
         )
 
+    def test_terminal_runtime_cleanup_cancels_sessions_and_sweeps_spool(self) -> None:
+        processor = BunshinV2OutboxProcessor(BunshinV2WorkflowService(self.runtime_root))
+        workflow_scratch = (
+            self.runtime_root
+            / "data"
+            / "bunshin"
+            / "runtime"
+            / "artifact-epochs"
+            / "wf-terminal-cleanup"
+        )
+        workflow_scratch.mkdir(parents=True)
+        (workflow_scratch / "derived.txt").write_text("derived", encoding="utf-8")
+        workflow = SimpleNamespace(
+            workflow_id="wf-terminal-cleanup",
+            aggregate_type=AggregateType.WORKFLOW,
+            state="CANCELLED",
+        )
+        processor._effect_snapshot = lambda _effect: workflow
+        completed: list[tuple[str, str]] = []
+        processor.repository.complete_workflow_role_sessions = (
+            lambda workflow_id, *, status="completed": completed.append(
+                (workflow_id, status)
+            )
+            or ()
+        )
+        reconciled: list[str] = []
+        processor.repository.reconcile_role_session_checkpoints = (
+            lambda: reconciled.append("checkpoints") or ()
+        )
+        processor.repository.reconcile_role_runtime_spool = (
+            lambda: reconciled.append("spool") or ()
+        )
+        processor._terminal_repository_layout = lambda _workflow: {}
+
+        asyncio.run(
+            processor._execute_mechanical(
+                {
+                    "effect_type": "cleanup_terminal_runtime",
+                    "effect_key": "terminal-cleanup",
+                    "payload": {},
+                }
+            )
+        )
+
+        self.assertEqual(completed, [("wf-terminal-cleanup", "cancelled")])
+        self.assertEqual(reconciled, ["checkpoints", "spool"])
+        self.assertFalse(workflow_scratch.exists())
+
     def test_node_acceptance_preserves_module_sessions(self) -> None:
         processor = BunshinV2OutboxProcessor(BunshinV2WorkflowService(self.runtime_root))
         node = SimpleNamespace(
