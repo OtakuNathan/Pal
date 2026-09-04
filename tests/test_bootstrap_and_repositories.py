@@ -3550,12 +3550,9 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
 
             first = await read_socket_message(reader)
             second = await read_socket_message(reader)
-            third = await read_socket_message(reader)
             self.assertEqual(first["type"], "text_delta")
-            self.assertEqual(first["text"], "po")
-            self.assertEqual(second["type"], "text_delta")
-            self.assertEqual(second["text"], "ng")
-            self.assertEqual(third["type"], "llm_done")
+            self.assertEqual(first["text"], "pong")
+            self.assertEqual(second["type"], "llm_done")
 
             self.assertFalse(self.endpoint.outbox)
             self.assertFalse(self.endpoint._stream_sessions)
