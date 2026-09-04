@@ -125,6 +125,26 @@ BrowserDialogInput = _strict_model(
         "timeout_ms": (int, Field(15000)),
     },
 )
+BrowserEvaluateInput = _strict_model(
+    "BrowserEvaluateInput",
+    {
+        "func": (str, Field(...)),
+        "target": (str | None, Field(None)),
+        "max_chars": (int, Field(20000)),
+        "timeout_ms": (int, Field(15000)),
+    },
+)
+BrowserNetworkInput = _strict_model(
+    "BrowserNetworkInput",
+    {
+        "operation": (Literal["start", "read", "clear"], Field("read")),
+        "url_filter": (str | None, Field(None)),
+        "since": (int, Field(0)),
+        "limit": (int, Field(50)),
+        "clear_on_read": (bool, Field(False)),
+        "timeout_ms": (int, Field(15000)),
+    },
+)
 BrowserInspectLayoutInput = _strict_model(
     "BrowserInspectLayoutInput",
     {
@@ -154,11 +174,13 @@ __all__ = [
     "BrowserCheckInput",
     "BrowserClickInput",
     "BrowserDialogInput",
+    "BrowserEvaluateInput",
     "BrowserFillInput",
     "BrowserFindInput",
     "BrowserHistoryInput",
     "BrowserInspectLayoutInput",
     "BrowserNavigateInput",
+    "BrowserNetworkInput",
     "BrowserPressInput",
     "BrowserReadInput",
     "BrowserResetInput",

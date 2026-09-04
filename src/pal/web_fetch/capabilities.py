@@ -10,11 +10,13 @@ from pal.web_fetch.tool_models import (
     BrowserCheckInput,
     BrowserClickInput,
     BrowserDialogInput,
+    BrowserEvaluateInput,
     BrowserFillInput,
     BrowserFindInput,
     BrowserHistoryInput,
     BrowserInspectLayoutInput,
     BrowserNavigateInput,
+    BrowserNetworkInput,
     BrowserPressInput,
     BrowserReadInput,
     BrowserResetInput,
@@ -70,9 +72,13 @@ navigation or reading fails and raw HTTP is sufficient, the main Pal may use `ru
 with curl. Curl cannot replace clicks, JavaScript state, dialogs, or rendered layout.
 
 Never invent element refs, automatically repeat a failed write action, expose cookies,
-or use browser tools for local files. Arbitrary JavaScript, uploads, cookie/storage
-editing, network interception, traces, videos, PDF and the Playwright dashboard are not
-part of this capability surface.
+or use browser tools for local files. `browser_evaluate` runs a JavaScript function
+inside the page with the logged-in origin's privileges; prefer read-only expressions and
+use it only when snapshot/read/layout evidence is not enough. `browser_network` observes
+fetch/XHR traffic via an injected hook: start it after navigation (hooks reset on every
+navigation), interact with the page, then read entries. Uploads, cookie/storage editing,
+request interception or modification, traces, videos, PDF and the Playwright dashboard
+are not part of this capability surface.
 """
 
 
@@ -97,8 +103,8 @@ class WebFetchModuleSnapshot:
         "browser_click", "browser_fill", "browser_type", "browser_press",
         "browser_hover", "browser_select", "browser_check", "browser_scroll",
         "browser_resize", "browser_history", "browser_tabs", "browser_dialog",
-        "browser_inspect_layout", "browser_screenshot", "browser_status",
-        "browser_close", "browser_reset",
+        "browser_evaluate", "browser_network", "browser_inspect_layout",
+        "browser_screenshot", "browser_status", "browser_close", "browser_reset",
     ),
     metadata={"internal": True, "plugin_id": "web_fetch"},
 )
@@ -275,6 +281,14 @@ class WebFetchIntrospectionProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="inspect_layout", guidance=ToolGuidance(purpose="Inspect computed layout and geometry for a bounded selector on the current page.", use_when="Diagnosing CSS or rendered geometry without relying on pixels.", do_not_use_when="Only text content is needed.", failure_next_steps="Verify the selector using browser_snapshot, then retry."), InputModel=BrowserInspectLayoutInput, OutputModel=BrowserActionOutput, aliases=("browser_inspect_layout",), metadata={"canonical_path": "op_browser_inspect_layout", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
     def inspect_layout(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "inspect_layout", "Browser layout inspection")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="evaluate", guidance=ToolGuidance(purpose="Evaluate a JavaScript function in the current page and return its result.", use_when="Reading page-internal state such as localStorage, sessionStorage, or JS globals that snapshots cannot expose.", do_not_use_when="The value is available via browser_read, browser_snapshot, or browser_inspect_layout.", failure_next_steps="Check that func is a function expression such as () => document.title; navigation resets page state."), InputModel=BrowserEvaluateInput, OutputModel=BrowserActionOutput, aliases=("browser_evaluate",), metadata={"canonical_path": "op_browser_evaluate", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def evaluate(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "evaluate", "Browser evaluation")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="network", guidance=ToolGuidance(purpose="Observe fetch/XHR API traffic of the current page through an injected JavaScript hook.", use_when="Capturing API requests, headers, or tokens the page sends; start after navigating, interact, then read entries.", do_not_use_when="Raw HTTP via curl is sufficient, or no page interaction is expected.", failure_next_steps="Navigation removes the hook; run operation=start again and confirm installed=true."), InputModel=BrowserNetworkInput, OutputModel=BrowserActionOutput, aliases=("browser_network",), metadata={"canonical_path": "op_browser_network", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    def network(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "network", "Browser network")
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(purpose="Capture the current page or target as a managed image artifact.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check browser_status and page state; failed calls return no artifact."), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:

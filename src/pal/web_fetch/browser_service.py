@@ -544,6 +544,7 @@ class _PlaywrightCliWorker:
             "navigate", "read", "snapshot", "find", "click", "fill", "type",
             "press", "hover", "select", "check", "scroll", "resize", "history",
             "tabs", "dialog", "inspect_layout", "screenshot", "status",
+            "evaluate", "network",
         }:
             raise BrowserServiceError("unsupported browser action", code="unsupported_action")
         if action == "status":
@@ -717,6 +718,42 @@ class _PlaywrightCliWorker:
             limit = max(1, min(20, int(args.get("max_elements") or 20)))
             raw = self._run(record, ["eval", _layout_script(selector=selector, limit=limit)], timeout_ms=timeout_ms, raw=True)
             return {"inspection": _parse_json_object(raw, "layout inspection")}
+        if action == "evaluate":
+            func = _bounded_text(args.get("func"), limit=20000, field_name="func").strip()
+            if not func:
+                raise BrowserServiceError("func is required", code="invalid_arguments")
+            target = _bounded_text(args.get("target") or "", limit=500, field_name="target").strip()
+            if func.startswith("-") or target.startswith("-"):
+                raise BrowserServiceError("func/target must not start with '-'", code="invalid_arguments")
+            argv = ["eval", func] + ([target] if target else [])
+            raw = self._run(record, argv, timeout_ms=timeout_ms, raw=True)
+            max_chars = max(200, min(100000, int(args.get("max_chars") or 20000)))
+            value = _parse_lenient_json(raw)
+            truncated = isinstance(value, str) and len(value) > max_chars
+            if truncated:
+                value = value[:max_chars]
+            return {"result": value, "result_type": type(value).__name__, "truncated": truncated}
+        if action == "network":
+            operation = str(args.get("operation") or "read").lower()
+            if operation == "start":
+                raw = self._run(record, ["eval", _network_start_script()], timeout_ms=timeout_ms, raw=True)
+                return {"network": _parse_json_object(raw, "network start")}
+            if operation == "clear":
+                raw = self._run(record, ["eval", _network_clear_script()], timeout_ms=timeout_ms, raw=True)
+                return {"network": _parse_json_object(raw, "network clear")}
+            if operation == "read":
+                url_filter = _bounded_text(args.get("url_filter") or "", limit=500, field_name="url_filter").strip()
+                since = max(0, int(args.get("since") or 0))
+                limit = max(1, min(200, int(args.get("limit") or 50)))
+                clear_on_read = bool(args.get("clear_on_read"))
+                raw = self._run(
+                    record,
+                    ["eval", _network_read_script(url_filter=url_filter, since=since, limit=limit, clear=clear_on_read)],
+                    timeout_ms=timeout_ms,
+                    raw=True,
+                )
+                return {"network": _parse_json_object(raw, "network read")}
+            raise BrowserServiceError("invalid network operation", code="invalid_arguments")
         if action == "screenshot":
             file_path = self.paths.temporary / f"shot-{uuid.uuid4().hex}.png"
             options = [f"--filename={file_path}"]
@@ -986,6 +1023,92 @@ def _parse_json_object(raw: str, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BrowserServiceError(f"{label} returned a non-object", code="invalid_cli_output")
     return value
+
+
+def _parse_lenient_json(raw: str) -> Any:
+    text = str(raw or "")
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+def _network_start_script() -> str:
+    return """() => JSON.stringify((() => {
+  if (window.__palNetHooked) {
+    return {installed: false, already_hooked: true, log_length: (window.__palNetLog || []).length};
+  }
+  const log = [];
+  window.__palNetLog = log;
+  const push = entry => { try { log.push(entry); if (log.length > 800) log.splice(0, log.length - 800); } catch (err) {} };
+  const headersOf = headers => {
+    const out = {};
+    try {
+      if (!headers) return out;
+      if (typeof headers.forEach === 'function') headers.forEach((value, key) => { out[key] = String(value); });
+      else if (typeof headers === 'object') for (const key of Object.keys(headers)) out[key] = String(headers[key]);
+    } catch (err) {}
+    return out;
+  };
+  const bodyOf = body => {
+    try {
+      if (body === null || body === undefined) return null;
+      if (typeof body === 'string') return body.slice(0, 2048);
+      if (typeof body === 'object') return JSON.stringify(body).slice(0, 2048);
+      return String(body).slice(0, 2048);
+    } catch (err) { return null; }
+  };
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === 'function') {
+    window.fetch = function(input, init) {
+      const url = typeof input === 'string' ? input : String((input && input.url) || input);
+      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      const request = {method: method, headers: headersOf((init && init.headers) || (input && input.headers)), body: bodyOf(init && init.body)};
+      const startedAt = Date.now();
+      const at = new Date(startedAt).toISOString();
+      return originalFetch.apply(this, arguments).then(
+        response => { push({kind: 'fetch', url: url, method: method, status: response.status, request: request, ms: Date.now() - startedAt, at: at}); return response; },
+        error => { push({kind: 'fetch', url: url, method: method, status: 0, request: request, error: String((error && error.message) || error), ms: Date.now() - startedAt, at: at}); throw error; }
+      );
+    };
+  }
+  const xhrProto = XMLHttpRequest.prototype;
+  const originalOpen = xhrProto.open, originalSend = xhrProto.send, originalSetHeader = xhrProto.setRequestHeader;
+  xhrProto.open = function(method, url) { this.__palNetMeta = {method: String(method || 'GET').toUpperCase(), url: String(url || ''), headers: {}}; return originalOpen.apply(this, arguments); };
+  xhrProto.setRequestHeader = function(name, value) { if (this.__palNetMeta) this.__palNetMeta.headers[String(name)] = String(value); return originalSetHeader.apply(this, arguments); };
+  xhrProto.send = function(body) {
+    const meta = this.__palNetMeta || {method: 'GET', url: '', headers: {}};
+    if (this.__palNetMeta && body !== undefined && body !== null) meta.body = bodyOf(body);
+    const startedAt = Date.now();
+    const at = new Date(startedAt).toISOString();
+    this.addEventListener('loadend', () => {
+      push({kind: 'xhr', url: String(this.responseURL || meta.url), method: meta.method, status: this.status, request: meta, ms: Date.now() - startedAt, at: at});
+    });
+    return originalSend.apply(this, arguments);
+  };
+  window.__palNetHooked = true;
+  return {installed: true, origin: location.origin};
+})())"""
+
+
+def _network_read_script(*, url_filter: str, since: int, limit: int, clear: bool) -> str:
+    args = json.dumps({"filter": url_filter, "since": since, "limit": limit, "clear": clear}, ensure_ascii=False)
+    return f"""() => JSON.stringify((() => {{
+  const args = {args};
+  const log = window.__palNetLog;
+  if (!log) return {{hooked: false, entries: [], note: 'hook not installed; run network start after navigation'}};
+  let entries = log.slice(Math.max(0, args.since));
+  if (args.filter) entries = entries.filter(entry => String(entry.url || '').indexOf(args.filter) !== -1);
+  const total_matching = entries.length;
+  const truncated = entries.length > args.limit;
+  entries = entries.slice(0, args.limit);
+  if (args.clear) window.__palNetLog = [];
+  return {{hooked: true, entries: entries, returned: entries.length, total_matching: total_matching, truncated: truncated, next_since: args.clear ? 0 : log.length, cleared: !!args.clear}};
+}})())"""
+
+
+def _network_clear_script() -> str:
+    return "() => JSON.stringify((() => { const count = (window.__palNetLog || []).length; window.__palNetLog = []; return {cleared: count}; })())"
 
 
 def _cli_args(command: str, *positionals: str, options: list[str] | None = None) -> list[str]:
