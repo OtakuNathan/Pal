@@ -78,8 +78,10 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 ### 边界
 
 - `L1` 属于 runtime memory
-- `L1` 只存在 RAM
-- Pal 进程重启后 `L1` 丢失；durable Bunshin role session 会完整序列化并恢复 L1
+- 运行中的 `L1` 以 RAM 内工作集为唯一权威来源；正常停机时会生成一次加密恢复快照
+- resident Pal 在正常停机时把完整 `L1` 加密导出，并在下次启动、channel
+  接入前恢复后消费；停机路径不调用 LLM。未及写出 checkpoint 的突然死亡仍可能
+  丢失 resident L1。durable Bunshin role session 则按自己的 checkpoint 合约恢复 L1
 - `L1` 不属于 Core durable state
 - `L1` 不是 summary bucket
 

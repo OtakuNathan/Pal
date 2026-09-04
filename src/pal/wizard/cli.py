@@ -107,6 +107,7 @@ def _generate_service_content(
         f"ExecStart={pal_bin} run --runtime-root {runtime_path}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
+        "KillMode=mixed\n"
         f"{environment_lines}\n"
         "StandardOutput=journal\n"
         "StandardError=journal\n"

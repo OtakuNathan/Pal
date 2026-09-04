@@ -18,7 +18,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_max_output_recovery_attempts, 3)
         self.assertEqual(cfg.llm_request_timeout_seconds, 600.0)
         self.assertEqual(cfg.llm_compaction_timeout_seconds, 180.0)
-        self.assertEqual(cfg.shutdown_compaction_timeout_seconds, 75.0)
         self.assertEqual(cfg.llm_stream_wall_timeout_seconds, 1_800.0)
         self.assertEqual(cfg.llm_stream_cleanup_timeout_seconds, 2.0)
         self.assertEqual(
@@ -81,7 +80,7 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text(
-                '[llm]\nbase_retry_delay_ms = 1000\nendpoint_retry_attempts = 5\ncompaction_retry_attempts = 4\nmax_output_recovery_attempts = 2\nrequest_timeout_seconds = 90.5\ncompaction_timeout_seconds = 45.0\nshutdown_compaction_timeout_seconds = 6.0\nstream_wall_timeout_seconds = 1200\nstream_cleanup_timeout_seconds = 1.5\nwait_status_seconds = [600, 120, -1, 300, 120]\n',
+                '[llm]\nbase_retry_delay_ms = 1000\nendpoint_retry_attempts = 5\ncompaction_retry_attempts = 4\nmax_output_recovery_attempts = 2\nrequest_timeout_seconds = 90.5\ncompaction_timeout_seconds = 45.0\nstream_wall_timeout_seconds = 1200\nstream_cleanup_timeout_seconds = 1.5\nwait_status_seconds = [600, 120, -1, 300, 120]\n',
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
@@ -91,7 +90,6 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(cfg.llm_max_output_recovery_attempts, 2)
             self.assertEqual(cfg.llm_request_timeout_seconds, 90.5)
             self.assertEqual(cfg.llm_compaction_timeout_seconds, 45.0)
-            self.assertEqual(cfg.shutdown_compaction_timeout_seconds, 6.0)
             self.assertEqual(cfg.llm_stream_wall_timeout_seconds, 1_200.0)
             self.assertEqual(cfg.llm_stream_cleanup_timeout_seconds, 1.5)
             self.assertEqual(cfg.llm_wait_status_seconds, (120.0, 300.0, 600.0))

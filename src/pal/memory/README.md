@@ -41,11 +41,11 @@ Interaction rule:
   provider tool envelope
 - Memory exposes one runtime-state port for L1, L2, top-of-mind, and heat.
   Core orchestrates snapshot/restore/reset; Memory never reaches into Execution
-- Resident Pal quiesces on SIGINT/SIGTERM and first writes the fixed runtime
-  snapshot as an encrypted atomic fallback. It may then attempt one bounded
-  shutdown compaction and replace that checkpoint on success. Startup restores
-  and consumes the checkpoint before channel endpoints start. There is no
-  periodic checkpoint or background compaction loop
+- Resident Pal quiesces on SIGINT/SIGTERM and writes the fixed L1 runtime
+  snapshot as one encrypted atomic checkpoint without calling an external
+  model. Startup restores and consumes that checkpoint before channel
+  endpoints start; normal context-budget policy may compact the restored L1
+  later. There is no periodic checkpoint or background compaction loop
 - Core runs compaction and host policies render its checkpoint before storage;
   `MemoryService` performs the L1 replacement, dependent L2 cleanup, and
   execution-context projection inside one rollback boundary

@@ -492,6 +492,7 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertIn("ExecStartPre=/usr/bin/mkdir -p /tmp/pal", content)
         self.assertNotIn("--debug-prompt", content)
         self.assertIn("Restart=on-failure", content)
+        self.assertIn("KillMode=mixed", content)
         self.assertIn("StandardOutput=journal", content)
         self.assertIn("StandardError=journal", content)
         self.assertIn('Environment="PAL_SERVICE_LOG_SINK=systemd_journal"', content)

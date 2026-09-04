@@ -186,18 +186,12 @@ class PalRuntimeApp:
                     core.state.resident_drained_event.wait(),
                     timeout=1.0,
                 )
-            # Publish the fixed L1 before spending any of the supervisor's
-            # shutdown window on an optional model call. If SIGKILL arrives
-            # during compaction, this raw encrypted fallback is already safe.
+            # Shutdown continuity must not depend on an external model.  Save
+            # the fixed L1 exactly once; the next process restores it before
+            # admitting channel traffic and normal budget policy can compact
+            # it later if that is actually required.
             await self._publish_checkpoint_async()
-            compact_status = await self._try_shutdown_compaction_async()
-            if compact_status == "compacted":
-                await self._publish_checkpoint_async()
-            self.last_checkpoint_status = (
-                "compacted_and_saved"
-                if compact_status == "compacted"
-                else f"l1_saved:{compact_status}"
-            )
+            self.last_checkpoint_status = "l1_saved"
             self.last_checkpoint_error = ""
         except Exception as exc:
             self.last_checkpoint_status = "save_failed"
@@ -208,47 +202,6 @@ class PalRuntimeApp:
                     "error": self.last_checkpoint_error,
                 }
             )
-
-    async def _try_shutdown_compaction_async(self) -> str:
-        memory_service = self.handle.memory_service
-        turns = list(memory_service.l1_store.turns.turns)
-        if not turns:
-            return "empty"
-        if all(turn.turn_id == "compact-summary" for turn in turns):
-            return "already_compact"
-        timeout = max(
-            0.1,
-            float(
-                getattr(
-                    self.handle.core.config,
-                    "shutdown_compaction_timeout_seconds",
-                    75.0,
-                )
-                or 75.0
-            ),
-        )
-        try:
-            result = await asyncio.wait_for(
-                self.handle.core.turn_executor.compact_memory_async(
-                    memory_service,
-                    target_input_budget=8192,
-                    reserved_output_tokens=4096,
-                    max_attempts=1,
-                    timeout_seconds=timeout,
-                ),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            return "compact_timeout"
-        except Exception as exc:
-            self.handle.core.state.diagnostics.append(
-                {
-                    "kind": "resident.checkpoint.compact_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            return "compact_failed"
-        return "compacted" if result.success else f"compact_{result.status}"
 
     async def _publish_checkpoint_async(self) -> None:
         self._checkpoint_sequence += 1

@@ -12,21 +12,14 @@ from pal.core.resident_checkpoint import ResidentCheckpointStore
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
 from pal.memory import (
-    L2Entry,
-    MemoryCompactRequest,
     MemoryService,
     register_with_core as register_memory_with_core,
 )
 from pal.runtime_app import PalRuntimeApp
 
 
-def _build_app(root: Path, *, shutdown_timeout: float = 75.0) -> PalRuntimeApp:
-    core = PalCore(
-        config=RuntimeConfig(
-            runtime_root=root,
-            shutdown_compaction_timeout_seconds=shutdown_timeout,
-        )
-    )
+def _build_app(root: Path) -> PalRuntimeApp:
+    core = PalCore(config=RuntimeConfig(runtime_root=root))
     core.context.execution_runtime.runtime_root = root
     memory_service = MemoryService()
     register_execution_with_core(core.context)
@@ -89,75 +82,35 @@ class ResidentCheckpointTests(unittest.TestCase):
                 "resident process restart",
             )
 
-    def test_shutdown_compaction_timeout_falls_back_to_full_l1_checkpoint(self) -> None:
+    def test_shutdown_saves_full_l1_without_calling_the_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            app = _build_app(root, shutdown_timeout=0.01)
+            app = _build_app(root)
             app.handle.memory_service.begin_l1_turn(
-                "turn-timeout",
+                "turn-shutdown",
                 user_text="keep this full L1",
             )
-            app.handle.memory_service.settle_l1_turn("turn-timeout")
+            app.handle.memory_service.settle_l1_turn("turn-shutdown")
 
-            async def never_compacts(*args, **kwargs):
-                _ = args
-                self.assertEqual(kwargs["max_attempts"], 1)
-                self.assertTrue(ResidentCheckpointStore(root).path.is_file())
-                await asyncio.Event().wait()
+            async def forbidden_compaction(*args, **kwargs):
+                _ = args, kwargs
+                self.fail("shutdown must not call the LLM compaction path")
 
-            app.handle.core.turn_executor.compact_memory_async = never_compacts
+            app.handle.core.turn_executor.compact_memory_async = forbidden_compaction
             asyncio.run(app._checkpoint_for_shutdown_async())
 
-            self.assertEqual(
-                app.last_checkpoint_status,
-                "l1_saved:compact_timeout",
-            )
+            self.assertEqual(app.last_checkpoint_status, "l1_saved")
             snapshot = ResidentCheckpointStore(root).read()
+            self.assertEqual(snapshot["sequence"], 1)
             memory_payload = snapshot["modules"]["memory"]["payload"]
             self.assertEqual(
                 memory_payload["l1_turns"][0]["turn_id"],
-                "turn-timeout",
+                "turn-shutdown",
             )
             self.assertIn(
                 "keep this full L1",
                 json.dumps(memory_payload, ensure_ascii=False),
             )
-
-    def test_successful_shutdown_compaction_replaces_raw_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            app = _build_app(root)
-            memory = app.handle.memory_service
-            memory.begin_l1_turn("turn-full", user_text="large old context")
-            memory.settle_l1_turn("turn-full")
-
-            async def compact_once(*args, **kwargs):
-                self.assertEqual(kwargs["max_attempts"], 1)
-                memory.compact(
-                    MemoryCompactRequest(
-                        target_input_budget=8192,
-                        reserved_output_tokens=4096,
-                        summary_entry=L2Entry(
-                            entry_id="memory_summary_current",
-                            kind="summary",
-                            scope="system",
-                            title="Current conversation compact",
-                            summary="compact continuity",
-                            rendered="compact continuity",
-                        ),
-                    )
-                )
-                return SimpleNamespace(success=True, status="compacted")
-
-            app.handle.core.turn_executor.compact_memory_async = compact_once
-            asyncio.run(app._checkpoint_for_shutdown_async())
-
-            self.assertEqual(app.last_checkpoint_status, "compacted_and_saved")
-            snapshot = ResidentCheckpointStore(root).read()
-            turns = snapshot["modules"]["memory"]["payload"]["l1_turns"]
-            self.assertEqual(snapshot["sequence"], 2)
-            self.assertEqual([turn["turn_id"] for turn in turns], ["compact-summary"])
-            self.assertIn("compact continuity", json.dumps(turns))
 
 
 if __name__ == "__main__":

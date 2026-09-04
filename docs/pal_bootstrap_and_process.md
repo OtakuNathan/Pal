@@ -73,6 +73,9 @@ It does not own:
 
 On Linux this may be represented by a user systemd service. On macOS this may
 be represented by a launchd plist. The contract is service-manager agnostic.
+Generated systemd units use `KillMode=mixed`: SIGTERM reaches Pal first so it
+can retire owned plugins and sidecars in lifecycle order; systemd still sends a
+final SIGKILL to any process left in the cgroup after the stop deadline.
 
 ## Pal Responsibilities
 
@@ -199,14 +202,14 @@ sidecars.
 The service layer restarts Pal. Pal reloads runtime root state, reconnects to
 configured channels, republishes capabilities, and resumes from durable stores.
 
-On SIGINT/SIGTERM, resident Pal stops admitting turns and writes an encrypted,
-atomic runtime checkpoint before attempting optional shutdown compaction. The
-compaction gets one attempt and a configurable deadline (75 seconds by default);
-failure or timeout leaves the already-written full L1 checkpoint intact. A
-successful compact replaces it. The next process restores and consumes the
-checkpoint before starting channel endpoints. This lifecycle path performs no
-periodic saves; an unannounced SIGKILL, power loss, or OOM kill before the exit
-checkpoint begins cannot be intercepted.
+On SIGINT/SIGTERM, resident Pal stops admitting turns and writes the complete L1
+as one encrypted, atomic runtime checkpoint. Shutdown never calls an external
+model. The next process restores and consumes the checkpoint before starting
+channel endpoints; ordinary context-budget policy can compact it later if
+needed. This preserves a warm provider prefix across a short restart without
+putting network latency inside the supervisor's stop deadline. This lifecycle
+path performs no periodic saves; an unannounced SIGKILL, power loss, or OOM kill
+before the exit checkpoint begins cannot be intercepted.
 
 ### Worker Crash
 
