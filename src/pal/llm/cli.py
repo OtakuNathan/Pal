@@ -237,7 +237,7 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         else {}
     )
     for name, value in dict(model_defaults.get("capabilities") or {}).items():
-        capabilities.setdefault(name, value)
+        capabilities[name] = value
     payload = {
         "endpoint_id": endpoint_id,
         "provider": provider,

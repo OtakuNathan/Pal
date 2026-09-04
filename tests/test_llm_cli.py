@@ -95,6 +95,47 @@ class LLMCLITests(unittest.TestCase):
             ["temperature", "top_p", "top_logprobs"],
         )
 
+        with sqlite3.connect(self.runtime_root / "pal.sqlite3") as database:
+            database.execute(
+                "UPDATE llm_endpoints SET capabilities_blob = ? WHERE endpoint_id = ?",
+                (
+                    json.dumps(
+                        {
+                            "unsupported_request_parameters": [
+                                "temperature",
+                                "top_p",
+                                "top_logprobs",
+                                "stale_parameter",
+                            ],
+                            "operator_extension": True,
+                        }
+                    ),
+                    "gpt-6-astra",
+                ),
+            )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                run_llm_cli(
+                    self._parse(
+                        "add",
+                        "gpt-6-astra",
+                        "--runtime-root",
+                        str(self.runtime_root),
+                        "--replace",
+                    )
+                ),
+                0,
+            )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_llm_cli(list_args), 0)
+        capabilities = json.loads(output.getvalue())["items"][0]["capabilities"]
+        self.assertEqual(
+            capabilities["unsupported_request_parameters"],
+            ["temperature", "top_p", "top_logprobs"],
+        )
+        self.assertTrue(capabilities["operator_extension"])
+
     def test_list_reports_corrupt_endpoint_contract_instead_of_returning_empty(self) -> None:
         args = self._parse(
             "add",
