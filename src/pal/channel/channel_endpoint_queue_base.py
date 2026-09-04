@@ -26,7 +26,7 @@ from pal.channel.contracts import (
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
 
 
 INTERACTIVE_STATUS_KINDS = {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}
@@ -484,6 +484,35 @@ class ChannelEndpointQueueBase(ABC):
         response_handle: ResponseHandle | None = None,
     ) -> str:
         handle = response_handle or self.build_response_handle()
+        if (
+            update.kind in {
+                ChannelStreamUpdateKind.TEXT_DELTA,
+                ChannelStreamUpdateKind.REASONING_DELTA,
+            }
+            and self.stream_update_outbox
+        ):
+            previous = self.stream_update_outbox[-1]
+            if (
+                previous.response_handle == handle
+                and previous.update.kind == update.kind
+                and previous.update.tool_call is None
+                and update.tool_call is None
+            ):
+                self.stream_update_outbox[-1] = QueuedStreamUpdate(
+                    update_id=previous.update_id,
+                    response_handle=handle,
+                    endpoint=self.endpoint,
+                    update=ChannelStreamUpdate(
+                        kind=update.kind,
+                        text=previous.update.text + update.text,
+                        reasoning_text=(
+                            previous.update.reasoning_text + update.reasoning_text
+                        ),
+                    ),
+                    attempts=previous.attempts,
+                )
+                self._notify_ready()
+                return previous.update_id
         update_id = str(uuid4())
         self.stream_update_outbox.append(
             QueuedStreamUpdate(
@@ -670,7 +699,7 @@ class ChannelEndpointQueueBase(ABC):
         pending = list(self.stream_update_outbox)
         self.stream_update_outbox.clear()
         emitted: list[EventEnvelope] = []
-        for item in pending:
+        for index, item in enumerate(pending):
             try:
                 self.send_stream_update(item.response_handle, item.update)
             except Exception as exc:
@@ -686,20 +715,24 @@ class ChannelEndpointQueueBase(ABC):
                             attempts=item.attempts + 1,
                         )
                     )
-                emitted.append(
-                    EventEnvelope(
-                        event_kind=EventKind.REPLY_FAILED,
-                        source_kind=SourceKind.CHANNEL,
-                        payload={
-                            "reply_id": item.update_id,
-                            "endpoint_id": self.endpoint.endpoint_id,
-                            "channel_kind": self.endpoint.channel_kind,
-                            "reason": str(exc),
-                            "permanent": permanent,
-                            "attempts": item.attempts + 1,
-                        },
-                    )
+                    # Transport backpressure applies to the ordered stream, not
+                    # just this frame. Preserve the untouched suffix and stop
+                    # this flush instead of retrying every item and amplifying
+                    # one full socket queue into thousands of failure events.
+                    self.stream_update_outbox.extend(pending[index + 1:])
+                failure = self._delivery_failure_event_once(
+                    delivery_id=item.update_id,
+                    attempts=item.attempts + 1,
+                    reason=str(exc),
+                    permanent=permanent,
                 )
+                if failure is not None:
+                    emitted.append(failure)
+                if not permanent:
+                    break
+                continue
+            self.last_delivery_error = ""
+            self._reported_reply_failures.pop(item.update_id, None)
         return emitted
 
     def flush_status_outbox(self) -> None:

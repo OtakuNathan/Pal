@@ -13,9 +13,10 @@ from pal.channel import (
     register_with_core as register_channel_with_core,
 )
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
-from pal.channel.contracts import ChannelDeliveryError
+from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
+from pal.shared import ChannelStreamUpdateKind
 from tests.runtime_channel_providers import telegram_endpoint_module
 
 
@@ -46,6 +47,29 @@ class _ActiveMessageEndpoint(ChannelEndpointQueueBase):
 class _ReplyOnlyEndpoint(_ActiveMessageEndpoint):
     def derive_default_reply_target(self) -> dict[str, str]:
         return {}
+
+
+class _BackpressuredEndpoint(_ActiveMessageEndpoint):
+    def __init__(self, endpoint: EndpointConfig) -> None:
+        super().__init__(endpoint)
+        self.blocked = True
+        self.stream_attempts: list[str] = []
+        self.stream_sent: list[str] = []
+
+    def send_stream_update(
+        self,
+        response_handle: ResponseHandle,
+        update: ChannelStreamUpdate,
+    ) -> None:
+        _ = response_handle
+        self.stream_attempts.append(update.text)
+        if self.blocked:
+            raise ChannelDeliveryError(
+                "socket delivery queue is full",
+                permanent=False,
+                reason="transport_backpressure",
+            )
+        self.stream_sent.append(update.text)
 
 
 class _TelegramBot:
@@ -92,6 +116,67 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         handle, text = endpoint.sent[0]
         self.assertEqual(text, "hello")
         self.assertEqual(handle.reply_target, {"recipient": "bound-recipient"})
+
+    async def test_stream_backpressure_stops_flush_and_throttles_failure(self) -> None:
+        endpoint = _BackpressuredEndpoint(
+            EndpointConfig("stream-main", "test", "bound")
+        )
+        handle = endpoint.build_response_handle(
+            reply_target={"recipient": "bound-recipient"}
+        )
+        for text in ("one", "two", "three"):
+            endpoint.queue_stream_update(
+                ChannelStreamUpdate(
+                    kind=ChannelStreamUpdateKind.PROGRESS,
+                    text=text,
+                ),
+                response_handle=handle,
+            )
+
+        first = endpoint.flush_stream_update_outbox()
+        second = endpoint.flush_stream_update_outbox()
+
+        self.assertEqual(endpoint.stream_attempts, ["one", "one"])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+        self.assertEqual(
+            [item.update.text for item in endpoint.stream_update_outbox],
+            ["one", "two", "three"],
+        )
+
+        endpoint.blocked = False
+        self.assertEqual(endpoint.flush_stream_update_outbox(), [])
+        self.assertEqual(endpoint.stream_sent, ["one", "two", "three"])
+        self.assertEqual(endpoint.last_delivery_error, "")
+
+    async def test_adjacent_text_deltas_coalesce_before_delivery(self) -> None:
+        endpoint = _BackpressuredEndpoint(
+            EndpointConfig("stream-main", "test", "bound")
+        )
+        endpoint.blocked = False
+        handle = endpoint.build_response_handle(
+            reply_target={"recipient": "bound-recipient"}
+        )
+
+        first_id = endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                text="hello ",
+            ),
+            response_handle=handle,
+        )
+        second_id = endpoint.queue_stream_update(
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                text="world",
+            ),
+            response_handle=handle,
+        )
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(endpoint.stream_update_outbox), 1)
+        endpoint.flush_stream_update_outbox()
+        self.assertEqual(endpoint.stream_sent, ["hello world"])
 
     async def test_runtime_rejects_unavailable_or_reply_only_endpoint(self) -> None:
         runtime = ChannelRuntime()
