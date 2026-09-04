@@ -18,7 +18,6 @@ from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVec
 from pal.plugins import PluginBundleModel
 from pal.proactive import ProactiveDefinitionModel, ProactiveRunModel
 from pal.skill import SkillModel
-from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
 from pal.channel.models import ChannelEndpointModel
 from pal.core.runtime_config import RuntimeConfig
@@ -40,7 +39,6 @@ ALL_MODELS = (
     ProactiveDefinitionModel,
     ProactiveRunModel,
     WebSearchProviderModel,
-    WebFetchProviderModel,
     BehaviorAffordanceModel,
     SkillModel,
     ArtifactRecordModel,
@@ -137,30 +135,6 @@ DEFAULT_WEB_SEARCH_PROVIDERS = (
     },
 )
 
-DEFAULT_WEB_FETCH_PROVIDERS = (
-    {
-        "provider_id": "playwright_fetch_default",
-        "provider_kind": "playwright_fetch",
-        "display_name": "Playwright Fetch",
-        "enabled": True,
-        "priority": 0,
-        "settings_blob": {"idle_timeout_seconds": 60, "max_concurrency": 2},
-        "auth_material_blob": {},
-        "notes": "Primary rendered web fetch provider.",
-    },
-    {
-        "provider_id": "plain_http_fetch_default",
-        "provider_kind": "plain_http_fetch",
-        "display_name": "Plain HTTP Fetch",
-        "enabled": True,
-        "priority": 10,
-        "settings_blob": {},
-        "auth_material_blob": {},
-        "notes": "Plain HTTP fallback provider.",
-    },
-)
-
-
 @dataclass
 class WizardService(WizardServicePort):
     registrations: list[PalRegistration] = field(default_factory=list)
@@ -219,13 +193,10 @@ class WizardService(WizardServicePort):
         ensure_recovery_socket_channel(channel_repository, registration.runtime.runtime_root)
         LLMEndpointRepository().ensure_defaults(DEFAULT_LLM_ENDPOINTS)
         WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
-        WebFetchProviderRepository().ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
         settings = RuntimeSettingRepository()
         settings.ensure_defaults()
         if settings.get("active_web_search_provider_id") is None:
             settings.set("active_web_search_provider_id", "brave_search_default")
-        if settings.get("active_web_fetch_provider_id") is None:
-            settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
 
     def provision_builtin_plugins(self, registration: PalRegistration) -> None:
         from pal.plugins.host import _source_plugins_root
@@ -406,7 +377,6 @@ class WizardService(WizardServicePort):
         from pal.identity.repository import DEFAULT_PERSONA_ID
         from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
         from pal.web_search import WebSearchProviderRepository
-        from pal.web_fetch import WebFetchProviderRepository
 
         data: WizardCollectedData = collected
         runtime_root = registration.runtime.runtime_root
@@ -522,13 +492,11 @@ class WizardService(WizardServicePort):
         if not (ch.channel_kind == "socket" and ch.endpoint_id == "socket_default"):
             ensure_recovery_socket_channel(channel_repo, runtime_root)
 
-        # 5. Web search/fetch defaults (same as seed_defaults)
+        # 5. Web search defaults. Browser automation is plugin-owned and has
+        # no database provider family.
         WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
-        WebFetchProviderRepository().ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
         if settings.get("active_web_search_provider_id") is None:
             settings.set("active_web_search_provider_id", "brave_search_default")
-        if settings.get("active_web_fetch_provider_id") is None:
-            settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
 
         # 6. Runtime config owned by the wizard
         upsert_memory_embedding_config(

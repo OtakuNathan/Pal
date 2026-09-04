@@ -42,7 +42,7 @@ risk = "workspace_write"
 
 [capability_guidance_overrides]
 op_web_search = { use_when = "Use only when local project source, user-provided references, and existing records cannot establish an architecture-feasibility fact.", do_not_use_when = "Do not use web search for private implementation details.", failure_next_steps = "If approval is denied, continue from local truth sources and record the bounded evidence gap." }
-op_web_read = { use_when = "Read a source selected to resolve one material architecture-feasibility gap.", do_not_use_when = "Do not use for private implementation research or broad browsing after the public boundary is decidable." }
+op_browser_read = { use_when = "Read a source selected to resolve one material architecture-feasibility gap through Manager's read-only browser broker.", do_not_use_when = "Do not use for private implementation research, interactive browsing, or broad browsing after the public boundary is decidable." }
 op_lsp_definition = { use_when = "Follow a known symbol to confirm ownership or an existing public boundary.", do_not_use_when = "Do not treat symbol metadata as semantic or runtime proof." }
 op_lsp_references = { use_when = "Find known consumers when they materially affect a directional contract or compatibility boundary.", do_not_use_when = "Do not use for unscoped repository discovery or treat reference counts as contract proof." }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 from pal.foundation.service_logging import configure_process_logging
@@ -67,12 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- browser-service -----------------------------------------------------
     browser_service_parser = subparsers.add_parser(
         "browser-service",
-        help="Run the internal Playwright fetch browser service",
+        help="Run the internal Playwright CLI browser sidecar",
     )
     browser_service_parser.add_argument("--runtime-root", type=Path, required=True)
     browser_service_parser.add_argument("--host", required=True)
     browser_service_parser.add_argument("--port", type=int, required=True)
-    browser_service_parser.add_argument("--token", required=True)
+    browser_service_parser.add_argument("--token", default="")
     browser_service_parser.add_argument("--idle-timeout-seconds", type=int, default=60)
     browser_service_parser.add_argument("--max-concurrency", type=int, default=2)
 
@@ -147,11 +148,18 @@ def main() -> int:
         return run_setup_wizard(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "browser-service":
+        browser_service_token = str(
+            args.token or os.environ.get("PAL_BROWSER_SERVICE_TOKEN") or ""
+        ).strip()
+        if not browser_service_token:
+            parser.error(
+                "browser-service requires PAL_BROWSER_SERVICE_TOKEN or --token"
+            )
         return run_browser_service_cli(
             runtime_root=args.runtime_root,
             host=str(args.host),
             port=int(args.port),
-            token=str(args.token),
+            token=browser_service_token,
             idle_timeout_seconds=int(args.idle_timeout_seconds),
             max_concurrency=int(args.max_concurrency),
         )

@@ -1,28 +1,41 @@
 from __future__ import annotations
 
-from pal.execution.tool_semantics import (
-    INDIRECT_CONTROL,
-    INDIRECT_LOCAL_WRITE,
-    INDIRECT_UNSAFE_LOCAL_WRITE,
-)
-from pal.execution.tool_facade import ToolGuidance
-
-from pal.execution.generated_tool_models import (
-    WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
-    WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
-)
-from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from pal.behavior.decorators import skill
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.web_fetch.tool_models import (
+    BrowserActionOutput,
+    BrowserCheckInput,
+    BrowserClickInput,
+    BrowserDialogInput,
+    BrowserFillInput,
+    BrowserFindInput,
+    BrowserHistoryInput,
+    BrowserInspectLayoutInput,
+    BrowserNavigateInput,
+    BrowserPressInput,
+    BrowserReadInput,
+    BrowserResetInput,
+    BrowserResizeInput,
+    BrowserScreenshotInput,
+    BrowserScrollInput,
+    BrowserSelectInput,
+    BrowserSnapshotInput,
+    BrowserTabsInput,
+    BrowserTargetInput,
+    BrowserTypeInput,
+)
+from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_semantics import (
+    DIRECT_EXTERNAL_READ,
+    INDIRECT_CONTROL,
+    INDIRECT_EXTERNAL_READ,
+    INDIRECT_EXTERNAL_WRITE,
+    INDIRECT_LOCAL_READ,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
+)
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -33,44 +46,61 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest, WebLayoutInspectionRequest
-from pal.web_fetch.models import WebFetchProviderModel
+from pal.web_fetch.browser_service import BrowserServiceError, browser_session_key
 from pal.web_fetch.service import WebFetchService
-from pal.web_fetch.tools import WebScreenshotTool
+from pal.web_fetch.tools import BrowserScreenshotTool
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
+_BROWSER_SKILL_MANUAL = """# Stateful Browser Use
+
+Use the browser capabilities for JavaScript-rendered pages and interactive UI work.
+
+1. Start with `browser_navigate` or `browser_read`.
+2. Use `browser_snapshot` or `browser_find` to obtain current element refs.
+3. Call the narrow interaction capability such as `browser_click` or `browser_fill`.
+4. Inspect the changed page again; refs may become stale after any action.
+5. Use `browser_screenshot` only when pixel evidence is useful.
+
+The browser profile belongs to the current conversation. `browser_close` releases live
+processes but keeps login state; `browser_reset` deliberately deletes it. If browser
+navigation or reading fails and raw HTTP is sufficient, the main Pal may use `run_shell`
+with curl. Curl cannot replace clicks, JavaScript state, dialogs, or rendered layout.
+
+Never invent element refs, automatically repeat a failed write action, expose cookies,
+or use browser tools for local files. Arbitrary JavaScript, uploads, cookie/storage
+editing, network interception, traces, videos, PDF and the Playwright dashboard are not
+part of this capability surface.
+"""
+
+
 @dataclass(frozen=True)
 class WebFetchModuleSnapshot:
-    provider_count: int
-    enabled_provider_count: int
-    configured_active_provider_id: str | None
-    effective_active_provider_id: str | None
+    browser: dict[str, Any]
     mounted: bool = True
     degraded: bool = False
 
 
-@capability_node(
-    namespace=OPERATION_NAMESPACE,
-    scope="provider",
-    kind="provider",
-    source="builtin:web_fetch",
-    target_kind="provider",
-    iterable_resolver="iter_providers",
-    target_id_resolver="resolve_provider_id",
-    target_label_resolver="resolve_provider_label",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="provider",
-    kind="provider",
-    source="builtin:web_fetch",
-    target_kind="provider",
-    iterable_resolver="iter_providers",
-    target_id_resolver="resolve_provider_id",
-    target_label_resolver="resolve_provider_label",
+@skill(
+    skill_id="pal.web.browser",
+    title="Stateful Browser Use",
+    summary="Navigate, inspect, and safely interact with rendered web pages in a conversation-scoped browser.",
+    manual_text=_BROWSER_SKILL_MANUAL,
+    activation_terms=(
+        "browser", "web page", "click website", "fill form", "rendered page",
+        "screenshot website", "inspect layout", "playwright",
+    ),
+    capability_refs=(
+        "browser_navigate", "browser_read", "browser_snapshot", "browser_find",
+        "browser_click", "browser_fill", "browser_type", "browser_press",
+        "browser_hover", "browser_select", "browser_check", "browser_scroll",
+        "browser_resize", "browser_history", "browser_tabs", "browser_dialog",
+        "browser_inspect_layout", "browser_screenshot", "browser_status",
+        "browser_close", "browser_reset",
+    ),
+    metadata={"internal": True, "plugin_id": "web_fetch"},
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
@@ -94,496 +124,228 @@ class WebFetchIntrospectionProvider:
     mounted: bool = True
     degraded: bool = False
 
-    def iter_providers(self) -> list[WebFetchProviderModel]:
-        return self.service.list_providers()
-
-    def resolve_provider_id(self, provider: WebFetchProviderModel) -> str:
-        return provider.provider_id
-
-    def resolve_provider_label(self, provider: WebFetchProviderModel) -> str:
-        return provider.provider_id
-
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
-        guidance=ToolGuidance(
-            purpose="Show web fetch module state.",
-            use_when="Diagnosing web fetch health — provider count, active provider, mounted status.",
-            do_not_use_when="Fetching a webpage (use read_web). Listing providers (use web_fetch_list_providers).",
-            failure_next_steps="Read-only. If no active provider, check web_fetch_list_providers.",
-        ), aliases=("web_fetch_show",))
-    def show(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        payload = inspect_web_fetch(self).__dict__
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch module snapshot",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch module snapshot", payload),
-        )
-
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
-        action_name="list_providers",
-        guidance=ToolGuidance(
-            purpose="List configured web fetch providers.",
-            use_when="Discovering available fetch backends and their enabled status.",
-            do_not_use_when="Checking the active provider (use web_fetch_active_provider). Fetching (use read_web).",
-            failure_next_steps="Read-only. If empty, no providers are configured.",
-        ),
-        aliases=("web_fetch_list_providers",),
-    )
-    def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        items = [self._provider_payload(item) for item in self.iter_providers()]
-        payload = {"items": items}
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch providers",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch providers", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="active_provider",
-        guidance=ToolGuidance(
-            purpose="Show the active web fetch provider.",
-            use_when="Checking which fetch backend handles read_web requests.",
-            do_not_use_when="Listing all providers (use web_fetch_list_providers). Switching (use web_fetch_set_active_provider).",
-            failure_next_steps="If no active provider is reported, use web_fetch_list_providers to find an enabled provider, then select it with web_fetch_set_active_provider.",
-        ),
-        aliases=("web_fetch_active_provider",),
-    )
-    def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        payload = {
-            "configured_provider_id": self.service.configured_active_provider_id(),
-            "effective_provider_id": self.service.effective_active_provider_id(),
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch active provider",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch active provider", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
         action_name="show",
         guidance=ToolGuidance(
-            purpose="Show one web fetch provider's metadata.",
-            use_when="Inspecting a specific provider's kind, settings, auth keys.",
-            do_not_use_when="Module health (use web_fetch_show). Auth state (use web_fetch_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
+            purpose="Show Playwright CLI, sidecar, profile, and browser-session health.",
+            use_when="Diagnosing browser startup, dependency installation, or session failures.",
+            do_not_use_when="Reading or interacting with a page.",
+            failure_next_steps="If dependencies are installing, continue with other work and retry later.",
         ),
-        aliases=("web_fetch_provider_show",),
+        aliases=("browser_status",),
+        execution=INDIRECT_LOCAL_READ,
     )
-    def show_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = self._provider_payload(provider)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider metadata",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider metadata", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="auth_state",
-        guidance=ToolGuidance(
-            purpose="Show one web fetch provider's authorization state.",
-            use_when="Diagnosing auth failures or checking if credentials are configured.",
-            do_not_use_when="Applying credentials (use web_fetch_provider_set_auth_material). Provider metadata (use web_fetch_provider_show).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers. If not authorized, apply credentials.",
-        ),
-        aliases=("web_fetch_provider_auth_state",),
-    )
-    def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = self.service.provider_auth_state(provider)
-        payload["name"] = provider.provider_id
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider authorization state",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider authorization state", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="health",
-        guidance=ToolGuidance(
-            purpose="Show one web fetch provider's health.",
-            use_when="Diagnosing fetch failures or browser connectivity issues.",
-            do_not_use_when="Auth state (use web_fetch_provider_auth_state). Module health (use web_fetch_show).",
-            failure_next_steps="If unhealthy, try switching providers with web_fetch_set_active_provider.",
-        ),
-        aliases=("web_fetch_provider_health",),
-    )
-    def health(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = self.service.provider_health(provider)
-        payload["name"] = provider.provider_id
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider health",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider health", payload),
-        )
+    def show(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        payload = self.service.health()
+        payload.update({"mounted": self.mounted, "degraded": self.degraded})
+        return _result(RuntimeStatus.OK, "Browser status", payload)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
-        family="management",
-        action_name="set_active_provider",
+        action_name="navigate",
         guidance=ToolGuidance(
-            purpose="Set the active web fetch provider.",
-            use_when="Switching to a different enabled fetch backend.",
-            do_not_use_when="Checking the active provider (use web_fetch_active_provider). The target provider is disabled (enable it first).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers. If disabled, enable the provider before selecting it.",
+            purpose="Open or navigate the current conversation's browser to an HTTP(S) URL.",
+            use_when="Starting an interactive browser workflow or changing pages.",
+            do_not_use_when="Only raw HTTP/API content is needed.",
+            failure_next_steps="For readable non-JavaScript content, the main Pal may use run_shell with curl; otherwise inspect browser_status and retry after repair.",
         ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
-        aliases=("web_fetch_set_active_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
+        InputModel=BrowserNavigateInput,
+        OutputModel=BrowserActionOutput,
+        aliases=("browser_navigate",),
+        metadata={"canonical_path": "op_browser_navigate", "omit_family_in_canonical": True},
+        execution=DIRECT_EXTERNAL_READ,
     )
-    def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider_id = str(call.args.get("name") or "").strip()
-        if not provider_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required", llm_text="name is required")
-        existing = self.service.get_provider(provider_id)
-        if existing is not None and not existing.enabled:
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text="web fetch provider is disabled",
-                structured={"name": provider_id, "reason": "provider_disabled"},
-                llm_text="web fetch provider is disabled; enable it before selecting it",
-            )
-        record = self.service.set_active_provider(provider_id)
-        if record is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = {
-            "configured_provider_id": record.provider_id,
-            "effective_provider_id": self.service.effective_active_provider_id(),
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch active provider updated",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch active provider updated", payload),
-        )
+    def navigate(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "navigate", "Browser navigated")
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="read",
         guidance=ToolGuidance(
-            purpose="Fetch a webpage using the configured browser fetch provider and internal fallback.",
-            use_when="Reading a specific webpage's text content, title, and links.",
-            do_not_use_when="Searching the web (use search_web). Diagnosing rendered CSS/layout (use inspect_web_layout because normalized text and HTML do not preserve computed layout). Reading local files (use read_file). API calls (use run_shell curl).",
-            failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
+            purpose="Read rendered text, metadata, and links from the current conversation's browser page.",
+            use_when="Reading a specific rendered page; provide url to navigate first or omit it to read the current page.",
+            do_not_use_when="Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
+            failure_next_steps="For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
         ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
+        InputModel=BrowserReadInput,
+        OutputModel=BrowserActionOutput,
+        aliases=("browser_read",),
+        metadata={"canonical_path": "op_browser_read", "omit_family_in_canonical": True},
         execution=DIRECT_EXTERNAL_READ,
-        metadata={"canonical_path": "op_web_read", "omit_family_in_canonical": True},
-        aliases=("read_web",),
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
-        url = str(call.args.get("url") or "").strip()
-        if not url:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="url is required", llm_text="url is required")
         if self.read_delegate is not None:
             return self.read_delegate(dict(call.args))
-        try:
-            result = self.service.read(
-                WebFetchRequest(
-                    url=url,
-                    timeout_ms=max(1000, int(call.args.get("timeout_ms") or 15000)),
-                    max_chars=max(1000, int(call.args.get("max_chars") or 12000)),
-                    max_raw_chars=max(0, int(call.args.get("max_raw_chars") or 50000)),
-                    max_links=max(0, int(call.args.get("max_links") or 80)),
-                    user_agent=str(call.args.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
-                )
-            )
-        except Exception as exc:
-            return IntrospectionResult(
-                status=RuntimeStatus.ERROR,
-                text="web fetch failed",
-                structured={"url": url, "error": str(exc)},
-                llm_text=f"web fetch failed: {exc}",
-            )
-        payload = {
-            "requested_url": result.requested_url,
-            "final_url": result.final_url,
-            "title": result.title,
-            "text": result.text,
-            "configured_provider_id": result.configured_provider_id,
-            "effective_provider_id": result.effective_provider_id,
-            "fetch_mode": result.fetch_mode,
-            "fallback_used": result.fallback_used,
-            "status_code": result.status_code,
-            "content_type": result.content_type,
-            "content_length": result.content_length,
-            "text_truncated": result.text_truncated,
-            "raw_content_available": bool(result.raw_content),
-            "raw_content_truncated": result.raw_content_truncated,
-            "links": [link.to_dict() for link in result.links],
-            "metadata": dict(result.metadata or {}),
-            "response_headers": dict(result.response_headers or {}),
-            "user_agent": result.user_agent,
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch result",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch result", payload),
-        )
+        return self._action(call, "read", "Browser page content")
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
-        action_name="inspect_layout",
+        action_name="snapshot",
         guidance=ToolGuidance(
-            purpose="Render a page and inspect selected elements' computed CSS, geometry, parent bounds, and sibling gaps as bounded text evidence.",
-            use_when="Diagnosing or verifying UI/CSS/layout behavior, especially when normalized page output omits styles or the active model cannot inspect screenshots. Inspect representative selectors before diagnosing and after changing layout code.",
-            do_not_use_when="Reading page content (use read_web). Capturing pixels for a vision-capable reviewer (use screenshot_web). Inspecting local source code (use read_file).",
-            failure_next_steps="If no elements match, verify the final URL and selector with read_web or source inspection, then retry with a narrower valid CSS selector. If the browser is unavailable, inspect web_fetch provider health.",
+            purpose="Capture a bounded accessibility snapshot containing current element refs.",
+            use_when="Locating interactive controls before acting or verifying a changed page.",
+            do_not_use_when="Pixel-level evidence is required (use browser_screenshot).",
+            failure_next_steps="Use browser_find for a narrower result, or navigate to a valid page first.",
         ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutInput,
-        OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderInspectLayoutOutput,
+        InputModel=BrowserSnapshotInput,
+        OutputModel=BrowserActionOutput,
+        aliases=("browser_snapshot",),
+        metadata={"canonical_path": "op_browser_snapshot", "omit_family_in_canonical": True},
         execution=DIRECT_EXTERNAL_READ,
-        metadata={"canonical_path": "op_web_inspect_layout", "omit_family_in_canonical": True},
-        aliases=("inspect_web_layout",),
     )
-    def inspect_layout(self, call: IntrospectionCall) -> IntrospectionResult:
-        url = str(call.args.get("url") or "").strip()
-        selector = str(call.args.get("selector") or "").strip()
-        if not url:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="url is required", llm_text="url is required")
-        if not selector:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="selector is required", llm_text="selector is required")
-        try:
-            result = self.service.inspect_layout(
-                WebLayoutInspectionRequest(
-                    url=url,
-                    selector=selector,
-                    timeout_ms=min(120000, max(1000, int(call.args.get("timeout_ms") or 15000))),
-                    viewport_width=min(4096, max(320, int(call.args.get("viewport_width") or 1280))),
-                    viewport_height=min(4096, max(320, int(call.args.get("viewport_height") or 900))),
-                    max_elements=min(20, max(1, int(call.args.get("max_elements") or 20))),
-                    user_agent=str(call.args.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
-                )
-            )
-        except Exception as exc:
-            return IntrospectionResult(
-                status=RuntimeStatus.ERROR,
-                text="web layout inspection failed",
-                structured={"url": url, "selector": selector, "error": str(exc)},
-                llm_text=f"web layout inspection failed: {exc}",
-            )
-        payload = {
-            "requested_url": result.requested_url,
-            "final_url": result.final_url,
-            "title": result.title,
-            "status_code": result.status_code,
-            "configured_provider_id": result.configured_provider_id,
-            "effective_provider_id": result.effective_provider_id,
-            "fallback_used": result.fallback_used,
-            "selector": result.selector,
-            "matched_count": result.matched_count,
-            "returned_count": len(result.elements),
-            "truncated": result.truncated,
-            "viewport_width": result.viewport_width,
-            "viewport_height": result.viewport_height,
-            "elements": [dict(item) for item in result.elements],
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web layout inspection result",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web layout inspection", payload),
-        )
+    def snapshot(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "snapshot", "Browser snapshot")
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
-        action_name="screenshot",
+        action_name="find",
         guidance=ToolGuidance(
-            purpose="Render a URL in the browser and save a PNG screenshot as an ordinary local file.",
-            use_when="Only when pixel-level visual page evidence is needed and the active model or reviewer can inspect the resulting image.",
-            do_not_use_when="Not for computed CSS or geometry with a text-only model (use inspect_web_layout). Not for text extraction (use read_web). Not for API calls.",
-            failure_next_steps="Check error_type, URL validity, and browser availability, then correct the cause and retry. Failed calls do not return a reusable local_cached_path.",
+            purpose="Find text or a regular expression in the current browser snapshot.",
+            use_when="A full snapshot would be too large or a particular control needs locating.",
+            do_not_use_when="Both text and regex are available; provide exactly one.",
+            failure_next_steps="Refresh browser_snapshot if the page changed, then search again.",
         ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
-        OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
-        metadata={"canonical_path": "op_web_screenshot", "omit_family_in_canonical": True, "async_required": True},
-        aliases=("screenshot_web",),
-        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+        InputModel=BrowserFindInput,
+        OutputModel=BrowserActionOutput,
+        aliases=("browser_find",),
+        metadata={"canonical_path": "op_browser_find", "omit_family_in_canonical": True},
+        execution=DIRECT_EXTERNAL_READ,
     )
+    def find(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "find", "Browser matches")
+
+    def _write_action(self, call: IntrospectionCall, action: str) -> IntrospectionResult:
+        return self._action(call, action, f"Browser {action} completed")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="click", guidance=ToolGuidance(purpose="Click a current snapshot ref or unique locator.", use_when="The requested UI action is authorized and its target was inspected.", do_not_use_when="The target is guessed or the prior result is uncertain.", failure_next_steps="Do not retry automatically; inspect the current page first."), InputModel=BrowserClickInput, OutputModel=BrowserActionOutput, aliases=("browser_click",), metadata={"canonical_path": "op_browser_click", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def click(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "click")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fill", guidance=ToolGuidance(purpose="Replace the value of an editable target, optionally submitting it.", use_when="Filling a known form control.", do_not_use_when="The target has not been inspected.", failure_next_steps="Do not retry automatically; inspect the current page first."), InputModel=BrowserFillInput, OutputModel=BrowserActionOutput, aliases=("browser_fill",), metadata={"canonical_path": "op_browser_fill", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def fill(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "fill")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="type", guidance=ToolGuidance(purpose="Type into the currently focused editable element.", use_when="Focus is already established and keystroke-like entry matters.", do_not_use_when="A target can be filled directly.", failure_next_steps="Inspect the page before deciding whether to repeat."), InputModel=BrowserTypeInput, OutputModel=BrowserActionOutput, aliases=("browser_type",), metadata={"canonical_path": "op_browser_type", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def type_text(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "type")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="press", guidance=ToolGuidance(purpose="Press one keyboard key in the current page.", use_when="Keyboard interaction is required.", do_not_use_when="The focused target is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserPressInput, OutputModel=BrowserActionOutput, aliases=("browser_press",), metadata={"canonical_path": "op_browser_press", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def press(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "press")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="hover", guidance=ToolGuidance(purpose="Hover a current snapshot ref or unique locator.", use_when="Revealing hover-only UI.", do_not_use_when="No target has been inspected.", failure_next_steps="Capture a new snapshot after the hover."), InputModel=BrowserTargetInput, OutputModel=BrowserActionOutput, aliases=("browser_hover",), metadata={"canonical_path": "op_browser_hover", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def hover(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "hover")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="select", guidance=ToolGuidance(purpose="Select a value in a known dropdown.", use_when="A snapshot identifies a select control and desired value.", do_not_use_when="The option value is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserSelectInput, OutputModel=BrowserActionOutput, aliases=("browser_select",), metadata={"canonical_path": "op_browser_select", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def select(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "select")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="check", guidance=ToolGuidance(purpose="Set a checkbox or radio target's checked state.", use_when="A known checkable control must change.", do_not_use_when="The target state is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserCheckInput, OutputModel=BrowserActionOutput, aliases=("browser_check",), metadata={"canonical_path": "op_browser_check", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def check(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "check")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="scroll", guidance=ToolGuidance(purpose="Scroll the current page by wheel deltas.", use_when="More of the rendered page must be exposed.", do_not_use_when="A direct target is already visible.", failure_next_steps="Take a fresh snapshot after scrolling."), InputModel=BrowserScrollInput, OutputModel=BrowserActionOutput, aliases=("browser_scroll",), metadata={"canonical_path": "op_browser_scroll", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def scroll(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "scroll")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="resize", guidance=ToolGuidance(purpose="Resize the current browser viewport.", use_when="Checking responsive behavior at a known viewport size.", do_not_use_when="No layout change is needed.", failure_next_steps="Inspect layout or capture a snapshot after resizing."), InputModel=BrowserResizeInput, OutputModel=BrowserActionOutput, aliases=("browser_resize",), metadata={"canonical_path": "op_browser_resize", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
+    def resize(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "resize", "Browser resized")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="history", guidance=ToolGuidance(purpose="Go back, go forward, or reload the current browser page.", use_when="Navigating browser history without a new URL.", do_not_use_when="A specific URL is known (use browser_navigate).", failure_next_steps="Inspect the current URL and snapshot after navigation."), InputModel=BrowserHistoryInput, OutputModel=BrowserActionOutput, aliases=("browser_history",), metadata={"canonical_path": "op_browser_history", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    def history(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "history", "Browser history updated")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="tabs", guidance=ToolGuidance(purpose="List, create, select, or close tabs in the current browser session.", use_when="A workflow genuinely needs multiple pages.", do_not_use_when="One page is sufficient.", failure_next_steps="List tabs to reconcile the current state."), InputModel=BrowserTabsInput, OutputModel=BrowserActionOutput, aliases=("browser_tabs",), metadata={"canonical_path": "op_browser_tabs", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def tabs(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "tabs")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="dialog", guidance=ToolGuidance(purpose="Accept or dismiss the currently open browser dialog.", use_when="A known page dialog blocks the authorized workflow.", do_not_use_when="No dialog was observed.", failure_next_steps="Inspect the page rather than retrying blindly."), InputModel=BrowserDialogInput, OutputModel=BrowserActionOutput, aliases=("browser_dialog",), metadata={"canonical_path": "op_browser_dialog", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def dialog(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._write_action(call, "dialog")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="inspect_layout", guidance=ToolGuidance(purpose="Inspect computed layout and geometry for a bounded selector on the current page.", use_when="Diagnosing CSS or rendered geometry without relying on pixels.", do_not_use_when="Only text content is needed.", failure_next_steps="Verify the selector using browser_snapshot, then retry."), InputModel=BrowserInspectLayoutInput, OutputModel=BrowserActionOutput, aliases=("browser_inspect_layout",), metadata={"canonical_path": "op_browser_inspect_layout", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    def inspect_layout(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "inspect_layout", "Browser layout inspection")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(purpose="Capture the current page or target as a managed image artifact.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check browser_status and page state; failed calls return no artifact."), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
-        return await WebScreenshotTool(service=self.service).ainvoke(
+        try:
+            key, persistent = self._scope(call)
+        except ValueError as exc:
+            return _result(RuntimeStatus.INVALID, "Browser screenshot failed", {"error": {"code": "missing_execution_scope", "message": str(exc)}})
+        return await BrowserScreenshotTool(self.service).ainvoke(
             dict(call.args),
-            turn_id=str(call.meta.get("turn_id") or "") or None,
+            session_key=key,
+            persistent=persistent,
+            runtime=call.meta.get("execution_runtime"),
+            turn_id=str(call.meta.get("turn_id") or "manual"),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="enable",
-        guidance=ToolGuidance(
-            purpose="Enable a web fetch provider.",
-            use_when="Re-enabling a disabled fetch provider.",
-            do_not_use_when="Disabling (use web_fetch_provider_disable). Setting active (use web_fetch_set_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
-        ),
-        aliases=("web_fetch_provider_enable",),
-        execution=INDIRECT_LOCAL_WRITE,
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="close", guidance=ToolGuidance(purpose="Close the current conversation's live browser while retaining its profile.", use_when="The live browser is no longer needed but login state should remain.", do_not_use_when="The profile must also be removed (use browser_reset).", failure_next_steps="Closing an already closed session is harmless."), OutputModel=BrowserActionOutput, aliases=("browser_close",), metadata={"canonical_path": "op_browser_close", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
+    def close(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "close", "Browser closed")
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="reset", guidance=ToolGuidance(purpose="Close the current browser and permanently delete its conversation profile.", use_when="The user explicitly wants cookies, login state, and browser profile data cleared.", do_not_use_when="Only live resources need releasing (use browser_close).", failure_next_steps="A deleted profile cannot be recovered; navigate again to create a clean one."), InputModel=BrowserResetInput, OutputModel=BrowserActionOutput, aliases=("browser_reset",), metadata={"canonical_path": "op_browser_reset", "omit_family_in_canonical": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    def reset(self, call: IntrospectionCall) -> IntrospectionResult:
+        if call.args.get("confirm") is not True:
+            return _result(RuntimeStatus.INVALID, "Browser reset rejected", {"error": {"code": "confirmation_required", "message": "confirm must be true"}})
+        return self._action(call, "reset", "Browser profile reset")
+
+    def _action(self, call: IntrospectionCall, action: str, title: str) -> IntrospectionResult:
+        try:
+            key, persistent = self._scope(call)
+            payload = self.service.execute(
+                session_key=key,
+                action=action,
+                args=dict(call.args),
+                persistent=persistent,
+                timeout_ms=int(call.args.get("timeout_ms") or 15000),
+            )
+        except ValueError as exc:
+            return _result(RuntimeStatus.INVALID, f"{title} failed", {"error": {"code": "missing_execution_scope", "message": str(exc)}})
+        except BrowserServiceError as exc:
+            error = exc.to_dict()
+            if error["curl_applicable"] and not call.meta.get("broker_run_id"):
+                error["fallback_hint"] = "Use run_shell with curl only when raw HTTP content is sufficient."
+            return _result(RuntimeStatus.ERROR, f"{title} failed", {"error": error})
+        return _result(RuntimeStatus.OK, title, payload)
+
+    @staticmethod
+    def _scope(call: IntrospectionCall) -> tuple[str, bool]:
+        broker_run_id = str(call.meta.get("broker_run_id") or "").strip()
+        if broker_run_id:
+            return browser_session_key(f"bunshin:{broker_run_id}"), False
+        turn_id = str(call.meta.get("turn_id") or "").strip()
+        runtime = call.meta.get("execution_runtime")
+        if runtime is not None and turn_id:
+            context = runtime.logical_context_for_turn(turn_id)
+            return browser_session_key(context.execution_lifetime_id), True
+        if turn_id:
+            return browser_session_key(f"local:{turn_id}"), True
+        raise ValueError("browser action has no conversation execution scope")
+
+
+def _result(status: str, title: str, payload: dict[str, Any]) -> IntrospectionResult:
+    return IntrospectionResult(
+        status=status,
+        text=title.lower(),
+        structured=payload,
+        llm_text=render_titled_structured_for_llm(title, payload),
     )
-    def enable(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._set_enabled(call, enabled=True)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="disable",
-        guidance=ToolGuidance(
-            purpose="Disable a web fetch provider.",
-            use_when="Temporarily removing a provider from the active pool.",
-            do_not_use_when="Enabling (use web_fetch_provider_enable).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
-        ),
-        aliases=("web_fetch_provider_disable",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def disable(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._set_enabled(call, enabled=False)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="set_auth_material",
-        guidance=ToolGuidance(
-            purpose="Apply auth material to a web fetch provider without exposing secrets.",
-            use_when="A provider needs API keys or credentials to function.",
-            do_not_use_when="Reading auth state (use web_fetch_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
-        ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
-        aliases=("web_fetch_provider_set_auth_material",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        material = call.args.get("material")
-        if not isinstance(material, dict):
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="material must be an object", llm_text="material must be an object")
-        updated = self.service.set_auth_material(provider.provider_id, dict(material))
-        if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = self.service.provider_auth_state(updated)
-        payload["name"] = updated.provider_id
-        payload["accepted_keys"] = sorted(str(key) for key in material.keys())
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider auth material updated",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider auth material updated", payload),
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="set_config",
-        guidance=ToolGuidance(
-            purpose="Merge config into a web fetch provider's settings blob.",
-            use_when="Tuning provider-specific settings (e.g. timeout, user agent).",
-            do_not_use_when="Setting auth material (use web_fetch_provider_set_auth_material).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
-        ),
-        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
-        aliases=("web_fetch_provider_set_config",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        config = call.args.get("config")
-        if not isinstance(config, dict):
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="config must be an object", llm_text="config must be an object")
-        updated = self.service.set_config(provider.provider_id, dict(config))
-        if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = self._provider_payload(updated)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider config updated",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider config updated", payload),
-        )
-
-    def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
-        provider = self._require_provider(call)
-        if provider is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        updated = self.service.set_enabled(provider.provider_id, enabled)
-        if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = {"name": updated.provider_id, "provider_id": updated.provider_id, "enabled": bool(updated.enabled)}
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="web fetch provider state updated",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Web fetch provider state updated", payload),
-        )
-
-    def _provider_payload(self, provider: WebFetchProviderModel) -> dict[str, object]:
-        return {
-            "name": provider.provider_id,
-            "provider_id": provider.provider_id,
-            "provider_kind": provider.provider_kind,
-            "display_name": provider.display_name,
-            "enabled": bool(provider.enabled),
-            "priority": int(provider.priority),
-            "settings": dict(provider.settings_blob or {}),
-            "auth_keys": sorted(str(key) for key in dict(provider.auth_material_blob or {}).keys()),
-            "notes": provider.notes,
-        }
-
-    def _require_provider(self, call: IntrospectionCall) -> WebFetchProviderModel | None:
-        target = call.meta.get("resolved_target")
-        if isinstance(target, WebFetchProviderModel):
-            return target
-        provider_id = str(call.args.get("target_id") or "").strip()
-        if not provider_id:
-            return None
-        return self.service.get_provider(provider_id)
 
 
 def inspect_web_fetch(provider: WebFetchIntrospectionProvider) -> WebFetchModuleSnapshot:
-    records = provider.service.list_providers()
-    enabled = [item for item in records if item.enabled]
     return WebFetchModuleSnapshot(
-        provider_count=len(records),
-        enabled_provider_count=len(enabled),
-        configured_active_provider_id=provider.service.configured_active_provider_id(),
-        effective_active_provider_id=provider.service.effective_active_provider_id(),
+        browser=provider.service.health(),
         mounted=provider.mounted,
         degraded=provider.degraded,
     )
@@ -595,10 +357,7 @@ def register_with_core(
     *,
     read_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None,
 ) -> ModuleHandle:
-    provider = WebFetchIntrospectionProvider(
-        service=service,
-        read_delegate=read_delegate,
-    )
+    provider = WebFetchIntrospectionProvider(service=service, read_delegate=read_delegate)
     handle = ModuleHandle(
         module_id="web_fetch",
         tier=MODULE_TIER_DETACHABLE,
@@ -610,3 +369,11 @@ def register_with_core(
     )
     context.register_module(handle)
     return handle
+
+
+__all__ = [
+    "WebFetchIntrospectionProvider",
+    "WebFetchModuleSnapshot",
+    "inspect_web_fetch",
+    "register_with_core",
+]

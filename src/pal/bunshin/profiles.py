@@ -599,7 +599,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_file_edit",
         "op_file_write",
     ),
-    "web_research": ("op_web_search", "op_web_read"),
+    "web_research": ("op_web_search", "op_browser_read"),
     "code_intel": (
         "op_lsp_status",
         "op_lsp_hover",

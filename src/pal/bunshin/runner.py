@@ -133,7 +133,7 @@ from pal.shared import (
     BunshinInvocationPack,
     default_tool_result_text,
 )
-from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, WebFetchService, register_with_core as register_web_fetch_with_core
+from pal.web_fetch import BrowserServiceManager, WebFetchService, register_with_core as register_web_fetch_with_core
 
 
 DEFAULT_BUNSHIN_OUTPUT_LENGTH_RECOVERY_ROUNDS = 3
@@ -148,7 +148,7 @@ BUNSHIN_OUTPUT_LENGTH_RECOVERY_NOTE = (
 )
 
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
-from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FETCH_PROVIDERS, DEFAULT_WEB_SEARCH_PROVIDERS
+from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_SEARCH_PROVIDERS
 
 
 _BUNSHIN_TOOL_RESULT_RETENTION_CALLS = 5
@@ -2657,14 +2657,11 @@ def build_slim_bunshin_runtime(
     database.initialize(ALL_MODELS)
     llm_repository = LLMEndpointRepository()
     web_search_repository = WebSearchProviderRepository()
-    web_fetch_repository = WebFetchProviderRepository()
     if not read_only_database:
         if not llm_repository.list_enabled():
             llm_repository.ensure_defaults(DEFAULT_LLM_ENDPOINTS)
         if not web_search_repository.list_all():
             web_search_repository.ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
-        if not web_fetch_repository.list_all():
-            web_fetch_repository.ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
     settings = RuntimeSettingRepository()
     if not read_only_database:
         settings.ensure_defaults()
@@ -2672,10 +2669,6 @@ def build_slim_bunshin_runtime(
             enabled = web_search_repository.list_enabled()
             if enabled:
                 settings.set("active_web_search_provider_id", enabled[0].provider_id)
-        if settings.get("active_web_fetch_provider_id") is None:
-            enabled = web_fetch_repository.list_enabled()
-            if enabled:
-                settings.set("active_web_fetch_provider_id", enabled[0].provider_id)
 
     config = RuntimeConfig.load(Path(runtime_root))
     context = MainContext()
@@ -2756,8 +2749,6 @@ def build_slim_bunshin_runtime(
     register_web_fetch_with_core(
         context,
         WebFetchService(
-            repository=web_fetch_repository,
-            settings_repository=settings,
             browser_manager=BrowserServiceManager(runtime_root=Path(runtime_root)),
         ),
         read_delegate=broker_web.read if broker_web is not None else None,
@@ -3220,16 +3211,16 @@ def _web_research_capability_name(name: object) -> str | None:
     normalized = str(name or "").strip()
     if normalized in {"op_web_search", "search_web"}:
         return "op_web_search"
-    if normalized in {"op_web_read", "read_web"}:
-        return "op_web_read"
+    if normalized in {"op_browser_read", "browser_read"}:
+        return "op_browser_read"
     return None
 
 
 def _web_research_budget_keys(canonical_name: str) -> tuple[str, ...]:
     if canonical_name == "op_web_search":
         return ("op_web_search", "search_web")
-    if canonical_name == "op_web_read":
-        return ("op_web_read", "read_web")
+    if canonical_name == "op_browser_read":
+        return ("op_browser_read", "browser_read")
     return (canonical_name,)
 
 

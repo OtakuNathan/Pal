@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, new_tool_call
-
 import asyncio
 import base64
 import shutil
@@ -10,13 +8,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.artifact import ArtifactManager
-from pal.artifact.models import ArtifactHotStateModel, ArtifactRecordModel, ArtifactRepresentationModel
-from pal.artifact.repository import ArtifactRepository
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
-from pal.web_fetch import WebScreenshotResult, WebScreenshotTool, register_with_core as register_web_fetch_with_core
+from pal.shared.tool_protocol import new_tool_call
+from pal.web_fetch import BrowserScreenshotTool, register_with_core as register_web_fetch_with_core
 
 
 _PNG_1X1 = base64.b64decode(
@@ -24,42 +20,22 @@ _PNG_1X1 = base64.b64decode(
 )
 
 
-class _FakeScreenshotService:
-    def __init__(
-        self,
-        runtime_root: Path,
-        *,
-        include_response_metadata: bool = True,
-    ) -> None:
+class _FakeBrowserService:
+    def __init__(self, runtime_root: Path) -> None:
         self.browser_manager = SimpleNamespace(runtime_root=runtime_root)
-        self.include_response_metadata = include_response_metadata
-        self.requests = []
+        self.calls: list[dict[str, object]] = []
 
-    def screenshot(self, request):
-        self.requests.append(request)
-        return WebScreenshotResult(
-            requested_url=request.url,
-            final_url="https://example.com/final",
-            title="Example",
-            png_bytes=_PNG_1X1,
-            configured_provider_id=(
-                "playwright_fetch_default"
-                if self.include_response_metadata
-                else None
-            ),
-            effective_provider_id=(
-                "playwright_fetch_default"
-                if self.include_response_metadata
-                else None
-            ),
-            status_code=200 if self.include_response_metadata else None,
-            full_page=request.full_page,
-            viewport_width=request.viewport_width,
-            viewport_height=request.viewport_height,
-        )
+    def execute(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        assert kwargs["action"] == "screenshot"
+        return {
+            "png_base64": base64.b64encode(_PNG_1X1).decode("ascii"),
+            "page": {"url": "https://example.com/final", "title": "Example"},
+            "session": {"persistent": bool(kwargs["persistent"]), "running": True},
+        }
 
-    def list_providers(self) -> list:
-        return []
+    def health(self):
+        return {"healthy": True, "service_running": False, "reason": "idle"}
 
     def shutdown_sync(self) -> None:
         return None
@@ -68,147 +44,67 @@ class _FakeScreenshotService:
         return None
 
 
-class _FakeTurnIO:
-    def __init__(self, scope_key: str) -> None:
-        self.scope_key = scope_key
-
-    def artifact_scope_for_turn(self, turn_id: str | None) -> str:
-        _ = turn_id
-        return self.scope_key
-
-
-class WebScreenshotToolTests(unittest.TestCase):
+class BrowserScreenshotToolTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="pal_web_screenshot_test_"))
-        self.database = PalV2Database(self.root / "pal_web_screenshot.sqlite3")
-        self.database.initialize([ArtifactRecordModel, ArtifactRepresentationModel, ArtifactHotStateModel])
-        self.manager = ArtifactManager(runtime_root=self.root, repository=ArtifactRepository())
-        self.scope_key = "socket:conversation:1"
-        self.turn_id = "turn-web-shot"
+        self.root = Path(tempfile.mkdtemp(prefix="pal_browser_screenshot_test_"))
+        self.database = PalV2Database(self.root / "pal.sqlite3")
+        self.database.initialize([])
 
     def tearDown(self) -> None:
         self.database.close()
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_screenshot_stays_an_ordinary_stored_file(self) -> None:
-        service = _FakeScreenshotService(self.root)
-        tool = WebScreenshotTool(service=service)
-        runtime = SimpleNamespace(
-            runtime_root=self.root,
-            provider_registry={"core:turn_io": _FakeTurnIO(self.scope_key), "artifact:artifact": self.manager},
-        )
-
+    def test_screenshot_is_stored_as_managed_artifact(self) -> None:
+        service = _FakeBrowserService(self.root)
         result = asyncio.run(
-            tool.ainvoke(
-                {"url": "https://example.com", "full_page": True, "viewport_width": 1024, "viewport_height": 768},
-                runtime=runtime,
-                turn_id=self.turn_id,
+            BrowserScreenshotTool(service=service).ainvoke(
+                {"full_page": True},
+                session_key="a" * 64,
+                persistent=True,
+                runtime=SimpleNamespace(runtime_root=self.root),
+                turn_id="turn-browser-shot",
             )
         )
 
         self.assertEqual(result.status, "ok")
-        self.assertTrue(str(result.structured["stored_artifact_id"]).startswith("artifact_"))
-        self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
-        self.assertEqual(result.structured["final_url"], "https://example.com/final")
-        self.assertEqual(service.requests[0].viewport_width, 1024)
-        self.assertEqual(self.manager.repository.list_records(scope_key=self.scope_key), ())
-        self.assertNotIn("registered_artifact", result.structured)
+        artifact = result.structured["artifact"]
+        self.assertTrue(str(artifact["stored_artifact_id"]).startswith("artifact_"))
+        self.assertTrue(Path(artifact["local_cached_path"]).is_file())
+        self.assertNotIn("png_base64", result.structured)
+        self.assertEqual(service.calls[0]["session_key"], "a" * 64)
 
-    def test_screenshot_falls_back_to_stored_file_without_artifact_scope(self) -> None:
-        service = _FakeScreenshotService(self.root)
-        tool = WebScreenshotTool(service=service)
-        runtime = SimpleNamespace(runtime_root=self.root, provider_registry={})
-
-        result = asyncio.run(tool.ainvoke({"url": "https://example.com"}, runtime=runtime, turn_id=""))
-
-        self.assertEqual(result.status, "ok")
-        self.assertTrue(str(result.structured["stored_artifact_id"]).startswith("artifact_"))
-        self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
-
-    def test_tool_call_reaches_async_screenshot_tool(self) -> None:
-        service = _FakeScreenshotService(self.root)
+    def test_call_tool_reaches_browser_screenshot_with_conversation_scope(self) -> None:
+        service = _FakeBrowserService(self.root)
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
-        runtime = core.context.execution_runtime
-        register_web_fetch_with_core(core.context, service)
+        register_web_fetch_with_core(core.context, service)  # type: ignore[arg-type]
         core.publish_module_capabilities("web_fetch")
 
         result = asyncio.run(
-            runtime.execute_tool_async(
+            core.context.execution_runtime.execute_tool_async(
                 new_tool_call(
                     name="call_tool",
-                    args={"name": "screenshot_web", "args": {"url": "https://example.com"}},
+                    args={"name": "browser_screenshot", "args": {"full_page": False}},
                 ),
-                turn_id=self.turn_id,
-            )
-        )
-
-        self.assertTrue(result.ok)
-        self.assertEqual(result.status, "ok")
-        self.assertEqual(result.structured["final_url"], "https://example.com/final")
-        self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
-        self.assertEqual(service.requests[0].url, "https://example.com")
-
-    def test_facade_accepts_nullable_screenshot_provider_metadata(self) -> None:
-        service = _FakeScreenshotService(
-            self.root,
-            include_response_metadata=False,
-        )
-        core = PalCore()
-        register_execution_with_core(core.context)
-        core.publish_module_capabilities("execution")
-        runtime = core.context.execution_runtime
-        register_web_fetch_with_core(core.context, service)
-        core.publish_module_capabilities("web_fetch")
-
-        result = asyncio.run(
-            runtime.execute_tool_async(
-                new_tool_call(
-                    name="call_tool",
-                    args={
-                        "name": "screenshot_web",
-                        "args": {"url": "https://example.com"},
-                    },
-                ),
-                turn_id=self.turn_id,
+                turn_id="turn-browser-shot",
             )
         )
 
         self.assertTrue(result.ok, result.llm_text)
-        self.assertEqual(result.invocation_result.kind, "complete")
-        self.assertNotIn("status_code", result.structured)
-        self.assertNotIn("configured_provider_id", result.structured)
-        self.assertNotIn("effective_provider_id", result.structured)
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(Path(result.structured["artifact"]["local_cached_path"]).is_file())
+        self.assertEqual(len(str(service.calls[0]["session_key"])), 64)
 
-    def test_facade_does_not_register_generated_screenshot_as_input_artifact(self) -> None:
-        service = _FakeScreenshotService(self.root)
+    def test_old_screenshot_alias_is_not_registered(self) -> None:
+        service = _FakeBrowserService(self.root)
         core = PalCore()
         register_execution_with_core(core.context)
-        core.publish_module_capabilities("execution")
-        core.context.port_registry["artifact:artifact"] = self.manager
-        runtime = core.context.execution_runtime
-        register_web_fetch_with_core(core.context, service)
+        register_web_fetch_with_core(core.context, service)  # type: ignore[arg-type]
         core.publish_module_capabilities("web_fetch")
 
-        result = asyncio.run(
-            runtime.execute_tool_async(
-                new_tool_call(
-                    name="call_tool",
-                    args={
-                        "name": "screenshot_web",
-                        "args": {"url": "https://example.com"},
-                    },
-                ),
-                turn_id=self.turn_id,
-            )
-        )
-
-        self.assertTrue(result.ok, result.llm_text)
-        self.assertEqual(result.invocation_result.kind, "complete")
-        self.assertNotIn("registered_artifact", result.structured)
-        self.assertNotIn("artifact_registration_error", result.structured)
-        self.assertEqual(self.manager.repository.list_records(scope_key=self.scope_key), ())
+        self.assertIn("browser_screenshot", core.context.capability_registry.descriptors)
+        self.assertNotIn("screenshot_web", core.context.capability_registry.descriptors)
 
 
 if __name__ == "__main__":

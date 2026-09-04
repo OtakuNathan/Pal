@@ -284,7 +284,7 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
-            do_not_use_when="Fetching a specific webpage (use read_web). Reading local files (use read_file).",
+            do_not_use_when="Fetching a specific webpage (use browser_read). Reading local files (use read_file).",
             failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,

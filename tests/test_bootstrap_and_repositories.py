@@ -51,7 +51,7 @@ from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.proactive import ProactiveDefinition, ProactiveRepository
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, RuntimeStatus, SINGLETON_TARGET
 from pal.wizard import WizardService
-from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
+from pal.web_fetch import BrowserServiceManager
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
 from tests.runtime_channel_providers import telegram_endpoint_module
 
@@ -262,7 +262,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("proactive_definitions", tables)
         self.assertIn("proactive_runs", tables)
         self.assertIn("web_search_providers", tables)
-        self.assertIn("web_fetch_providers", tables)
+        self.assertNotIn("web_fetch_providers", tables)
         self.assertNotIn("users", tables)
         self.assertNotIn("conversation_routes", tables)
         self.assertNotIn("pal_memories", tables)
@@ -593,23 +593,18 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertNotIn(module_id, handle.plugin_host.module_to_plugin)
             self.assertEqual(handle.core.detach_module(module_id), RuntimeStatus.FORBIDDEN)
 
-    def test_wizard_seeds_default_web_providers_and_active_settings(self) -> None:
+    def test_wizard_seeds_search_providers_without_retired_browser_provider_state(self) -> None:
         self.wizard.seed_defaults(self.registration)
 
         search_records = WebSearchProviderRepository().list_all()
-        fetch_records = WebFetchProviderRepository().list_all()
         settings = RuntimeSettingRepository()
 
         self.assertEqual(
             [item.provider_id for item in search_records],
             ["brave_search_default", "duckduckgo_search_default"],
         )
-        self.assertEqual(
-            [item.provider_id for item in fetch_records],
-            ["playwright_fetch_default", "plain_http_fetch_default"],
-        )
         self.assertEqual(settings.get("active_web_search_provider_id"), "brave_search_default")
-        self.assertEqual(settings.get("active_web_fetch_provider_id"), "playwright_fetch_default")
+        self.assertIsNone(settings.get("active_web_fetch_provider_id"))
 
     def test_compose_runtime_loads_first_party_web_plugins_and_default_tools(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -632,23 +627,26 @@ class PalV2BootstrapTests(unittest.TestCase):
         descriptors = handle.core.context.capability_registry.descriptors
         canonical_paths = {descriptor.canonical_path for descriptor in descriptors.values()}
         self.assertIn("op_web_search", canonical_paths)
-        self.assertIn("op_web_read", canonical_paths)
-        self.assertIn("op_web_inspect_layout", canonical_paths)
-        self.assertIn("op_web_screenshot", canonical_paths)
+        self.assertIn("op_browser_read", canonical_paths)
+        self.assertIn("op_browser_inspect_layout", canonical_paths)
+        self.assertIn("op_browser_screenshot", canonical_paths)
         self.assertIn("mcp_image_prepare", handle.core.context.capability_registry.descriptors)
         self.assertIn("web_search_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("web_fetch_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("browser_status", handle.core.context.capability_registry.descriptors)
         self.assertIn("mcp_show", handle.core.context.capability_registry.descriptors)
         self.assertTrue(
             any(name.startswith("web_search_provider_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
-        self.assertTrue(
-            any(name.startswith("web_fetch_provider_set_config") for name in handle.core.context.capability_registry.descriptors)
+        self.assertFalse(
+            any(name.startswith("web_fetch_provider_") for name in handle.core.context.capability_registry.descriptors)
         )
         self.assertIn("search_web", tool_names)
-        self.assertIn("read_web", tool_names)
-        self.assertIn("inspect_web_layout", tool_names)
-        self.assertNotIn("screenshot_web", tool_names)
+        self.assertIn("browser_navigate", tool_names)
+        self.assertIn("browser_read", tool_names)
+        self.assertIn("browser_snapshot", tool_names)
+        self.assertIn("browser_find", tool_names)
+        self.assertNotIn("browser_screenshot", tool_names)
+        self.assertNotIn("read_web", tool_names)
 
     def test_compose_runtime_loads_bunshin_as_first_party_builtin_plugin(self) -> None:
         if not _local_sidecar_bind_available():
@@ -962,7 +960,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             "mcp": ("pal.mcp", "mcp_show"),
             "bunshin": ("pal.bunshin", "bunshin_start_workflow"),
             "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show"),
-            "web_fetch": ("pal.web_fetch", "web_fetch_show"),
+            "web_fetch": ("pal.web_fetch", "browser_status"),
             "web_search": ("pal.web_search", "web_search_show"),
         }
         owned_prefixes = tuple(prefix for prefix, _ in expectations.values())
@@ -977,10 +975,15 @@ class PalV2BootstrapTests(unittest.TestCase):
         try:
             for plugin_id, (reload_prefix, capability_name) in expectations.items():
                 self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if plugin_id == "web_fetch":
+                    skill_service = handle.core.context.require_port("skill:skill")
+                    self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
                 detached = runtime.execute(CapabilityCall(name="plugin_detach", args={"name": plugin_id}))
                 self.assertEqual(detached.status, "ok", plugin_id)
                 self.assertIn(capability_name, initial_registry.descriptors, plugin_id)
                 self.assertNotIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if plugin_id == "web_fetch":
+                    self.assertIsNone(skill_service.repository.get_skill("pal.web.browser"))
 
                 probe_name = f"{reload_prefix}.__pal_hot_reload_probe__"
                 sys.modules[probe_name] = types.ModuleType(probe_name)
@@ -989,6 +992,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 self.assertEqual(attached.status, "ok", plugin_id)
                 self.assertNotIn(probe_name, sys.modules, plugin_id)
                 self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if plugin_id == "web_fetch":
+                    self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
                 record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == plugin_id)
                 self.assertTrue(record["attached"], plugin_id)
         finally:
@@ -2707,7 +2712,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.structured["effective_provider_id"], "duckduckgo_search_default")
         self.assertEqual(result.structured["items"][0]["title"], "Pal runtime docs")
 
-    def test_web_fetch_health_does_not_start_browser_service_and_disable_stops_manager(self) -> None:
+    def test_browser_status_does_not_start_sidecar_and_plugin_detach_stops_manager(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = self._compose_runtime(
             wizard=self.wizard,
@@ -2717,10 +2722,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         service = handle.core.context.module_registry.require("web_fetch").ports["web_fetch"]
 
         health = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="web_fetch_provider_health",
-                args={"name": "playwright_fetch_default"},
-            )
+            CapabilityCall(name="browser_status")
         )
 
         self.assertEqual(health.status, "ok")
@@ -2735,26 +2737,22 @@ class PalV2BootstrapTests(unittest.TestCase):
                 self.stop_calls += 1
 
             async def shutdown_async(self) -> None:
-                return None
+                self.stop_calls += 1
 
-            def health(self, *, settings=None):
-                _ = settings
+            def health(self):
                 return {"healthy": True, "service_running": False, "reason": "idle"}
 
         fake_manager = FakeBrowserManager()
         service.browser_manager = fake_manager
 
-        disabled = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="web_fetch_provider_disable",
-                args={"name": "playwright_fetch_default"},
-            )
+        detached = handle.core.context.execution_runtime.execute(
+            CapabilityCall(name="plugin_detach", args={"name": "web_fetch"})
         )
 
-        self.assertEqual(disabled.status, "ok")
+        self.assertEqual(detached.status, "ok")
         self.assertEqual(fake_manager.stop_calls, 1)
 
-    def test_web_fetch_capability_falls_back_to_plain_http_and_runtime_stop_runs_shutdown_hook(self) -> None:
+    def test_browser_read_has_no_provider_fallback_and_runtime_stop_runs_shutdown_hook(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = self._compose_runtime(
             wizard=self.wizard,
@@ -2762,155 +2760,50 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         service = handle.core.context.module_registry.require("web_fetch").ports["web_fetch"]
-        seen_requests: list[object] = []
+        current_browser_error = service.browser_manager.execute.__globals__["BrowserServiceError"]
 
-        class RaisingFetchProvider:
-            provider_kind = "playwright_fetch"
-
-            def read(self, record, request):
-                _ = record
-                _ = request
-                raise RuntimeError("browser unavailable")
-
-        class StaticFetchProvider:
-            provider_kind = "plain_http_fetch"
-
-            def read(self, record, request):
-                _ = record
-                seen_requests.append(request)
-                return {
-                    "requested_url": request.url,
-                    "final_url": "https://example.com/final",
-                    "title": "Example Domain",
-                    "text": "Example body text",
-                    "raw_content": "<html><body>Example body text</body></html>",
-                    "raw_content_truncated": False,
-                    "status_code": 200,
-                    "content_type": "text/html; charset=utf-8",
-                    "content_length": 1234,
-                    "text_truncated": True,
-                    "links": [{"href": "https://example.com/about", "text": "About", "rel": ""}],
-                    "metadata": {"description": "Example metadata"},
-                    "response_headers": {"content-type": "text/html; charset=utf-8"},
-                }
-
-        service.providers = {
-            "playwright_fetch": RaisingFetchProvider(),
-            "plain_http_fetch": StaticFetchProvider(),
-        }
-
-        result = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="op_web_read",
-                args={"url": "https://example.com"},
-            )
-        )
-
-        self.assertEqual(result.status, "ok")
-        self.assertTrue(result.structured["fallback_used"])
-        self.assertEqual(result.structured["configured_provider_id"], "playwright_fetch_default")
-        self.assertEqual(result.structured["effective_provider_id"], "plain_http_fetch_default")
-        self.assertEqual(result.structured["fetch_mode"], "http")
-        self.assertEqual(result.structured["final_url"], "https://example.com/final")
-        self.assertEqual(result.structured["status_code"], 200)
-        self.assertEqual(result.structured["content_type"], "text/html; charset=utf-8")
-        self.assertTrue(result.structured["text_truncated"])
-        self.assertTrue(result.structured["raw_content_available"])
-        self.assertFalse(result.structured["raw_content_truncated"])
-        self.assertEqual(result.structured["links"][0]["href"], "https://example.com/about")
-        self.assertEqual(result.structured["metadata"]["description"], "Example metadata")
-        self.assertIn("Chrome/", result.structured["user_agent"])
-        self.assertEqual(seen_requests[0].user_agent, DEFAULT_WEB_FETCH_USER_AGENT)
-
-        class ShutdownTrackingManager:
-            def __init__(self) -> None:
+        class FailingManager:
+            def __init__(self, runtime_root: Path) -> None:
+                self.runtime_root = runtime_root
                 self.shutdown_calls = 0
 
+            def execute(self, **kwargs):
+                _ = kwargs
+                raise current_browser_error(
+                    "browser unavailable",
+                    code="cli_unavailable",
+                    retryable=True,
+                    curl_applicable=True,
+                )
+
+            def health(self):
+                return {"healthy": False, "reason": "dependency_missing"}
+
             def stop_sync(self) -> None:
-                return None
+                self.shutdown_calls += 1
 
             async def shutdown_async(self) -> None:
                 self.shutdown_calls += 1
 
-            def health(self, *, settings=None):
-                _ = settings
-                return {"healthy": True, "service_running": False, "reason": "idle"}
+        manager = FailingManager(self.runtime_root)
+        service.browser_manager = manager
 
-        tracking_manager = ShutdownTrackingManager()
-        service.browser_manager = tracking_manager
+        result = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_browser_read",
+                args={"url": "https://example.com"},
+                meta={"turn_id": "browser-failure"},
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.ERROR)
+        self.assertIn("browser unavailable", result.llm_text)
+        self.assertIn("curl", result.llm_text)
+        self.assertNotIn("fallback_used", result.structured)
 
         asyncio.run(handle.stop_async())
 
-        self.assertEqual(tracking_manager.shutdown_calls, 1)
-
-    def test_plain_http_fetch_uses_chrome_user_agent_and_preserves_page_metadata(self) -> None:
-        captured = {}
-
-        class FakeHeaders:
-            def get(self, key, default=None):
-                values = {
-                    "Content-Type": "text/html; charset=utf-8",
-                    "Content-Length": "321",
-                }
-                return values.get(key, default)
-
-            def items(self):
-                return {
-                    "Content-Type": "text/html; charset=utf-8",
-                    "Content-Length": "321",
-                    "Set-Cookie": "secret=ignored",
-                }.items()
-
-        class FakeResponse:
-            headers = FakeHeaders()
-            status = 203
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                _ = (exc_type, exc, tb)
-                return False
-
-            def geturl(self):
-                return "https://example.test/final"
-
-            def read(self):
-                return (
-                    b"<html lang='en'><head><title>Example</title>"
-                    b"<meta name='description' content='A useful page'>"
-                    b"<link rel='canonical' href='https://example.test/canonical'>"
-                    b"</head><body><a href='/docs' rel='help'>Docs</a>"
-                    b"<p>Hello world</p></body></html>"
-                )
-
-        def fake_urlopen(request, timeout):
-            captured["user_agent"] = request.get_header("User-agent")
-            captured["timeout"] = timeout
-            return FakeResponse()
-
-        # Earlier hot-reload tests intentionally evict pal.web_fetch modules;
-        # patch the imported function's own globals so test order is irrelevant.
-        with patch.dict(plain_http_fetch.__globals__, {"urlopen": fake_urlopen}):
-            document = plain_http_fetch("https://example.test", timeout_ms=2500, max_chars=20, max_raw_chars=30)
-
-        self.assertIn("Chrome/", captured["user_agent"])
-        self.assertEqual(captured["timeout"], 2.5)
-        self.assertEqual(document.status_code, 203)
-        self.assertEqual(document.final_url, "https://example.test/final")
-        self.assertEqual(document.title, "Example")
-        self.assertTrue(document.text_truncated)
-        self.assertTrue(document.raw_content.startswith("<html"))
-        self.assertTrue(document.raw_content_truncated)
-        self.assertEqual(document.links[0].href, "/docs")
-        self.assertEqual(document.links[0].text, "Docs")
-        self.assertEqual(document.metadata["description"], "A useful page")
-        self.assertEqual(document.metadata["canonical_url"], "https://example.test/canonical")
-        self.assertIn("content-type", document.response_headers or {})
-        self.assertNotIn("Set-Cookie", document.response_headers or {})
-
-
-
+        self.assertEqual(manager.shutdown_calls, 1)
 
 class PalV2SocketEndpointUnitTests(unittest.TestCase):
     def test_channel_turn_marks_tool_round_text_as_stream_companion(self) -> None:

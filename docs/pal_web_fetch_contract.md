@@ -1,161 +1,81 @@
-# Pal Web Fetch Contract
+# Pal Browser Contract
 
-> 目标：定义 `web_fetch` 子系统的职责、对象模型，以及与 capability forest 的集成方式。
+> `web_fetch` 是由 Pal 随包提供、由 Plugin Hub 管理的第一方 RAII 插件；它对外发布的是会话级浏览器能力，而不是 fetch provider family。
 
-## 目标
+## Ownership
 
-`web_fetch` 负责让 `Pal` 获得网页内容抓取能力。
+插件拥有：
 
-它不等于搜索引擎，也不等于 HTTP client 库。
+- 经 token 认证的本地 browser sidecar 及其全部子进程
+- 固定版本 `@playwright/cli@0.1.19` 与对应 Chromium 的按需安装
+- 每个主对话独立的持久 profile，以及每个 Bunshin workflow 的临时 session
+- 浏览器命令白名单、结果裁剪、截图 artifact 写入和 profile 回收
+- 声明式 builtin skill `pal.web.browser`
 
-它负责：
+插件不拥有 web search、任意 HTTP client、LLM 决策或 Bunshin 的角色授权。`web_search` 继续是独立 provider family。
 
-- 抓取网页并保留页面元信息，再提取文本内容
-- 支持 Playwright 浏览器渲染（处理 JS 页面）和纯 HTTP 抓取
-- 多 provider fallback
-- provider 健康检查与状态报告
-- fetch provider 的生命周期管理
+## Lifecycle
 
-## Owns
+`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，唯一生命周期入口是 Plugin Hub 的 `plugin_attach` / `plugin_detach`。
 
-- web fetch provider registry
-- 页面抓取执行
-- provider fallback 链
-- active provider 选择
-- browser service 进程管理
-- provider health / auth 状态
+sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不随 sidecar、插件刷新或 Pal 重启删除；`browser_close` 只释放活进程，`browser_reset(confirm=true)` 才删除当前对话 profile。
 
-## Does Not Own
+## Session model
 
-- Playwright 浏览器二进制（由 `playwright install` 管理）
-- LLM 调用决策
-- 抓取内容的后续处理
-- channel 传输
+- 主 Pal：以 logical execution lifetime 派生不可逆 session key，profile 持久化。
+- Bunshin：以 workflow run id 派生临时 session，不持久化。
+- 同一 session 串行执行，不同 session 受全局并发上限约束。
+- profile 最长保留 30 天，总预算 2 GiB；只按 LRU 删除不活跃 profile。
+- 所有 URL 必须是绝对 `http` / `https` URL，不能浏览 `file://`。
 
-## 核心对象
+## Public capabilities
 
-### WebFetchProvider
+默认直接暴露给模型的读取路径：
 
-fetch provider 是一个可替换后端。
+- `browser_navigate`
+- `browser_read`
+- `browser_snapshot`
+- `browser_find`
 
-当前已实现：
+通过 tool search 发现的交互及管理路径：
 
-- `PlaywrightFetchProvider` — 使用 Playwright 渲染页面后提取文本。支持 JS 渲染，需要 Chromium 二进制。通过 `BrowserServiceManager` 管理外部 browser service 进程。
-- `PlainHTTPFetchProvider` — 纯 HTTP 抓取 + HTML 解析。无需浏览器，作为 fallback。
+- `browser_click`, `browser_fill`, `browser_type`, `browser_press`
+- `browser_hover`, `browser_select`, `browser_check`, `browser_scroll`
+- `browser_resize`, `browser_history`, `browser_tabs`, `browser_dialog`
+- `browser_inspect_layout`, `browser_screenshot`, `browser_status`
+- `browser_close`, `browser_reset`
 
-每个 provider 实现 `WebFetchProviderPort` 协议：
+canonical path 统一为 `op_browser_*`；状态查询仍是模块 introspection。旧的 `read_web`、`inspect_web_layout`、`screenshot_web` 及 `web_fetch_provider_*` 名称不保留兼容别名。
 
-```python
-class WebFetchProviderPort(Protocol):
-    provider_kind: str
-    def read(self, record, request: WebFetchRequest) -> WebFetchDocument | dict[str, object]: ...
-```
+写操作均为 indirect、non-idempotent、reconcile-first；失败后必须重新检查页面，不能自动重复。截图是受治理的本地 artifact 写入。reset 是明确确认后的不可恢复本地写入。
 
-`dict` 返回仅用于兼容旧 provider；新 provider 应返回 `WebFetchDocument`。
+页面正文、链接、snapshot 和 layout 结果均有调用级上限；单张截图超过 32 MiB 会被拒绝，避免 sidecar 把异常页面放大成主进程内存压力。
 
-### WebFetchDocument
+## Restricted surface
 
-`web_fetch` 内部保留 typed document，而不是只保留正文字符串：
+插件不发布任意 JavaScript、上传、cookie/local/session storage 读写、网络拦截、请求正文读取、录制、trace、video、PDF 或 dashboard。`browser_read` 和 layout inspection 内部使用固定脚本，但调用者不能注入脚本。
 
-- `requested_url` / `final_url`
-- `status_code`
-- `content_type` / `content_length`
-- `title` / `text` / `text_truncated`
-- `raw_content` / `raw_content_truncated`（内部保留，capability 默认不把全文输出给 LLM）
-- `links`
-- `metadata`（例如 `description`、`canonical_url`、`language`）
-- `response_headers`（只保留安全排错字段）
+## Dependency and repair
 
-LLM-facing 的 `web_read` 仍然返回紧凑文本，但 structured payload 会带上这些字段，并用 `raw_content_available` / `raw_content_truncated` 标明是否保留了原始内容，方便引用、排错和后续处理。
+运行环境需要 Node.js 18+ 和 npm。CLI 与浏览器安装在 runtime root 的 `data/web_fetch/` 下，不写项目依赖或用户级 npm 环境。首次缺失或 Chromium build 漂移时 sidecar 后台安装固定版本并返回可重试的 `dependency_installing`；`browser_status` 报告安装状态和最近错误。
 
-### BrowserServiceManager
+不再有 Python Playwright provider 或 plain-HTTP fallback。只有主 Pal 在 navigate/read 失败且原始 HTTP 足够时会得到 curl 提示；插件本身不会偷偷改变执行语义。Bunshin 必须报告证据缺口。
 
-Playwright 的进程管理器。负责：
+代理配置继承 `http_proxy` / `https_proxy`（含大写形式）与 `no_proxy`，并交给 Chromium。具体直连、分流规则仍由用户的代理服务负责。
 
-- 拉起 `pal browser-service` 子进程
-- 通过 HTTP + token 认证与子进程通信
-- 并发控制（BoundedSemaphore）
-- 空闲超时自动关闭
-- 进程健康检查
+## Bunshin boundary
 
-子进程通过 `pal main browser-service` 启动，独立于 Pal 主进程运行。
+Bunshin participant 不直接获得交互浏览器。只有启用 external research 的 software-engineering architect 可通过 host broker 使用 `browser_read`；其他角色保持 search/read-only 边界，不能 click、fill 或启动自己的持久 profile。
 
-### WebFetchService
+## Upgrade
 
-核心服务层。负责：
-
-- 维护 provider 注册表
-- 按 priority 和 enabled 状态选择 provider
-- 执行抓取，失败时自动 fallback
-- 追踪最近错误（`last_errors`）
-
-### WebFetchProviderModel
-
-数据库模型，存储 provider 配置：
-
-- `provider_id` — 唯一标识
-- `provider_kind` — 对应哪种实现
-- `enabled` — 是否启用
-- `priority` — 优先级
-- `settings_blob` — provider 特定配置（如 `idle_timeout_seconds`、`max_concurrency`）
-- `auth_material_blob` — 认证信息
-
-## 与 Capability Forest 的集成
-
-`web_fetch` 通过 `IntrospectionProvider` 注册到 capability forest。
-
-### 模块级能力（SINGLETON_TARGET）
-
-| canonical_path | 作用 |
-|----------------|------|
-| `${1}_show` | 模块概览 |
-| `${1}_providers` | 列出所有 provider |
-| `${1}_provider` | 当前活跃 provider |
-| `web_read` | 抓取网页内容 |
-| `op_web_fetch_mgmt_set_active_provider` | 切换活跃 provider |
-
-### Provider 实例级能力
-
-每个注册的 provider 会自动生成实例级能力：
-
-- `${1}_provider_health::<provider_id>`
-- `${1}_provider_show::<provider_id>`
-- `${1}_provider_state::<provider_id>`
-- `op_web_fetch_mgmt_enable::<provider_id>`
-- `op_web_fetch_mgmt_disable::<provider_id>`
-- `op_web_fetch_mgmt_set_config::<provider_id>`
-- `op_web_fetch_mgmt_set_auth_material::<provider_id>`
-
-## 代理支持
-
-Playwright provider 自动读取环境变量 `https_proxy` / `http_proxy`，通过 `--proxy-server` 传递给 Chromium。
-
-## User-Agent
-
-默认 `User-Agent` 使用桌面 Chrome 风格字符串，而不是 `Pal` 自定义标识。`WebFetchRequest.user_agent` 可以覆盖默认值；Playwright 和纯 HTTP provider 都必须使用同一请求级 UA。
-
-## 插件集成
-
-`web_fetch` 通过 `plugins_builtin/web_fetch/` 作为第一方插件加载。
-
-## Supervisor 默认配置
-
-`supervisor` 的 `seed_defaults()` 会预置两个 provider：
-
-1. `playwright_fetch_default` — Playwright 渲染抓取，priority 0
-2. `plain_http_fetch_default` — 纯 HTTP 抓取，priority 10
-
-活跃 provider 默认为 `playwright_fetch_default`。
+`pal setup --upgrade --runtime-root ...` 删除退休的 `web_fetch_providers` 表和 `active_web_fetch_provider_id`。非默认旧 provider 会先以权限 `0600` 归档到 `data/web_fetch/legacy_provider_backup.json`。
 
 ## Invariants
 
-- `web_fetch` 提供 fallback-capable provider family。
-- 抓取失败时自动尝试下一个 provider。
-- Browser service 是独立子进程，崩溃不影响 Pal 主进程。
-- 抓取结果以 `WebFetchDocument` 保留页面元信息；返回给 LLM 的正文经过文本提取和截断。
-
-## Non-Goals
-
-- 不在本文件定义抓取内容的后处理和摘要策略
-- 不在本文件定义抓取缓存策略
-- 不在本文件定义 URL 安全校验策略
+- Plugin Hub 是 `web_fetch` 生命周期的唯一 owner。
+- 插件 detach 后没有残留公共能力或受管浏览器进程。
+- 主对话之间不共享 profile；Bunshin 不继承主对话登录状态。
+- 页面写操作永不自动重放。
+- CLI 版本固定、安装原子切换，安装进程也受 RAII 回收。
+- 浏览器失败不会退回旧 provider；curl 只是显式建议。

@@ -1938,7 +1938,6 @@ def _target_discovery_alias(descriptor: CapabilityDescriptor) -> str:
     if descriptor.target_kind == "provider":
         return {
             "memory": "memory_list_providers",
-            "web_fetch": "web_fetch_list_providers",
             "web_search": "web_search_list_providers",
         }.get(descriptor.module_id, "")
     return ""

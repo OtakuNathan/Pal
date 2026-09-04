@@ -326,7 +326,7 @@ IM channel 默认采用三阶段反馈：
 - 常见 UTF-8 文件读写改优先通过结构化文件能力，例如 `file_read`、`file_edit`、`file_write`、`file_state`
 - 命令、测试、构建、脚本执行通过 `shell`
 - `web_search` 保留为独立能力与 provider family
-- `web_fetch` 可以通过 `curl` 或 headless browser backend 落地
+- `web_fetch` 是 Plugin Hub 管理的 stateful browser 插件；原始 HTTP 足够时由主 Pal 显式使用 `curl`
 
 也就是说：
 

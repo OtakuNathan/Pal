@@ -116,7 +116,7 @@ Important results include:
 - optional Codex CLI support;
 - optional local Ollama embedding fallback;
 - service-manager availability;
-- optional Playwright Chromium, with plain HTTP fetch as a fallback.
+- Node.js 18+ and npm for the `web_fetch` plugin, which provisions its pinned Playwright CLI and Chromium on first use.
 
 ## Upgrade
 

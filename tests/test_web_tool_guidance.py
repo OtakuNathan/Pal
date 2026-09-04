@@ -34,17 +34,10 @@ class WebToolGuidanceTests(unittest.TestCase):
         self.assertEqual(result.structured["reason"], "provider_disabled")
         self.assertFalse(service.selected)
 
-    def test_fetch_rejects_disabled_provider_before_selection(self) -> None:
-        service = _DisabledProviderService()
-        provider = WebFetchIntrospectionProvider(service=service)  # type: ignore[arg-type]
+    def test_browser_plugin_has_no_provider_selection_surface(self) -> None:
+        provider = WebFetchIntrospectionProvider(service=SimpleNamespace())  # type: ignore[arg-type]
 
-        result = provider.set_active_provider(
-            IntrospectionCall(name="web_fetch_set_active_provider", args={"name": "disabled"})
-        )
-
-        self.assertEqual(result.status, RuntimeStatus.INVALID)
-        self.assertEqual(result.structured["reason"], "provider_disabled")
-        self.assertFalse(service.selected)
+        self.assertFalse(hasattr(provider, "set_active_provider"))
 
 
 if __name__ == "__main__":

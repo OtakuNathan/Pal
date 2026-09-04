@@ -1,6 +1,6 @@
 plugin_id = "web_fetch"
 entrypoint = "pal.plugins_builtin.web_fetch.runtime"
-version = "0.1.0"
+version = "0.2.0"
 enabled_by_default = true
 lifecycle_protocol = "raii.v1"
 module_id = "web_fetch"

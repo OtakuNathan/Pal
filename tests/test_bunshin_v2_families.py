@@ -617,21 +617,21 @@ workspace_policy: {}
     def test_architect_has_no_external_research_surface(self) -> None:
         architect = self._pack("lifestyle.architect")
         self.assertNotIn("op_web_search", architect.allowed_capabilities)
-        self.assertNotIn("op_web_read", architect.allowed_capabilities)
+        self.assertNotIn("op_browser_read", architect.allowed_capabilities)
         local = apply_v2_research_capability_policy(architect, research_mode="local_only")
         self.assertNotIn("op_web_search", local.allowed_capabilities)
-        self.assertNotIn("op_web_read", local.allowed_capabilities)
+        self.assertNotIn("op_browser_read", local.allowed_capabilities)
 
     def test_software_architect_gets_web_only_when_research_mode_allows_it(self) -> None:
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_web_search", architect.allowed_capabilities)
-        self.assertIn("op_web_read", architect.allowed_capabilities)
+        self.assertIn("op_browser_read", architect.allowed_capabilities)
         local = apply_v2_research_capability_policy(architect, research_mode="local_only")
         external = apply_v2_research_capability_policy(architect, research_mode="external_allowed")
         self.assertNotIn("op_web_search", local.allowed_capabilities)
-        self.assertNotIn("op_web_read", local.allowed_capabilities)
+        self.assertNotIn("op_browser_read", local.allowed_capabilities)
         self.assertIn("op_web_search", external.allowed_capabilities)
-        self.assertIn("op_web_read", external.allowed_capabilities)
+        self.assertIn("op_browser_read", external.allowed_capabilities)
 
     def test_architect_roles_receive_contract_file_authoring_surface(self) -> None:
         for profile in ("general.architect", "lifestyle.architect"):

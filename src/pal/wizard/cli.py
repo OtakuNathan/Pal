@@ -448,8 +448,10 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
         pal_entrypoint=DEFAULT_PAL_ENTRYPOINT,
     )
     from pal.llm.schema import migrate_llm_endpoint_schema
+    from pal.web_fetch.schema import migrate_web_fetch_schema
 
     migrate_llm_endpoint_schema(db_path)
+    migrate_web_fetch_schema(db_path)
     service.create_database(registration)
     service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
@@ -501,11 +503,16 @@ def run_setup_upgrade(*, runtime_root: Path) -> int:
     from pal.bunshin.cutover import cutover_bunshin_runtime
     from pal.bunshin.v2.schema import BUNSHIN_V2_SCHEMA_VERSION
     from pal.llm.schema import migrate_llm_endpoint_schema
+    from pal.web_fetch.schema import migrate_web_fetch_schema
 
     llm_result = migrate_llm_endpoint_schema(db_path)
+    web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
+    print(f"  Browser schema: {web_fetch_result.status}")
+    if web_fetch_result.archive_path:
+        print(f"  Legacy browser providers archived at: {web_fetch_result.archive_path}")
     print(f"  Bunshin schema: v{BUNSHIN_V2_SCHEMA_VERSION} ({result.status})")
     if result.archive_root is not None:
         print(f"  Previous Bunshin runtime archive: {result.archive_root}")

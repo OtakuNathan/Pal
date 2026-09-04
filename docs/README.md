@@ -77,7 +77,7 @@ Continue with the contract for the subsystem you are changing:
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.
 - `pal_migration_map.md`: current code migration map.
 - `pal_web_search_contract.md`: web search provider registry, fallback chain, and capability integration.
-- `pal_web_fetch_contract.md`: web fetch subsystem, Playwright rendering, HTTP fallback, and browser service process management.
+- `pal_web_fetch_contract.md`: Plugin Hub-managed stateful browser, pinned Playwright CLI, session/profile isolation, and Bunshin boundary.
 - `pal_tool_surface.md`: descriptor `invocation_mode`-driven LLM tool exposure, failure surface selection, and discovery-first design.
 - `pal_mcp_contract.md`: MCP manager sidecar, config discovery, tool/prompt compilation, and projection lifecycle.
 - `capability_forest_structure.md`: unified capability forest structure and compiler model.

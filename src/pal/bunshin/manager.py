@@ -1660,8 +1660,8 @@ class BunshinManager:
     async def web_broker_read(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._web_broker_call(
             params,
-            canonical_path="op_web_read",
-            alias="read_web",
+            canonical_path="op_browser_read",
+            alias="browser_read",
         )
 
     async def _web_broker_call(

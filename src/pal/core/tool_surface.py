@@ -125,12 +125,6 @@ class ToolSurface:
                 include("op_web_search_mgmt_set_active_provider")
         elif signal.subsystem == "web_fetch":
             include("intro_module_web_fetch_show")
-            include("intro_module_web_fetch_active_provider")
-            include("intro_module_web_fetch_list_providers")
-            active_web_fetch_provider_id = self._get_setting("active_web_fetch_provider_id")
-            if active_web_fetch_provider_id:
-                include("intro_provider_web_fetch_health", target_id=active_web_fetch_provider_id)
-                include("op_web_fetch_mgmt_set_active_provider")
         else:
             module_name = str(signal.subsystem or "").strip()
             if module_name:

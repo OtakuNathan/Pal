@@ -325,7 +325,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(existing.channel.endpoint_id, "telegram_main")
         self.assertEqual(existing.channel.channel_kind, "telegram")
 
-    def test_seed_from_wizard_seeds_web_providers(self) -> None:
+    def test_seed_from_wizard_seeds_only_search_provider_state(self) -> None:
         from pal.llm import RuntimeSettingRepository
 
         collected = _make_collected()
@@ -333,7 +333,7 @@ class TestSeedFromWizard(unittest.TestCase):
 
         settings = RuntimeSettingRepository()
         self.assertEqual(settings.get("active_web_search_provider_id"), "brave_search_default")
-        self.assertEqual(settings.get("active_web_fetch_provider_id"), "playwright_fetch_default")
+        self.assertIsNone(settings.get("active_web_fetch_provider_id"))
 
     def test_rerun_seed_from_wizard_updates_in_place(self) -> None:
         from pal.identity import IdentityRepository

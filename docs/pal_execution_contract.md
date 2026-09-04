@@ -71,7 +71,7 @@ Current boundaries:
 - `file_read` / `file_edit` / `file_write` / `file_state` 作为 UTF-8 文本文件读写改的结构化路径
 - `shell` 作为命令、测试、构建、脚本和无专用 capability 时的 escape hatch
 - `web_search` 作为独立 capability / provider family
-- `web_fetch` 可通过 `curl` 或 headless browser tool backend 落地
+- `web_fetch` 发布会话级 `browser_*` 能力；`curl` 只是主 Pal 的显式 raw-HTTP escape hatch
 
 也就是说，`MCP` 只是 tool 的一种来源，而不是独立平级哲学层。
 

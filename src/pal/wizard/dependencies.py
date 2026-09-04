@@ -4,6 +4,7 @@ import importlib.util
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,10 +51,9 @@ def collect_dependency_checks() -> tuple[WizardDependencyCheck, ...]:
         _check_python_version(),
         _check_python_package("jieba", "jieba", "Chinese FTS tokenization"),
         _check_python_package("openai", "openai", "OpenAI-compatible endpoint calls"),
-        _check_python_package("playwright", "playwright", "rendered web fetch"),
         _check_python_package("python-telegram-bot", "telegram", "Telegram channel"),
         _check_python_package("sqlite-vec", "sqlite_vec", "vector memory backend", required=False),
-        _check_playwright_chromium(),
+        _check_playwright_cli_runtime(),
         _check_git(),
         _check_codex_cli(),
         _check_bunshin_sandbox(),
@@ -113,64 +113,38 @@ def _check_python_package(distribution_name: str, import_name: str, purpose: str
     )
 
 
-def _check_playwright_chromium() -> WizardDependencyCheck:
-    if importlib.util.find_spec("playwright") is None:
+def _check_playwright_cli_runtime() -> WizardDependencyCheck:
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if not node or not npm:
         return WizardDependencyCheck(
-            check_id="playwright.chromium",
-            title="Playwright Chromium",
+            check_id="playwright_cli.runtime",
+            title="Playwright CLI runtime",
             status=CHECK_STATUS_MISSING,
-            detail="Playwright package is missing, so Chromium cannot be checked.",
-            fix="pip install pal-v2 && python -m playwright install chromium",
+            detail="Node.js and npm are required for the web_fetch plugin to provision its pinned Playwright CLI.",
+            fix="Install Node.js 18 or newer with npm.",
         )
-    executable = _find_playwright_chromium_executable()
-    if executable is not None:
+    try:
+        completed = subprocess.run(
+            [node, "--version"], capture_output=True, text=True, timeout=5, check=False
+        )
+        major = int(completed.stdout.strip().lstrip("v").split(".", 1)[0])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        major = 0
+    if major < 18:
         return WizardDependencyCheck(
-            check_id="playwright.chromium",
-            title="Playwright Chromium",
-            status=CHECK_STATUS_OK,
-            detail=f"Chromium executable found at {executable}",
-            required=False,
+            check_id="playwright_cli.runtime",
+            title="Playwright CLI runtime",
+            status=CHECK_STATUS_ERROR,
+            detail=f"Node.js {major or 'unknown'} found; the web_fetch plugin requires Node.js 18 or newer.",
+            fix="Upgrade Node.js to version 18 or newer.",
         )
     return WizardDependencyCheck(
-        check_id="playwright.chromium",
-        title="Playwright Chromium",
-        status=CHECK_STATUS_WARN,
-        detail="No Playwright Chromium executable was found in the standard browser cache. Plain HTTP fetch still works as fallback.",
-        required=False,
-        fix="python -m playwright install chromium",
+        check_id="playwright_cli.runtime",
+        title="Playwright CLI runtime",
+        status=CHECK_STATUS_OK,
+        detail=f"Node.js {major} and npm are available; web_fetch provisions its pinned CLI and Chromium on first use.",
     )
-
-
-def _find_playwright_chromium_executable() -> Path | None:
-    roots: list[Path] = []
-    env_path = str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
-    if env_path and env_path != "0":
-        roots.append(Path(env_path).expanduser())
-    system = platform.system().lower()
-    if system == "windows":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            roots.append(Path(local_app_data) / "ms-playwright")
-    elif system == "darwin":
-        roots.append(Path.home() / "Library" / "Caches" / "ms-playwright")
-    else:
-        roots.append(Path.home() / ".cache" / "ms-playwright")
-
-    suffixes = (
-        Path("chrome-win64") / "chrome.exe",
-        Path("chrome-linux") / "chrome",
-        Path("chrome-mac") / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
-        Path("chrome-mac") / "Chromium.app" / "Contents" / "MacOS" / "Google Chrome for Testing",
-    )
-    for root in roots:
-        if not root.exists():
-            continue
-        for browser_dir in sorted(root.glob("chromium-*"), reverse=True):
-            for suffix in suffixes:
-                candidate = browser_dir / suffix
-                if candidate.exists():
-                    return candidate
-    return None
 
 
 def _check_git() -> WizardDependencyCheck:

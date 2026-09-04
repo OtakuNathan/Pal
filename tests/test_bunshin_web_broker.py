@@ -11,9 +11,8 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.generated_tool_models import (
-    WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
-)
+from pal.execution.generated_tool_models import WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput
+from pal.web_fetch.tool_models import BrowserReadInput
 from pal.execution.tool_result_pager import ToolResultPagerStore
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV
 from pal.bunshin.manager import BunshinManager, BunshinRunState
@@ -37,7 +36,7 @@ class BunshinWebBrokerTests(unittest.TestCase):
                 runtime_root=root,
                 turn_id="turn-1",
                 result_ref="result-1",
-                tool_name="read_web",
+                tool_name="browser_read",
                 status="ok",
                 ok=True,
                 rendered="x" * 5000,
@@ -118,7 +117,7 @@ class BunshinWebBrokerTests(unittest.TestCase):
         )
         read_result = fetch_provider.read(
             IntrospectionCall(
-                name="op_web_read",
+                name="op_browser_read",
                 args={"url": "https://example.invalid"},
             )
         )
@@ -139,7 +138,7 @@ class BunshinWebBrokerTests(unittest.TestCase):
                 manager = BunshinManager(Path(tmp))
                 pack = BunshinInvocationPack(
                     invocation_id="web-invocation",
-                    allowed_capabilities=["op_web_search"],
+                    allowed_capabilities=["op_web_search", "op_browser_read"],
                 )
                 manager.runs["run-web"] = BunshinRunState(
                     bunshin_id="session-web",
@@ -154,7 +153,11 @@ class BunshinWebBrokerTests(unittest.TestCase):
                             "search_web": SimpleNamespace(
                                 canonical_path="op_web_search",
                                 input_model=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
-                            )
+                            ),
+                            "browser_read": SimpleNamespace(
+                                canonical_path="op_browser_read",
+                                input_model=BrowserReadInput,
+                            ),
                         }
                     )
 
@@ -183,6 +186,16 @@ class BunshinWebBrokerTests(unittest.TestCase):
                 )
                 self.assertEqual(observed[0].name, "op_web_search")
                 self.assertEqual(observed[0].args["limit"], 3)
+
+                read_result = await manager.web_broker_read(
+                    {
+                        "run_id": "run-web",
+                        "args": {"url": "https://example.com", "max_chars": 1000},
+                    }
+                )
+                self.assertEqual(read_result["result"]["status"], "ok")
+                self.assertEqual(observed[1].name, "op_browser_read")
+                self.assertEqual(observed[1].meta["broker_run_id"], "run-web")
 
                 with self.assertRaises(ValidationError):
                     await manager.web_broker_search(

@@ -320,7 +320,6 @@ def _target_discovery_alias(node_blueprint: CapabilityNodeBlueprint, *, module_i
     if node_blueprint.target_kind == "provider":
         return {
             "memory": "memory_list_providers",
-            "web_fetch": "web_fetch_list_providers",
             "web_search": "web_search_list_providers",
         }.get(node_blueprint.path_module_id or module_id, "")
     return ""

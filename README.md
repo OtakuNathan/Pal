@@ -260,7 +260,7 @@ development manual demands.
 
 Built-in plugins include artifact, behavior, checklist, proactive, skill,
 Bunshin, LSP, MCP, SQLite-vec L3 memory, web search (Brave + DuckDuckGo), and
-web fetch (Playwright + HTTP). Enabled built-ins are
+stateful browser automation (pinned Playwright CLI). Enabled built-ins are
 attached automatically during startup; users do not assemble the runtime by
 hand.
 

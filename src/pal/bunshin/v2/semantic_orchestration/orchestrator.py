@@ -8892,7 +8892,7 @@ def apply_v2_research_capability_policy(pack: BunshinInvocationPack, *, research
     mode = ResearchMode(str(research_mode or ResearchMode.LOCAL_ONLY))
     if mode == ResearchMode.EXTERNAL_ALLOWED:
         return pack
-    denied = {"op_web_search", "op_web_read"}
+    denied = {"op_web_search", "op_browser_read"}
     return BunshinInvocationPack.from_dict(
         {
             **pack.to_dict(),
