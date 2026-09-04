@@ -88,6 +88,17 @@ class LLMEndpointSpec:
                 f"endpoint {endpoint_id} max_output_tokens exceeds context_window"
             )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        unsupported_parameters = capabilities.get(
+            "unsupported_request_parameters"
+        )
+        if unsupported_parameters is not None:
+            capabilities["unsupported_request_parameters"] = list(
+                _string_tuple(
+                    unsupported_parameters,
+                    lowercase=True,
+                    field_name="capabilities_blob.unsupported_request_parameters",
+                )
+            )
         return cls(
             endpoint_id=endpoint_id,
             provider=provider,

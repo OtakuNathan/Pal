@@ -28,6 +28,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    request_parameter_supported,
 )
 from pal.llm.shapes.builder import ResponseIRBuilder, canonical_finish_reason, merge_usage, usage_from_mapping
 from pal.llm.shapes.common import anthropic_tool_definition, json_object, tool_results
@@ -173,7 +174,10 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         }
         if system_parts:
             payload["system"] = system_parts
-        if policy.temperature is not None:
+        if (
+            policy.temperature is not None
+            and request_parameter_supported(context, "temperature")
+        ):
             payload["temperature"] = policy.temperature
         if request.tools:
             payload["tools"] = [anthropic_tool_definition(tool) for tool in request.tools]

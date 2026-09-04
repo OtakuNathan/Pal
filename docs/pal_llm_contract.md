@@ -57,7 +57,9 @@ Each `llm_endpoints` row declares:
 - context and output limits;
 - an explicit `thinking_levels_blob` enum and a
   `default_thinking_level` contained in that enum;
-- tool, streaming, vision, and modality capabilities;
+- tool, streaming, vision, and modality capabilities, including optional
+  rejected generation fields in
+  `capabilities_blob.unsupported_request_parameters`;
 - ascending fallback priority and enabled state.
 
 `/refresh_llm_endpoint` is the explicit reload boundary. It refreshes the
@@ -89,6 +91,19 @@ L1.
 Tool schemas are represented once as `ToolDefinitionIR.input_schema`. Codecs
 render that schema under the provider's required wire field. Tool execution
 always returns to local `Execution`.
+
+An endpoint may declare optional generation parameters that its exact model
+rejects:
+
+```json
+{"unsupported_request_parameters": ["temperature", "top_p"]}
+```
+
+The shape codec omits those fields without changing Pal's provider-neutral
+generation policy. `pal llm add gpt-6-astra` installs the official OpenAI
+Responses profile: `openai_response`, reasoning levels `low` through `max`,
+vision/tool/stream support, and the unsupported sampling-parameter declaration.
+The command does not activate the endpoint unless explicitly requested.
 
 ## Streaming and output recovery
 

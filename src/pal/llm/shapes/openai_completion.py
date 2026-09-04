@@ -26,6 +26,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    request_parameter_supported,
 )
 from pal.llm.shapes.builder import (
     ResponseIRBuilder,
@@ -129,7 +130,10 @@ class OpenAICompletionCodec(ShapeCodecBase):
             "messages": messages,
             "max_tokens": policy.max_output_tokens,
         }
-        if policy.temperature is not None:
+        if (
+            policy.temperature is not None
+            and request_parameter_supported(context, "temperature")
+        ):
             payload["temperature"] = policy.temperature
         if request.tools:
             payload["tools"] = [openai_tool_definition(tool) for tool in request.tools]

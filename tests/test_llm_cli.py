@@ -51,6 +51,50 @@ class LLMCLITests(unittest.TestCase):
         self.assertEqual(endpoint["thinking_levels"], ["off", "high", "max"])
         self.assertEqual(payload["active_endpoint_id"], "deepseek-v4-flash")
 
+    def test_add_gpt_6_astra_uses_official_responses_profile(self) -> None:
+        args = self._parse(
+            "add",
+            "gpt-6-astra",
+            "--runtime-root",
+            str(self.runtime_root),
+            "--api-key-env",
+            "OPENAI_API_KEY",
+            "--no-enabled",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_llm_cli(args), 0)
+
+        list_args = self._parse(
+            "list",
+            "--runtime-root",
+            str(self.runtime_root),
+            "--all",
+            "--json",
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_llm_cli(list_args), 0)
+        endpoint = json.loads(output.getvalue())["items"][0]
+
+        self.assertEqual(endpoint["provider"], "openai")
+        self.assertEqual(endpoint["wire_shape"], "openai_response")
+        self.assertEqual(endpoint["base_url"], "https://api.openai.com/v1")
+        self.assertEqual(endpoint["context_window"], 1_050_000)
+        self.assertEqual(endpoint["max_output_tokens"], 128_000)
+        self.assertEqual(
+            endpoint["thinking_levels"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(endpoint["default_thinking_level"], "medium")
+        self.assertTrue(endpoint["supports_tools"])
+        self.assertTrue(endpoint["supports_streaming"])
+        self.assertTrue(endpoint["supports_vision"])
+        self.assertFalse(endpoint["enabled"])
+        self.assertEqual(
+            endpoint["capabilities"]["unsupported_request_parameters"],
+            ["temperature", "top_p", "top_logprobs"],
+        )
+
     def test_list_reports_corrupt_endpoint_contract_instead_of_returning_empty(self) -> None:
         args = self._parse(
             "add",

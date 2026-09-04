@@ -24,6 +24,7 @@ from pal.llm.ir import (
     PromptRegionIR,
     ReasoningPartIR,
     TextPartIR,
+    ThinkingLevel,
     WireShape,
 )
 from pal.llm.shapes import codec_for_shape
@@ -46,6 +47,42 @@ def decode_frames(codec, frames, context):
 
 
 class LLMIRShapeTests(unittest.TestCase):
+    def test_endpoint_capability_omits_unsupported_sampling_parameter(self) -> None:
+        request = LLMRequestIR(
+            messages=(LLMMessageIR(MessageRole.USER, (TextPartIR("work"),)),),
+            tools=(),
+            policy=GenerationPolicyIR(
+                max_output_tokens=128,
+                temperature=0.2,
+                thinking_level=ThinkingLevel.HIGH,
+            ),
+        )
+        context = ShapeContext(
+            wire_shape=WireShape.OPENAI_RESPONSE,
+            endpoint_id="astra",
+            model_id="gpt-6-astra",
+            capabilities={
+                "unsupported_request_parameters": [
+                    "temperature",
+                    "top_p",
+                    "top_logprobs",
+                ]
+            },
+        )
+
+        payload = codec_for_shape(WireShape.OPENAI_RESPONSE).encode(
+            request,
+            context,
+        ).payload
+
+        self.assertNotIn("temperature", payload)
+        self.assertEqual(payload["reasoning"], {"effort": "high"})
+        ordinary = codec_for_shape(WireShape.OPENAI_RESPONSE).encode(
+            request,
+            _context(WireShape.OPENAI_RESPONSE),
+        ).payload
+        self.assertEqual(ordinary["temperature"], 0.2)
+
     def test_instruction_roles_preserve_authority_or_degrade_at_shape_boundary(self) -> None:
         request = LLMRequestIR(
             messages=(

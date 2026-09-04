@@ -166,6 +166,30 @@ class ShapeCodec(Protocol):
         ...
 
 
+def request_parameter_supported(
+    context: ShapeContext,
+    parameter: str,
+) -> bool:
+    """Return whether an endpoint accepts one optional generation parameter."""
+
+    normalized = str(parameter or "").strip().lower()
+    if not normalized:
+        return False
+    explicit = context.capabilities.get(f"supports_{normalized}")
+    if isinstance(explicit, bool):
+        return explicit
+    unsupported = context.capabilities.get("unsupported_request_parameters", ())
+    if isinstance(unsupported, str):
+        unsupported = (unsupported,)
+    if not isinstance(unsupported, (list, tuple, set, frozenset)):
+        return True
+    return normalized not in {
+        str(item or "").strip().lower()
+        for item in unsupported
+        if str(item or "").strip()
+    }
+
+
 class ShapeCodecBase:
     """Internal iterator codec shared by single-shot and streaming transports."""
 

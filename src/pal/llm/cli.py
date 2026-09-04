@@ -19,6 +19,31 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 
 DEFAULT_RUNTIME_ROOT = Path.home() / ".pal"
 _DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_EXACT_MODEL_ENDPOINT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "gpt-6-astra": {
+        "provider": "openai",
+        "display_name": "GPT-6 Astra",
+        "wire_shape": WireShape.OPENAI_RESPONSE.value,
+        "base_url": _OPENAI_BASE_URL,
+        "context_window": 1_050_000,
+        "max_output_tokens": 128_000,
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking_level": "medium",
+        "supports_vision": True,
+        "capabilities": {
+            "unsupported_request_parameters": [
+                "temperature",
+                "top_p",
+                "top_logprobs",
+            ],
+        },
+        "notes": (
+            "Official OpenAI Responses profile; disabled deployments can be "
+            "prepared before GPT-6 Astra API access is granted."
+        ),
+    },
+}
 
 
 def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
@@ -26,6 +51,7 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
         "examples:\n"
         "  pal llm list\n"
         "  pal llm add deepseek-v4-pro --store-api-key --set-active\n"
+        "  pal llm add gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled\n"
         "  pal llm delete deepseek-v4-pro"
     )
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
@@ -161,6 +187,7 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         raise ValueError(f"endpoint {endpoint_id!r} already exists; pass --replace to update it")
 
     model_id = _option(args.model_id, existing, "model_id", endpoint_id)
+    model_defaults = _model_endpoint_defaults(model_id)
     requested_provider = _option(args.provider, existing, "provider", "")
     requested_shape = _option(args.wire_shape, existing, "wire_shape", "")
     requested_base_url = _option(args.base_url, existing, "base_url", "")
@@ -186,6 +213,7 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
     default_level = str(
         args.default_thinking_level
         or _existing_value(existing, "default_thinking_level", "")
+        or model_defaults.get("default_thinking_level")
         or ("high" if "high" in levels else levels[0])
     ).strip().lower()
     if default_level not in levels:
@@ -195,19 +223,47 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
 
     supports_tools = _bool_option(args.tools, existing, "supports_tools", True)
     supports_streaming = _bool_option(args.streaming, existing, "supports_streaming", True)
-    supports_vision = _bool_option(args.vision, existing, "supports_vision", False)
+    supports_vision = _bool_option(
+        args.vision,
+        existing,
+        "supports_vision",
+        bool(model_defaults.get("supports_vision", False)),
+    )
     enabled = _bool_option(args.enabled, existing, "enabled", True)
+    same_model = existing is not None and str(existing.model_id) == str(model_id)
+    capabilities = (
+        dict(_existing_value(existing, "capabilities_blob", {}) or {})
+        if same_model
+        else {}
+    )
+    for name, value in dict(model_defaults.get("capabilities") or {}).items():
+        capabilities.setdefault(name, value)
     payload = {
         "endpoint_id": endpoint_id,
         "provider": provider,
         "model_id": model_id,
-        "display_name": _option(args.display_name, existing, "display_name", endpoint_id),
+        "display_name": _option(
+            args.display_name,
+            existing,
+            "display_name",
+            model_defaults.get("display_name", endpoint_id),
+        ),
         "wire_shape": wire_shape,
         "base_url": base_url,
         "auth_kind": auth_kind,
         "credential_ref": credential_ref,
-        "context_window": _option(args.context_window, existing, "context_window", None),
-        "max_output_tokens": _option(args.max_output_tokens, existing, "max_output_tokens", None),
+        "context_window": _option(
+            args.context_window,
+            existing,
+            "context_window",
+            model_defaults.get("context_window"),
+        ),
+        "max_output_tokens": _option(
+            args.max_output_tokens,
+            existing,
+            "max_output_tokens",
+            model_defaults.get("max_output_tokens"),
+        ),
         "thinking_levels_blob": levels,
         "default_thinking_level": default_level,
         "supports_tools": supports_tools,
@@ -217,8 +273,13 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         "output_modalities_blob": list(_existing_value(existing, "output_modalities_blob", ["text"]) or ["text"]),
         "priority": int(_option(args.priority, existing, "priority", 0)),
         "enabled": enabled,
-        "capabilities_blob": dict(_existing_value(existing, "capabilities_blob", {}) or {}),
-        "notes": _option(args.notes, existing, "notes", "Configured via pal llm add."),
+        "capabilities_blob": capabilities,
+        "notes": _option(
+            args.notes,
+            existing,
+            "notes",
+            model_defaults.get("notes", "Configured via pal llm add."),
+        ),
     }
     endpoint = repository.upsert(**payload)
     _store_api_key_if_requested(args, runtime_root, endpoint)
@@ -317,20 +378,28 @@ def _endpoint_identity_defaults(
     normalized_provider = str(provider or "").strip().lower()
     normalized_shape = str(wire_shape or "").strip()
     normalized_url = str(base_url or "").strip()
+    model_defaults = _model_endpoint_defaults(normalized_model)
     deepseek = normalized_provider == "deepseek" or normalized_model.lower().startswith("deepseek-") or "deepseek.com" in normalized_url.lower()
     if deepseek:
         normalized_provider = "deepseek"
         normalized_shape = normalized_shape or WireShape.ANTHROPIC_MESSAGES.value
         normalized_url = normalized_url or _DEEPSEEK_ANTHROPIC_BASE_URL
     else:
-        normalized_shape = normalized_shape or WireShape.OPENAI_COMPLETION.value
+        normalized_shape = normalized_shape or str(
+            model_defaults.get("wire_shape")
+            or WireShape.OPENAI_COMPLETION.value
+        )
         if not normalized_provider:
-            normalized_provider = "anthropic" if normalized_shape == WireShape.ANTHROPIC_MESSAGES.value else "openai"
+            normalized_provider = str(model_defaults.get("provider") or "") or (
+                "anthropic"
+                if normalized_shape == WireShape.ANTHROPIC_MESSAGES.value
+                else "openai"
+            )
         if not normalized_url:
             normalized_url = (
                 "https://api.anthropic.com"
                 if normalized_shape == WireShape.ANTHROPIC_MESSAGES.value
-                else "https://api.openai.com/v1"
+                else str(model_defaults.get("base_url") or _OPENAI_BASE_URL)
             )
     WireShape(normalized_shape)
     if not normalized_model:
@@ -341,12 +410,15 @@ def _endpoint_identity_defaults(
 
 
 def _thinking_levels(raw: str | None, *, existing: LLMEndpointModel | None, model_id: str) -> list[str]:
+    model_defaults = _model_endpoint_defaults(model_id)
     if raw is not None:
         candidates = [item.strip().lower() for item in str(raw).split(",")]
     elif existing is not None:
         candidates = [str(item).strip().lower() for item in (existing.thinking_levels_blob or ())]
     elif str(model_id).lower().startswith("deepseek-v4-"):
         candidates = ["off", "high", "max"]
+    elif model_defaults.get("thinking_levels"):
+        candidates = list(model_defaults["thinking_levels"])
     else:
         candidates = ["off"]
     allowed = {item.value for item in ThinkingLevel}
@@ -375,10 +447,20 @@ def _endpoint_payload(endpoint: LLMEndpointModel, *, active_endpoint_id: str | N
         "max_output_tokens": endpoint.max_output_tokens,
         "thinking_levels": list(endpoint.thinking_levels_blob or ()),
         "default_thinking_level": endpoint.default_thinking_level,
+        "supports_tools": bool(endpoint.supports_tools),
+        "supports_streaming": bool(endpoint.supports_streaming),
+        "supports_vision": bool(endpoint.supports_vision),
         "priority": int(endpoint.priority),
         "enabled": bool(endpoint.enabled),
         "active": endpoint.endpoint_id == active_endpoint_id,
+        "capabilities": dict(endpoint.capabilities_blob or {}),
     }
+
+
+def _model_endpoint_defaults(model_id: str) -> dict[str, Any]:
+    return dict(
+        _EXACT_MODEL_ENDPOINT_DEFAULTS.get(str(model_id or "").strip().lower(), {})
+    )
 
 
 def _add_runtime_root(parser: argparse.ArgumentParser) -> None:

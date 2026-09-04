@@ -35,6 +35,8 @@ Invariants:
 - provider is credential/display/telemetry identity and may select only a
   response-syntax normalizer; it never selects request semantics or a codec
 - the validated endpoint row is the only thinking-level truth source
+- endpoint-declared unsupported request parameters are omitted by codecs while
+  the provider-neutral generation policy remains unchanged
 - exact-model hooks can modify only messages and tool definitions
 - provider response hooks decorate the codec-owned response-update iterator
   and can only normalize updates into the same immutable IR; malformed

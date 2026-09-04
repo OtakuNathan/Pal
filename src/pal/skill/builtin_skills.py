@@ -264,7 +264,18 @@ Create or update endpoint metadata only after checking the existing endpoint lis
 - `auth_kind`: `api_key_ref`, `oauth`, or `local_provider_auth`.
 - `credential_ref`: secret reference such as `my_provider:api-key`; never store the key in the model hook.
 - capability flags: `supports_tools`, `supports_streaming`, `supports_vision`, and optional `capabilities_blob`.
+- models that reject ordinary sampling controls declare them in `capabilities_blob.unsupported_request_parameters`; codecs omit those fields without changing Core policy.
 - `thinking_levels_blob` and `default_thinking_level`: explicit endpoint-supported enum values.
+
+## Official GPT-6 Astra Profile
+
+Prepare Astra without activating it:
+
+```text
+pal llm add gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled
+```
+
+The exact-model preset uses OpenAI Responses, the official 1,050,000-token context and 128,000-token output limits, vision/tool/stream support, reasoning levels `low`, `medium`, `high`, `xhigh`, and `max`, and omits unsupported `temperature`, `top_p`, and `top_logprobs` request parameters. Keep the endpoint disabled until API access and credentials are available; enabling or selecting it remains an explicit operator action.
 
 Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoint-management capability exists. Mutating the production database or secrets requires explicit user approval.
 
