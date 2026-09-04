@@ -6,6 +6,7 @@ import random
 import sqlite3
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol

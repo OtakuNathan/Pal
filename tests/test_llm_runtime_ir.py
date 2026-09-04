@@ -237,6 +237,29 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
 
 
 class LLMRuntimeIRTests(unittest.TestCase):
+    def test_detached_stream_retirement_suppresses_task_failure(self) -> None:
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(_endpoint(),)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=_Invoker(),
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+
+        async def retire_failed_task() -> None:
+            async def fail() -> None:
+                raise RuntimeError("detached stream failed")
+
+            task = asyncio.create_task(fail())
+            with self.assertRaises(RuntimeError):
+                await task
+            runtime._detached_stream_tasks.add(task)
+
+            runtime._retire_detached_stream_task(task)
+
+            self.assertNotIn(task, runtime._detached_stream_tasks)
+
+        asyncio.run(retire_failed_task())
+
     def test_prepared_cache_replay_does_not_apply_model_hooks_twice(self) -> None:
         endpoint = _endpoint()
         runtime = LLMRuntime(
