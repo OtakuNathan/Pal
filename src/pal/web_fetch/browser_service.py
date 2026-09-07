@@ -729,10 +729,17 @@ class _PlaywrightCliWorker:
             raw = self._run(record, argv, timeout_ms=timeout_ms, raw=True)
             max_chars = max(200, min(100000, int(args.get("max_chars") or 20000)))
             value = _parse_lenient_json(raw)
-            truncated = isinstance(value, str) and len(value) > max_chars
-            if truncated:
-                value = value[:max_chars]
-            return {"result": value, "result_type": type(value).__name__, "truncated": truncated}
+            result_type = type(value).__name__
+            preview = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            truncated = len(preview) > max_chars
+            result = {
+                "result": preview[:max_chars] if truncated else value,
+                "result_type": result_type,
+                "truncated": truncated,
+            }
+            if truncated and not isinstance(value, str):
+                result["result_format"] = "json_preview"
+            return result
         if action == "network":
             operation = str(args.get("operation") or "read").lower()
             if operation == "start":
@@ -1040,7 +1047,12 @@ def _network_start_script() -> str:
   }
   const log = [];
   window.__palNetLog = log;
-  const push = entry => { try { log.push(entry); if (log.length > 800) log.splice(0, log.length - 800); } catch (err) {} };
+  window.__palNetSequence = 0;
+  const push = entry => { try {
+    entry.sequence = ++window.__palNetSequence;
+    log.push(entry);
+    if (log.length > 800) log.splice(0, log.length - 800);
+  } catch (err) {} };
   const headersOf = headers => {
     const out = {};
     try {
@@ -1097,18 +1109,26 @@ def _network_read_script(*, url_filter: str, since: int, limit: int, clear: bool
   const args = {args};
   const log = window.__palNetLog;
   if (!log) return {{hooked: false, entries: [], note: 'hook not installed; run network start after navigation'}};
-  let entries = log.slice(Math.max(0, args.since));
+  const latest = window.__palNetSequence || 0;
+  const oldest_available = log.length ? log[0].sequence : latest + 1;
+  const cursor_expired = args.since > 0 && args.since < oldest_available - 1;
+  let entries = log.filter(entry => entry.sequence > args.since);
   if (args.filter) entries = entries.filter(entry => String(entry.url || '').indexOf(args.filter) !== -1);
   const total_matching = entries.length;
   const truncated = entries.length > args.limit;
   entries = entries.slice(0, args.limit);
-  if (args.clear) window.__palNetLog = [];
-  return {{hooked: true, entries: entries, returned: entries.length, total_matching: total_matching, truncated: truncated, next_since: args.clear ? 0 : log.length, cleared: !!args.clear}};
+  const next_since = truncated ? entries[entries.length - 1].sequence : Math.max(args.since, latest);
+  // Consume only the scanned prefix, preserving entries on subsequent pages.
+  if (args.clear) {{
+    const first_unread = log.findIndex(entry => entry.sequence > next_since);
+    log.splice(0, first_unread < 0 ? log.length : first_unread);
+  }}
+  return {{hooked: true, entries: entries, returned: entries.length, total_matching: total_matching, truncated: truncated, next_since: next_since, cleared: !!args.clear, oldest_available: oldest_available, cursor_expired: cursor_expired}};
 }})())"""
 
 
 def _network_clear_script() -> str:
-    return "() => JSON.stringify((() => { const count = (window.__palNetLog || []).length; window.__palNetLog = []; return {cleared: count}; })())"
+    return "() => JSON.stringify((() => { const log = window.__palNetLog || []; const count = log.length; log.length = 0; return {cleared: count, next_since: window.__palNetSequence || 0}; })())"
 
 
 def _cli_args(command: str, *positionals: str, options: list[str] | None = None) -> list[str]:

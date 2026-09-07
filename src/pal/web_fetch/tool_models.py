@@ -130,7 +130,7 @@ BrowserEvaluateInput = _strict_model(
     {
         "func": (str, Field(...)),
         "target": (str | None, Field(None)),
-        "max_chars": (int, Field(20000)),
+        "max_chars": (int, Field(20000, description="Result character budget. Oversized objects/arrays return a JSON text preview with truncated=true and their original result_type.")),
         "timeout_ms": (int, Field(15000)),
     },
 )
@@ -139,9 +139,9 @@ BrowserNetworkInput = _strict_model(
     {
         "operation": (Literal["start", "read", "clear"], Field("read")),
         "url_filter": (str | None, Field(None)),
-        "since": (int, Field(0)),
+        "since": (int, Field(0, description="Exclusive sequence cursor: pass next_since from the previous read. Reset to 0 after navigation.")),
         "limit": (int, Field(50)),
-        "clear_on_read": (bool, Field(False)),
+        "clear_on_read": (bool, Field(False, description="Discard the scanned prefix through next_since, including nonmatching entries; preserve subsequent pages.")),
         "timeout_ms": (int, Field(15000)),
     },
 )
