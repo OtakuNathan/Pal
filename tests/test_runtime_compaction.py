@@ -235,6 +235,27 @@ def _memory_with_turns(count: int = 4) -> MemoryService:
     return service
 
 
+
+def _attach_hot_cache(llm, service):
+    service.begin_l1_turn("cached-turn", user_text="cached request")
+    anchor = service.active_l1_turn("cached-turn").messages[0]
+    service.upsert_l1_assistant(
+        "cached-turn", LLMMessageIR(role=MessageRole.ASSISTANT, parts=(TextPartIR("cached reply"),)),
+    )
+    service.settle_l1_turn("cached-turn")
+    cached_request = LLMRequestIR(
+        messages=(replace(anchor, prompt_region=PromptRegionIR.ACTIVE_INPUT),),
+        tools=(), policy=GenerationPolicyIR(max_output_tokens=1024),
+        model_hint="gpt-5.6-luna", logical_scope_id="pal:resident",
+    )
+    live = {"eligible": True, "anchor_epoch": "epoch-a", "anchor_remaining_ttl_seconds": 1800}
+    llm.prompt_cache_warm_deadline_snapshot = lambda: live
+    llm.prompt_cache_confirmed_anchor_request = lambda **kwargs: {
+        "request": cached_request, "anchor_message_id": anchor.message_id,
+        "dialect": "openrouter_openai_explicit", "wire_shape": "openai_response",
+    }
+    return live
+
 def _snapshot(
     service: MemoryService,
     *,
@@ -1855,6 +1876,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             "source_excerpt": "duplicate click",
         }
         llm = _PurposeAwareLLM(memory_candidates=[candidate])
+        _attach_hot_cache(llm, service)
         core.context.port_registry["llm:llm"] = llm
         statuses: list[tuple[str, dict[str, object]]] = []
         claimed_epochs: list[str] = []

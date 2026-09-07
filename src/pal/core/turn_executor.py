@@ -1748,6 +1748,7 @@ class TurnExecutor:
         preferred_model_id: str | None = None,
         max_attempts: int | None = None,
         timeout_seconds: float | None = None,
+        cache_epoch: str = "",
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -1911,11 +1912,27 @@ class TurnExecutor:
                     )
 
             after_compact = retire_compacted_l1_results
+
+        def replay_guard() -> bool:
+            reader = getattr(llm_runtime, "prompt_cache_warm_deadline_snapshot", None)
+            if not callable(reader):
+                return False
+            try:
+                current = dict(reader() or {})
+                return bool(
+                    current.get("eligible")
+                    and str(current.get("anchor_epoch") or "") == cache_epoch
+                    and int(current.get("anchor_remaining_ttl_seconds") or 0) > 0
+                )
+            except Exception:
+                return False
+
         run_result = await engine.run(
             snapshot,
             llm_runtime=llm_runtime,
             memory_service=memory_service,
             after_commit=after_compact,
+            replay_guard=replay_guard if cache_epoch else None,
         )
         if not run_result.success or continuation is None:
             return run_result

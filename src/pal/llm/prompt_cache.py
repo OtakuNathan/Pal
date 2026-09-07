@@ -654,6 +654,7 @@ class PromptCacheCoordinator:
                     if eligible
                     else ""
                 ),
+                "context_tokens": max(prefix_tokens, plan.estimated_prefix_tokens),
                 "anchor_ttl": plan.anchor.ttl,
                 "anchor_ttl_seconds": ttl_seconds,
                 "anchor_remaining_ttl_seconds": remaining_ttl_seconds,

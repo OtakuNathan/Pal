@@ -65,6 +65,7 @@ def _snapshot(epoch: str = "epoch-a") -> dict[str, object]:
         "anchor_epoch": epoch,
         "anchor_ttl": "90s",
         "anchor_ttl_seconds": 90,
+        "anchor_remaining_ttl_seconds": 90,
         "prefix_tokens": 50_000,
         "dialect": "openai_responses_explicit",
     }

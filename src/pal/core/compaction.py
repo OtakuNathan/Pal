@@ -198,6 +198,7 @@ class CompactionEngine:
         llm_runtime: Any,
         memory_service: Any,
         after_commit: Callable[[], None] | None = None,
+        replay_guard: Callable[[], bool] | None = None,
     ) -> CompactionRunResult:
         snapshot = await _with_compaction_output_limit(
             snapshot,
@@ -212,7 +213,17 @@ class CompactionEngine:
         validation_error = ""
         consecutive_schema_failures = 0
 
+        def hot_replay_unavailable() -> bool:
+            return replay_guard is not None and (
+                snapshot.replay_request is None or not replay_guard()
+            )
+
         while attempts < max(1, int(self.max_attempts or 1)):
+            if hot_replay_unavailable():
+                return self._result(
+                    snapshot, status="hot_cache_unavailable", attempts=attempts,
+                    source_sizes=source_sizes, failures=failures,
+                )
             source = (
                 ""
                 if snapshot.replay_request is not None
@@ -257,6 +268,13 @@ class CompactionEngine:
                 retained = shrunk
                 continue
 
+            # Preflight may await provider work. Recheck immediately before
+            # every model attempt, including retries; never silently go cold.
+            if hot_replay_unavailable():
+                return self._result(
+                    snapshot, status="hot_cache_unavailable", attempts=attempts,
+                    source_sizes=source_sizes, failures=failures,
+                )
             source_sizes.append(len(source))
             attempts += 1
             try:

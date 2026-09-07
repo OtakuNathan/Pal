@@ -139,27 +139,23 @@ class CacheWarmDeadlineManager:
         settings = self.settings()
         snapshot = dict(self.cache_snapshot() or {})
         epoch = str(snapshot.get("anchor_epoch") or "").strip()
+        # The idle reminder starts at the completed conversation interaction.
+        # Actual cache availability is checked independently before execution.
+        ttl_seconds = max(0, int(snapshot.get("anchor_ttl_seconds") or 0))
         remaining_ttl = snapshot.get("anchor_remaining_ttl_seconds")
-        ttl_seconds = max(
-            0,
-            int(
-                remaining_ttl
-                if remaining_ttl is not None
-                else snapshot.get("anchor_ttl_seconds") or 0
-            ),
-        )
-        prefix_tokens = max(0, int(snapshot.get("prefix_tokens") or 0))
+        prefix_tokens = _context_tokens(snapshot)
         if (
             not settings.enabled
             or not bool(snapshot.get("eligible"))
             or not epoch
-            or ttl_seconds <= settings.lead_seconds
+            or ttl_seconds <= 0
+            or (remaining_ttl is not None and int(remaining_ttl) <= 0)
             or prefix_tokens < settings.min_prefix_tokens
             or epoch == self._notified_epoch
             or epoch == self._ignored_epoch
         ):
             return False
-        delay_seconds = ttl_seconds - settings.lead_seconds
+        delay_seconds = max(0, ttl_seconds - settings.lead_seconds)
         self._generation += 1
         generation = self._generation
         self._scheduled_epoch = epoch
@@ -248,6 +244,18 @@ class CacheWarmDeadlineManager:
             or self._consumed_epoch == normalized
         ):
             return False
+        snapshot = dict(self.cache_snapshot() or {})
+        settings = self.settings()
+        if (
+            self.has_active_turn()
+            or not settings.enabled
+            or datetime.now(timezone.utc) >= datetime.fromisoformat(notice.expires_at)
+            or not bool(snapshot.get("eligible"))
+            or str(snapshot.get("anchor_epoch") or "") != normalized
+            or int(snapshot.get("anchor_remaining_ttl_seconds") or 0) <= 0
+            or _context_tokens(snapshot) < settings.min_prefix_tokens
+        ):
+            return False
         self._consumed_epoch = normalized
         # The action now owns the interaction lifecycle.  Cancel the TTL task
         # without expiring the message so its pending/final updates can reuse
@@ -328,8 +336,7 @@ class CacheWarmDeadlineManager:
                     remaining_ttl is not None
                     and int(remaining_ttl) <= 0
                 )
-                or int(snapshot.get("prefix_tokens") or 0)
-                < settings.min_prefix_tokens
+                or _context_tokens(snapshot) < settings.min_prefix_tokens
                 or epoch in {self._ignored_epoch, self._notified_epoch}
             ):
                 return
@@ -339,10 +346,7 @@ class CacheWarmDeadlineManager:
                 turn_id=turn_id,
                 ttl_seconds=ttl_seconds,
                 lead_seconds=lead_seconds,
-                prefix_tokens=max(
-                    0,
-                    int(snapshot.get("prefix_tokens") or prefix_tokens),
-                ),
+                prefix_tokens=_context_tokens(snapshot),
                 expires_at=expires_at.isoformat(),
             )
             if await self.deliver_notice(notice):
@@ -395,3 +399,7 @@ def _setting_int(
         return max(minimum, int(value)) if value is not None else int(default)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _context_tokens(snapshot: Mapping[str, Any]) -> int:
+    return max(0, int(snapshot.get("context_tokens", snapshot.get("prefix_tokens", 0)) or 0))

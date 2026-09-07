@@ -1533,6 +1533,12 @@ class PalCore:
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
+        if self.turn_manager.latest_active_turn_id() is not None:
+            await self._complete_compact_reply_async(
+                action,
+                "Compaction is unavailable while a conversation turn is active. Try again after the current turn finishes.",
+            )
+            return
         cache_epoch = str(action.args.get("cache_epoch") or "").strip()
         if cache_epoch:
             if not self.cache_warm_deadline.claim_compaction(cache_epoch):
@@ -1569,12 +1575,18 @@ class PalCore:
             memory_service,
             target_input_budget=8192,
             reserved_output_tokens=4096,
+            max_attempts=3 if cache_epoch else None,
+            cache_epoch=cache_epoch,
         )
         if not run_result.success:
-            await self._complete_compact_reply_async(
-                action,
-                "Compaction failed - memory state was left unchanged.",
-            )
+            message = "Compaction failed - memory state was left unchanged."
+            if cache_epoch:
+                message = (
+                    "热缓存已失效或无法复用，已停止自动尝试。原上下文保留，请按需手动 compact。"
+                    if run_result.status == "hot_cache_unavailable"
+                    else f"Compact 未完成（已尝试 {run_result.attempts} 次）。原上下文保留，请稍后手动 compact。"
+                )
+            await self._complete_compact_reply_async(action, message)
             return
         result = run_result.memory_result
         entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
