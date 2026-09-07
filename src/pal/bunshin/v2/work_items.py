@@ -450,6 +450,8 @@ def add_finding_tool_result(
 
 
 def assert_work_items_complete(workspace: Mapping[str, Any]) -> dict[str, Any]:
+    from pal.bunshin.v2.submission_errors import SubmissionValidationError
+
     ledger = read_work_items(workspace)
     required_seed = [
         str(item.get("summary") or "")
@@ -463,7 +465,7 @@ def assert_work_items_complete(workspace: Mapping[str, Any]) -> dict[str, Any]:
     }
     missing = [summary for summary in required_seed if summary not in present]
     if missing:
-        raise ValueError(
+        raise SubmissionValidationError(
             "checklist dropped Manager-routed work items: "
             + "; ".join(missing)
         )
@@ -473,14 +475,14 @@ def assert_work_items_complete(workspace: Mapping[str, Any]) -> dict[str, Any]:
         if str(item.get("kind") or "") in {"phase", "task"}
     ]
     if not planned:
-        raise ValueError("initialize update_checklist before submitting")
+        raise SubmissionValidationError("initialize update_checklist before submitting")
     unfinished = [
         str(item.get("summary") or "")
         for item in planned
         if str(item.get("status") or "") != "completed"
     ]
     if unfinished:
-        raise ValueError(
+        raise SubmissionValidationError(
             "complete every checklist item before submitting: "
             + "; ".join(unfinished)
         )

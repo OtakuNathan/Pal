@@ -3434,7 +3434,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(runner.agent_calls, 2)
         self.assertEqual(runner.blocked_kind, "completion_gate_stalled")
-        self.assertIn("made no capability or artifact progress", runner.blocked_summary)
+        self.assertIn("made no checklist, finding, or artifact content progress", runner.blocked_summary)
 
     def test_snapshot_rejection_becomes_the_latest_architect_instruction(self) -> None:
         instruction = _contract_architect_instruction(

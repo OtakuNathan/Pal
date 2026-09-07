@@ -397,14 +397,39 @@ class SubmissionDraftStore:
         if self._role_gateway is not None:
             if not isinstance(submission_payload, Mapping):
                 raise ValueError("remote submission requires its compiled JSON payload")
-            return dict(self._role_gateway.request_sync(
-                "draft_submit",
-                {
-                    "context": context.to_dict(),
-                    "expected_version": int(expected_version),
-                    "submission": dict(submission_payload),
-                },
-            ))
+            try:
+                return dict(self._role_gateway.request_sync(
+                    "draft_submit",
+                    {
+                        "context": context.to_dict(),
+                        "expected_version": int(expected_version),
+                        "submission": dict(submission_payload),
+                    },
+                ))
+            except Exception as exc:
+                from pal.bunshin.ipc import BunshinManagerRpcError
+
+                if isinstance(exc, BunshinManagerRpcError) and exc.kind == "submission_validation":
+                    raise
+                # A lost reply does not undo a durable Manager receipt. Query only;
+                # never replay the submit while its outcome remains uncertain.
+                try:
+                    status = self._role_gateway.request_sync("submission_status", {})
+                except Exception:
+                    status = {}
+                if (
+                    status.get("recorded")
+                    and status.get("submission_artifact_ref")
+                    and status.get("submission_payload_hash")
+                ):
+                    return {
+                        "submitted": True,
+                        "receipt_confirmed": True,
+                        "submission_artifact_ref": dict(status["submission_artifact_ref"]),
+                        "submission_payload_hash": str(status["submission_payload_hash"]),
+                    }
+                raise
+
         self._ensure_schema()
         artifact_ref = dict(submission_artifact_ref or {})
         payload_hash = str(submission_payload_hash or "")

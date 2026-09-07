@@ -5,7 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.execution.tool_facade import EmptyToolInput, rejection
+from pal.execution.tool_facade import EmptyToolInput
 from pal.bunshin.v2.contract_protocol import (
     ARCHITECT_FILENAME,
     read_architect_yaml,
@@ -17,6 +17,9 @@ from pal.bunshin.v2.submission_drafts import (
 from pal.bunshin.v2.workspace_paths import MANAGER_ARCHITECT_DIRECTORY
 from pal.bunshin.v2.work_items import assert_work_items_complete
 from pal.shared import RuntimeStatus, ToolExecutionResult
+from pal.bunshin.v2.submission_errors import (
+    SubmissionValidationError, submission_error_result, submission_validation,
+)
 
 
 CONTRACT_SUBMIT_CAPABILITY = "op_bunshin_contract_submit"
@@ -34,6 +37,8 @@ CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
             "known schema or graph defect."
         ),
         "failure_next_steps": (
+            "Follow the returned error category. For infrastructure or uncertain-outcome "
+            "failures, preserve content and let the runtime recover/reconcile. For validation errors: "
             "Correct all reported checklist, schema, graph, and bound-file defects in "
             "place, then retry once the submitted contract is mechanically valid."
         ),
@@ -78,9 +83,10 @@ def contract_submit_tool_result(
     call: ToolCallIR,
     workspace: Mapping[str, Any],
 ) -> ToolExecutionResult:
+    submission_started = False
     try:
         if dict(call.args or {}):
-            raise ValueError("contract_submit takes no arguments")
+            raise SubmissionValidationError("contract_submit takes no arguments")
         assert_work_items_complete(workspace)
         context = SubmissionDraftContext.from_workspace(
             workspace,
@@ -92,12 +98,14 @@ def contract_submit_tool_result(
                 "contract_submit requires the assignment-scoped Manager gateway"
             )
         snapshot = store.read(context, seed={})
-        payload = {
-            "source": ARCHITECT_FILENAME,
-            "architecture": read_architect_yaml(
-                architect_path(workspace)
-            ),
-        }
+        with submission_validation():
+            payload = {
+                "source": ARCHITECT_FILENAME,
+                "architecture": read_architect_yaml(
+                    architect_path(workspace)
+                ),
+            }
+        submission_started = True
         result = store.mark_submitted(
             context,
             expected_version=snapshot.version,
@@ -117,30 +125,10 @@ def contract_submit_tool_result(
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        text = f"{exc.__class__.__name__}: {exc}"
-        llm_text = (
-            text
-            + " Correct all reported contract/checklist defects before retrying."
-        )
-        return ToolExecutionResult(
-            name=call.name,
-            ok=False,
-            text=text,
-            llm_text=llm_text,
-            structured={
-                "error": str(exc),
-                "error_type": exc.__class__.__name__,
-            },
-            call_id=call.call_id,
-            status=RuntimeStatus.INVALID,
-            invocation_result=rejection(
-                "invalid_contract_submission",
-                llm_text,
-                details={
-                    "error": str(exc),
-                    "error_type": exc.__class__.__name__,
-                },
-            ),
+        return submission_error_result(
+            call, exc, submission_started=submission_started,
+            invalid_code="invalid_contract_submission",
+            correction="Correct the reported contract/checklist defects before retrying.",
         )
 
 

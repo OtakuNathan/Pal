@@ -636,7 +636,8 @@ class WorkItemProtocolTests(unittest.TestCase):
         )
         self.assertFalse(submitted.ok)
         self.assertIn("Manager gateway", submitted.llm_text)
-        self.assertEqual(submitted.invocation_result.kind, "rejected")
+        self.assertEqual(submitted.invocation_result.kind, "failed")
+        self.assertEqual(submitted.structured["error_category"], "submission_infrastructure_error")
 
     def test_invalid_checklist_is_a_pre_effect_rejection(self) -> None:
         invalid = update_checklist_tool_result(

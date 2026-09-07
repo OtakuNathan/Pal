@@ -5,7 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.execution.tool_facade import EmptyToolInput, rejection
+from pal.execution.tool_facade import EmptyToolInput
 from pal.bunshin.v2.review_findings import partition_findings
 from pal.bunshin.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -17,6 +17,9 @@ from pal.bunshin.v2.work_items import (
     submission_work_items,
 )
 from pal.shared import RuntimeStatus, ToolExecutionResult
+from pal.bunshin.v2.submission_errors import (
+    SubmissionValidationError, submission_error_result,
+)
 
 
 REVIEW_SUBMIT_CAPABILITY = "op_bunshin_review_submit"
@@ -34,6 +37,8 @@ REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
             "Markdown verdict, or treat a blocking p2 finding as PASS."
         ),
         "failure_next_steps": (
+            "Follow the returned error category. For infrastructure or uncertain-outcome "
+            "failures, preserve content and let the runtime recover/reconcile. For validation errors: "
             "Complete or correct the checklist and structured findings reported by the "
             "rejection, then submit again without inventing a separate verdict."
         ),
@@ -49,9 +54,10 @@ def review_submit_tool_result(
     call: ToolCallIR,
     workspace: Mapping[str, Any],
 ) -> ToolExecutionResult:
+    submission_started = False
     try:
         if dict(call.args or {}):
-            raise ValueError("review_submit takes no arguments")
+            raise SubmissionValidationError("review_submit takes no arguments")
         ledger = assert_work_items_complete(workspace)
         findings = findings_from_work_items(workspace)
         blocking, advisories = partition_findings(findings)
@@ -78,6 +84,7 @@ def review_submit_tool_result(
             "advisories": advisories,
             "work_items": submission_work_items(ledger["items"]),
         }
+        submission_started = True
         result = store.mark_submitted(
             context,
             expected_version=snapshot.version,
@@ -98,24 +105,10 @@ def review_submit_tool_result(
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        text = f"{exc.__class__.__name__}: {exc}"
-        llm_text = f"{text} Complete the audit/checklist and retry."
-        return ToolExecutionResult(
-            name=call.name,
-            ok=False,
-            text=text,
-            llm_text=llm_text,
-            structured={"error": str(exc), "error_type": exc.__class__.__name__},
-            call_id=call.call_id,
-            status=RuntimeStatus.INVALID,
-            invocation_result=rejection(
-                "invalid_review_submission",
-                llm_text,
-                details={
-                    "error": str(exc),
-                    "error_type": exc.__class__.__name__,
-                },
-            ),
+        return submission_error_result(
+            call, exc, submission_started=submission_started,
+            invalid_code="invalid_review_submission",
+            correction="Complete or correct the reported audit/checklist/findings defects before retrying.",
         )
 
 

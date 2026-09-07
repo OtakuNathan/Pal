@@ -48,6 +48,7 @@ from pal.bunshin.v2.recovery import BunshinV2Recovery
 from pal.bunshin.v2.service import BunshinV2WorkflowService
 from pal.bunshin.v2.semantic_orchestration import SemanticOrchestrator
 from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
+from pal.bunshin.v2.submission_errors import role_gateway_error_kind
 from pal.shared import BunshinApprovalDecision, BunshinInvocationPack, RuntimeStatus
 from pal.shared.json_values import thaw_json
 
@@ -553,7 +554,7 @@ class BunshinManager:
                         await dispatch_sidecar_request(
                             request,
                             self._call_worker_method,
-                            error_kind=lambda _exc: "role_gateway",
+                            error_kind=role_gateway_error_kind,
                             logger=self.logger,
                         )
                     )

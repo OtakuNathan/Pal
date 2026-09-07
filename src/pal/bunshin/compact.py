@@ -26,14 +26,22 @@ BUNSHIN_COMPACTION_SYSTEM_PROMPT = (
     '- "kind": "bunshin"\n'
     '- "continuity": an object containing all five fields below\n'
     '- "summary": {"summary": non-empty string, "search_text": non-empty string}\n'
-    "continuity fields:\n"
-    "- technical_route: current technical route and the evidence-based reason for it.\n"
-    "- active_work: current goal, concrete file/symbol target, action, and status.\n"
-    "- active_errors: symptom, latest evidence, and current hypothesis.\n"
-    "- active_issues: issue, known facts, status, and paths already excluded.\n"
-    "- next_actions: next concrete action, target, and expected result.\n"
-    "Every continuity field is an array. Every item must contain exactly the keys named above; empty arrays are valid.\n"
-    'Valid minimal example: {"schema":"pal.compaction.bunshin.v3","kind":"bunshin","continuity":{"technical_route":[],"active_work":[],"active_errors":[],"active_issues":[],"next_actions":[]},"summary":{"summary":"No active work remains.","search_text":"no active work"}}\n'
+    "continuity fields (arrays of objects with exactly these required keys):\n"
+    '- technical_route[]: {"route": string, "rationale": string} — current technical route and its evidence-based reason.\n'
+    '- active_work[]: {"goal": string, "target": string, "action": string, "status": string} — current work and exact file/symbol target.\n'
+    '- active_errors[]: {"symptom": string, "latest_evidence": string, "current_hypothesis": string} — observed error and current hypothesis.\n'
+    '- active_issues[]: {"issue": string, "known_facts": string[], "status": string, "excluded_paths": string[]} — unresolved issue and already excluded approaches.\n'
+    '- next_actions[]: {"action": string, "target": string, "expected_result": string} — next concrete action.\n'
+    "All string values must be non-empty. known_facts and excluded_paths are arrays of non-empty strings; empty arrays are valid. "
+    "All five continuity arrays are required and may be empty. Do not add or rename keys.\n"
+    'Valid non-empty example (shape only; never copy example facts into the checkpoint): '
+    '{"schema":"pal.compaction.bunshin.v3","kind":"bunshin","continuity":'
+    '{"technical_route":[{"route":"Retain the existing queue owner","rationale":"The public contract assigns shutdown to that owner."}],'
+    '"active_work":[{"goal":"Close shutdown semantics","target":"include/queue.hpp","action":"Revise the public declaration","status":"in progress"}],'
+    '"active_errors":[{"symptom":"Consumer cannot observe completion","latest_evidence":"The declaration has no completion result","current_hypothesis":"The public handoff is incomplete"}],'
+    '"active_issues":[{"issue":"Shutdown completion handoff","known_facts":["Queue owns the worker"],"status":"open","excluded_paths":["Moving worker ownership to the caller"]}],'
+    '"next_actions":[{"action":"Declare completion observation","target":"include/queue.hpp","expected_result":"Consumer can distinguish requested shutdown from completed shutdown"}]},'
+    '"summary":{"summary":"Shutdown completion handoff remains open.","search_text":"queue.hpp shutdown completion"}}\n'
     "Do not emit memory_candidates. Do not include hidden reasoning, internal deliberation, chain-of-thought, or a prose replay of the role assignment.\n"
     "Record failed, rejected, and unknown-effect tool work accurately; do not claim its side effects succeeded.\n"
     "Closed tool batches may be compressed into verified work state. Never invent a tool result.\n"

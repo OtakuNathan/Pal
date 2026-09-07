@@ -514,7 +514,7 @@ class BunshinRunner:
         while True:
             await self._raise_if_cancel_requested()
             await self._raise_if_restart_requested()
-            progress_before = self._completion_gate_progress_marker()
+            progress_before = await asyncio.to_thread(self._completion_gate_progress_marker)
             final_text = await self._run_agent_loop(bundle, forced_retry_note=retry_note)
             await self._raise_if_cancel_requested()
             await self._raise_if_restart_requested()
@@ -523,12 +523,12 @@ class BunshinRunner:
                 return 0
             if not self._required_primary_artifact_name() or self._completion_evidence_present():
                 break
-            progress_after = self._completion_gate_progress_marker()
+            progress_after = await asyncio.to_thread(self._completion_gate_progress_marker)
             if retry_note and progress_after == progress_before:
                 self.blocked_kind = "completion_gate_stalled"
                 self.blocked_summary = (
                     "completion gate stalled: the required primary artifact is still absent after explicit "
-                    "submit feedback, and the worker made no capability or artifact progress"
+                    "submit feedback, and the worker made no checklist, finding, or artifact content progress"
                 )
                 await self._emit_progress(
                     "completion_gate_stalled",
@@ -554,29 +554,52 @@ class BunshinRunner:
         )
         return 0
 
-    def _completion_gate_progress_marker(self) -> tuple[int, tuple[tuple[str, str], ...]]:
-        checkpoint_state = dict(
-            self._agent_session_checkpoint.get("coroutine_state") or {}
+    def _completion_gate_progress_marker(self) -> str:
+        """Observe semantic state, excluding RPC counts and ledger bookkeeping.
+
+        Read failures propagate: unavailable evidence must not be mistaken for
+        unchanged work. The caller runs this observation outside the event loop.
+        """
+        from pal.bunshin.v2.work_items import read_work_items
+
+        workspace = dict(self.pack.workspace or {})
+        binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
+        binding.update(dict(workspace.get("bunshin_v2") or {}))
+        workspace.update(
+            runtime_root=str(self.runtime_root),
+            invocation_id=self.pack.invocation_id,
+            bunshin_v2=binding,
         )
-        tool_call_count = max(
-            self._observed_tool_call_count,
-            int(checkpoint_state.get("tool_call_count") or 0),
-        )
-        artifacts = tuple(
-            sorted(
-                (
-                    str(item.get("role") or ""),
-                    str(
-                        item.get("relative_path")
-                        or item.get("requested_relative_path")
-                        or item.get("path")
-                        or ""
-                    ),
-                )
-                for item in self.produced_artifacts
-            )
-        )
-        return tool_call_count, artifacts
+        items = []
+        if binding.get("role"):
+            ledger = read_work_items(workspace)
+            items = [
+                {key: item.get(key) for key in ("kind", "summary", "status", "finding")}
+                for item in ledger["items"]
+            ]
+        # Observe only explicitly bound/registered outputs, never scan the repo.
+        paths = {
+            str(item.get("stage_path") or item.get("path") or "")
+            for item in self.produced_artifacts
+        }
+        if workspace.get("architect_path"):
+            paths.add(str(workspace["architect_path"]))
+        artifacts = []
+        for raw_path in sorted(paths - {""}):
+            path = Path(raw_path)
+            try:
+                with path.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            except FileNotFoundError:
+                digest = "missing"
+            artifacts.append((raw_path, digest))
+        payload = {
+            "items": sorted(items, key=lambda item: json.dumps(item, sort_keys=True)),
+            "artifacts": artifacts,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
 
     def _missing_completion_evidence_feedback(self) -> str:
         primary = self._required_primary_artifact_name()

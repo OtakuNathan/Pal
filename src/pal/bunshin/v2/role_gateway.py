@@ -52,6 +52,8 @@ from pal.bunshin.v2.work_items import (
     submission_work_items,
 )
 
+from pal.bunshin.v2.submission_errors import SubmissionValidationError, submission_validation
+
 ROLE_SUBMISSION_ARTIFACT_TYPES = {
     "architecture_review": "ArchitectureReviewRoleSubmissionArtifact",
     "candidate": "CandidateRoleSubmissionArtifact",
@@ -249,7 +251,14 @@ class RoleAssignmentGateway:
         } and bool(assignment.get("submission_artifact_ref")) and bool(
             assignment.get("submission_payload_hash")
         )
-        return {"recorded": recorded, "state": state}
+        return {
+            "recorded": recorded,
+            "state": state,
+            **({
+                "submission_artifact_ref": dict(assignment["submission_artifact_ref"]),
+                "submission_payload_hash": str(assignment["submission_payload_hash"]),
+            } if recorded else {}),
+        }
 
     def _draft_read(
         self,
@@ -306,7 +315,7 @@ class RoleAssignmentGateway:
         context = self._context(authenticated, params)
         submission = params.get("submission")
         if not isinstance(submission, Mapping):
-            raise ValueError("role submission must be a JSON object")
+            raise SubmissionValidationError("role submission must be a JSON object")
         payload = dict(submission)
         if context.draft_kind == "contract":
             payload = self._compile_architect_submission(
@@ -489,16 +498,16 @@ class RoleAssignmentGateway:
 
         payload = dict(submission)
         if set(payload) != {"source", "architecture"}:
-            raise ValueError(
+            raise SubmissionValidationError(
                 "architect submission requires only source and architecture"
             )
         if str(payload.get("source") or "") != ARCHITECT_FILENAME:
-            raise ValueError(
+            raise SubmissionValidationError(
                 f"architect submission source must be {ARCHITECT_FILENAME}"
             )
         architecture = payload.get("architecture")
         if not isinstance(architecture, Mapping):
-            raise ValueError("architect submission architecture must be an object")
+            raise SubmissionValidationError("architect submission architecture must be an object")
 
         assignment = dict(authenticated["assignment"])
         binding_sha = str(assignment.get("family_binding_sha") or "").strip()
@@ -549,10 +558,11 @@ class RoleAssignmentGateway:
                 "example": {},
             }
         )
-        document = validate_contract_payload(
-            dict(architecture),
-            definition=definition,
-        )
+        with submission_validation():
+            document = validate_contract_payload(
+                dict(architecture),
+                definition=definition,
+            )
 
         if (
             family_execution_adapter(binding.get("execution_adapter"))
@@ -602,7 +612,8 @@ class RoleAssignmentGateway:
                     ),
                 )
             )
-            validation.raise_for_errors()
+            with submission_validation():
+                validation.raise_for_errors()
 
         prompt_pack = self._authenticated_prompt_pack(authenticated)
         workspace = {
@@ -646,28 +657,29 @@ class RoleAssignmentGateway:
                 ),
             },
         )
-        graph_ir = GraphCompiler().compile(
-            document,
-            graph_id=str(assignment["workflow_id"]),
-            generation=graph_generation,
-            bindings=GraphCompileBindings(
-                producer=_graph_role_binding(
-                    dict(binding["role_bindings"])["implementation"]
+        with submission_validation():
+            graph_ir = GraphCompiler().compile(
+                document,
+                graph_id=str(assignment["workflow_id"]),
+                generation=graph_generation,
+                bindings=GraphCompileBindings(
+                    producer=_graph_role_binding(
+                        dict(binding["role_bindings"])["implementation"]
+                    ),
+                    checker=_graph_role_binding(
+                        dict(binding["role_bindings"])["verifier"]
+                    ),
+                    execution_adapter=str(binding["execution_adapter"]),
                 ),
-                checker=_graph_role_binding(
-                    dict(binding["role_bindings"])["verifier"]
+                satellite_projector=FamilyGraphSatelliteProjector(
+                    specialization_id=definition.specialization_id,
+                    template=definition.graph_satellite_template,
                 ),
-                execution_adapter=str(binding["execution_adapter"]),
-            ),
-            satellite_projector=FamilyGraphSatelliteProjector(
-                specialization_id=definition.specialization_id,
-                template=definition.graph_satellite_template,
-            ),
-            source_ref=ARCHITECT_FILENAME,
-            workspace_authority_rules=definition.workspace_authority_rules,
-            source_map=source_map,
-            source_map_ref=source_map_ref.sha256,
-        )
+                source_ref=ARCHITECT_FILENAME,
+                workspace_authority_rules=definition.workspace_authority_rules,
+                source_map=source_map,
+                source_map_ref=source_map_ref.sha256,
+            )
         work_items = assert_work_items_complete(workspace)
         return {
             "schema_version": "2",

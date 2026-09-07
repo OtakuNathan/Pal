@@ -23,6 +23,7 @@ from pal.bunshin.v2.role_gateway import (
     RoleGatewayArtifactStore,
 )
 from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
+from pal.bunshin.v2.submission_errors import SubmissionValidationError
 from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
 
 
@@ -254,7 +255,10 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         assignment = self.service.repository.read_role_assignment(self.assignment_id)
         self.assertEqual(assignment["state"], "result_recorded")
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
-        self.assertTrue(self.call("submission_status")["recorded"])
+        status = self.call("submission_status")
+        self.assertTrue(status["recorded"])
+        self.assertEqual(status["submission_artifact_ref"], receipt["submission_artifact_ref"])
+        self.assertEqual(status["submission_payload_hash"], receipt["submission_payload_hash"])
 
     def test_gateway_reconciles_draft_cas_race_after_canonical_receipt(self) -> None:
         first = self.call("draft_read", context=self.context, seed={"checks": []})
@@ -559,7 +563,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         contract_file.unlink()
 
         with self.assertRaisesRegex(
-            ValueError,
+            SubmissionValidationError,
             "contract (entrypoint|path) does not exist",
         ):
             architect_call(
@@ -585,7 +589,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             "contract_paths"
         ] = [contract_path]
         with self.assertRaisesRegex(
-            ValueError,
+            SubmissionValidationError,
             "contract path .* is owned by both",
         ):
             architect_call(
@@ -601,7 +605,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         private_file = self.workspace / "src" / "architect_private.py"
         private_file.write_text("PRIVATE = True\n", encoding="utf-8")
         with self.assertRaisesRegex(
-            ValueError,
+            SubmissionValidationError,
             "outside declared contract or implementation scopes",
         ):
             architect_call(
