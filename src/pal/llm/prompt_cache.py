@@ -1071,8 +1071,15 @@ def _uses_anthropic_breakpoints(dialect: PromptCacheDialect) -> bool:
 
 def _supports_openai_explicit(model_id: str) -> bool:
     normalized = str(model_id or "").strip().lower()
-    match = re.search(r"gpt-(\d+)\.(\d+)", normalized)
-    return bool(match and (int(match.group(1)), int(match.group(2))) >= (5, 6))
+    match = re.search(
+        r"(?:^|/)gpt-(\d+)(?:\.(\d+))?(?:-|$)",
+        normalized,
+    )
+    if match is None:
+        return False
+    major = int(match.group(1))
+    minor = int(match.group(2) or 0)
+    return major > 5 or (major == 5 and minor >= 6)
 
 
 def _scope_key(

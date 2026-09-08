@@ -277,6 +277,8 @@ pal llm add gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled
 
 The exact-model preset uses OpenAI Responses, the official 1,050,000-token context and 128,000-token output limits, vision/tool/stream support, reasoning levels `low`, `medium`, `high`, `xhigh`, and `max`, and omits unsupported `temperature`, `top_p`, and `top_logprobs` request parameters. Keep the endpoint disabled until API access and credentials are available; enabling or selecting it remains an explicit operator action.
 
+OpenRouter exposes the same model as `openai/gpt-6-astra`. Configure that exact model id with the OpenRouter base URL and credential; Pal applies the same Responses and unsupported-parameter profile. OpenRouter advertises the full 1,050,000-token context, while a deployment may deliberately cap it at 272,000 tokens to avoid the higher long-context pricing tier.
+
 Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoint-management capability exists. Mutating the production database or secrets requires explicit user approval.
 
 ## Verification Workflow

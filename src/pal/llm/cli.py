@@ -20,6 +20,7 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 DEFAULT_RUNTIME_ROOT = Path.home() / ".pal"
 _DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _EXACT_MODEL_ENDPOINT_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-6-astra": {
         "provider": "openai",
@@ -41,6 +42,28 @@ _EXACT_MODEL_ENDPOINT_DEFAULTS: dict[str, dict[str, Any]] = {
         "notes": (
             "Official OpenAI Responses profile; disabled deployments can be "
             "prepared before GPT-6 Astra API access is granted."
+        ),
+    },
+    "openai/gpt-6-astra": {
+        "provider": "openrouter",
+        "display_name": "GPT-6 Astra (OpenRouter)",
+        "wire_shape": WireShape.OPENAI_RESPONSE.value,
+        "base_url": _OPENROUTER_BASE_URL,
+        "context_window": 1_050_000,
+        "max_output_tokens": 128_000,
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking_level": "medium",
+        "supports_vision": True,
+        "capabilities": {
+            "unsupported_request_parameters": [
+                "temperature",
+                "top_p",
+                "top_logprobs",
+            ],
+        },
+        "notes": (
+            "OpenRouter Responses profile for GPT-6 Astra. Prompts above "
+            "272k tokens enter OpenRouter's higher pricing tier."
         ),
     },
 }

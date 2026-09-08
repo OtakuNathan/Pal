@@ -136,6 +136,42 @@ class LLMCLITests(unittest.TestCase):
         )
         self.assertTrue(capabilities["operator_extension"])
 
+    def test_add_openrouter_gpt_6_astra_uses_responses_profile(self) -> None:
+        args = self._parse(
+            "add",
+            "openrouter-gpt-6-astra",
+            "--runtime-root",
+            str(self.runtime_root),
+            "--model-id",
+            "openai/gpt-6-astra",
+            "--credential-ref",
+            "openrouter:api-key",
+            "--context-window",
+            "272000",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_llm_cli(args), 0)
+
+        list_args = self._parse(
+            "list", "--runtime-root", str(self.runtime_root), "--all", "--json"
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_llm_cli(list_args), 0)
+        endpoint = json.loads(output.getvalue())["items"][0]
+
+        self.assertEqual(endpoint["provider"], "openrouter")
+        self.assertEqual(endpoint["model_id"], "openai/gpt-6-astra")
+        self.assertEqual(endpoint["wire_shape"], "openai_response")
+        self.assertEqual(endpoint["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(endpoint["context_window"], 272_000)
+        self.assertEqual(endpoint["max_output_tokens"], 128_000)
+        self.assertTrue(endpoint["supports_vision"])
+        self.assertEqual(
+            endpoint["capabilities"]["unsupported_request_parameters"],
+            ["temperature", "top_p", "top_logprobs"],
+        )
+
     def test_list_reports_corrupt_endpoint_contract_instead_of_returning_empty(self) -> None:
         args = self._parse(
             "add",

@@ -104,6 +104,10 @@ generation policy. `pal llm add gpt-6-astra` installs the official OpenAI
 Responses profile: `openai_response`, reasoning levels `low` through `max`,
 vision/tool/stream support, and the unsupported sampling-parameter declaration.
 The command does not activate the endpoint unless explicitly requested.
+The OpenRouter model id `openai/gpt-6-astra` selects the equivalent
+`openai_response` profile at `https://openrouter.ai/api/v1`. Its advertised
+context remains 1,050,000 tokens, but operators may configure a 272,000-token
+limit to stay below OpenRouter's higher long-context pricing tier.
 
 ## Streaming and output recovery
 

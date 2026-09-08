@@ -239,6 +239,62 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     assert len(marked) == 2
 
 
+def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
+    request = _request()
+
+    for endpoint_id, provider_id, base_url, expected_dialect in (
+        (
+            "openai-astra",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
+        ),
+        (
+            "openrouter-astra",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
+        ),
+    ):
+        context = ShapeContext(
+            wire_shape=WireShape.OPENAI_RESPONSE,
+            endpoint_id=endpoint_id,
+            model_id=(
+                "openai/gpt-6-astra"
+                if provider_id == "OpenRouter"
+                else "gpt-6-astra"
+            ),
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+        coordinator = PromptCacheCoordinator()
+
+        plan = coordinator.plan(request, context)
+        encoded = coordinator.inject(
+            OpenAIResponseCodec().encode(request, context),
+            plan,
+        )
+        payload = thaw_json(encoded.payload)
+
+        assert plan.dialect == expected_dialect
+        assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
+        assert encoded.extra_body["prompt_cache_options"] == {
+            "mode": "explicit",
+            "ttl": "30m",
+        }
+        assert sum(
+            "prompt_cache_breakpoint" in block
+            for item in payload["input"]
+            for block in item.get("content", [])
+            if isinstance(block, dict)
+        ) == 2
+        if provider_id == "OpenRouter":
+            assert (
+                encoded.extra_body["session_id"]
+                == encoded.extra_body["prompt_cache_key"]
+            )
+
+
 def test_openrouter_pre56_automatic_cache_does_not_report_inert_breakpoints() -> None:
     request = _request()
     context = ShapeContext(

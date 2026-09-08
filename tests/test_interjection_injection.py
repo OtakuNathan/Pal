@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from dataclasses import replace
 
 from pal.channel.contracts import (
     ChannelEnvelope,
@@ -20,6 +21,7 @@ from pal.core.turns import TurnOutcome
 from pal.foundation.io import EventEnvelope
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightAdvice, LLMPreflightRequest
 from pal.llm.ir import (
+    ImagePartIR,
     LLMFinishReason,
     LLMMessageIR,
     LLMResponseIR,
@@ -235,7 +237,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             any(isinstance(part, ToolResultIR) for part in messages[-2].parts)
         )
 
-    def test_only_head_of_queue_is_injected(self) -> None:
+    def test_queue_snapshot_is_injected_as_one_ordered_message(self) -> None:
         # Pre-seeded queue; disable the execute_tool_async auto-enqueue so
         # the queue is exactly the two pre-seeded interjections.
         self.interjection_enqueued = True
@@ -251,20 +253,82 @@ class InterjectionInjectionTests(unittest.TestCase):
         outcome = self._drive(continuation)
 
         self.assertIsNotNone(outcome)
-        # Only the head was consumed; the second interjection stays queued
-        # and will be picked up as the next turn.
-        self.assertEqual(len(self.state.pending_channel_turns), 1)
-        remaining = self.state.pending_channel_turns[0]
-        self.assertIn(
-            "second interjection",
-            str(remaining.event.payload.get("text") or ""),
-        )
+        self.assertEqual(len(self.state.pending_channel_turns), 0)
 
         second_prompt = self.captured_prompts[-1]
         messages = list(second_prompt.messages)
         self.assertEqual(messages[-1].role, MessageRole.USER)
         self.assertIn("first interjection", messages[-1].text)
-        self.assertNotIn("second interjection", messages[-1].text)
+        self.assertEqual(messages[-1].text, "first interjection\n\nsecond interjection")
+        self.assertEqual(sum(m.semantic_kind == "user_interjection" for m in messages), 1)
+
+    def test_batch_preserves_images_and_leaves_later_arrivals_queued(self) -> None:
+        backing = self.context.port_registry["memory:memory"]
+        continuation = self.turn_manager.start(_make_envelope(turn_id="main", text="run"))
+        backing.begin_l1_turn("main", user_text="run")
+        first = _make_envelope(turn_id="first", text="first")
+        second = _make_envelope(turn_id="second", text="")
+        picture = ImagePartIR(source="https://example.test/image.png", media_type="image/png")
+        second = replace(second, event=replace(second.event, payload=LLMMessageIR(
+            role=MessageRole.USER, parts=(picture, TextPartIR("look")), message_id="image-message",
+        )))
+        late = _make_envelope(turn_id="late", text="later")
+        self.state.pending_channel_turns.extend([first, second])
+        state = self.state
+
+        class Memory:
+            async def append_l1_user(inner_self, turn_id, message):
+                state.pending_channel_turns.append(late)
+                return backing.append_l1_user(turn_id, message)
+
+        self.context.port_registry["memory:memory"] = Memory()
+        asyncio.run(inject_pending_interjection_async(
+            context=self.context, state=self.state, continuation=continuation,
+        ))
+        self.assertEqual(list(self.state.pending_channel_turns), [late])
+        message = backing.active_l1_turn("main").messages[-1]
+        self.assertIn(picture, message.parts)
+        self.assertEqual(message.text, "first\n\nlook")
+        self.assertEqual([x["message_id"] for x in message.metadata["interjection_sources"]],
+                         ["first", "image-message"])
+
+    def test_failed_batch_retains_every_envelope_and_retry_commits_once(self) -> None:
+        backing = self.context.port_registry["memory:memory"]
+        continuation = self.turn_manager.start(_make_envelope(turn_id="main", text="run"))
+        backing.begin_l1_turn("main", user_text="run")
+        batch = [_make_envelope(turn_id=str(i), text=f"message {i}") for i in range(3)]
+        self.state.pending_channel_turns.extend(batch)
+
+        class Memory:
+            fail = True
+
+            def append_l1_user(inner_self, turn_id, message):
+                if inner_self.fail:
+                    raise RuntimeError("before commit")
+                backing.append_l1_user(turn_id, message)
+                raise RuntimeError("after commit")
+
+            def contains_l1_message(inner_self, turn_id, message_id):
+                return backing.contains_l1_message(turn_id, message_id)
+
+        memory = Memory()
+        self.context.port_registry["memory:memory"] = memory
+
+        async def scenario():
+            await inject_pending_interjection_async(
+                context=self.context, state=self.state, continuation=continuation,
+            )
+            self.assertEqual(list(self.state.pending_channel_turns), batch)
+            memory.fail = False
+            await inject_pending_interjection_async(
+                context=self.context, state=self.state, continuation=continuation,
+            )
+
+        asyncio.run(scenario())
+        self.assertFalse(self.state.pending_channel_turns)
+        messages = backing.active_l1_turn("main").messages
+        self.assertEqual(sum(m.semantic_kind == "user_interjection" for m in messages), 1)
+        self.assertEqual(messages[-1].text, "message 0\n\nmessage 1\n\nmessage 2")
 
     def test_injection_restores_envelope_when_l1_unavailable(self) -> None:
         # No L1 turn has been begun (preflight never ran), so appending the

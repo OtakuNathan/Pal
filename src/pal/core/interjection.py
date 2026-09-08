@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import hashlib
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -15,7 +17,7 @@ async def inject_pending_interjection_async(
     state: Any,
     continuation: Any,
 ) -> None:
-    """Append one queued Pal channel message to L1 after a tool batch.
+    """Append the queued snapshot as one ordered user message after a tool batch.
 
     Routing metadata on the queued envelope is deliberately ignored: reply
     authority remains with the message that opened ``continuation``.
@@ -26,37 +28,65 @@ async def inject_pending_interjection_async(
     async with state.channel_turn_transition_lock:
         if not state.pending_channel_turns:
             return
-        pending = state.pending_channel_turns[0]
-    envelope = pending
+        snapshot = tuple(state.pending_channel_turns)
 
     try:
-        payload = getattr(getattr(envelope, "event", None), "payload", None)
-        if isinstance(payload, LLMMessageIR):
-            message = replace(payload, semantic_kind="user_interjection")
-        else:
-            text = extract_text_from_payload(payload).strip()
-            if not text:
-                return
+        batch = []
+        messages = []
+        for envelope in snapshot:
+            payload = getattr(getattr(envelope, "event", None), "payload", None)
+            if isinstance(payload, LLMMessageIR):
+                message = replace(payload, semantic_kind="user_interjection")
+            else:
+                text = extract_text_from_payload(payload).strip()
+                if not text:
+                    break
+                message = LLMMessageIR(
+                    role=MessageRole.USER,
+                    parts=(TextPartIR(text),),
+                    message_id=str(getattr(getattr(envelope, "event", None), "event_id", "") or "interjection"),
+                    semantic_kind="user_interjection",
+                )
+            # Leave unsupported entries and their successors for normal queue
+            # processing; never silently discard them or change FIFO order.
+            if not message.parts or message.role != MessageRole.USER:
+                break
+            batch.append(envelope)
+            messages.append(message)
+        if not messages:
+            return
+        message = messages[0]
+        if len(messages) > 1:
+            source_ids = [item.message_id for item in messages]
+            digest = hashlib.sha256(json.dumps(source_ids).encode()).hexdigest()
+            parts = []
+            for item in messages:
+                if parts:
+                    parts.append(TextPartIR("\n\n"))
+                parts.extend(item.parts)
             message = LLMMessageIR(
                 role=MessageRole.USER,
-                parts=(TextPartIR(text),),
-                message_id=str(getattr(getattr(envelope, "event", None), "event_id", "") or "interjection"),
+                parts=tuple(parts),
+                message_id=f"interjection-batch:{digest}",
                 semantic_kind="user_interjection",
+                metadata={"interjection_sources": [
+                    {"message_id": item.message_id, "metadata": dict(item.metadata)}
+                    for item in messages
+                ]},
             )
-        if not message.parts:
-            return
         memory_service = context.port_registry.get("memory:memory")
         append_user = getattr(memory_service, "append_l1_user", None)
         if not callable(append_user):
             return
 
-        async def append_and_acknowledge() -> None:
+        async def append_and_acknowledge() -> bool:
             async with state.channel_turn_transition_lock:
                 if (
-                    not state.pending_channel_turns
-                    or state.pending_channel_turns[0] is not pending
+                    len(state.pending_channel_turns) < len(batch)
+                    or any(current is not expected for current, expected in
+                           zip(state.pending_channel_turns, batch))
                 ):
-                    return
+                    return False
                 try:
                     result = append_user(str(continuation.turn_id), message)
                     if inspect.isawaitable(result):
@@ -73,34 +103,36 @@ async def inject_pending_interjection_async(
                 # lock. A cancelled caller may leave this task running, but
                 # the normal next-turn path cannot dequeue the same envelope
                 # between the durable L1 write and this acknowledgement.
-                del state.pending_channel_turns[0]
+                for _ in batch:
+                    state.pending_channel_turns.popleft()
+                return True
 
         commit = asyncio.create_task(append_and_acknowledge())
         committed = False
         try:
-            await asyncio.shield(commit)
-            committed = True
+            committed = await asyncio.shield(commit)
         except asyncio.CancelledError:
             # The append is idempotent by message_id. Let append+ack finish so
             # cancellation can never strand the message between L1 and queue.
             try:
-                await asyncio.shield(commit)
-                committed = True
+                committed = await asyncio.shield(commit)
             except Exception:
                 pass
             if committed:
+                for envelope in batch:
+                    await _acknowledge_cross_scope_interjection_async(
+                        context=context,
+                        envelope=envelope,
+                        continuation=continuation,
+                    )
+            raise
+        if committed:
+            for envelope in batch:
                 await _acknowledge_cross_scope_interjection_async(
                     context=context,
                     envelope=envelope,
                     continuation=continuation,
                 )
-            raise
-        if committed:
-            await _acknowledge_cross_scope_interjection_async(
-                context=context,
-                envelope=envelope,
-                continuation=continuation,
-            )
     except Exception:
         # Leave the unacknowledged head in place for the normal queue flow.
         return
