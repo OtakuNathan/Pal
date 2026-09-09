@@ -59,7 +59,7 @@ class NativeShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result["session_id"], result["returncode"], result["stdout"], result["stderr"]),
                          (0, 7, "hello", "bad"))
         result = await self.runtime.run("pwd", cwd=str(self.root))
-        self.assertEqual(result["stdout"].strip(), str(self.root))
+        self.assertEqual(Path(result["stdout"].strip()).resolve(), self.root.resolve())
         result = await self.runtime.run("true", cwd=str(self.root / "missing"))
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["session_id"], 0)

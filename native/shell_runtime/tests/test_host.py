@@ -27,6 +27,13 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.host.close()
 
+    async def wait_for_completion(self):
+        # Synchronize with native delivery, not a machine-dependent sleep.
+        async def wait():
+            while not self.host.shell._completions:
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(wait(), timeout=5)
+
     async def tool(self, alias, **args):
         return await self.runtime.execute_tool_async(new_tool_call(name=alias, args=args), turn_id="origin")
 
@@ -93,7 +100,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
         # A different active turn prevents a completion from being dispatched.
         self.host.core.state.active_turn_id = "busy"
         self.host.core.state.active_turns["busy"] = object()
-        await asyncio.sleep(.1)
+        await self.wait_for_completion()
         await self.host.pump()
         self.assertEqual(self.observed, [])
         self.host.core.state.active_turn_id = None
@@ -181,7 +188,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             "cmd": "sleep .05; head -c 20000 /dev/zero; printf END", "wait_ms": 0}),
             budget=budget, turn_id="background")
         sid = result.structured["session_id"]
-        await asyncio.sleep(.15)
+        await self.wait_for_completion()
         await self.host.pump()
         self.assertFalse(self.host.failures, self.host.failures)
         observed = self.observed[0]
@@ -212,7 +219,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("ack failed")
         self.host.shell.acknowledge_completion = fail
         result = await self.tool("prototype_run_shell", cmd="sleep .03", wait_ms=0)
-        await asyncio.sleep(.1)
+        await self.wait_for_completion()
         await self.host.pump()
         sid = result.structured["session_id"]
         self.assertEqual(self.host.failures[sid], "ack failed")
@@ -230,7 +237,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("release reply lost")
         self.host.shell.acknowledge_completion = lose_reply
         result = await self.tool("prototype_run_shell", cmd="sleep .03; printf done", wait_ms=0)
-        await asyncio.sleep(.1)
+        await self.wait_for_completion()
         await self.host.pump()
         sid = result.structured["session_id"]
         self.assertEqual(self.host.failures[sid], "release reply lost")
@@ -248,7 +255,7 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("consumer failed")
         self.host.on_completion = fail
         result = await self.tool("prototype_run_shell", cmd="sleep .03", wait_ms=0)
-        await asyncio.sleep(.1)
+        await self.wait_for_completion()
         await self.host.pump()
         sid = result.structured["session_id"]
         self.assertEqual(self.host.failures[sid], "consumer failed")
