@@ -46,8 +46,15 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     register_with_core(core.context, WebFetchService(browser_manager=_FakeManager()))  # type: ignore[arg-type]
     core.publish_module_capabilities("web_fetch")
 
-    direct = {item["function"]["name"] for item in core._build_llm_tool_contracts()}
-    assert {"browser_navigate", "browser_read", "browser_snapshot", "browser_find"} <= direct
+    contracts = core._build_llm_tool_contracts()
+    direct = {item["function"]["name"] for item in contracts}
+    assert {name for name in direct if name.startswith("browser_")} == {"browser_navigate"}
+    navigate = next(item["function"] for item in contracts if item["function"]["name"] == "browser_navigate")
+    for name in ("browser_read", "browser_snapshot", "browser_find", "browser_status",
+                 "browser_extensions", "browser_extension_manage"):
+        assert name in navigate["description"]
+    assert "read_tool" in navigate["description"]
+    assert "call_tool" in navigate["description"]
     assert "browser_click" not in direct
     assert "browser_screenshot" not in direct
 
@@ -264,3 +271,127 @@ def test_legacy_provider_schema_is_archived_then_removed(tmp_path: Path) -> None
         "SELECT setting_value FROM pal_runtime_settings WHERE setting_key='active_web_search_provider_id'"
     ).fetchone()[0] == "brave_search_default"
     database.close()
+
+
+@pytest.mark.parametrize("action", ["navigate", "read"])
+def test_explicit_url_skips_unreachable_saved_page(tmp_path: Path, action: str) -> None:
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    key = "c" * 64
+    calls = []
+    saved_url = "https://unreachable.invalid/old"
+    target_url = "https://example.com/new"
+    worker._read_profile_meta = lambda _: {"last_url": saved_url}
+
+    def run(record, argv, **kwargs):
+        calls.append(argv)
+        if saved_url in argv:
+            raise BrowserServiceError("saved page unavailable", code="cli_command_failed")
+        if argv[0] == "eval":
+            return json.dumps({"text": "new page", "links": []})
+        return ""
+
+    worker._run = run
+    worker._page_state = lambda *a, **k: {"url": target_url}
+    result = worker._execute_ready(
+        key=key, action=action, args={"url": target_url}, persistent=True, timeout_ms=1000
+    )
+    assert calls[0][0] == "open" and "about:blank" in calls[0]
+    assert any(arg.startswith("--profile=") for arg in calls[0])
+    assert not any(saved_url in call for call in calls)
+    assert sum(call[0] == "goto" and target_url in call for call in calls) == 1
+    assert result["session"]["recovered"] is False
+    assert json.loads(worker._profile_meta_path(key).read_text())["last_url"] == target_url
+
+
+def test_failed_restore_reports_new_url_recovery_without_reset(tmp_path: Path) -> None:
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    key = "d" * 64
+    saved_url = "https://unreachable.invalid/old"
+    worker._read_profile_meta = lambda _: {"last_url": saved_url}
+    closed = []
+    worker._close_named = lambda record, **kwargs: closed.append(record.key)
+    profile = worker.paths.profiles / key / "user-data"
+    profile.mkdir(parents=True)
+    marker = profile / "login-fixture"
+    marker.write_text("preserved")
+
+    def run(record, argv, **kwargs):
+        if argv[0] == "goto":
+            raise BrowserServiceError("offline", code="cli_command_failed")
+        return ""
+
+    worker._run = run
+    with pytest.raises(BrowserServiceError) as error:
+        worker._execute_ready(key=key, action="read", args={}, persistent=True, timeout_ms=1000)
+    assert error.value.code == "page_restore_failed"
+    assert "browser_navigate" in str(error.value)
+    assert "offline" in str(error.value)
+    assert closed == [key]
+    assert key not in worker.sessions
+    assert marker.read_text() == "preserved"
+    # An explicit new URL is usable immediately after this failure.
+    worker._run = lambda *a, **k: ""
+    worker._page_state = lambda *a, **k: {"url": "https://example.com/new"}
+    result = worker._execute_ready(
+        key=key, action="navigate", args={"url": "https://example.com/new"},
+        persistent=True, timeout_ms=1000,
+    )
+    assert result["session"]["running"] is True
+    assert marker.read_text() == "preserved"
+
+
+def test_restore_without_new_url_and_existing_session_reuse(tmp_path: Path) -> None:
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    key = "e" * 64
+    url = "https://example.com/old"
+    worker._read_profile_meta = lambda _: {"last_url": url}
+    calls = []
+    worker._run = lambda record, argv, **kwargs: calls.append(argv) or ""
+    record, recovered = worker._ensure_session(key, persistent=True, timeout_ms=1000)
+    assert recovered is True
+    assert calls[-1] == _cli_args("goto", url)
+    count = len(calls)
+    same, recovered = worker._ensure_session(key, persistent=True, timeout_ms=1000)
+    assert same is record and recovered is False
+    assert len(calls) == count
+
+
+def test_startup_error_is_not_misreported_as_page_restore_failure(tmp_path: Path) -> None:
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    worker._read_profile_meta = lambda _: {"last_url": "https://example.com/old"}
+    worker._close_named = lambda *a, **k: None
+    def run(*args, **kwargs):
+        raise BrowserServiceError("cannot start browser", code="cli_unavailable")
+    worker._run = run
+    with pytest.raises(BrowserServiceError) as error:
+        worker._ensure_session("f" * 64, persistent=True, timeout_ms=1000)
+    assert error.value.code == "cli_unavailable"
+    assert not worker.sessions
+
+
+def test_cache_cleanup_skips_restore_and_preserves_saved_profile(tmp_path: Path) -> None:
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    key = "1" * 64
+    meta = worker._profile_meta_path(key)
+    meta.parent.mkdir(parents=True)
+    saved = '{"last_url":"https://unreachable.invalid/","last_used_at":123}'
+    meta.write_text(saved)
+    calls = []
+
+    def run(record, argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "goto":
+            raise AssertionError("cache cleanup must not restore the saved page")
+        return json.dumps({"cache_cleared": True, "cache_kind": "http"}) if argv[0] == "run-code" else ""
+
+    worker._run = run
+    result = worker._execute_ready(
+        key=key, action="clear_cache", args={}, persistent=True, timeout_ms=1000
+    )
+    assert result["cache_cleared"] is True
+    assert meta.read_text() == saved
+    assert calls[0][0] == "open" and "about:blank" in calls[0]
+    assert calls[1][0] == "run-code"
+    worker._run = lambda *a, **k: '{}'
+    with pytest.raises(BrowserServiceError, match="did not confirm"):
+        worker._execute_ready(key=key, action="clear_cache", args={}, persistent=True, timeout_ms=1000)

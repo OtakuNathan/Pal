@@ -31,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.set_defaults(command="setup")
 
-    subparsers.add_parser("doctor", help="Check local Pal runtime dependencies")
+    subparsers.add_parser("doctor", help="Check local Pal runtime dependencies").add_argument("--runtime-root", type=Path, default=None)
 
     # -- llm -----------------------------------------------------------------
     llm_parser = subparsers.add_parser("llm", help="Manage configured LLM endpoints")
@@ -44,6 +44,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from pal.provider_cli import configure_provider_parser
 
     configure_provider_parser(provider_parser)
+
+    from pal.packages.cli import configure_package_parser
+    configure_package_parser(subparsers.add_parser("package", help="Build and prepare plugin packages"))
 
     # -- run -----------------------------------------------------------------
     run_parser = subparsers.add_parser("run", help="Run the Pal runtime")
@@ -101,8 +104,10 @@ def _build_parser() -> argparse.ArgumentParser:
 async def _run_async(args: argparse.Namespace) -> int:
     if args.command == "run":
         configure_process_logging(component="pal")
-        app = build_runtime_app(args.runtime_root)
-        await app.run()
+        from pal.packages.process import runtime_lease
+        with runtime_lease(args.runtime_root):
+            app = build_runtime_app(args.runtime_root)
+            await app.run()
         return 0
     if args.command == "client":
         await send_message(default_socket_path(args.runtime_root), args.message)
@@ -119,7 +124,7 @@ def main() -> int:
 
     if args.command == "doctor":
         from pal.wizard.cli import run_dependency_doctor
-        return run_dependency_doctor()
+        return run_dependency_doctor(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "llm":
         from pal.llm.cli import run_llm_cli
@@ -131,6 +136,10 @@ def main() -> int:
 
         return run_provider_cli(args)
 
+    if args.command == "package":
+        from pal.packages.cli import run_package_cli
+        return run_package_cli(args)
+
     # -- setup is synchronous, no asyncio ------------------------------------
     if args.command == "setup":
         from pal.wizard.cli import run_setup_wizard
@@ -138,7 +147,7 @@ def main() -> int:
             parser.error("setup --check and --upgrade are mutually exclusive")
         if getattr(args, "check", False):
             from pal.wizard.cli import run_dependency_doctor
-            return run_dependency_doctor()
+            return run_dependency_doctor(runtime_root=getattr(args, "runtime_root", None))
         if getattr(args, "upgrade", False):
             from pal.wizard.cli import run_setup_upgrade
             runtime_root = getattr(args, "runtime_root", None)

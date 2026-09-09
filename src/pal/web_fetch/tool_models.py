@@ -166,11 +166,21 @@ BrowserResetInput = _strict_model(
     "BrowserResetInput",
     {"confirm": (Literal[True], Field(...))},
 )
+BrowserExtensionManageInput = _strict_model(
+    "BrowserExtensionManageInput",
+    {
+        "operation": (Literal["mount", "unmount", "reload"], Field(...)),
+        "path": (str | None, Field(None)),
+        "extension_id": (str | None, Field(None)),
+        "timeout_ms": (int, Field(20000)),
+    },
+)
 BrowserActionOutput = StructuredToolOutput
 
 
 __all__ = [
     "BrowserActionOutput",
+    "BrowserExtensionManageInput",
     "BrowserCheckInput",
     "BrowserClickInput",
     "BrowserDialogInput",

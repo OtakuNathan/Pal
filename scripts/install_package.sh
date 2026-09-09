@@ -261,25 +261,6 @@ echo "Creating Pal virtual environment at $venv_dir..."
 echo "Installing $(basename "$wheel_path")..."
 "$venv_python" -m pip install --upgrade "$wheel_path"
 
-echo "Verifying sqlite-vec can be loaded by the selected Python..."
-"$venv_python" - <<'PY'
-from __future__ import annotations
-
-import sqlite3
-
-import sqlite_vec
-
-connection = sqlite3.connect(":memory:")
-try:
-    connection.enable_load_extension(True)
-    sqlite_vec.load(connection)
-    version = connection.execute("select vec_version()").fetchone()[0]
-finally:
-    connection.enable_load_extension(False)
-    connection.close()
-print(f"sqlite-vec {version} loaded successfully")
-PY
-
 "$pal_bin" --help >/dev/null
 
 echo "Installing runtime-root overlay into $runtime_root..."
@@ -294,6 +275,9 @@ if [[ "${#provider_wheels[@]}" -gt 0 ]]; then
     --force
 fi
 
+echo "Preparing and verifying built-in plugin dependencies..."
+"$pal_bin" package prepare --all-builtin --runtime-root "$runtime_root"
+
 mkdir -p "$bin_dir"
 launcher="$bin_dir/pal"
 if [[ -d "$launcher" && ! -L "$launcher" ]]; then
@@ -303,7 +287,7 @@ rm -f "$launcher"
 ln -s "$pal_bin" "$launcher"
 
 echo
-echo "Pal installed successfully."
+echo "Pal files installed. Preparing runtime..."
 echo "  Python:       $venv_python"
 echo "  Launcher:     $launcher"
 echo "  Runtime root: $runtime_root"
@@ -323,7 +307,7 @@ fi
 
 echo
 echo "Running Pal dependency doctor..."
-"$pal_bin" doctor
+"$pal_bin" doctor --runtime-root "$runtime_root"
 
 if [[ "$service_was_active" -eq 1 ]]; then
   echo

@@ -5,6 +5,7 @@ import importlib
 import inspect
 import sys
 import tomllib
+from pal.packages import installed_environment
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -148,6 +149,8 @@ class PluginHost:
         return handle
 
     def shutdown(self) -> None:
+        if self._management_handle is not None and self._management_handle.shutdown_sync:
+            self._management_handle.shutdown_sync()
         for plugin_id in reversed(self._topological_order(attached_only=True)):
             with contextlib.suppress(Exception):
                 self._detach_generation(plugin_id)
@@ -250,6 +253,11 @@ class PluginHost:
                     "lifecycle_state": item.get("last_load_status"),
                 }
             )
+            from pal.packages.service import PackageService
+            kind = "builtin" if item["source"] == PLUGIN_SOURCE_FIRST_PARTY else "plugin"
+            records = PackageService(self.runtime_root).status(name=str(item["plugin_id"]), kind=kind)["items"]
+            if records:
+                item["installation"] = {key: records[0].get(key) for key in ("status", "stage", "version", "environment", "error")}
         return sorted(items, key=lambda item: (item["source"], item["plugin_id"]))
 
     def attach(self, plugin_id: str) -> dict[str, Any]:
@@ -983,6 +991,7 @@ class PluginHost:
             runtime_root=self.runtime_root,
             services=dict(self.services),
             plugin_dir=plugin_dir,
+            environment=installed_environment(plugin_dir),
         )
         if "context" in signature.parameters:
             kwargs["context"] = build_context

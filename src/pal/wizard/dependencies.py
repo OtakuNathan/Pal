@@ -46,14 +46,14 @@ class WizardDependencyCheck:
         }
 
 
-def collect_dependency_checks() -> tuple[WizardDependencyCheck, ...]:
+def collect_dependency_checks(runtime_root: Path | None = None) -> tuple[WizardDependencyCheck, ...]:
     checks: list[WizardDependencyCheck] = [
         _check_python_version(),
         _check_python_package("jieba", "jieba", "Chinese FTS tokenization"),
         _check_python_package("openai", "openai", "OpenAI-compatible endpoint calls"),
         _check_python_package("python-telegram-bot", "telegram", "Telegram channel"),
         _check_python_package("sqlite-vec", "sqlite_vec", "vector memory backend", required=False),
-        _check_playwright_cli_runtime(),
+        _check_playwright_cli_runtime(runtime_root),
         _check_git(),
         _check_codex_cli(),
         _check_bunshin_sandbox(),
@@ -113,37 +113,17 @@ def _check_python_package(distribution_name: str, import_name: str, purpose: str
     )
 
 
-def _check_playwright_cli_runtime() -> WizardDependencyCheck:
-    node = shutil.which("node")
-    npm = shutil.which("npm")
-    if not node or not npm:
-        return WizardDependencyCheck(
-            check_id="playwright_cli.runtime",
-            title="Playwright CLI runtime",
-            status=CHECK_STATUS_MISSING,
-            detail="Node.js and npm are required for the web_fetch plugin to provision its pinned Playwright CLI.",
-            fix="Install Node.js 18 or newer with npm.",
-        )
-    try:
-        completed = subprocess.run(
-            [node, "--version"], capture_output=True, text=True, timeout=5, check=False
-        )
-        major = int(completed.stdout.strip().lstrip("v").split(".", 1)[0])
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        major = 0
-    if major < 18:
-        return WizardDependencyCheck(
-            check_id="playwright_cli.runtime",
-            title="Playwright CLI runtime",
-            status=CHECK_STATUS_ERROR,
-            detail=f"Node.js {major or 'unknown'} found; the web_fetch plugin requires Node.js 18 or newer.",
-            fix="Upgrade Node.js to version 18 or newer.",
-        )
+def _check_playwright_cli_runtime(runtime_root: Path | None = None) -> WizardDependencyCheck:
+    from pal.web_fetch.provisioning import inspect
+    root = runtime_root or Path.home() / ".pal"
+    state = inspect(root)
+    ready = state["ok"]
     return WizardDependencyCheck(
-        check_id="playwright_cli.runtime",
-        title="Playwright CLI runtime",
-        status=CHECK_STATUS_OK,
-        detail=f"Node.js {major} and npm are available; web_fetch provisions its pinned CLI and Chromium on first use.",
+        check_id="playwright_cli.runtime", title="Playwright CLI runtime",
+        status=CHECK_STATUS_OK if ready else CHECK_STATUS_MISSING,
+        detail=(f"Node {state['node_major'] or 'missing'} (requires {state['required_node_major']}+), "
+                f"CLI {state['cli_version'] or 'missing'}, full Chromium {'present' if state['browser_installed'] else 'missing'}."),
+        fix="" if ready else "Run pal package prepare web_fetch --runtime-root <runtime-root>.",
     )
 
 

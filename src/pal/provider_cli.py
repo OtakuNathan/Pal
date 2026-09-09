@@ -7,7 +7,6 @@ from pathlib import Path
 from pal.provider_install import (
     ProviderInstallError,
     inspect_provider_wheel,
-    install_provider_wheel,
 )
 
 
@@ -41,23 +40,19 @@ def run_provider_cli(args: argparse.Namespace) -> int:
         if len(set(provider_ids)) != len(provider_ids):
             raise ProviderInstallError("one install command must not contain duplicate provider ids")
         for wheel in inspected:
-            result = install_provider_wheel(
-                wheel.wheel_path,
-                runtime_root=runtime_root,
-                force=bool(args.force),
-            )
-            print(
-                f"Installed provider {result.provider_id} {result.provider_version} "
-                f"to {result.target_dir}"
-            )
-            if result.archived_previous_dir is not None:
-                print(f"Archived previous provider at {result.archived_previous_dir}")
-            print(f"Wheel SHA-256: {result.wheel_sha256}")
+            from pal.packages.service import PackageService
+            from pal.provider_install import _installed_provider_version
+            target = runtime_root / "channel/providers" / wheel.provider_id
+            if _installed_provider_version(target) == wheel.provider_version and not args.force:
+                raise ProviderInstallError("Provider version is already installed; pass --force to reinstall")
+            result = PackageService(runtime_root).install(wheel.wheel_path)
+            print(f"Installed provider {result['id']} {result['version']} to {target}")
+            print(f"Wheel SHA-256: {result['sha256']}")
         print(
             "Provider files are installed. Run channel_provider_rescan in the running Pal "
             "instance (or restart Pal) to activate the new generation."
         )
-    except (OSError, ProviderInstallError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         print(f"provider install failed: {exc}", file=sys.stderr)
         return 2
     return 0

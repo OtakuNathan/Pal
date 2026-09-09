@@ -53,6 +53,28 @@ reload_modules = ["runtime", "capabilities"]
 
 For community plugins, Pal clears modules loaded from the plugin directory during refresh. `reload_modules` is still useful when the plugin imports helper modules through stable names.
 
+## Packaging and private dependencies
+
+Use `pal package build` with a project-local `package.toml` to build a `.palpkg`.
+Declare `id`, `kind="plugin"`, `version`, `python="venv"`, and `host_files`
+(the runtime manifest and host-side management/IPC files). The backend wheel
+comes from the project's pyproject.toml; its Python dependencies belong only to
+the package venv. Optional `hooks="install_hooks.py"` supplies check/prepare/verify
+functions returning a JSON object with boolean `ok`. Check must work before the
+backend is installed. Prepare/verify use its private interpreter.
+
+Use indirect `package_install` to install and activate a local package, then
+`package_status` to follow its job. Use `package_prepare` to retry dependency
+preparation. Do not manually pip-install plugin dependencies into Pal's Python.
+
+`PluginBuildContext.environment` supplies `python_executable` and `child_env()`
+for the plugin's existing sidecar manager. Use both when spawning the backend;
+do not resolve the Python symlink or inject its site-packages into Pal's sys.path.
+The host-side adapter imports only Pal's existing APIs/dependencies. Sidecar
+resources remain owned by the existing start(scope)/cleanup lifecycle.
+Adapters with no extra Python backend can declare `python="host"`; this mode
+never installs Python dependencies. Builtin modules keep their current packaging.
+
 ## Runtime Entrypoint
 
 The entrypoint module must expose `build_plugin`. Pal calls it by name-aware dependency injection. Supported argument names include:
@@ -320,6 +342,12 @@ concrete endpoint kept in Pal core. Every detachable provider is loaded from the
 selected runtime root by `ChannelEndpointProviderManager`, which is the single
 LLM/core-facing management entrypoint. A provider owns the concrete endpoint
 lifecycle and endpoint-specific introspection.
+
+Providers can share the `.palpkg` installation pipeline using `kind="provider"`.
+Their lifecycle still belongs to this channel manager. A private Python backend
+uses `ChannelProviderBuildContext.environment.python_executable` and
+`environment.child_env()`; no provider dependencies are installed into Pal's
+Python environment. Legacy provider wheel installation remains supported.
 
 Keep these boundaries:
 

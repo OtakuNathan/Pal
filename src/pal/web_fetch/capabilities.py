@@ -20,6 +20,7 @@ from pal.web_fetch.tool_models import (
     BrowserPressInput,
     BrowserReadInput,
     BrowserResetInput,
+    BrowserExtensionManageInput,
     BrowserResizeInput,
     BrowserScreenshotInput,
     BrowserScrollInput,
@@ -29,7 +30,7 @@ from pal.web_fetch.tool_models import (
     BrowserTargetInput,
     BrowserTypeInput,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import NextToolHint, ToolGuidance
 from pal.execution.tool_semantics import (
     DIRECT_EXTERNAL_READ,
     INDIRECT_CONTROL,
@@ -60,14 +61,17 @@ _BROWSER_SKILL_MANUAL = """# Stateful Browser Use
 
 Use the browser capabilities for JavaScript-rendered pages and interactive UI work.
 
-1. Start with `browser_navigate` or `browser_read`.
+1. Use `browser_navigate` as the browser discovery entry point. Its next-tool hints lead to
+   page inspection and extension tools via `read_tool` / `call_tool`. If the current page
+   already suffices, discover and call `browser_read` directly; no extra navigation is required.
 2. Use `browser_snapshot` or `browser_find` to obtain current element refs.
 3. Call the narrow interaction capability such as `browser_click` or `browser_fill`.
 4. Inspect the changed page again; refs may become stale after any action.
 5. Use `browser_screenshot` only when pixel evidence is useful.
 
 The browser profile belongs to the current conversation. `browser_close` releases live
-processes but keeps login state; `browser_reset` deliberately deletes it. If browser
+processes but keeps login state; `browser_clear_cache` clears HTTP cache while retaining
+cookies and site storage; `browser_reset` deliberately deletes the profile. If browser
 navigation or reading fails and raw HTTP is sufficient, the main Pal may use `run_shell`
 with curl. Curl cannot replace clicks, JavaScript state, dialogs, or rendered layout.
 
@@ -76,7 +80,11 @@ or use browser tools for local files. `browser_evaluate` runs a JavaScript funct
 inside the page with the logged-in origin's privileges; prefer read-only expressions and
 use it only when snapshot/read/layout evidence is not enough. `browser_network` observes
 fetch/XHR traffic via an injected hook: start it after navigation (hooks reset on every
-navigation), interact with the page, then read entries. Uploads, cookie/storage editing,
+navigation), interact with the page, then read entries. For local extension development, use browser_extension_manage to mount/reload/unmount
+an unpacked Manifest V3 directory. Changes close current tabs but preserve profile data;
+navigate afterward and verify content scripts or a mounted chrome-extension:// page.
+Use browser_extensions to inspect configuration and observed service workers.
+Uploads, cookie/storage editing,
 request interception or modification, traces, videos, PDF and the Playwright dashboard
 are not part of this capability surface.
 """
@@ -104,7 +112,8 @@ class WebFetchModuleSnapshot:
         "browser_hover", "browser_select", "browser_check", "browser_scroll",
         "browser_resize", "browser_history", "browser_tabs", "browser_dialog",
         "browser_evaluate", "browser_network", "browser_inspect_layout",
-        "browser_screenshot", "browser_status", "browser_close", "browser_reset",
+        "browser_screenshot", "browser_status", "browser_close", "browser_clear_cache", "browser_reset",
+        "browser_extensions", "browser_extension_manage",
     ),
     metadata={"internal": True, "plugin_id": "web_fetch"},
 )
@@ -154,10 +163,18 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="navigate",
         guidance=ToolGuidance(
-            purpose="Open or navigate the current conversation's browser to an HTTP(S) URL.",
+            purpose="Open a URL in the current conversation's full Chromium browser. It supports interactive pages and loading local Manifest V3 extensions, including extensions you develop and test here.",
             use_when="Starting an interactive browser workflow or changing pages.",
             do_not_use_when="Only raw HTTP/API content is needed.",
-            failure_next_steps="For readable non-JavaScript content, the main Pal may use run_shell with curl; otherwise inspect browser_status and retry after repair.",
+            failure_next_steps="An explicit URL skips saved-page restoration. For page_restore_failed, provide a new HTTP(S) URL; do not edit last_url or reset login data. For startup failures inspect browser_status. For target-page failures check the URL/network; the main Pal may use run_shell with curl when raw HTTP content suffices.",
+            next_tool_hints=(
+                NextToolHint(name="browser_read", use_when="Read rendered text, metadata, and links; omit url to use the current page."),
+                NextToolHint(name="browser_snapshot", use_when="Inspect controls and obtain element refs before interacting."),
+                NextToolHint(name="browser_find", use_when="Locate specific text or controls without a full snapshot."),
+                NextToolHint(name="browser_status", use_when="Inspect browser health or diagnose startup failures."),
+                NextToolHint(name="browser_extension_manage", use_when="Mount, reload, or unmount a local Manifest V3 extension you are developing or using."),
+                NextToolHint(name="browser_extensions", use_when="Inspect configured extensions and observed service workers."),
+            ),
         ),
         InputModel=BrowserNavigateInput,
         OutputModel=BrowserActionOutput,
@@ -176,13 +193,13 @@ class WebFetchIntrospectionProvider:
             purpose="Read rendered text, metadata, and links from the current conversation's browser page.",
             use_when="Reading a specific rendered page; provide url to navigate first or omit it to read the current page.",
             do_not_use_when="Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
-            failure_next_steps="For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
+            failure_next_steps="For page_restore_failed, supply a new HTTP(S) url here or use browser_navigate; this skips the saved page without clearing login data. Do not edit last_url. For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
         ),
         InputModel=BrowserReadInput,
         OutputModel=BrowserActionOutput,
         aliases=("browser_read",),
         metadata={"canonical_path": "op_browser_read", "omit_family_in_canonical": True},
-        execution=DIRECT_EXTERNAL_READ,
+        execution=INDIRECT_EXTERNAL_READ,
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
         if self.read_delegate is not None:
@@ -203,7 +220,7 @@ class WebFetchIntrospectionProvider:
         OutputModel=BrowserActionOutput,
         aliases=("browser_snapshot",),
         metadata={"canonical_path": "op_browser_snapshot", "omit_family_in_canonical": True},
-        execution=DIRECT_EXTERNAL_READ,
+        execution=INDIRECT_EXTERNAL_READ,
     )
     def snapshot(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "snapshot", "Browser snapshot")
@@ -222,7 +239,7 @@ class WebFetchIntrospectionProvider:
         OutputModel=BrowserActionOutput,
         aliases=("browser_find",),
         metadata={"canonical_path": "op_browser_find", "omit_family_in_canonical": True},
-        execution=DIRECT_EXTERNAL_READ,
+        execution=INDIRECT_EXTERNAL_READ,
     )
     def find(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "find", "Browser matches")
@@ -303,6 +320,50 @@ class WebFetchIntrospectionProvider:
             runtime=call.meta.get("execution_runtime"),
             turn_id=str(call.meta.get("turn_id") or "manual"),
         )
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="extensions",
+        guidance=ToolGuidance(
+            purpose="Inspect configured local browser extensions and observed extension service workers.",
+            use_when="Developing an extension or checking its configuration, ID, permissions, and manifest URL.",
+            do_not_use_when="Treating a configured entry or missing worker as proof of extension success or failure.",
+            failure_next_steps="Use browser_status for browser health. Verify content scripts on the target page and open the mounted extension's manifest URL to check loading.",
+        ),
+        OutputModel=BrowserActionOutput, aliases=("browser_extensions",),
+        execution=INDIRECT_LOCAL_READ,
+    )
+    def extensions(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "extensions", "Browser extensions")
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE, scope="module", action_name="extension_manage",
+        guidance=ToolGuidance(
+            purpose="Mount, reload, or unmount an unpacked local Manifest V3 extension for this conversation's browser.",
+            use_when="The user requests extension development or installation. For mount supply a directory containing manifest.json; for reload/unmount supply extension_id from browser_extensions.",
+            do_not_use_when="Installing Chrome Web Store packages, using temporary Bunshin browser scopes, or assuming configuration proves the extension works. This closes current browser tabs; persistent login data is retained.",
+            failure_next_steps="Correct manifest/path errors before retrying. After success navigate to a test page to launch with the new configuration, then verify behavior. Unmount remains available if the source directory was deleted.",
+        ),
+        InputModel=BrowserExtensionManageInput, OutputModel=BrowserActionOutput,
+        aliases=("browser_extension_manage",), execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+        examples=({"operation": "mount", "path": "/tmp/pal-test-extension"},),
+    )
+    def extension_manage(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "extension_manage", "Browser extension configuration updated")
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE, scope="module", action_name="clear_cache",
+        guidance=ToolGuidance(
+            purpose="Clear the current conversation browser's HTTP cache, retaining cookies and site storage.",
+            use_when="The user requests browser cache cleanup or stale cached resources need to be discarded.",
+            do_not_use_when="Logging out, deleting cookies, removing service-worker CacheStorage, or resetting the profile. Cache clearing does not fix an unreachable URL.",
+            failure_next_steps="Inspect browser_status on failure. A failed result does not confirm cleanup; do not reset the profile. Navigate or reload afterward only when the task needs it.",
+        ),
+        OutputModel=BrowserActionOutput, aliases=("browser_clear_cache",),
+        metadata={"canonical_path": "op_browser_clear_cache", "omit_family_in_canonical": True},
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+    )
+    def clear_cache(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._action(call, "clear_cache", "Browser HTTP cache cleared")
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="close", guidance=ToolGuidance(purpose="Close the current conversation's live browser while retaining its profile.", use_when="The live browser is no longer needed but login state should remain.", do_not_use_when="The profile must also be removed (use browser_reset).", failure_next_steps="Closing an already closed session is harmless."), OutputModel=BrowserActionOutput, aliases=("browser_close",), metadata={"canonical_path": "op_browser_close", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
     def close(self, call: IntrospectionCall) -> IntrospectionResult:

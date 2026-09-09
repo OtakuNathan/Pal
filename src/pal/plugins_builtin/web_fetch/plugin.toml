@@ -7,3 +7,7 @@ module_id = "web_fetch"
 requires_plugins = []
 requires_ports = []
 reload_modules = ["pal.web_fetch"]
+
+[installation]
+protocol = "pal.install.v1"
+entrypoint = "pal.plugins_builtin.web_fetch.installation"

@@ -55,6 +55,13 @@ def test_required_runtime_package_data_is_available() -> None:
     for package, relative_path in required_files:
         assert resources.files(package).joinpath(relative_path).is_file()
 
+    for package, relative_path in (
+        ("pal.packages", "hook_runner.py"),
+        ("pal.plugins_builtin.web_fetch", "installation.py"),
+        ("pal.plugins_builtin.web_fetch", "plugin.toml"),
+    ):
+        assert resources.files(package).joinpath(relative_path).is_file()
+
     assert not resources.files("pal.bunshin").joinpath("profile_templates/software_engineering/planner.toml").is_file()
     assert not resources.files("pal.bunshin").joinpath(
         "profile_templates/software_engineering/v2_architecture_reviewer.toml"

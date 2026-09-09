@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from pal.packages.environment import PackageEnvironment
 
 if False:  # pragma: no cover
     from pal.core.main_context import MainContext
@@ -76,3 +77,4 @@ class PluginBuildContext:
     runtime_root: Path
     services: dict[str, Any] = field(default_factory=dict)
     plugin_dir: Path | None = None
+    environment: PackageEnvironment | None = None

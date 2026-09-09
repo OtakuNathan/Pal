@@ -57,6 +57,11 @@ class ChannelProviderBuildContext:
     cleanup_callbacks: list[Callable[[], Any]] = field(default_factory=list)
 
     @property
+    def environment(self):
+        from pal.packages import installed_environment
+        return installed_environment(self.provider_dir)
+
+    @property
     def channel_data_root(self) -> Path:
         return self.runtime_root / RUNTIME_CHANNEL_DATA_DIR
 

@@ -3,8 +3,13 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_READ,
     INDIRECT_CONTROL,
+    INDIRECT_LOCAL_READ,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import NextToolHint, ToolGuidance
+from pal.packages.jobs import PackageJobs
+from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput
+from pathlib import Path
 
 from pal.execution.generated_tool_models import (
     PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -49,6 +54,53 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 class PluginsIntrospectionProvider:
     host: PluginHost
     module_id: str = "plugins"
+    package_jobs: PackageJobs | None = None
+
+    def jobs(self) -> PackageJobs:
+        if self.package_jobs is None:
+            self.package_jobs = PackageJobs(self.host)
+        return self.package_jobs
+
+    def shutdown_packages(self) -> None:
+        if self.package_jobs is not None:
+            self.package_jobs.shutdown()
+
+    def _package_result(self, action, **args) -> IntrospectionResult:
+        try:
+            payload = action(**args)
+            status = RuntimeStatus.OK
+        except Exception as exc:
+            payload = {"error": str(exc)}
+            status = RuntimeStatus.ERROR
+        return IntrospectionResult(status=status, text="Package operation", structured=payload,
+                                   llm_text=render_titled_structured_for_llm("Package operation", payload))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="package", action_name="install",
+        guidance=ToolGuidance(purpose="Install a local plugin package, prepare its private dependencies, and activate it through its owner.",
+            use_when="A plugin package is ready to install or upgrade.", do_not_use_when="Only dependencies of an installed plugin need repair; use package_prepare.",
+            failure_next_steps="Read package_status. Failure does not confirm installation or activation; retry after correcting the reported cause.",
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Follow the returned installation job."),)),
+        InputModel=PackageInstallInput, aliases=("package_install",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    def package_install(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._package_result(self.jobs().start, operation="install", path=Path(call.args["path"]))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="package", action_name="prepare",
+        guidance=ToolGuidance(purpose="Prepare or repair an installed package's dependencies without modifying Pal's Python environment.",
+            use_when="An installed plugin or builtin such as web_fetch has missing runtime dependencies.",
+            do_not_use_when="Installing a new artifact; use package_install.",
+            failure_next_steps="Inspect package_status for the stage and cause. Missing system privileges or configuration must be resolved before retrying.",
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Inspect preparation progress and verification."),)),
+        InputModel=PackagePrepareInput, aliases=("package_prepare",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    def package_prepare(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._package_result(self.jobs().start, operation="prepare", name=call.args["name"], kind=call.args.get("kind", "plugin"))
+
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", family="package", action_name="status",
+        guidance=ToolGuidance(purpose="Inspect package installation stages, failures, private environments and activation results.",
+            use_when="Following an installation job or diagnosing dependencies.", do_not_use_when="Reading a plugin's application data.",
+            failure_next_steps="Unknown jobs may belong to another runtime root; verify the selected runtime."),
+        InputModel=PackageStatusInput, aliases=("package_status",), execution=INDIRECT_LOCAL_READ)
+    def package_status(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._package_result(self.jobs().status, job_id=call.args.get("job_id"))
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
@@ -73,6 +125,11 @@ class PluginsIntrospectionProvider:
             use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. bunshin, mcp). The authoritative source for module ownership and lifecycle state.",
             do_not_use_when="Checking core/channel/execution internals (use their own show/observe). Searching capabilities by function (use search_tools).",
             failure_next_steps="Read-only. If a plugin is not listed, it may not be installed — check plugin directories or run plugin_rescan.",
+            next_tool_hints=(
+                NextToolHint(name="package_install", use_when="Install a prepared plugin package and its private dependencies."),
+                NextToolHint(name="package_prepare", use_when="Prepare or repair dependencies of an existing plugin."),
+                NextToolHint(name="package_status", use_when="Inspect package preparation or installation progress."),
+            ),
         ), aliases=("plugins_list",), execution=DIRECT_LOCAL_READ)
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -242,6 +299,7 @@ def build_management_handle(host: PluginHost) -> ModuleHandle:
         detachable=False,
         introspection_provider=provider,
         ports={"plugins": host},
+        shutdown_sync=provider.shutdown_packages,
     )
 
 

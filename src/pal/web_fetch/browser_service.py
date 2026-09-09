@@ -23,10 +23,11 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT
+from pal.web_fetch.extensions import inspect_extension, read_extensions, validate_extension_url
 
 PLAYWRIGHT_CLI_PACKAGE = "@playwright/cli"
 PLAYWRIGHT_CLI_VERSION = "0.1.19"
-NODE_MINIMUM_MAJOR = 18
+NODE_MINIMUM_MAJOR = 20
 INSTALL_TIMEOUT_SECONDS = 420
 PROFILE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 PROFILE_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -154,17 +155,9 @@ class BrowserRuntimePaths:
             self.profiles.chmod(0o700)
 
 
-def _detect_node_major() -> int | None:
-    node = shutil.which("node")
-    if not node:
-        return None
-    try:
-        completed = subprocess.run(
-            [node, "--version"], capture_output=True, text=True, timeout=5, check=False
-        )
-        return int(completed.stdout.strip().lstrip("v").split(".", 1)[0])
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
+def _detect_node_major(paths: BrowserRuntimePaths | None = None) -> int | None:
+    from pal.web_fetch.provisioning import child_env, node_major
+    return node_major(child_env(paths) if paths is not None else dict(os.environ))
 
 
 def _installed_cli_version(paths: BrowserRuntimePaths) -> str:
@@ -179,14 +172,14 @@ def _installed_cli_version(paths: BrowserRuntimePaths) -> str:
 
 
 def _chromium_installed(paths: BrowserRuntimePaths) -> bool:
-    candidates = (
-        "chrome-headless-shell",
-        "chrome-headless-shell.exe",
-        "headless_shell",
-        "Chromium Headless Shell",
-    )
-    for browser_root in paths.browser_cache.glob("chromium_headless_shell-*"):
-        for name in candidates:
+    package = paths.tooling_current / "node_modules" / "playwright-core" / "browsers.json"
+    try:
+        entries = json.loads(package.read_text())["browsers"]
+        revision = next(item["revision"] for item in entries if item["name"] == "chromium")
+    except (OSError, ValueError, KeyError, StopIteration):
+        return False
+    for browser_root in paths.browser_cache.glob(f"chromium-{revision}"):
+        for name in ("chrome", "chrome.exe", "Chromium", "Google Chrome for Testing"):
             if any(candidate.is_file() for candidate in browser_root.rglob(name)):
                 return True
     return False
@@ -241,7 +234,8 @@ class _PlaywrightCliWorker:
         self._lock = threading.RLock()
         self._install_lock = threading.Lock()
         self._install_thread: threading.Thread | None = None
-        self._installer_process: subprocess.Popen[str] | None = None
+        from pal.packages.process import CommandControl
+        self._install_control = CommandControl()
         self._stopping = threading.Event()
         self._install_state: dict[str, Any] = {
             "attempted": False,
@@ -256,7 +250,7 @@ class _PlaywrightCliWorker:
         self._prune_profiles()
 
     def _write_config(self) -> None:
-        launch_options: dict[str, Any] = {"headless": True}
+        launch_options: dict[str, Any] = {"headless": True, "channel": "chromium"}
         proxy_url = str(
             os.environ.get("https_proxy")
             or os.environ.get("HTTPS_PROXY")
@@ -289,24 +283,24 @@ class _PlaywrightCliWorker:
         _atomic_write_json(self.paths.config, payload, mode=0o600)
 
     def _child_env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update(
-            {
-                "CI": "1",
-                "NO_UPDATE_NOTIFIER": "1",
-                "PLAYWRIGHT_BROWSERS_PATH": str(self.paths.browser_cache),
-                "XDG_CACHE_HOME": str(self.paths.cli_cache),
-            }
-        )
-        return env
+        from pal.web_fetch.provisioning import child_env
+        return child_env(self.paths)
 
     def _node_major(self) -> int | None:
-        return _detect_node_major()
+        return _detect_node_major(self.paths)
 
     def _detected_cli_version(self) -> str:
         return _installed_cli_version(self.paths)
 
     def _cli_ready(self) -> bool:
+        if self.paths.cli.is_file() and (
+            self._node_major_cached is None
+            or self._node_major_cached < NODE_MINIMUM_MAJOR
+            or self._cli_version_cached != PLAYWRIGHT_CLI_VERSION
+        ):
+            # An external package_prepare may have repaired an already-running sidecar.
+            self._node_major_cached = self._node_major()
+            self._cli_version_cached = self._detected_cli_version()
         return bool(
             self._node_major_cached is not None
             and self._node_major_cached >= NODE_MINIMUM_MAJOR
@@ -337,91 +331,19 @@ class _PlaywrightCliWorker:
             thread.start()
 
     def _install_dependencies(self, *, browser_only: bool) -> None:
-        staging: Path | None = None
+        from pal.packages.process import command_control
+        from pal.packages.service import PackageService
         try:
-            node_major = self._node_major()
-            npm = shutil.which("npm")
-            if node_major is None or node_major < NODE_MINIMUM_MAJOR:
-                raise RuntimeError(f"Node.js {NODE_MINIMUM_MAJOR}+ is required")
-            if not browser_only:
-                if not npm:
-                    raise RuntimeError("npm is required to provision Playwright CLI")
-                staging = self.paths.tooling_root / f"staging-{uuid.uuid4().hex}"
-                completed = self._run_install_command(
-                    [
-                        npm, "install", "--prefix", str(staging), "--ignore-scripts",
-                        "--no-audit", "--no-fund", "--omit=dev",
-                        f"{PLAYWRIGHT_CLI_PACKAGE}@{PLAYWRIGHT_CLI_VERSION}",
-                    ],
-                )
-                if completed.returncode != 0:
-                    shutil.rmtree(staging, ignore_errors=True)
-                    detail = (completed.stderr or completed.stdout or "")[-500:]
-                    raise RuntimeError(f"npm install failed: {detail}")
-                old = self.paths.tooling_root / f"old-{uuid.uuid4().hex}"
-                moved_current = False
-                try:
-                    if self.paths.tooling_current.exists():
-                        os.replace(self.paths.tooling_current, old)
-                        moved_current = True
-                    os.replace(staging, self.paths.tooling_current)
-                    staging = None
-                except Exception:
-                    if (
-                        moved_current
-                        and old.exists()
-                        and not self.paths.tooling_current.exists()
-                    ):
-                        os.replace(old, self.paths.tooling_current)
-                    raise
-                finally:
-                    if self.paths.tooling_current.exists():
-                        shutil.rmtree(old, ignore_errors=True)
-            if not self.paths.cli.is_file():
-                raise RuntimeError("Playwright CLI executable was not installed")
-            completed = self._run_install_command(
-                [str(self.paths.cli), "install-browser", "chromium", "--only-shell"],
-            )
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "")[-500:]
-                raise RuntimeError(f"browser install failed: {detail}")
+            with command_control(self._install_control):
+                PackageService(self.paths.runtime_root).prepare("web_fetch", kind="builtin")
             self._node_major_cached = self._node_major()
             self._cli_version_cached = self._detected_cli_version()
             result = "ok"
         except Exception as exc:
-            if staging is not None:
-                shutil.rmtree(staging, ignore_errors=True)
             result = f"failed: {exc}"[-500:]
         with self._install_lock:
             self._install_state["in_progress"] = False
             self._install_state["last_result"] = result
-
-    def _run_install_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
-        process = subprocess.Popen(
-            command,
-            cwd=str(self.paths.workspace),
-            env=self._child_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=os.name != "nt",
-        )
-        with self._install_lock:
-            if self._stopping.is_set():
-                _terminate_process_tree(process)
-                raise RuntimeError("browser dependency installation was cancelled")
-            self._installer_process = process
-        try:
-            stdout, stderr = process.communicate(timeout=INSTALL_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_process_tree(process)
-            stdout, stderr = process.communicate()
-            raise RuntimeError("browser dependency installation timed out") from exc
-        finally:
-            with self._install_lock:
-                if self._installer_process is process:
-                    self._installer_process = None
-        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
     def health(self) -> dict[str, Any]:
         with self._lock:
@@ -476,6 +398,8 @@ class _PlaywrightCliWorker:
                 self.in_flight += 1
                 self.last_activity_at = time.monotonic()
             try:
+                if normalized_action in {"extensions", "extension_manage"}:
+                    return self._extension_action(key, normalized_action, dict(args or {}), persistent, timeout_ms)
                 if normalized_action == "reset":
                     result = self._reset(key)
                     self.last_error = ""
@@ -502,6 +426,18 @@ class _PlaywrightCliWorker:
                 self.last_error = ""
                 return result
             except BrowserServiceError as exc:
+                # Startup errors happen before action dispatch. A shell-only
+                # installation must provision full Chromium on first use too.
+                if exc.code != "dependency_installing" and any(
+                    marker in str(exc).lower() for marker in _BROWSER_MISSING_MARKERS
+                ):
+                    self._schedule_install(browser_only=True, reason="Chromium build missing")
+                    self.last_error = "Chromium is being provisioned"
+                    raise BrowserServiceError(
+                        self.last_error, code="dependency_installing", retryable=True,
+                        state_unknown=exc.state_unknown,
+                        curl_applicable=normalized_action in {"navigate", "read"},
+                    ) from exc
                 if (
                     normalized_action in {"navigate", "read"}
                     and exc.code != "invalid_arguments"
@@ -544,13 +480,27 @@ class _PlaywrightCliWorker:
             "navigate", "read", "snapshot", "find", "click", "fill", "type",
             "press", "hover", "select", "check", "scroll", "resize", "history",
             "tabs", "dialog", "inspect_layout", "screenshot", "status",
-            "evaluate", "network",
+            "evaluate", "network", "clear_cache",
         }:
             raise BrowserServiceError("unsupported browser action", code="unsupported_action")
         if action == "status":
             record = self.sessions.get(key)
             return {"session": self._session_payload(record), "runtime": self.health()}
-        record, recovered = self._ensure_session(key, persistent=persistent, timeout_ms=timeout_ms)
+        explicit_url = action in {"navigate", "read"} and bool(str(args.get("url") or "").strip())
+        if action == "navigate" or explicit_url:
+            self._navigation_url(key, args.get("url"))
+        record, recovered = self._ensure_session(
+            key, persistent=persistent, timeout_ms=timeout_ms,
+            restore_page=not explicit_url and action != "clear_cache",
+        )
+        if action == "clear_cache":
+            # Clear HTTP cache without restoring a possibly broken old page.
+            raw = self._run_write(record, _cli_args("run-code", _CLEAR_HTTP_CACHE_SCRIPT), timeout_ms=timeout_ms)
+            result = _parse_json_object(raw, "browser cache clear")
+            if result.get("cache_cleared") is not True:
+                raise BrowserServiceError("Browser did not confirm cache clearing", code="invalid_cli_output")
+            record.last_used_at = time.time()
+            return {"action": action, **result, "session": self._session_payload(record)}
         try:
             payload = self._dispatch_action(record, action=action, args=args, timeout_ms=timeout_ms)
         except BrowserServiceError as exc:
@@ -587,12 +537,12 @@ class _PlaywrightCliWorker:
         timeout_ms: int,
     ) -> dict[str, Any]:
         if action == "navigate":
-            self._run(record, _cli_args("goto", _validate_url(args.get("url"))), timeout_ms=timeout_ms, raw=True)
+            self._run(record, _cli_args("goto", self._navigation_url(record.key, args.get("url"))), timeout_ms=timeout_ms, raw=True)
             return {}
         if action == "read":
             url = str(args.get("url") or "").strip()
             if url:
-                self._run(record, _cli_args("goto", _validate_url(url)), timeout_ms=timeout_ms, raw=True)
+                self._run(record, _cli_args("goto", self._navigation_url(record.key, url)), timeout_ms=timeout_ms, raw=True)
             max_chars = max(1000, min(100000, int(args.get("max_chars") or 12000)))
             max_links = max(0, min(500, int(args.get("max_links") or 80)))
             raw = self._run(
@@ -825,32 +775,108 @@ class _PlaywrightCliWorker:
             raise BrowserServiceError(detail, code="cli_command_failed")
         return completed.stdout.strip()
 
-    def _ensure_session(self, key: str, *, persistent: bool, timeout_ms: int) -> tuple[_SessionRecord, bool]:
+    def _ensure_session(
+        self, key: str, *, persistent: bool, timeout_ms: int, restore_page: bool = True
+    ) -> tuple[_SessionRecord, bool]:
         with self._lock:
             current = self.sessions.get(key)
         if current is not None:
             return current, False
         record = _SessionRecord(key=key, name=f"pal-{key[:24]}", persistent=bool(persistent))
-        open_options = [f"--config={self.paths.config}"]
+        config_path = self.paths.config
+        extensions = read_extensions(self.paths.profiles / key) if persistent else []
+        if extensions:
+            extensions = [inspect_extension(item["path"]) for item in extensions]
+            config = json.loads(self.paths.config.read_text())
+            directories = ','.join(item['path'] for item in extensions)
+            config['browser']['launchOptions']['args'] = [
+                f'--disable-extensions-except={directories}', f'--load-extension={directories}',
+            ]
+            config_path = self.paths.profiles / key / 'browser.config.json'
+            _atomic_write_json(config_path, config, mode=0o600)
+        open_options = [f"--config={config_path}"]
         restored_url = ""
         if persistent:
             profile_dir = self.paths.profiles / key
             profile_dir.mkdir(parents=True, exist_ok=True)
             with contextlib.suppress(OSError):
                 profile_dir.chmod(0o700)
-            restored_url = str(self._read_profile_meta(key).get("last_url") or "")
+            if restore_page:
+                restored_url = str(self._read_profile_meta(key).get("last_url") or "")
             open_options.append(f"--profile={profile_dir / 'user-data'}")
-        initial_url = restored_url if restored_url.startswith(("http://", "https://")) else "about:blank"
-        open_args = _cli_args("open", initial_url, options=open_options)
+        # Starting the browser and restoring a page are separate operations:
+        # an unreachable saved URL must not block an explicit new destination.
+        open_args = _cli_args("open", "about:blank", options=open_options)
         try:
             self._run(record, open_args, timeout_ms=timeout_ms, raw=True)
         except BrowserServiceError:
             self._close_named(record, force=True)
             raise
-        record.last_url = restored_url
+        restore_http_page = restored_url.startswith(("http://", "https://"))
+        if restore_http_page:
+            try:
+                self._run(record, _cli_args("goto", restored_url), timeout_ms=timeout_ms, raw=True)
+            except BrowserServiceError as exc:
+                self._close_named(record, force=True)
+                raise BrowserServiceError(
+                    "The browser started, but restoring the saved page failed. "
+                    "Provide a new HTTP(S) URL to browser_navigate or browser_read to continue; "
+                    "the new URL will skip saved-page restoration. "
+                    "Do not edit last_url or reset the profile; login data is retained. "
+                    f"Restore error ({exc.code}): {exc}",
+                    code="page_restore_failed",
+                    state_unknown=exc.state_unknown,
+                ) from exc
+        record.last_url = restored_url if restore_http_page else "about:blank"
         with self._lock:
             self.sessions[key] = record
-        return record, bool(restored_url)
+        return record, restore_http_page
+
+    def _navigation_url(self, key: str, value: object) -> str:
+        url = str(value or "").strip()
+        if url.startswith("chrome-extension:"):
+            return validate_extension_url(url, read_extensions(self.paths.profiles / key))
+        return _validate_url(value)
+
+    def _extension_action(self, key: str, action: str, args: dict, persistent: bool, timeout_ms: int) -> dict:
+        if not persistent:
+            raise BrowserServiceError("Extension development requires a persistent conversation profile", code="unsupported_scope")
+        profile_dir = self.paths.profiles / key
+        items = read_extensions(profile_dir)
+        record = self.sessions.get(key)
+        if action == "extensions":
+            workers = []
+            if record is not None:
+                script = "async page => ({workers: page.context().serviceWorkers().map(w => w.url())})"
+                workers = _parse_json_object(self._run(record, _cli_args("run-code", script), timeout_ms=timeout_ms, raw=True), "extension workers").get("workers", [])
+            return {"extensions": items, "browser_running": record is not None,
+                    "observed_service_workers": workers,
+                    "note": "Configured extensions are not proof of successful loading. A worker may be suspended or absent for content-only extensions; verify the target page or extension manifest URL."}
+        operation = args.get("operation")
+        if operation == "mount":
+            item = inspect_extension(str(args.get("path") or ""))
+            items = [other for other in items if other['id'] != item['id'] and other['path'] != item['path']] + [item]
+            if len(items) > 16:
+                raise ValueError("At most 16 extensions may be mounted per conversation")
+        elif operation in {"unmount", "reload"}:
+            extension_id = str(args.get("extension_id") or "")
+            if not any(item['id'] == extension_id for item in items):
+                raise ValueError("Unknown extension_id; inspect browser_extensions first")
+            if operation == "unmount":
+                items = [item for item in items if item['id'] != extension_id]
+            else:
+                items = [inspect_extension(item['path']) if item['id'] == extension_id else item for item in items]
+        else:
+            raise ValueError("Expected mount, unmount, or reload")
+        # Confirm shutdown before changing startup configuration. Never delete profile data.
+        if record is not None:
+            self._run(record, ["close"], timeout_ms=timeout_ms, raw=True)
+            self.sessions.pop(key, None)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(profile_dir / 'extensions.json', items, mode=0o600)
+        return {"operation": operation, "configured": True, "extensions": items,
+                "browser_running": False, "profile_retained": True,
+                "next_step": "Navigate to the test page to start the browser with this configuration, then verify extension behavior. Existing tabs were closed if running."}
 
     def _page_state(self, record: _SessionRecord, *, timeout_ms: int) -> dict[str, Any]:
         raw = self._run(record, ["eval", _PAGE_STATE_SCRIPT], timeout_ms=timeout_ms, raw=True)
@@ -910,10 +936,7 @@ class _PlaywrightCliWorker:
 
     def shutdown(self) -> None:
         self._stopping.set()
-        with self._install_lock:
-            installer = self._installer_process
-        if installer is not None:
-            _terminate_process_tree(installer)
+        self._install_control.stop()
         self._close_workspace_sessions(force=False)
         with self._lock:
             self.sessions.clear()
@@ -1018,6 +1041,17 @@ def _layout_script(*, selector: str, limit: int) -> str:
       }});
       return {{selector: args.selector, matched_count: all.length, truncated: all.length > args.limit, elements}};
     }})())"""
+
+
+_CLEAR_HTTP_CACHE_SCRIPT = """async (page) => {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('Network.clearBrowserCache');
+    return {cache_cleared: true, cache_kind: 'http', cookies_retained: true, site_storage_retained: true};
+  } finally {
+    await session.detach();
+  }
+}"""
 
 
 def _parse_json_object(raw: str, label: str) -> dict[str, Any]:
@@ -1335,7 +1369,7 @@ class BrowserServiceManager:
         resource = self._process
         running = self._process_running(resource)
         paths = BrowserRuntimePaths(Path(self.runtime_root))
-        node_major = _detect_node_major()
+        node_major = _detect_node_major(paths)
         cli_version = _installed_cli_version(paths)
         browser_installed = _chromium_installed(paths)
         dependencies_ready = bool(

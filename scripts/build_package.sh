@@ -52,6 +52,10 @@ if [[ -z "${websocket_provider_wheel_path:-}" || ! -f "$websocket_provider_wheel
 fi
 
 required_wheel_paths=(
+  "pal/packages/service.py"
+  "pal/packages/hook_runner.py"
+  "pal/web_fetch/provisioning.py"
+  "pal/plugins_builtin/web_fetch/installation.py"
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"

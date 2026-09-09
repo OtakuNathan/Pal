@@ -402,10 +402,10 @@ def _render_dependency_check(check: WizardDependencyCheck) -> str:
     return "\n".join(lines)
 
 
-def run_dependency_doctor() -> int:
+def run_dependency_doctor(*, runtime_root: Path | None = None) -> int:
     print(_PAL_LOGO)
     print("  Dependency Doctor\n")
-    checks = collect_dependency_checks()
+    checks = collect_dependency_checks(runtime_root)
     for check in checks:
         print(_render_dependency_check(check))
     blocking = [check for check in checks if check.blocking]

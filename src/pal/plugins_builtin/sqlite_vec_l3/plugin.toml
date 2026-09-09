@@ -7,3 +7,7 @@ module_id = "l3.sqlite_vec_l3"
 requires_plugins = []
 requires_ports = ["memory:memory"]
 reload_modules = ["pal.plugins.l3"]
+
+[installation]
+protocol = "pal.install.v1"
+entrypoint = "pal.plugins_builtin.sqlite_vec_l3.installation"
