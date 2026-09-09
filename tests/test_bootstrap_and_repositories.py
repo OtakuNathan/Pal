@@ -642,9 +642,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertIn("search_web", tool_names)
         self.assertIn("browser_navigate", tool_names)
-        self.assertIn("browser_read", tool_names)
-        self.assertIn("browser_snapshot", tool_names)
-        self.assertIn("browser_find", tool_names)
+        for name in ("browser_read", "browser_snapshot", "browser_find"):
+            self.assertNotIn(name, tool_names)
+            self.assertIn(name, descriptors)
+        navigate = next(item["function"] for item in handle.core._build_llm_tool_contracts()
+                        if item["function"]["name"] == "browser_navigate")
+        for name in ("browser_read", "browser_snapshot", "browser_find"):
+            self.assertIn(name, navigate["description"])
         self.assertNotIn("browser_screenshot", tool_names)
         self.assertNotIn("read_web", tool_names)
 

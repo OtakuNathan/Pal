@@ -14,4 +14,4 @@ class PackagePrepareInput(StrictToolModel):
 
 
 class PackageStatusInput(StrictToolModel):
-    job_id: str | None = Field(default=None, description="Installation job id, or omit for recent jobs and package records.")
+    job_id: str | None = Field(default=None, description="Exact job_id returned by package_install or package_prepare, or listed by package_status. Omit for recent jobs and package records.")
