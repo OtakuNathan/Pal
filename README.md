@@ -234,7 +234,7 @@ Tools are the **only** execution primitive. Built-in: `shell.exec`, `tool.search
 
 An optional [native shell backend](native/shell_runtime/README.md) supports retained
 process sessions and PTYs through the same `run_shell` entry, with session controls
-discovered on demand. Resident integration trials use `PAL_SHELL_BACKEND=native`
+discovered on demand. Resident and Bunshin runtimes use `PAL_SHELL_BACKEND=native`
 and a separately built extension; Python remains the default and rollback backend.
 
 ### Prompt Assembly

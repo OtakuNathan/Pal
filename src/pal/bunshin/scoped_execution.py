@@ -89,6 +89,7 @@ from pal.bunshin.v2.swe_verification import (
     swe_verification_tool_result,
 )
 from pal.bunshin.v2.verification_builder import (
+    SHELL_EVIDENCE_CAPABILITIES,
     VERIFICATION_BUILDER_TOOL_SPECS,
     is_verification_builder_capability,
     verification_builder_tool_result,
@@ -320,6 +321,7 @@ def _workflow_capability(
             "scope": "workflow",
             "allow_missing_next_tool_hints": True,
             "scoped_projection": "bunshin",
+            "native_shell_delegation": name in SHELL_EVIDENCE_CAPABILITIES,
         },
     )
     action = BoundCapabilityAction(
@@ -492,6 +494,14 @@ class BunshinScopedExecutionRuntime:
         ).strip()
         self._direct_turn_id = f"{lifetime_id}:direct" if lifetime_id else ""
         self.allowed_capabilities = filter_bunshin_allowed_capabilities(list(self.allowed_capabilities or []))
+        shell_capabilities = SHELL_EVIDENCE_CAPABILITIES | {"op_exec_shell"}
+        if getattr(self._original_runtime, "shell_owner", None) is not None and shell_capabilities.intersection(self.allowed_capabilities):
+            # These controls grant authority only over this role's own shell
+            # instances; they do not expose resident or other-role sessions.
+            self.allowed_capabilities = list(dict.fromkeys([
+                *self.allowed_capabilities, "op_exec_session", "op_exec_status", "op_exec_recover_output",
+                "op_tool_call", "op_tool_read",
+            ]))
         if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
             self.allowed_capabilities.append("op_tool_result_page")
         self.capability_guidance_overrides = normalize_tool_guidance_overrides(
@@ -591,7 +601,15 @@ class BunshinScopedExecutionRuntime:
         execute = getattr(self._original_runtime, "execute_tool_async", None)
         if callable(execute):
             facade_call = _manager_call_to_facade(self._original_runtime, call)
-            return await execute(facade_call, **_supported_kwargs(execute, kwargs))
+            result = await execute(facade_call, **_supported_kwargs(execute, kwargs))
+            if call.name == "op_exec_shell" and getattr(self._original_runtime, "shell_owner", None) is not None:
+                # Verification evidence must describe a terminal command, even
+                # when its internal shell call outlives the response wait.
+                while result.ok and (result.structured or {}).get("status") in {"running", "terminating"}:
+                    result = await execute(new_tool_call(name="call_tool", args={
+                        "name": "shell_session", "args": {"session_id": result.structured["session_id"], "wait_ms": 300000},
+                    }, call_id=call.call_id), **_supported_kwargs(execute, kwargs))
+            return result
         return _error_result(call, "unknown tool", "unknown_tool")
 
     def begin_tool_result_turn(self, **kwargs: Any) -> None:
@@ -619,6 +637,16 @@ class BunshinScopedExecutionRuntime:
             None,
         )
         return commit(**kwargs) if callable(commit) else None
+
+    async def acknowledge_tool_result_async(self, call_id: str, turn_id: str) -> None:
+        acknowledge = getattr(self._original_runtime, "acknowledge_tool_result_async", None)
+        if callable(acknowledge):
+            await acknowledge(call_id, turn_id)
+
+    async def interrupt_turn(self, turn_id: str) -> None:
+        interrupt = getattr(self._original_runtime, "interrupt_turn", None)
+        if callable(interrupt):
+            await interrupt(turn_id)
 
     def discard_uncommitted_tool_delivery(self, **kwargs: Any) -> Any:
         discard = getattr(
@@ -869,7 +897,7 @@ def _scope_descriptor(
     canonical = str(descriptor.canonical_path or descriptor.name)
     input_model = (
         BunshinScopedExecutionShellInput
-        if canonical == "op_exec_shell"
+        if canonical == "op_exec_shell" and "wait_ms" not in descriptor.InputModel.model_fields
         else descriptor.InputModel
     )
     guidance = bunshin_tool_guidance(
@@ -877,8 +905,23 @@ def _scope_descriptor(
         descriptor.guidance,
         guidance_overrides.get(canonical),
     )
+    native_shell = canonical == "op_exec_shell" and "wait_ms" in input_model.model_fields
+    if native_shell:
+        guidance = guidance.model_copy(update={
+            "use_when": guidance.use_when + " wait_ms controls response waiting, not process lifetime; timeout_ms is an optional hard deadline."
+                " A nonzero session_id identifies a continuing command. The runner waits up to five minutes for background completion"
+                " before the next model round and delivers output to this role's context. Use tty=true for interactive input.",
+            "failure_next_steps": guidance.failure_next_steps + " Do not replay a live session or poll repeatedly."
+                " Use shell_session for PTY input or termination and shell_recover_output for retained output."
+                " Success requires status=exited and returncode=0. Pending shell output blocks writes and submission.",
+        })
+    if canonical == "op_exec_session":
+        guidance = guidance.model_copy(update={"use_when": guidance.use_when.replace(
+            "retry_notification retries a failed completion turn; inspect its previous effects before retrying.",
+            "The role runner delivers completions automatically; retry_notification is available only in the resident host.",
+        )})
     execution = descriptor.execution
-    if execution is not None:
+    if execution is not None and canonical not in {"op_exec_session", "op_exec_status", "op_exec_recover_output"}:
         execution = execution.model_copy(update={"invocation_mode": InvocationMode.DIRECT})
     return replace(
         descriptor,
@@ -905,6 +948,14 @@ def _manager_call_to_facade(runtime: Any, call: ToolCallIR) -> ToolCallIR:
     generation = getattr(runtime, "registry_generation", None)
     if generation is None:
         return call
+    if call.name in {"op_tool_call", "call_tool", "op_tool_read", "read_tool"}:
+        args = dict(call.args or {})
+        target = str(args.get("name") or "")
+        targets = [record for record in (*generation.direct_aliases.values(), *generation.indirect_aliases.values())
+                   if record.canonical_path == target]
+        if len(targets) == 1:
+            args["name"] = targets[0].alias
+            call = new_tool_call(name=call.name, args=args, call_id=call.call_id)
     exact = generation.record_for_alias(str(call.name or ""))
     if exact is not None:
         return call

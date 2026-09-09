@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import suppress, asynccontextmanager
+import asyncio
 from dataclasses import dataclass
 import json
 
@@ -48,6 +49,26 @@ class NativeShellOwner:
         self.pending = {}
         self.sessions = {}
         self.closed = False
+        self.defer_delivery = False
+        self.require_output_delivery = False
+        self.on_ready = None
+        self.write_task = None
+
+    @property
+    def has_work(self):
+        return bool(self.sessions or self.pending or (self._shell is not None and self._shell._foreground))
+
+    @asynccontextmanager
+    async def write_scope(self):
+        task = asyncio.current_task()
+        previous = self.write_task
+        if previous is not None and previous is not task:
+            raise ShellRejected("write_busy: another host write is active")
+        self.write_task = task
+        try:
+            yield
+        finally:
+            self.write_task = previous
 
     @property
     def shell(self):
@@ -58,6 +79,8 @@ class NativeShellOwner:
         return self._shell
 
     def notify(self):
+        if self.on_ready is not None:
+            self.on_ready()
         if self.core is not None:
             self.core.notify_ready()
 
@@ -151,10 +174,21 @@ class NativeExecutionRuntime(ExecutionRuntime):
     async def _call_record_async(self, record, binding, call, validated, turn_id, budget, allow_tools):
         arguments = record, binding, call, validated, turn_id, budget, allow_tools
         try:
-            if record.alias in NATIVE_TOOLS:
+            if record.execution.effect_kind.value in READ_EFFECTS or record.alias in NATIVE_TOOLS - {"run_shell"}:
                 return await super()._call_record_async(*arguments)
-            async with self.shell_owner.shell.tool_admission(record.execution.effect_kind.value):
-                return await super()._call_record_async(*arguments)
+            async with self.shell_owner.write_scope():
+                if record.alias == "run_shell":
+                    return await super()._call_record_async(*arguments)
+                if self.shell_owner.require_output_delivery and self.shell_owner.has_work:
+                    raise ShellRejected("write_busy: deliver or explicitly release retained shell results before writing or submitting")
+                if record.binding.descriptor.metadata.get("native_shell_delegation"):
+                    # This compound tool invokes run_shell itself. Keep host
+                    # exclusivity, but let the child own its native write lease.
+                    async with self.shell_owner.shell.tool_admission(record.execution.effect_kind.value):
+                        pass
+                    return await super()._call_record_async(*arguments)
+                async with self.shell_owner.shell.tool_admission(record.execution.effect_kind.value):
+                    return await super()._call_record_async(*arguments)
         except ShellRejected as exc:
             prefix = str(exc).partition(":")[0]
             code = {"write_busy": "shell_write_busy", "invalid_session": "invalid_session",
@@ -195,7 +229,7 @@ class NativeExecutionRuntime(ExecutionRuntime):
                 reason="Retry retained output delivery only; the command must not be replayed.")],
                 "effect": EffectOutcome.APPLIED})
         core = self.shell_owner.core
-        if core is None or pending.turn_id not in core.state.active_turns:
+        if not self.shell_owner.defer_delivery and (core is None or pending.turn_id not in core.state.active_turns):
             # Embedded callers own delivery at the returned result boundary.
             await self.shell_owner.commit(call.call_id)
         return result

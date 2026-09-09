@@ -431,6 +431,7 @@ class BunshinRunner:
     _visible_capability_aliases: list[str] = field(default_factory=list, init=False, repr=False)
     _observed_tool_call_count: int = field(default=0, init=False, repr=False)
     _manager_submission_receipt_observed: bool = field(default=False, init=False, repr=False)
+    _shell_sessions: Any = field(default=None, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: BunshinRuntimeBundle | None = None
@@ -462,14 +463,17 @@ class BunshinRunner:
             )
             return await self._run_v2_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
         except _BunshinCooperativeCancel as cancel:
+            await self._close_native_shell_work(bundle)
             with contextlib.suppress(Exception):
                 await self._emit("terminal", self._cancel_terminal_payload(cancel.payload))
             return 0
         except _BunshinCooperativeRestart as restart:
+            await self._close_native_shell_work(bundle)
             with contextlib.suppress(Exception):
                 await self._emit("terminal", self._restart_terminal_payload(restart.payload))
             return 0
         except Exception as exc:
+            await self._close_native_shell_work(bundle)
             checkpoint_error = isinstance(exc, AgentSessionCheckpointError)
             with contextlib.suppress(Exception):
                 await self._emit(
@@ -497,6 +501,12 @@ class BunshinRunner:
                 await bundle.close()
             self._append_debug_log("runner_stopped", {"blocked_summary": self.blocked_summary})
 
+    @staticmethod
+    async def _close_native_shell_work(bundle):
+        owner = getattr(getattr(bundle, "execution_runtime", None), "shell_owner", None)
+        if owner is not None:
+            await owner.close()
+
     async def _run_v2_invocation(
         self,
         bundle: BunshinRuntimeBundle,
@@ -519,6 +529,7 @@ class BunshinRunner:
             await self._raise_if_cancel_requested()
             await self._raise_if_restart_requested()
             if self.blocked_summary:
+                await self._close_native_shell_work(bundle)
                 await self._emit("terminal", self._terminal_payload("blocked", self.blocked_summary))
                 return 0
             if not self._required_primary_artifact_name() or self._completion_evidence_present():
@@ -626,6 +637,9 @@ class BunshinRunner:
         return str(output_policy.get("primary_artifact") or "").strip()
 
     async def _run_agent_loop(self, bundle: BunshinRuntimeBundle, *, forced_retry_note: str = "") -> str:
+        if self._shell_sessions is None and getattr(bundle.execution_runtime, "shell_owner", None) is not None:
+            from pal.bunshin.shell_sessions import BunshinShellSessions
+            self._shell_sessions = BunshinShellSessions(bundle.execution_runtime)
         memory_service = bundle.memory_service
         memory_candidate_sink = self._runner_memory_candidate_sink()
         workspace = dict(self.pack.workspace)
@@ -1027,11 +1041,13 @@ class BunshinRunner:
                 # durable protocol boundary.
                 continue
 
-    @staticmethod
     def _continuation_is_restart_safe(
+        self,
         continuation: TurnContinuation,
         memory_service: MemoryService | None = None,
     ) -> bool:
+        if self._shell_sessions is not None and self._shell_sessions.has_work:
+            return False
         if continuation.pending_tool_call_batch or continuation.pending_tool_results:
             return False
         if memory_service is None:
@@ -1415,6 +1431,8 @@ class BunshinRunner:
             return state.pending_output_length_recovery_note
         if self.blocked_summary:
             return ""
+        if self._shell_sessions is not None and self._shell_sessions.has_work:
+            return self._shell_sessions.retry_note()
         if str(getattr(outcome, "finish_reason", "") or "") == LLMFinishReason.ERROR:
             return ""
         tools_available = bool(self.pack.allowed_capabilities)
@@ -1519,6 +1537,11 @@ class BunshinRunner:
         max_output_tokens: int,
     ) -> EffectResult:
         if isinstance(effect, LLMRequestEffect):
+            if self._shell_sessions is not None and not self.blocked_summary:
+                await self._await_with_progress_heartbeat(
+                    self._shell_sessions.before_model(state.memory_service, continuation.turn_id, self._raise_if_cancel_requested),
+                    phase="shell_session_waiting", round=state.llm_round_count,
+                )
             preflight = self._preflight_bunshin_llm_round(state)
             if preflight is not None:
                 return preflight
@@ -1544,7 +1567,8 @@ class BunshinRunner:
     def _preflight_bunshin_llm_round(self, state: BunshinAgentLoopState) -> EffectResult | None:
         if self.blocked_summary:
             return EffectResult(status=RuntimeStatus.OK, payload=_bunshin_generation_result(self.blocked_summary))
-        if self._required_primary_artifact_name() and self._completion_evidence_present():
+        shell_pending = self._shell_sessions is not None and self._shell_sessions.has_work
+        if not shell_pending and self._required_primary_artifact_name() and self._completion_evidence_present():
             return EffectResult(
                 status=RuntimeStatus.OK,
                 payload=_bunshin_generation_result(
@@ -1556,7 +1580,7 @@ class BunshinRunner:
         if max_rounds is None or state.llm_round_count < max_rounds:
             state.llm_round_count += 1
             return None
-        if self._completion_evidence_present() or self._artifact_completion_evidence_present():
+        if not shell_pending and (self._completion_evidence_present() or self._artifact_completion_evidence_present()):
             outcome = _bunshin_generation_result("assignment produced completion evidence")
         else:
             self.blocked_summary = f"bunshin reached explicit max_tool_rounds={max_rounds} before completing the current invocation"
@@ -1795,14 +1819,17 @@ class BunshinRunner:
                 retention_steps=_BUNSHIN_TOOL_RESULT_RETENTION_CALLS,
             )
         try:
+            operation = self._execute_allowed_tool(
+                state.execution_runtime, call, allow_tools=allow_tools,
+                budget=budget, turn_id=turn_id or continuation.turn_id,
+            )
+            if self._shell_sessions is not None:
+                from pal.bunshin.v2.verification_builder import SHELL_EVIDENCE_CAPABILITIES
+                canonical = state.execution_runtime.resolve_capability_address(target_name)
+                if canonical in SHELL_EVIDENCE_CAPABILITIES | {"op_exec_shell", "op_exec_session"}:
+                    operation = self._shell_sessions.run_tool(operation, self._raise_if_cancel_requested)
             result = await self._await_with_progress_heartbeat(
-                self._execute_allowed_tool(
-                    state.execution_runtime,
-                    call,
-                    allow_tools=allow_tools,
-                    budget=budget,
-                    turn_id=turn_id or continuation.turn_id,
-                ),
+                operation,
                 phase="tool_call_waiting",
                 round=state.llm_round_count,
                 tool_call_index=index,
@@ -2694,7 +2721,8 @@ def build_slim_bunshin_runtime(
                 settings.set("active_web_search_provider_id", enabled[0].provider_id)
 
     config = RuntimeConfig.load(Path(runtime_root))
-    context = MainContext()
+    from pal.execution.backend import build_execution_runtime
+    context = MainContext(execution_runtime=build_execution_runtime())
     context.execution_runtime.runtime_root = Path(runtime_root)
     lifecycle = ModuleLifecycle(context, CoreRuntimeState())
     artifact_service = ArtifactManager(

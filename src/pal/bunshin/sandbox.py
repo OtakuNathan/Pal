@@ -485,6 +485,15 @@ def _build_bwrap_invocation(
     _append_bind_path(args, source_root, read_only=True)
     for python_path in _python_dependency_paths():
         _append_bind_path(args, Path(python_path), read_only=True)
+    if env.get("PAL_SHELL_BACKEND", "python") == "native":
+        # The role gets only the extension file, not the resident runtime root.
+        # Its processes and session/output files remain inside this sandbox.
+        from importlib.machinery import PathFinder
+        paths = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+        spec = PathFinder.find_spec("_pal_shell_runtime", [*paths, *sys.path])
+        if spec is None or not spec.origin:
+            raise RuntimeError("native shell backend selected but _pal_shell_runtime is unavailable to the Bunshin sandbox")
+        _append_bind_path(args, Path(spec.origin).resolve(), read_only=True)
     nvm_root = Path.home() / ".nvm"
     if nvm_root.exists():
         _append_bind_path(args, nvm_root, read_only=True)

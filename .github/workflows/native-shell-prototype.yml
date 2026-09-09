@@ -8,7 +8,7 @@ on:
       - "src/pal/core/turn_executor.py"
       - "src/pal/bootstrap/service.py"
       - "src/pal/runtime_app.py"
-      - "src/pal/bunshin/scoped_execution.py"
+      - "src/pal/bunshin/**"
       - ".github/workflows/native-shell-prototype.yml"
   workflow_dispatch:
 
