@@ -14,9 +14,9 @@ and add that directory to the resident service's `PYTHONPATH`. Set
 `PAL_SHELL_BACKEND=native` and restart the service. An unavailable extension is a
 startup error; the selected backend never silently changes execution semantics.
 Unset the variable (or set it to `python`) and restart to revert. This switch
-applies to the resident bootstrap; standalone Bunshin role processes retain their
-existing Python backend. Native registry projections share their owner's write
-gate when used in the same runtime.
+applies to both resident bootstrap and standalone Bunshin role processes. Each
+role owns its own native runtime, processes and sessions. Native registry
+projections share their owner's write gate within that role.
 
 The resident keeps `run_shell` direct. `shell_session`, `shell_status`, and
 `shell_recover_output` are indirect and discoverable from its hints. `shell_status`
@@ -45,6 +45,29 @@ session IDs. Graceful shutdown closes native execution before saving the existin
 resident L1 checkpoint. Live processes and unconsumed native files are **not**
 persisted across restart; already delivered pager results retain normal checkpoint
 semantics. Snapshot/restore while native sessions are outstanding is rejected.
+
+### Bunshin roles
+
+Roles use the same run/session contracts, output budget, pager, recovery and
+cancellation implementation. Shell-enabled roles discover `shell_session`,
+`shell_status` and `shell_recover_output` indirectly. The sandbox mounts only the
+native extension file read-only; it does not expose the resident's runtime data.
+
+Before the next model round, the role runner waits up to five minutes for a
+noninteractive background command, with Manager heartbeats and responsive
+cancellation. A PTY returns control to the model for input. Completions enter the
+same role's L1 as runtime context artifacts; they never wake the resident or
+another role. Output files are released after that observation is committed.
+Failed deliveries use the normal explicit output-recovery tool.
+
+Outstanding sessions or undelivered output block role writes, submission and
+restart-safe checkpoints. A cooperative restart waits for a safe point; cancellation
+and failed/blocked role exit reap remaining children before terminal notification.
+Verification wrappers wait for terminal shell results before recording evidence,
+and retain the output until the outer tool result is committed. They reserve host
+write admission while their nested shell owns the native process lease.
+Forced process termination does not preserve shell sessions; an earlier role
+checkpoint cannot restore those processes or prove their external effects.
 
 ## Build and test
 

@@ -81,7 +81,7 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
             owner.sessions[sid] = {
                 "origin_turn": turn_id, "budget": budget,
                 "binding": getattr(continuation, "delivery_binding", None),
-                "committed": False, "cmd": call.args["cmd"],
+                "committed": False, "cmd": call.args["cmd"], "tty": bool(call.args.get("tty")),
             }
         return await owner.stage(call, result)
 

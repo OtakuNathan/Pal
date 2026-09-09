@@ -4,8 +4,7 @@ from pal.execution.runtime_state import ExecutionRuntimeStatePort
 class NativeExecutionStatePort(ExecutionRuntimeStatePort):
     def _has_native_work(self):
         owner = self.runtime.shell_owner
-        return bool(owner.sessions or owner.pending
-                    or (owner._shell is not None and owner._shell._foreground))
+        return owner.has_work
 
     def snapshot_state(self):
         if self._has_native_work():

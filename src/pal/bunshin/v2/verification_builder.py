@@ -67,6 +67,8 @@ _RUN_TO_KIND_TAG = {
     "op_bunshin_verification_run_platform_probe": ("platform_assumption", "platform_probe"),
 }
 
+SHELL_EVIDENCE_CAPABILITIES = frozenset(_RUN_TO_KIND_TAG)
+
 # Short, risk-directed action scripts.  These are deliberately data, rather
 # than another role prompt: the Manager binds only the scripts applicable to
 # this verification node and draft_status exposes the next unfinished one.

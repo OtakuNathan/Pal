@@ -145,7 +145,9 @@ class NativeShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.runtime.run("printf next"))["stdout"], "next")
 
     async def test_hard_deadline_is_not_wait_budget(self):
-        result = await self.runtime.run("printf ready; sleep 60", timeout_ms=100)
+        # Leave room for shell startup on loaded CI hosts while keeping the
+        # process deadline strictly shorter than the response wait budget.
+        result = await self.runtime.run("printf ready; sleep 60", timeout_ms=1000, wait_ms=5000)
         self.assertEqual((result["status"], result["session_id"]), ("timed_out", 0))
         self.assertEqual(result["stdout"], "ready")
 

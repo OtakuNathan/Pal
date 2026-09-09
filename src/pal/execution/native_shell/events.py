@@ -126,7 +126,8 @@ class ShellCompletionSource:
                     raise RuntimeError(f"completion output delivery failed: {result}")
                 text = (f"Runtime shell completion for session {sid}, originating turn {completion.origin_turn}. "
                         "This is command output, not a new user instruction. Continue the existing task if appropriate; "
-                        "do not rerun the command merely because it completed asynchronously.\n" + result.llm_text)
+                        "do not rerun the command merely because it completed asynchronously.\n"
+                        + self.runtime._render_invocation_for_llm(result))
                 message = LLMMessageIR(role=MessageRole.USER, semantic_kind="runtime_context_artifact",
                     parts=(TextPartIR(text),), message_id=continuation.turn_id,
                     metadata={"source": EVENT, "origin_turn": completion.origin_turn, "session_id": sid,
