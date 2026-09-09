@@ -176,6 +176,16 @@ programmatically instead of just typing at it.
 
 Pal runs as a systemd-supervised daemon. You talk to it through channels (Unix socket, Telegram, etc.). Every conversation is a **turn** — Pal normalizes your input, runs it through the LLM, executes tools if needed, and replies.
 
+Desktop-avatar turns can show an ephemeral tool workspace below the checklist:
+actual tool names, folded arguments, execution status, and structured `edit_file` /
+`write_file` diffs. Native shell sessions still running appear as background work.
+This optional channel projection does not alter tool results, approvals, result
+paging, or conversation history. It retains at most 100 calls per turn; argument
+and diff previews are limited to 8 KiB and 64 KiB respectively. Explicit sensitive
+argument keys are redacted in the display copy; arbitrary text and diffs are not
+secret-scanned. The workspace clears when the turn ends. The matching updated
+`desktop_avatar` provider and client are required; other channels are unchanged.
+
 ```
 systemd → Pal daemon → bunshins
                 ↑

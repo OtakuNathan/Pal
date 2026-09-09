@@ -134,6 +134,7 @@ def _invocation_args(
 
 @dataclass
 class ExecutionRuntime(ExecutionRuntimePort):
+    activity_decorator: Any | None = field(default=None, kw_only=True)
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
@@ -1194,6 +1195,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         llm_text = ""
         context_delivery: dict[str, Any] | None = None
         context_messages: tuple[ToolContextMessageIR, ...] = ()
+        from pal.execution.activity import capture_activity_output
+        capture_activity_output(record.alias, raw)
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt
@@ -1561,6 +1564,22 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return self._canonical_result_from_invocation(call.name, getattr(call, "call_id", None), invocation)
 
     async def execute_tool_async(
+        self,
+        call: ToolCallIR,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
+    ) -> ToolExecutionResult:
+        if self.activity_decorator is not None:
+            return await self.activity_decorator.invoke(
+                call,
+                lambda: self._execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
+                turn_id=turn_id,
+            )
+        return await self._execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
+
+    async def _execute_tool_async(
         self,
         call: ToolCallIR,
         *,

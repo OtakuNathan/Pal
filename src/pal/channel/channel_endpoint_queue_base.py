@@ -116,6 +116,8 @@ class ChannelEndpointQueueBase(ABC):
             status="accepted",
         )
 
+    supports_tool_activity = False
+
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         if kind == "control_catalog":
             self.apply_control_catalog(payload)

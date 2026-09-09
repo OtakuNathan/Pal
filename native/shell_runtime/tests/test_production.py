@@ -50,6 +50,21 @@ class ProductionTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.shutdown_async()
         self.core.close()
 
+    async def test_activity_reports_background_without_changing_shell_delivery(self):
+        from pal.execution.activity import ExecutionActivityDecorator
+        events = []
+        self.runtime.activity_decorator = ExecutionActivityDecorator(lambda _: events.append)
+        result = await self.tool("run_shell", {"cmd": "sleep .2; printf observed", "wait_ms": 0})
+        self.assertTrue(result.ok)
+        self.assertEqual(events[-1]["status"], "background")
+        sid = events[-1]["session_id"]
+        self.assertGreater(sid, 0)
+        terminal = await self.session(sid, action="read", wait_ms=5000)
+        self.assertTrue(terminal.ok, terminal.text)
+        self.assertEqual(events[-1]["status"], "succeeded")
+        self.assertIn("observed", terminal.text)
+        self.assertEqual(len(events), 4)
+
     async def tool(self, name, args=None, *, budget=None, turn_id="origin"):
         return await self.runtime.execute_tool_async(new_tool_call(name=name, args=args or {}), budget=budget, turn_id=turn_id)
 

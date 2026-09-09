@@ -898,6 +898,12 @@ def register_with_core(
     context.register_module(handle)
     context.port_registry["agent_io:output"] = runtime
     context.event_source_registry.attach("channel", source)
+    from pal.channel.tool_activity import ToolActivityRouter
+    from pal.execution.activity import ExecutionActivityDecorator
+    activity_router = ToolActivityRouter(runtime)
+    context.execution_runtime.activity_decorator = ExecutionActivityDecorator(activity_router.open_sink)
+    context.turn_event_bus.subscribe(TURN_START, activity_router)
+    context.turn_event_bus.subscribe(TURN_END, activity_router)
     typing_sub = TypingSubscriber(runtime)
     context.turn_event_bus.subscribe(TURN_START, typing_sub)
     context.turn_event_bus.subscribe(TURN_END, typing_sub)
