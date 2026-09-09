@@ -1,9 +1,50 @@
-# Native shell runtime prototype
+# Native shell runtime
 
 An opt-in, in-process CPython extension built with Flux Foundry, dynabridge and
-statically linked libuv. This directory does **not** replace `run_shell`, alter
-Pal startup, or change the installed wheel. The Python adapter and acceptance
-host are deliberately separate from production modules.
+statically linked libuv. The default backend remains Python. The resident can
+explicitly select the native backend for a local integration trial; the extension
+is built separately and is not included in the ordinary wheel. The shared Python
+adapter and tool contracts live in `src/pal/execution/native_shell`; the isolated
+acceptance host remains available in this directory.
+
+## Resident integration trial
+
+Build the extension below, copy its ABI-specific `.so` into a stable directory,
+and add that directory to the resident service's `PYTHONPATH`. Set
+`PAL_SHELL_BACKEND=native` and restart the service. An unavailable extension is a
+startup error; the selected backend never silently changes execution semantics.
+Unset the variable (or set it to `python`) and restart to revert. This switch
+applies to the resident bootstrap; standalone Bunshin role processes retain their
+existing Python backend. Native registry projections share their owner's write
+gate when used in the same runtime.
+
+The resident keeps `run_shell` direct. `shell_session`, `shell_status`, and
+`shell_recover_output` are indirect and discoverable from its hints. `shell_status`
+reports the selected backend, sessions, retained output calls and notification
+failures. `retry_notification` on `shell_session` explicitly retries a failed
+completion turn after reconciling its previous effects.
+
+The resident acknowledges a returned session after its tool result is written to
+L1. Interrupting before that boundary terminates the undelivered session; after
+it, the background session continues. Terminal files are retired after validated
+output/paging and L1 delivery. Embedded callers without an active Core turn use
+the return boundary. Output delivery failures retain their files and return a
+concrete `shell_recover_output` action, which never repeats the command.
+
+A completion waits for an idle resident with no queued user turns or unfinished
+post-turn tasks, then runs a
+new agent continuation using the captured originating delivery binding. Its input
+is an L1 `runtime_context_artifact`, never an extra result on a closed tool call.
+Output inherits the original budget and uses the existing pager. Tool-only calls
+without a captured delivery binding retain results for explicit reads and cannot
+start unsolicited model turns. Failed notifications are retained for manual retry;
+acknowledgement-only retries do not repeat a successful model turn.
+
+Reset and graceful shutdown cancel/reap native children and invalidate their
+session IDs. Graceful shutdown closes native execution before saving the existing
+resident L1 checkpoint. Live processes and unconsumed native files are **not**
+persisted across restart; already delivered pager results retain normal checkpoint
+semantics. Snapshot/restore while native sessions are outstanding is rejected.
 
 ## Build and test
 
@@ -165,6 +206,41 @@ available for comparison. The write gate checks resolved tool records, including
 indirect dispatch. A separate projection factory demonstrates sharing the same
 owner with an actual Bunshin registry overlay.
 
+### On-demand session tools
+
+The acceptance host keeps `prototype_run_shell` as its only direct native entry.
+Its compiled `NextToolHint` points to the **indirect** `shell_session` tool:
+
+```text
+read_tool(name="shell_session")
+call_tool(name="shell_session", args={"session_id": 123, "action": "read", "wait_ms": 300000})
+call_tool(name="shell_session", args={"session_id": 123, "action": "write", "text": "answer\n"})
+call_tool(name="shell_session", args={"session_id": 123, "action": "resize", "rows": 32, "columns": 100})
+call_tool(name="shell_session", args={"session_id": 123, "action": "terminate"})
+```
+
+Use a real returned ID in place of `123`. `release` explicitly discards a
+completed session's retained output; a successfully delivered terminal snapshot
+is released automatically. Session actions validate their own argument sets,
+and input/resize require a live PTY. Session controls bypass the write gate so a
+command holding that gate can still receive input or be stopped; other writes
+remain blocked.
+
+Running results include concrete read/terminate affordances. Only PTY results
+suggest discovering input/resize arguments; terminating results suggest waiting
+for exit. These affordances remain outside the paged body, alongside
+`read_tool_result`, even when the initial result is too small to contain the
+session ID. One-shot and terminal results do not suggest further session actions.
+Guidance distinguishes response waits from hard deadlines, discourages repeated
+short polling and command replay, and explains stale handles and uncertain input
+delivery. Full-output retention and pagination use the existing budget path.
+
+A terminal session read only consumes output after successful normalization and
+pager storage. This also removes a completion that was already queued while
+another turn was active, avoiding duplicate observations of released files.
+Failed handoffs remain recoverable with the host's existing `retry_output` method.
+The same contracts are used by the opt-in resident integration described above.
+
 The event source waits for a safe turn boundary. A background result becomes a
 new runtime-observation L1 turn, never an extra tool result appended to a closed
 call. The acceptance host uses an injected consumer and spends no model tokens.
@@ -172,19 +248,11 @@ Consumer errors retain the event for explicit retry; failed acknowledgement afte
 successful consumption does not invoke the consumer again. This is an in-memory
 acceptance path, not durable exactly-once delivery across crashes.
 
-## Prototype boundaries before production cutover
+## Remaining platform boundaries
 
-- Test the configured macOS job. Local acceptance was on the Raspberry Pi/Linux
-  arm64 with CPython 3.13.5, GCC 14.2 and libuv 1.50.0. A local Release comparison is recorded in
-  [benchmarks/file-handoff.md](benchmarks/file-handoff.md); correctness tests alone do not
-  establish performance.
-- Wire the shared owner through production runtime/role construction and expose
-  the session tools there. The prototype's Bunshin factory is explicit; existing
-  production overlays have not been changed.
-- Integrate session handoff acknowledgement with the actual tool-result commit
-  boundary, choose completion scheduling policy, and reconcile existing shell
-  and Bunshin timeout schemas. The adapter currently acknowledges its own return
-  boundary; this alone is not a production tool-result delivery guarantee.
+- Native Linux/macOS CI previously passed for the prototype. This resident
+  integration is locally tested on the Raspberry Pi/Linux arm64; its new remote
+  CI has not yet run. No new performance claim is made for model interaction.
 - This backend assumes normal POSIX child ownership: no external SIGCHLD reaper,
   and no descendants deliberately escaping the owned process/terminal groups.
   It is not a process sandbox. An escaped descendant retaining an output FD can
@@ -196,8 +264,8 @@ acceptance path, not durable exactly-once delivery across crashes.
   Native callbacks must schedule host work and must not destroy their runtime;
   calling `close()` from its callback is rejected. The adapter uses weak callback
   ownership and serializes concurrent close calls.
-- No resident Pal deployment, packaging switch or migration is part
-  of this prototype. Production `run_shell` remains the rollback baseline.
+- Native selection is opt-in and separately built. Automatic binary packaging,
+  standalone Bunshin role migration and durable process resumption are not included.
 
 ## Local verification — 2026-09-09
 
@@ -205,6 +273,10 @@ acceptance path, not durable exactly-once delivery across crashes.
 - Latest UBSan build (`-fsanitize=undefined -fno-sanitize-recover=all`): all
   **38 native/host tests** and the **1,000-capture GIL lifetime test** passed.
 - Existing shell tests and the original shell/full-output pager regression: **9 passed**.
+- On-demand session follow-up: **45 native/host tests** plus the GIL lifetime test
+  passed with the existing Release extension. **25 facade/guidance/shell tests**
+  passed, including JSON delivery of custom-validator rejections. This follow-up
+  changes Python host/contracts only; it does not claim a new native benchmark.
 - The dependency patch was applied to a fresh archive of the pinned bridge
   commit and reproduced exactly the three intended modified/new files.
 - Linux/macOS remote workflow runs for prototype pull requests and supports manual dispatch.
@@ -213,3 +285,24 @@ To repeat the sanitizer run, configure another build directory with the same
 arguments plus `-DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all"`,
 then build and run CTest there. This verifies undefined-behavior instrumentation;
 it is not an ASan, TSan or performance result.
+
+## Resident trial verification — 2026-09-09
+
+- The Release extension passed 60 native, isolated-host and production-host tests,
+  plus the GIL lifetime check. Production coverage includes actual L1 commit
+  acknowledgement, pre/post-delivery interruption, inherited completion budgets,
+  captured reply bindings, output recovery, registry projection, reset/shutdown,
+  foreground snapshot exclusion, queued user-turn resumption, chained output recovery,
+  explicit session release after delivery failure, and acknowledgement retry without
+  replaying a model turn.
+- 164 shared facade, guidance, shell, async execution, resident checkpoint and
+  bootstrap regression tests passed.
+- The local resident was restarted with `PAL_SHELL_BACKEND=native`; its existing
+  L1 checkpoint restored successfully. The installed ABI-specific extension is in
+  `~/.pal/native/shell-runtime`, selected by a user-service drop-in.
+- A real model over the local socket discovered `shell_status`, confirmed `native`,
+  issued exactly one `run_shell` with `wait_ms=0`, and received a nonzero session.
+  Without polling or rerunning the command, a separate completion turn reported
+  `returncode=0` and `PAL_NATIVE_BACKGROUND_SMOKE_OK` on the original socket.
+- This is a local integration smoke test, not a long-duration soak or a new native
+  performance benchmark. Standalone Bunshin role processes remain on Python.

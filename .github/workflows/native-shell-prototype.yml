@@ -1,9 +1,14 @@
-name: native shell prototype
+name: native shell runtime
 
 on:
   pull_request:
     paths:
       - "native/shell_runtime/**"
+      - "src/pal/execution/**"
+      - "src/pal/core/turn_executor.py"
+      - "src/pal/bootstrap/service.py"
+      - "src/pal/runtime_app.py"
+      - "src/pal/bunshin/scoped_execution.py"
       - ".github/workflows/native-shell-prototype.yml"
   workflow_dispatch:
 
@@ -46,9 +51,9 @@ jobs:
         run: |
           cmake -S .native-deps/libuv -B .native-build/uv -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLIBUV_BUILD_TESTS=OFF -DLIBUV_BUILD_BENCH=OFF
           cmake --build .native-build/uv --target uv_a --parallel 2
-      - name: Build prototype
+      - name: Build native shell backend
         run: |
           cmake -S native/shell_runtime -B .native-build/shell -DCMAKE_BUILD_TYPE=Debug -DPython3_EXECUTABLE="$(command -v python)" -DFLUX_FOUNDRY_INCLUDE_DIR="$PWD/.native-deps/ff" -DDYNABRIDGE_INCLUDE_DIR="$PWD/.native-deps/bridge" -DLIBUV_INCLUDE_DIR="$PWD/.native-deps/libuv/include" -DLIBUV_STATIC_LIBRARY="$PWD/.native-build/uv/libuv.a"
           cmake --build .native-build/shell --parallel 2
-      - name: Exercise native lifecycle and isolated Pal host
+      - name: Exercise native lifecycle and Pal hosts
         run: ctest --test-dir .native-build/shell --output-on-failure

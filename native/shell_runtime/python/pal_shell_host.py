@@ -5,8 +5,6 @@ from collections import deque
 from dataclasses import dataclass, replace
 import json
 
-from pydantic import Field
-
 from pal.core import PalCore
 from pal.core.main_context import MainContext
 from pal.core.module_registry import ModuleHandle, MODULE_TIER_CORE_FOUNDATION
@@ -15,15 +13,16 @@ from pal.execution.runtime import ExecutionRuntime
 from pal.execution.contracts import CapabilityResult
 from pal.shared.tool_protocol import new_tool_call
 from pal.execution.tool_facade import (
-    StrictToolModel, StructuredToolOutput, ToolGuidance, ToolRejectedError, CompleteResult, PagedResult, ToolHandlerResult, EffectReceipt, EffectOutcome,
+    StructuredToolOutput, ToolRejectedError, CompleteResult, PagedResult, ToolHandlerResult, EffectReceipt, EffectOutcome,
 )
-from pal.execution.tool_semantics import DIRECT_CONTROL
+from pal.execution.tool_semantics import DIRECT_CONTROL, INDIRECT_CONTROL
 from pal.foundation import EventEnvelope
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory import MemoryService
 from pal.shared import RuntimeStatus, capability_action, capability_node
 
 from pal_shell_prototype import Completion, READ_EFFECTS, ShellRejected, ShellRuntime
+from pal_shell_tools import RUN_GUIDANCE, SESSION_GUIDANCE, RunInput, SessionInput, session_affordances
 
 EVENT = "prototype.shell.completed"
 
@@ -45,13 +44,29 @@ class PrototypeExecutionRuntime(ExecutionRuntime):
 
     async def _call_record_async(self, record, binding, call, validated, turn_id, budget, allow_tools):
         arguments = record, binding, call, validated, turn_id, budget, allow_tools
-        if record.alias == "prototype_run_shell":
-            return await super()._call_record_async(*arguments)
         try:
+            if record.alias in {"prototype_run_shell", "shell_session"}:
+                return await super()._call_record_async(*arguments)
             async with self.shell.tool_admission(record.execution.effect_kind.value):
                 return await super()._call_record_async(*arguments)
         except ShellRejected as exc:
-            raise ToolRejectedError(str(exc), error_code="shell_write_busy") from exc
+            native_code = str(exc).partition(":")[0]
+            code = {
+                "write_busy": "shell_write_busy",
+                "result_capacity": "shell_result_capacity",
+                "invalid_session": "invalid_session",
+                "stdin_closed": "stdin_closed",
+            }.get(native_code, "shell_session_rejected" if record.alias == "shell_session" else "shell_rejected")
+            raise ToolRejectedError(str(exc) + " " + record.guidance.failure_next_steps, error_code=code) from exc
+
+    def _normalize_invocation_result(self, record, call, raw, **kwargs):
+        result = super()._normalize_invocation_result(record, call, raw, **kwargs)
+        # Keep live controls outside the paged body: page one may contain only stdout.
+        payload = raw.structured if isinstance(raw, CapabilityResult) else getattr(raw, "output", None)
+        if (record.alias in {"prototype_run_shell", "shell_session"}
+                and isinstance(payload, dict) and isinstance(result, (CompleteResult, PagedResult))):
+            result = result.model_copy(update={"affordances": result.affordances + session_affordances(payload)})
+        return result
 
     async def _invoke_tool_record_async(self, generation, call, **kwargs):
         result = await super()._invoke_tool_record_async(generation, call, **kwargs)
@@ -90,14 +105,6 @@ class PrototypeExecutionRuntime(ExecutionRuntime):
         await super().interrupt_turn(turn_id)
 
 
-class RunInput(StrictToolModel):
-    cmd: str
-    cwd: str = ""
-    tty: bool = False
-    wait_ms: int | None = Field(default=None, ge=0)
-    timeout_ms: int | None = Field(default=None, ge=1)
-
-
 def json_result(result: dict) -> dict:
     return {key: value for key, value in result.items()
             if not key.endswith(("_bytes", "_path")) and key != "output_id"}
@@ -121,12 +128,7 @@ class ShellProvider:
         namespace="op", scope="module", family="exec", action_name="run",
         aliases=("prototype_run_shell",), InputModel=RunInput, OutputModel=StructuredToolOutput,
         execution=DIRECT_CONTROL, async_handler_name="run_async",
-        guidance=ToolGuidance(
-            purpose="Execute a command through the isolated native shell prototype.",
-            use_when="Testing native process sessions and completion delivery in an isolated host.",
-            do_not_use_when="Operating the resident Pal; this capability is not installed there.",
-            failure_next_steps="Inspect the session before retrying; commands are non-idempotent writes.",
-        ),
+        guidance=RUN_GUIDANCE,
     )
     def run(self, call):
         raise RuntimeError("prototype requires asynchronous execution")
@@ -140,6 +142,26 @@ class ShellProvider:
                                         inline_limit=-1 if limit is None else min(limit, 2147483647))
         if result["session_id"]:
             self.runtime.completion_budgets[result["session_id"]] = budget
+        return await self.deliver_output(call, result)
+
+    @capability_action(
+        namespace="op", scope="module", family="exec", action_name="session",
+        aliases=("shell_session",), InputModel=SessionInput, OutputModel=StructuredToolOutput,
+        execution=INDIRECT_CONTROL, async_handler_name="session_async", guidance=SESSION_GUIDANCE,
+    )
+    def session(self, call):
+        raise RuntimeError("prototype requires asynchronous execution")
+
+    async def session_async(self, call):
+        result = await self.runtime.session_snapshot(**dict(call.args))
+        if result["status"] == "released":
+            payload = {"session_id": result["session_id"], "status": "released"}
+            text = json.dumps(payload)
+            return CapabilityResult(status=RuntimeStatus.OK, structured=payload, text=text, llm_text=text)
+        return await self.deliver_output(call, result)
+
+    async def deliver_output(self, call, result):
+        execution = call.meta["execution_runtime"]
         tool_call = call.meta["tool_call"]
         execution.pending_outputs[tool_call.call_id] = tool_call, None, result
         raw = output_result(await self.runtime.materialize(result))
@@ -178,6 +200,14 @@ class PrototypeHost:
 
     def prepare(self, context):
         self.pending.extend(self.shell.drain_completions())
+        # A session read/release can consume a completion already drained while a
+        # turn was active. Do not deliver it again or reopen retired output files.
+        retired = {event.session_id for event in self.pending
+                   if event.session_id in self.shell._consumed and event.session_id not in self.observed}
+        self.pending = deque(event for event in self.pending if event.session_id not in retired)
+        for sid in retired:
+            self.failures.pop(sid, None)
+            self.in_flight.discard(sid)
         # Conservative safe boundary: do not preempt a user/role turn.
         return self.core.turn_manager.latest_active_turn_id() is None and any(
             event.session_id not in self.in_flight and event.session_id not in self.failures

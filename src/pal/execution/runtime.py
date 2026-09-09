@@ -48,6 +48,7 @@ from pal.execution.tool_facade import (
     derive_retry_directive,
     rejection,
     validate_output,
+    validation_error_details,
 )
 from pal.execution.tool_registry import (
     CompiledToolRecord,
@@ -705,7 +706,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return record.input_model.model_validate(dict(args or {}), strict=True)
         except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
             details = (
-                {"validation_errors": exc.errors(include_url=False, include_input=False)}
+                validation_error_details(exc)
                 if isinstance(exc, ValidationError)
                 else {"validation_error": str(exc)}
             )

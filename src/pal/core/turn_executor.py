@@ -1622,6 +1622,10 @@ class TurnExecutor:
                 )
                 raise
 
+        acknowledge = getattr(self.context.execution_runtime, "acknowledge_tool_result_async", None)
+        if callable(acknowledge):
+            await acknowledge(call.call_id, turn_id)
+
     async def _append_l1_tool_context_messages_async(
         self,
         continuation: Any,

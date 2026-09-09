@@ -376,6 +376,10 @@ class _ExecutionOverlay:
             self.runtime.tool_result_pager = delegate_pager
         if delegate_state is not None:
             self.runtime.logical_state = delegate_state
+        native_owner = getattr(delegate, "shell_owner", None)
+        if native_owner is not None:
+            from pal.execution.native_shell.runtime import NativeExecutionRuntime
+            self.runtime = NativeExecutionRuntime.project_view(self.runtime, native_owner)
         self._mount_allowed_generation(
             allowed_capabilities,
             guidance_overrides=guidance_overrides,
