@@ -1508,7 +1508,15 @@ workspace_policy: {}
         # role while leaving the semantic philosophy readable in one place.
         self.assertLess(len(architect), 7_500)
         self.assertLess(len(architecture_review), 7_000)
-        self.assertLess(len(coder), 5_500)
+        quality_heading = "### Code quality: control flow and abstraction"
+        coder_body, _, _ = coder.partition(quality_heading)
+        self.assertLess(len(coder_body), 5_500)
+        # The separately requested quality section has its own bounded budget.
+        # Check effective module-mode output too: it replaces the base fragment.
+        for behavior in (coder, verifier, str(verifier_profile["behavior_fragment"])):
+            self.assertEqual(behavior.count(quality_heading), 1)
+            _, _, quality = behavior.partition(quality_heading)
+            self.assertLess(len(quality), 1_400)
         for behavior in (architect, architecture_review, coder):
             self.assertNotIn("Do not run git commit", behavior)
             self.assertNotIn("tests/<module_name>/developer", behavior)
