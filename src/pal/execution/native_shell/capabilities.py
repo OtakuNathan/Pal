@@ -9,11 +9,11 @@ from pal.execution.tool_facade import EmptyToolInput, StrictToolModel, Structure
 from pal.execution.tool_semantics import DIRECT_CONTROL, INDIRECT_CONTROL, INDIRECT_LOCAL_READ
 from pal.shared import RuntimeStatus, capability_action
 
-from .tools import RUN_GUIDANCE, SESSION_GUIDANCE, RunInput, SessionInput
+from .tools import RunInput, SessionInput
 
 
 class RecoverInput(StrictToolModel):
-    call_id: str = Field(min_length=1)
+    call_id: str = Field(min_length=1, description="Exact call_id returned by the failed output recovery action or shell_status.retained_outputs.")
 
 
 class NativeSessionInput(SessionInput):
@@ -34,10 +34,35 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="shell", aliases=("run_shell",),
         InputModel=RunInput, OutputModel=StructuredToolOutput, execution=DIRECT_CONTROL,
-        async_handler_name="shell_async", guidance=RUN_GUIDANCE.model_copy(update={
-            "next_tool_hints": RUN_GUIDANCE.next_tool_hints + (NextToolHint(
-                name="shell_status", use_when="A shell is blocked or retained output/completion needs diagnosis."),),
-        }),
+        async_handler_name="shell_async", guidance=ToolGuidance(
+            purpose="Run a shell command; return its result or a live session for continued execution.",
+            use_when=(
+                "Execute commands, builds or tests. Prefer rg for repository text search and rg --files for file"
+                " enumeration; use alternatives only when rg is unavailable or unsuitable. Run tests and builds"
+                " directly to preserve full output. wait_ms controls response waiting (default five minutes,"
+                " one second for a PTY), not process lifetime; timeout_ms sets an optional hard deadline."
+                " Use tty=true for interactive terminal input. A nonzero session_id means execution continues."
+                " Completion is delivered to this channel separately; finish the turn when nothing else is needed."
+                " Success requires status=exited and returncode=0."
+            ),
+            do_not_use_when=(
+                "A dedicated file or Pal runtime/module/Bunshin introspection tool directly handles the task."
+                " Never stop, restart or kill Pal's own hosting service/process from an active turn; use subsystem"
+                " lifecycle/hot-reload tools or hand a required full restart to the user or an external supervisor."
+                " Use read_file, edit_file, write_file or delete_path for file operations. Do not pipe long-running"
+                " tests/builds through head, tail or grep to shorten output; result budgeting handles it. Do not rerun a command"
+                " that returned a live session or repeatedly poll it just to wait for completion."
+            ),
+            failure_next_steps=(
+                "Inspect status, returncode, stdout and stderr before deciding whether repetition is safe."
+                " Follow live-session affordances. For failed output delivery, use shell_recover_output;"
+                " never repeat a command to retrieve output. A missing session does not prove it never ran."
+            ),
+            next_tool_hints=(
+                NextToolHint(name="shell_session", use_when="Inspect progress, send PTY input, resize or terminate a returned session."),
+                NextToolHint(name="shell_status", use_when="A shell is blocked or retained output/completion needs diagnosis."),
+            ),
+        ),
     )
     def shell(self, call):
         raise RuntimeError("native shell requires asynchronous execution")
@@ -63,9 +88,26 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="session", aliases=("shell_session",),
         InputModel=NativeSessionInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
-        async_handler_name="session_async", guidance=SESSION_GUIDANCE.model_copy(update={
-            "use_when": SESSION_GUIDANCE.use_when + " retry_notification explicitly retries a failed completion turn; inspect its previous effects first.",
-        }),
+        async_handler_name="session_async", guidance=ToolGuidance(
+            purpose="Inspect or control an existing shell session without rerunning its command.",
+            use_when=(
+                "Use the returned session_id. read returns a full snapshot; wait_ms waits for exit (default zero,"
+                " maximum five minutes). Read for progress or interactive prompts, not in a short polling loop."
+                " write queues exact PTY text (include a newline to submit); acceptance does not prove processing."
+                " resize changes a live PTY. terminate requests cancellation; read terminal status to confirm exit."
+                " release discards completed output. retry_notification retries a failed completion turn;"
+                " inspect its previous effects before retrying."
+            ),
+            do_not_use_when=(
+                "Do not invent IDs or use zero. Do not write or resize a non-PTY session, or release a running one."
+                " Delivered terminal output is released automatically; use read_tool_result for its result_handle."
+            ),
+            failure_next_steps=(
+                "For invalid_session, consult the previous result/result_handle or shell_status; reset or consumption"
+                " may have retired it. Do not rerun the command automatically. For live-session precondition errors,"
+                " read current status. After uncertain input delivery, inspect output before resending input."
+            ),
+        ),
     )
     def session(self, call):
         raise RuntimeError("native shell requires asynchronous execution")
