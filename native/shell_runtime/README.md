@@ -1,22 +1,32 @@
-# Native shell runtime
+# Native shell host integration
 
-An opt-in, in-process CPython extension built with Flux Foundry, dynabridge and
-statically linked libuv. The default backend remains Python. The resident can
-explicitly select the native backend for a local integration trial; the extension
-is built separately and is not included in the ordinary wheel. The shared Python
-adapter and tool contracts live in `src/pal/execution/native_shell`; the isolated
-acceptance host remains available in this directory.
+The native C++ implementation is maintained and released separately as
+[pal-shell-native](https://github.com/OtakuNathan/pal-shell-native).
+Read its README for release wheels, source builds, compatibility, agent-assisted
+installation and rollback. The ordinary Pal wheel keeps Python as its default
+shell backend; it does not contain or build the optional native extension.
 
-## Resident integration trial
+Pal owns the Python adapter, tool contracts, paging and lifecycle integration in
+`src/pal/execution/native_shell`. This directory retains the acceptance host,
+full integration tests and historical benchmarks. Native process implementation,
+CMake build and dependency patches belong to the extension repository.
 
-Build the extension below, copy its ABI-specific `.so` into a stable directory,
-and add that directory to the resident service's `PYTHONPATH`. Set
-`PAL_SHELL_BACKEND=native` and restart the service. An unavailable extension is a
-startup error; the selected backend never silently changes execution semantics.
-Unset the variable (or set it to `python`) and restart to revert. This switch
-applies to both resident bootstrap and standalone Bunshin role processes. Each
-role owns its own native runtime, processes and sessions. Native registry
-projections share their owner's write gate within that role.
+## Enable
+
+Install a compatible `pal-shell-native` wheel into Pal's actual Python environment
+(or a versioned module directory on its launch `PYTHONPATH`), test it in a separate
+process, then set `PAL_SHELL_BACKEND=native` in the launch environment. Report the
+changes and notify the user to restart. Do not replace a loaded binary in place.
+Unset the variable or set it to `python` and restart to revert. An unavailable
+native module is a startup error when selected; commands never silently replay
+through the fallback backend.
+
+The switch applies to resident bootstrap and standalone Bunshin roles. Each role
+owns its own runtime, processes and sessions. Bunshin can reload Python host code
+through its normal remount lifecycle; replacing a loaded native module requires
+a new process.
+
+## Resident and role lifecycle
 
 The resident keeps `run_shell` direct. `shell_session`, `shell_status`, and
 `shell_recover_output` are indirect and discoverable from its hints. `shell_status`
@@ -69,76 +79,22 @@ write admission while their nested shell owns the native process lease.
 Forced process termination does not preserve shell sessions; an earlier role
 checkpoint cannot restore those processes or prove their external effects.
 
-## Build and test
+## Integration tests
 
-Requirements: Linux or macOS, CMake >= 3.20, a C++17 compiler, CPython development
-headers/library, a **PIC static** libuv archive, and Pal's test dependencies.
-The tested dependency baseline is:
-
-| Dependency | Revision |
-| --- | --- |
-| Flux Foundry | `781375ab57884cbccb84b9d91133c2b2a22a95e9` |
-| dynabridge | `0762d81175a6f3172b4a142b026d8392150fca6f` plus the lifetime fix below |
-| libuv | `v1.50.0` |
-
-The bridge fix destroys queued task captures **before releasing the GIL**. A
-capture can own Python references even after its callable has returned. The
-local sibling checkout already contains the fix; do not apply it twice. For a
-fresh checkout at the pinned revision:
-
-```bash
-git -C ../bridge apply "$PWD/native/shell_runtime/dependencies/bridge-gil-lifetime.patch"
-```
-
-From the Pal repository, with your chosen Python environment active:
+From a Pal checkout with its test dependencies and the extension installed in the
+active interpreter:
 
 ```bash
 python -m pip install -e '.[test]'
-cmake -S native/shell_runtime -B /tmp/pal-native-shell-build \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DPython3_EXECUTABLE="$(command -v python)" \
-  -DFLUX_FOUNDRY_INCLUDE_DIR="$PWD/../flux_foundry" \
-  -DDYNABRIDGE_INCLUDE_DIR="$PWD/../bridge"
-cmake --build /tmp/pal-native-shell-build --parallel 2
-ctest --test-dir /tmp/pal-native-shell-build --output-on-failure
+PYTHONPATH="$PWD/native/shell_runtime/python:$PWD/src" \
+  python -m unittest discover -s native/shell_runtime/tests -v
 ```
 
-If libuv is not installed as a PIC static library, build its pinned source with
-`-DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLIBUV_BUILD_TESTS=OFF`, target `uv_a`, and
-pass `-DLIBUV_STATIC_LIBRARY=/absolute/build/libuv.a` and
-`-DLIBUV_INCLUDE_DIR=/absolute/libuv/include` to the prototype configure command.
-The resulting `_pal_shell_runtime.<python-abi>.so` contains the native manager,
-executors and libuv; it still depends on the platform C/C++ runtime and matches
-one CPython ABI. It is not a portable, cross-platform single binary.
-
-A pull-request and manually dispatched [workflow](../../.github/workflows/native-shell-prototype.yml)
-builds static libuv and runs the suite on Linux and macOS, applying the pending
-bridge patch only inside its isolated dependency checkout. It does not modify
-the normal Pal CI or packaging. Remote CI must actually run before claiming
-macOS acceptance.
-
-## Try the adapter
-
-```bash
-export PYTHONPATH="/tmp/pal-native-shell-build:$PWD/native/shell_runtime/python:$PWD/src"
-python - <<'PY'
-import asyncio
-from pal_shell_prototype import ShellRuntime
-
-async def main():
-    runtime = ShellRuntime()
-    try:
-        short = await runtime.run("printf hello")
-        assert short["session_id"] == 0
-        background = await runtime.run("sleep 1; printf done", wait_ms=0)
-        result = await runtime.read(background["session_id"], wait_ms=5000)
-        print(result["status"], result["stdout"])
-    finally:
-        await runtime.close()
-
-asyncio.run(main())
-PY
-```
+The [native workflow](../../.github/workflows/native-shell-prototype.yml) installs
+the extension from a pinned revision and runs these tests on Linux and macOS.
+Backend CI separately validates binary wheels, source builds, GIL lifetime and
+integration against its known-compatible Pal baseline. These suites use isolated
+hosts and do not call a model or restart the user's resident.
 
 ## Contract
 
@@ -271,61 +227,11 @@ Consumer errors retain the event for explicit retry; failed acknowledgement afte
 successful consumption does not invoke the consumer again. This is an in-memory
 acceptance path, not durable exactly-once delivery across crashes.
 
-## Remaining platform boundaries
+## Boundaries
 
-- Native Linux/macOS CI previously passed for the prototype. This resident
-  integration is locally tested on the Raspberry Pi/Linux arm64; its new remote
-  CI has not yet run. No new performance claim is made for model interaction.
-- This backend assumes normal POSIX child ownership: no external SIGCHLD reaper,
-  and no descendants deliberately escaping the owned process/terminal groups.
-  It is not a process sandbox. An escaped descendant retaining an output FD can
-  prevent PTY EOF and delay cleanup. Spawn's exec-error handshake is synchronous on
-  the native loop and is not yet covered by a cancellable startup deadline.
-- Main CPython interpreter only; close all runtimes before finalization. No
-  subinterpreter, free-threaded Python, module hot-unload or Windows support is
-  claimed. Registration metadata intentionally lives until process exit.
-  Native callbacks must schedule host work and must not destroy their runtime;
-  calling `close()` from its callback is rejected. The adapter uses weak callback
-  ownership and serializes concurrent close calls.
-- Native selection is opt-in and separately built. Automatic binary packaging,
-  standalone Bunshin role migration and durable process resumption are not included.
-
-## Local verification — 2026-09-09
-
-- Debug extension compiled on the Raspberry Pi; `ldd` shows no shared libuv.
-- Latest UBSan build (`-fsanitize=undefined -fno-sanitize-recover=all`): all
-  **38 native/host tests** and the **1,000-capture GIL lifetime test** passed.
-- Existing shell tests and the original shell/full-output pager regression: **9 passed**.
-- On-demand session follow-up: **45 native/host tests** plus the GIL lifetime test
-  passed with the existing Release extension. **25 facade/guidance/shell tests**
-  passed, including JSON delivery of custom-validator rejections. This follow-up
-  changes Python host/contracts only; it does not claim a new native benchmark.
-- The dependency patch was applied to a fresh archive of the pinned bridge
-  commit and reproduced exactly the three intended modified/new files.
-- Linux/macOS remote workflow runs for prototype pull requests and supports manual dispatch.
-
-To repeat the sanitizer run, configure another build directory with the same
-arguments plus `-DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all"`,
-then build and run CTest there. This verifies undefined-behavior instrumentation;
-it is not an ASan, TSan or performance result.
-
-## Resident trial verification — 2026-09-09
-
-- The Release extension passed 60 native, isolated-host and production-host tests,
-  plus the GIL lifetime check. Production coverage includes actual L1 commit
-  acknowledgement, pre/post-delivery interruption, inherited completion budgets,
-  captured reply bindings, output recovery, registry projection, reset/shutdown,
-  foreground snapshot exclusion, queued user-turn resumption, chained output recovery,
-  explicit session release after delivery failure, and acknowledgement retry without
-  replaying a model turn.
-- 164 shared facade, guidance, shell, async execution, resident checkpoint and
-  bootstrap regression tests passed.
-- The local resident was restarted with `PAL_SHELL_BACKEND=native`; its existing
-  L1 checkpoint restored successfully. The installed ABI-specific extension is in
-  `~/.pal/native/shell-runtime`, selected by a user-service drop-in.
-- A real model over the local socket discovered `shell_status`, confirmed `native`,
-  issued exactly one `run_shell` with `wait_ms=0`, and received a nonzero session.
-  Without polling or rerunning the command, a separate completion turn reported
-  `returncode=0` and `PAL_NATIVE_BACKGROUND_SMOKE_OK` on the original socket.
-- This is a local integration smoke test, not a long-duration soak or a new native
-  performance benchmark. Standalone Bunshin role processes remain on Python.
+Live native processes and undelivered files do not survive restart. Delivered
+pager results retain Pal's normal checkpoint semantics. The backend is not a
+sandbox; Pal's existing sandbox and tool admission policies still apply.
+See the extension README for supported Python/platform versions and native
+process ownership limits. Benchmark reports here describe historical runs;
+extracting the package does not itself establish a new performance improvement.

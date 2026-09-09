@@ -48,11 +48,12 @@ response arrived in 19.15 ms and the final result in
 
 ## Reproduce
 
-From the repository root, build the prototype in Release mode as described in
-[the runtime README](../README.md), then:
+From the Pal repository root, install a Release build of
+[pal-shell-native](https://github.com/OtakuNathan/pal-shell-native) into the active
+interpreter as described in its README, then:
 
 ```bash
-PYTHONPATH=/tmp/pal-native-shell-release:native/shell_runtime/python:src \
+PYTHONPATH=native/shell_runtime/python:src \
   python3 native/shell_runtime/benchmarks/compare.py > /tmp/pal-shell-comparison.json
 ```
 

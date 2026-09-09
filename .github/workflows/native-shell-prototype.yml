@@ -30,30 +30,14 @@ jobs:
           python-version: '3.12'
       - uses: actions/checkout@v4
         with:
-          repository: OtakuNathan/flux_foundry
-          ref: 781375ab57884cbccb84b9d91133c2b2a22a95e9
-          path: .native-deps/ff
-      - uses: actions/checkout@v4
-        with:
-          repository: OtakuNathan/dynabridge
-          ref: 0762d81175a6f3172b4a142b026d8392150fca6f
-          path: .native-deps/bridge
-      - uses: actions/checkout@v4
-        with:
-          repository: libuv/libuv
-          ref: v1.50.0
-          path: .native-deps/libuv
-      - name: Apply pending bridge lifetime fix
-        run: git -C .native-deps/bridge apply ../../native/shell_runtime/dependencies/bridge-gil-lifetime.patch
-      - name: Install isolated host dependencies
-        run: python -m pip install -e '.[test]'
-      - name: Build PIC static libuv
-        run: |
-          cmake -S .native-deps/libuv -B .native-build/uv -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLIBUV_BUILD_TESTS=OFF -DLIBUV_BUILD_BENCH=OFF
-          cmake --build .native-build/uv --target uv_a --parallel 2
-      - name: Build native shell backend
-        run: |
-          cmake -S native/shell_runtime -B .native-build/shell -DCMAKE_BUILD_TYPE=Debug -DPython3_EXECUTABLE="$(command -v python)" -DFLUX_FOUNDRY_INCLUDE_DIR="$PWD/.native-deps/ff" -DDYNABRIDGE_INCLUDE_DIR="$PWD/.native-deps/bridge" -DLIBUV_INCLUDE_DIR="$PWD/.native-deps/libuv/include" -DLIBUV_STATIC_LIBRARY="$PWD/.native-build/uv/libuv.a"
-          cmake --build .native-build/shell --parallel 2
+          repository: OtakuNathan/pal-shell-native
+          ref: e66d526acc8ce315572eb225d4abc9817384e828
+          path: .native-backend
+      - name: Install Pal and independently packaged backend
+        run: python -m pip install -e '.[test]' ./.native-backend
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
       - name: Exercise native lifecycle and Pal hosts
-        run: ctest --test-dir .native-build/shell --output-on-failure
+        run: python -m unittest discover -s native/shell_runtime/tests -v
+        env:
+          PYTHONPATH: native/shell_runtime/python:src
