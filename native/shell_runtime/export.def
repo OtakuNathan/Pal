@@ -1,0 +1,46 @@
+BEGIN_CALLABLE_GROUP(connect)
+    DECL_CALLABLE(void, OBJECT(Runtime), CALLABLE(notify))
+END_CALLABLE_GROUP
+
+BEGIN_CLASS(pal_shell, Runtime)
+    DECL_CONSTRUCTOR(unsigned)
+    BEGIN_MEMBER_CALLABLE_GROUP(run)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, std::string, std::string, std::string, bool, int, int, int)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(read)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t, int)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(write)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t, std::string)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(resize)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t, int, int)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(terminate)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(release)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(release_output)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(acknowledge)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t, bool)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(cancel_request)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(acquire_write)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(release_write)
+        DECL_MEMBER_FUNCTION(void, pal_shell::id_t, pal_shell::id_t)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(close)
+        DECL_MEMBER_FUNCTION(void)
+    END_MEMBER_CALLABLE_GROUP
+    BEGIN_MEMBER_CALLABLE_GROUP(callback_errors)
+        DECL_MEMBER_FUNCTION(int)
+    END_MEMBER_CALLABLE_GROUP
+END_CLASS

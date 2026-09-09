@@ -1,0 +1,3 @@
+BEGIN_CALLABLE_GROUP(notify)
+    DECL_CALLABLE(void, pal_shell::Event)
+END_CALLABLE_GROUP

@@ -53,7 +53,7 @@ class PalV2CliParserTests(unittest.TestCase):
         ):
             self.assertEqual(main(), 0)
 
-        run_setup_wizard.assert_called_once_with(runtime_root=runtime_root)
+        run_setup_wizard.assert_called_once_with(runtime_root=runtime_root.resolve())
 
     def test_setup_upgrade_is_non_interactive_with_explicit_runtime_root(
         self,
@@ -78,7 +78,7 @@ class PalV2CliParserTests(unittest.TestCase):
         ):
             self.assertEqual(main(), 0)
 
-        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root)
+        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root.resolve())
 
     def test_tty_subcommand_parses_with_runtime_root(self) -> None:
         args = _build_parser().parse_args(
@@ -198,13 +198,17 @@ def test_missing_root_hint_includes_environment_option(tmp_path, monkeypatch, ca
     assert not (tmp_path / '.pal').exists()
 
 
-def test_stale_tty_socket_returns_failure(tmp_path, monkeypatch):
+def test_stale_tty_socket_returns_failure(monkeypatch):
     import socket
     from unittest.mock import AsyncMock
+    from tempfile import TemporaryDirectory
     from pal.socket_client import default_socket_path
-    path = default_socket_path(tmp_path)
-    with socket.socket(socket.AF_UNIX) as sock:
-        sock.bind(str(path))
-    monkeypatch.setattr(sys, 'argv', ['pal', 'tty', '--runtime-root', str(tmp_path)])
-    with patch('pal.main.run_tty', new=AsyncMock(return_value=False)):
-        assert main() == 2
+    # macOS pytest fixture paths can exceed sockaddr_un.sun_path's limit.
+    with TemporaryDirectory(prefix="pal-cli-", dir="/tmp") as directory:
+        runtime_root = Path(directory)
+        path = default_socket_path(runtime_root)
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(path))
+        monkeypatch.setattr(sys, 'argv', ['pal', 'tty', '--runtime-root', str(runtime_root)])
+        with patch('pal.main.run_tty', new=AsyncMock(return_value=False)):
+            assert main() == 2
