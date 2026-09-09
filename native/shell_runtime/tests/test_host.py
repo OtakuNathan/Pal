@@ -37,6 +37,142 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
     async def tool(self, alias, **args):
         return await self.runtime.execute_tool_async(new_tool_call(name=alias, args=args), turn_id="origin")
 
+    async def session(self, sid, action="read", **args):
+        return await self.tool("call_tool", name="shell_session", args={"session_id": sid, "action": action, **args})
+
+    async def test_session_schema_is_discovered_from_entry_without_resident_expansion(self):
+        generation = self.runtime.registry_generation
+        self.assertNotIn("shell_session", generation.direct_aliases)
+        self.assertIn("shell_session", generation.indirect_aliases)
+        description = generation.record_for_alias("prototype_run_shell").compiled_description
+        self.assertIn('read_tool(name="shell_session")', description)
+        self.assertIn('call_tool(name="shell_session", args=...)', description)
+        schema = await self.tool("read_tool", name="shell_session")
+        self.assertTrue(schema.ok, schema.text)
+        self.assertIn("terminate", str(schema.structured))
+        direct = await self.tool("shell_session", session_id=1)
+        self.assertFalse(direct.ok)
+        oneshot = await self.tool("prototype_run_shell", cmd="true")
+        self.assertFalse(oneshot.invocation_result.affordances)
+
+    async def test_live_session_controls_survive_output_paging(self):
+        with tempfile.TemporaryDirectory() as root:
+            ready = Path(root) / "ready"
+            started = await self.runtime.execute_tool_async(new_tool_call(name="prototype_run_shell", args={
+                "cmd": f"head -c 20000 /dev/zero; touch {shlex.quote(str(ready))}; sleep 60", "wait_ms": 0}),
+                turn_id="origin", budget=ToolCallBudget(max_output_chars=10, preview_chars=10))
+            self.assertTrue(started.ok, started.text)
+            self.assertIn("result_handle", started.structured)
+            control = next(a for a in started.invocation_result.affordances if a.tool == "call_tool")
+            sid = control.arguments["args"]["session_id"]
+            async def wait():
+                while not ready.exists():
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(wait(), 5)
+            result = await self.runtime.execute_tool_async(new_tool_call(name="call_tool", args={
+                "name": "shell_session", "args": {"session_id": sid, "action": "read"}}),
+                turn_id="origin", budget=ToolCallBudget(max_output_chars=1000, preview_chars=500))
+            self.assertTrue(result.ok, result.text)
+            self.assertIn("result_handle", result.structured)
+            actions = result.invocation_result.affordances
+            self.assertTrue(any(a.tool == "read_tool_result" for a in actions))
+            self.assertTrue(any(a.tool == "call_tool" and a.arguments["args"] == {"session_id": sid, "action": "terminate"} for a in actions))
+            self.assertFalse(any(a.tool == "read_tool" for a in actions), "non-PTY must not suggest input")
+            read = next(a for a in actions if a.tool == "call_tool" and a.arguments["args"]["action"] == "read")
+            self.assertEqual(read.arguments["args"]["wait_ms"], 300000)
+            stopped = await self.session(sid, "terminate")
+            self.assertTrue(stopped.ok, stopped.text)
+            if stopped.structured["status"] == "terminating":
+                self.assertEqual(len(stopped.invocation_result.affordances), 1)
+                final = await self.session(sid, wait_ms=5000)
+                self.assertTrue(final.ok, final.text)
+                self.assertEqual(final.structured["status"], "cancelled")
+
+    async def test_interactive_input_and_resize_via_indirect_tool(self):
+        started = await self.tool("prototype_run_shell", cmd="read -r line; printf 'received:%s' \"$line\"", tty=True, wait_ms=0)
+        sid = started.structured["session_id"]
+        self.assertTrue(any(a.tool == "read_tool" for a in started.invocation_result.affordances))
+        resized = await self.session(sid, "resize", rows=32, columns=100)
+        self.assertTrue(resized.ok, resized.text)
+        written = await self.session(sid, "write", text="hello\n")
+        self.assertTrue(written.ok, written.text)
+        self.assertEqual(written.structured["status"], "input_accepted")
+        final = await self.session(sid, wait_ms=5000)
+        self.assertTrue(final.ok, final.text)
+        self.assertIn("received:hello", final.structured["stdout"])
+        self.assertFalse(final.invocation_result.affordances)
+        stale = await self.session(sid)
+        self.assertFalse(stale.ok)
+        self.assertIn("invalid_session", stale.text)
+        self.assertIn("Do not automatically rerun", stale.text)
+
+    async def test_session_preconditions_reject_without_stopping_live_command(self):
+        started = await self.tool("prototype_run_shell", cmd="sleep 60", wait_ms=0)
+        sid = started.structured["session_id"]
+        for args in ({"session_id": 0}, {"session_id": sid, "action": "write"},
+                     {"session_id": sid, "action": "read", "text": "ignored?"},
+                     {"session_id": sid, "action": "resize", "rows": 0, "columns": 80},
+                     {"session_id": sid, "wait_ms": 300001}):
+            rejected = await self.tool("call_tool", name="shell_session", args=args)
+            self.assertFalse(rejected.ok)
+        for action, args in (("write", {"text": "no stdin"}), ("release", {})):
+            rejected = await self.session(sid, action, **args)
+            self.assertFalse(rejected.ok)
+        live = await self.session(sid)
+        self.assertTrue(live.ok, live.text)
+        self.assertEqual(live.structured["status"], "running")
+
+    async def test_terminal_tool_read_consumes_already_queued_completion(self):
+        started = await self.tool("prototype_run_shell", cmd="sleep .03; printf completed", wait_ms=0)
+        sid = started.structured["session_id"]
+        self.host.core.state.active_turn_id = "busy"
+        self.host.core.state.active_turns["busy"] = object()
+        await self.wait_for_completion()
+        await self.host.pump()
+        self.assertTrue(self.host.pending)
+        final = await self.session(sid)
+        self.assertTrue(final.ok, final.text)
+        self.assertEqual(final.structured["stdout"], "completed")
+        self.host.core.state.active_turn_id = None
+        self.host.core.state.active_turns.pop("busy")
+        await self.host.pump()
+        self.assertFalse(self.observed)
+        self.assertFalse(self.host.pending)
+        self.assertFalse(self.host.failures)
+
+    async def test_terminal_session_pager_failure_retains_unconsumed_output(self):
+        started = await self.tool("prototype_run_shell", cmd="sleep .03; head -c 5000 /dev/zero", wait_ms=0)
+        sid = started.structured["session_id"]
+        await self.wait_for_completion()
+        store = self.runtime.tool_result_pager.store
+        def fail(**kwargs):
+            raise OSError("pager unavailable")
+        self.runtime.tool_result_pager.store = fail
+        call = new_tool_call(name="call_tool", args={"name": "shell_session", "args": {"session_id": sid}})
+        budget = ToolCallBudget(max_output_chars=1000, preview_chars=500)
+        result = await self.runtime.execute_tool_async(call, budget=budget, turn_id="origin")
+        self.assertFalse(result.ok)
+        self.assertNotIn(sid, self.host.shell._consumed)
+        path = Path(self.runtime.pending_outputs[call.call_id][2]["stdout_path"])
+        self.assertTrue(path.exists())
+        self.runtime.tool_result_pager.store = store
+        recovered = await self.runtime.retry_output(call.call_id, budget=budget, turn_id="origin")
+        self.assertTrue(recovered.ok, recovered.text)
+        self.assertFalse(path.exists())
+        await self.host.pump()
+        self.assertFalse(self.observed)
+
+    async def test_explicit_release_of_completed_session_prevents_completion_delivery(self):
+        started = await self.tool("prototype_run_shell", cmd="sleep .03", wait_ms=0)
+        sid = started.structured["session_id"]
+        await self.wait_for_completion()
+        result = await self.session(sid, "release")
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(result.structured["status"], "released")
+        self.assertFalse(result.invocation_result.affordances)
+        await self.host.pump()
+        self.assertFalse(self.observed)
+
     async def test_compiled_native_tool_and_original_tool_are_separate(self):
         names = self.runtime.registry_generation.direct_aliases
         self.assertIn("run_shell", names)

@@ -190,6 +190,9 @@ class PalRuntimeApp:
             # the fixed L1 exactly once; the next process restores it before
             # admitting channel traffic and normal budget policy can compact
             # it later if that is actually required.
+            prepare_execution = getattr(core.context.execution_runtime, "prepare_shutdown_async", None)
+            if callable(prepare_execution):
+                await prepare_execution()
             await self._publish_checkpoint_async()
             self.last_checkpoint_status = "l1_saved"
             self.last_checkpoint_error = ""
@@ -263,7 +266,10 @@ class PalRuntimeApp:
             self.last_debug_dump_error = f"{type(exc).__name__}: {exc}"
 
     def _debug_snapshot(self) -> dict[str, object]:
+        shell_owner = getattr(self.handle.core.context.execution_runtime, "shell_owner", None)
         return {
+            "shell_backend": "native" if shell_owner is not None else "python",
+            "shell_sessions": len(shell_owner.sessions) if shell_owner is not None else 0,
             "loop_iterations": self.loop_iterations,
             "last_tick_monotonic": self.last_tick_monotonic,
             "last_tick_utc": self.last_tick_utc,

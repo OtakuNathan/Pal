@@ -110,7 +110,15 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
         if existing.ports.get("execution") is not resolved_runtime:
             raise ValueError("execution module is already bound to a different runtime")
         return existing
-    provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
+    native = getattr(resolved_runtime, "shell_owner", None) is not None
+    if native:
+        from pal.execution.native_shell.capabilities import NativeExecutionProvider
+        from pal.execution.native_shell.state import NativeExecutionStatePort
+        provider = NativeExecutionProvider(runtime=resolved_runtime)
+        state_port = NativeExecutionStatePort(resolved_runtime)
+    else:
+        provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
+        state_port = ExecutionRuntimeStatePort(resolved_runtime)
     handle = ModuleHandle(
         module_id="execution",
         tier=MODULE_TIER_CORE_FOUNDATION,
@@ -118,7 +126,8 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
         introspection_provider=provider,
         ports={"execution": resolved_runtime},
         shutdown_sync=resolved_runtime.shutdown,
-        runtime_state_port=ExecutionRuntimeStatePort(resolved_runtime),
+        shutdown_async=resolved_runtime.shutdown_async if native else None,
+        runtime_state_port=state_port,
     )
     context.register_module(handle)
     return handle

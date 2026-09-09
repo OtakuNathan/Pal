@@ -7,7 +7,7 @@ import json
 import unittest
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityResult, ToolCallBudget
@@ -51,6 +51,16 @@ class EchoOutput(StrictToolModel):
 class NullableInput(StrictToolModel):
     value: str
     optional: str | None = None
+
+
+class RejectingInput(StrictToolModel):
+    value: str
+
+    @model_validator(mode="after")
+    def reject(self):
+        if self.value != "ok":
+            raise ValueError("incompatible action arguments")
+        return self
 
 
 def _guidance() -> ToolGuidance:
@@ -317,6 +327,18 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(uncertain, FailedResult)
         self.assertEqual(uncertain.effect, EffectOutcome.UNKNOWN)
         self.assertEqual(uncertain.retry, RetryDirective.DO_NOT_RETRY)
+
+    async def test_custom_validator_error_can_be_delivered_as_json(self) -> None:
+        def unexpected(_value):
+            self.fail("invalid arguments reached the handler")
+        kwargs = _echo_kwargs(mode=InvocationMode.DIRECT, handler=unexpected)
+        kwargs.update(InputModel=RejectingInput, examples=({"value": "ok"},))
+        mount_test_capability(self.runtime, **kwargs)
+        result = await self.runtime.execute_tool_async(new_tool_call(name="echo", args={"value": "invalid"}))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.structured["error_code"], "invalid_arguments")
+        self.assertIn("incompatible action arguments", json.dumps(result.structured))
+        self.assertNotIn("input", result.structured["details"]["validation_errors"][0])
 
     async def test_validation_rejects_before_handler_and_output_failure_is_tagged(self) -> None:
         calls = 0

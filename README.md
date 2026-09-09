@@ -232,6 +232,11 @@ The surface exposed to the LLM is deliberately small: 6 singletons + 3 dynamic t
 
 Tools are the **only** execution primitive. Built-in: `shell.exec`, `tool.search`, `tool.read`. Every tool call is budgeted (max output size, timeout, read limits). Oversized results spill to artifact storage. A stagnation guard detects loops and force-terminates them.
 
+An optional [native shell backend](native/shell_runtime/README.md) supports retained
+process sessions and PTYs through the same `run_shell` entry, with session controls
+discovered on demand. Resident integration trials use `PAL_SHELL_BACKEND=native`
+and a separately built extension; Python remains the default and rollback backend.
+
 ### Prompt Assembly
 
 PalCore gathers prompt fragments from registered providers (identity, rules, behavior, memory, etc.) and assembles them into a single system prompt. The priority hierarchy is explicit:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from pal.bootstrap.contracts import RuntimeComposerPort
 from pal.channel import (
@@ -113,7 +114,15 @@ def compose_runtime(
     runtime_settings_repository = RuntimeSettingRepository()
 
     config = RuntimeConfig.load(registration.runtime.runtime_root)
-    core = PalCore(config=config)
+    backend = os.environ.get("PAL_SHELL_BACKEND", "python")
+    if backend not in {"python", "native"}:
+        raise ValueError("PAL_SHELL_BACKEND must be python or native")
+    if backend == "native":
+        from pal.core.main_context import MainContext
+        from pal.execution.native_shell.runtime import NativeExecutionRuntime
+        core = PalCore(config=config, context=MainContext(execution_runtime=NativeExecutionRuntime()))
+    else:
+        core = PalCore(config=config)
     core.context.execution_runtime.runtime_root = registration.runtime.runtime_root
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
@@ -146,6 +155,9 @@ def compose_runtime(
     failure_runtime = FailureRuntime()
     register_core_with_core(core)
     register_execution_with_core(core.context)
+    if backend == "native":
+        from pal.execution.native_shell.events import attach_completion_source
+        attach_completion_source(core, core.context.execution_runtime)
     register_channel_with_core(
         core.context,
         channel_runtime,

@@ -299,7 +299,9 @@ def rejection(
 
 
 def validation_error_details(exc: ValidationError) -> dict[str, Any]:
-    return {"validation_errors": exc.errors(include_url=False, include_input=False)}
+    # Custom validators can carry a ValueError in ctx. Pydantic's JSON encoder
+    # serializes that context; errors() leaves the exception object in the wire result.
+    return {"validation_errors": json.loads(exc.json(include_url=False, include_input=False))}
 
 
 def _schema_enum_values(schema: Any, path: str = "$") -> list[tuple[str, list[Any]]]:
