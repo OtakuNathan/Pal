@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP
+
 from pal.provider_install import (
     ProviderInstallError,
     inspect_provider_wheel,
@@ -20,8 +22,8 @@ def configure_provider_parser(parser: argparse.ArgumentParser) -> None:
     install_parser.add_argument(
         "--runtime-root",
         type=Path,
-        default=Path("~/.pal"),
-        help="Pal runtime root (default: ~/.pal)",
+        default=default_runtime_root(),
+        help=RUNTIME_ROOT_HELP,
     )
     install_parser.add_argument(
         "--force",

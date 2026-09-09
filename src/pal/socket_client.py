@@ -93,7 +93,7 @@ async def run_tty(
     socket_path: Path,
     *,
     input_fn: Callable[[str], str] | None = None,
-) -> None:
+) -> bool:
     """Run an async Prompt Toolkit and Rich interactive socket session."""
 
     repl = TtyRepl(
@@ -102,7 +102,7 @@ async def run_tty(
         read_message=read_socket_message,
         request_id_factory=uuid4,
     )
-    await repl.run(input_fn=input_fn)
+    return await repl.run(input_fn=input_fn)
 
 
 def default_socket_path(runtime_root: Path) -> Path:

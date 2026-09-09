@@ -592,7 +592,14 @@ class _PlaywrightCliWorker:
             for modifier in list(args.get("modifiers") or []):
                 options.append(f"--modifiers={_bounded_text(modifier, limit=20, field_name='modifier')}")
             command = _cli_args(command_name, self._target(args), button, options=options)
-            self._run_write(record, command, timeout_ms=timeout_ms)
+            output = self._run_write(record, command, timeout_ms=timeout_ms, raw=False)
+            # CLI raw mode removes Open tabs. Preserve that existing signal
+            # without another round trip or automatically changing selection.
+            _, marker, section = output.partition("### Open tabs\n")
+            tabs = section.split("\n### ", 1)[0].strip() if marker else ""
+            if tabs:
+                return {"open_tabs": tabs[:12000], "tabs_truncated": len(tabs) > 12000,
+                        "next_step": "Inspect open_tabs. To read a popup or another tab, use browser_tabs with operation=select and its index, then browser_read or browser_snapshot. Use operation=list to refresh indices first if tabs changed."}
             return {}
         if action == "fill":
             options = []
@@ -741,9 +748,9 @@ class _PlaywrightCliWorker:
             raise BrowserServiceError("target is required", code="invalid_arguments")
         return target
 
-    def _run_write(self, record: _SessionRecord, argv: list[str], *, timeout_ms: int) -> str:
+    def _run_write(self, record: _SessionRecord, argv: list[str], *, timeout_ms: int, raw: bool = True) -> str:
         try:
-            return self._run(record, argv, timeout_ms=timeout_ms, raw=True)
+            return self._run(record, argv, timeout_ms=timeout_ms, raw=raw)
         except BrowserServiceError as exc:
             raise BrowserServiceError(
                 str(exc), code=exc.code, retryable=False, state_unknown=True

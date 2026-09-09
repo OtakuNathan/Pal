@@ -67,6 +67,9 @@ Use the browser capabilities for JavaScript-rendered pages and interactive UI wo
 2. Use `browser_snapshot` or `browser_find` to obtain current element refs.
 3. Call the narrow interaction capability such as `browser_click` or `browser_fill`.
 4. Inspect the changed page again; refs may become stale after any action.
+   Click results include open tabs when reported by the browser. Popups do not
+   automatically become current: use browser_tabs list/select, then read or snapshot.
+   If a popup appears later, list tabs again; do not repeat the click blindly.
 5. Use `browser_screenshot` only when pixel evidence is useful.
 
 The browser profile belongs to the current conversation. `browser_close` releases live
@@ -247,7 +250,7 @@ class WebFetchIntrospectionProvider:
     def _write_action(self, call: IntrospectionCall, action: str) -> IntrospectionResult:
         return self._action(call, action, f"Browser {action} completed")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="click", guidance=ToolGuidance(purpose="Click a current snapshot ref or unique locator.", use_when="The requested UI action is authorized and its target was inspected.", do_not_use_when="The target is guessed or the prior result is uncertain.", failure_next_steps="Do not retry automatically; inspect the current page first."), InputModel=BrowserClickInput, OutputModel=BrowserActionOutput, aliases=("browser_click",), metadata={"canonical_path": "op_browser_click", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="click", guidance=ToolGuidance(purpose="Click a current snapshot ref or unique locator.", use_when="The requested UI action is authorized and its target was inspected.", do_not_use_when="The target is guessed or the prior result is uncertain.", failure_next_steps="Do not retry automatically. Inspect the current page and use browser_tabs list if a popup opened or the page appears unchanged; select the intended tab before reading it.", next_tool_hints=(NextToolHint(name="browser_tabs", use_when="Inspect or select a popup or new tab after clicking."),)), InputModel=BrowserClickInput, OutputModel=BrowserActionOutput, aliases=("browser_click",), metadata={"canonical_path": "op_browser_click", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def click(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "click")
 

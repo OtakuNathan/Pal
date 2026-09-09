@@ -395,3 +395,28 @@ def test_cache_cleanup_skips_restore_and_preserves_saved_profile(tmp_path: Path)
     worker._run = lambda *a, **k: '{}'
     with pytest.raises(BrowserServiceError, match="did not confirm"):
         worker._execute_ready(key=key, action="clear_cache", args={}, persistent=True, timeout_ms=1000)
+
+
+def test_click_preserves_cli_tabs_without_selecting_or_extra_query(tmp_path):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    output = '### Ran Playwright code\nclick\n### Open tabs\n- 0: (current) [Parent](https://example.com)\n- 1: [Popup](https://example.com/popup)\n### Page\nparent\n### Snapshot\nlarge snapshot'
+    with patch.object(worker, '_run', return_value=output) as run:
+        result = worker._dispatch_action(SimpleNamespace(), action='click', args={'target': 'e1'}, timeout_ms=1000)
+    assert 'Popup' in result['open_tabs']
+    assert '(current)' in result['open_tabs']
+    assert 'Snapshot' not in result['open_tabs']
+    assert 'browser_tabs' in result['next_step']
+    assert run.call_count == 1
+    assert run.call_args.kwargs['raw'] is False
+
+
+def test_click_without_tab_report_and_failed_click_keep_existing_semantics(tmp_path):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    with patch.object(worker, '_run', return_value='### Page\nparent'):
+        assert worker._dispatch_action(SimpleNamespace(), action='click', args={'target': 'e1'}, timeout_ms=1000) == {}
+    with patch.object(worker, '_run', side_effect=BrowserServiceError('timeout', code='command_timeout')) as run:
+        with pytest.raises(BrowserServiceError) as failure:
+            worker._dispatch_action(SimpleNamespace(), action='click', args={'target': 'e1'}, timeout_ms=1000)
+    assert failure.value.state_unknown
+    assert not failure.value.retryable
+    assert run.call_count == 1

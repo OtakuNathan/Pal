@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP
+
 from pal.packages.archive import build
 from pal.packages.service import PackageService
 
@@ -23,7 +25,7 @@ def configure_package_parser(parser: argparse.ArgumentParser) -> None:
     status.add_argument("name", nargs="?")
     status.add_argument("--kind", choices=("plugin", "provider", "builtin"), default="plugin")
     for command in (installer, preparer, status):
-        command.add_argument("--runtime-root", type=Path, default=Path("~/.pal"))
+        command.add_argument("--runtime-root", type=Path, default=default_runtime_root(), help=RUNTIME_ROOT_HELP)
 
 
 def run_package_cli(args: argparse.Namespace) -> int:

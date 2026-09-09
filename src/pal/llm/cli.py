@@ -6,6 +6,8 @@ import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP, RUNTIME_ROOT_HINT
 from typing import Any, Iterator
 
 from pal.foundation import PalV2Database
@@ -17,7 +19,6 @@ from pal.llm.schema import migrate_llm_endpoint_schema
 from pal.llm.secret_store import EncryptedFileSecretStore
 
 
-DEFAULT_RUNTIME_ROOT = Path.home() / ".pal"
 _DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -359,7 +360,7 @@ def _run_delete(args: argparse.Namespace) -> int:
 def _open_runtime_database(runtime_root: Path) -> Iterator[PalV2Database]:
     db_path = runtime_root / "pal.sqlite3"
     if not db_path.is_file():
-        raise FileNotFoundError(f"Pal runtime database does not exist: {db_path}")
+        raise FileNotFoundError(f"Pal runtime database does not exist: {db_path}. {RUNTIME_ROOT_HINT}")
     migrate_llm_endpoint_schema(db_path)
     database = PalV2Database(db_path)
     database.initialize((LLMEndpointModel, PalRuntimeSettingModel))
@@ -490,8 +491,8 @@ def _add_runtime_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--runtime-root",
         type=Path,
-        default=DEFAULT_RUNTIME_ROOT,
-        help=f"Pal runtime root (default: {DEFAULT_RUNTIME_ROOT})",
+        default=default_runtime_root(),
+        help=RUNTIME_ROOT_HELP,
     )
 
 

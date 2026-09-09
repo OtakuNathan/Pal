@@ -497,7 +497,7 @@ def run_setup_upgrade(*, runtime_root: Path) -> int:
     if not db_path.is_file():
         print(
             "  Existing Pal database is required for non-interactive upgrade: "
-            f"{db_path}"
+            f"{db_path}. Set PAL_HOME or use --runtime-root /actual/path, or run pal setup for a new installation."
         )
         return 2
     from pal.bunshin.cutover import cutover_bunshin_runtime

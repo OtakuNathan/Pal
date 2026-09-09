@@ -55,7 +55,7 @@ class PalV2CliParserTests(unittest.TestCase):
 
         run_setup_wizard.assert_called_once_with(runtime_root=runtime_root)
 
-    def test_setup_upgrade_is_non_interactive_and_requires_runtime_root(
+    def test_setup_upgrade_is_non_interactive_with_explicit_runtime_root(
         self,
     ) -> None:
         runtime_root = Path("/tmp/pal-runtime")
@@ -124,3 +124,87 @@ class PalV2CliParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_runtime_commands_default_to_home_and_accept_override():
+    commands = [
+        ['run'], ['client', '--message', 'hello'], ['tty'], ['doctor'],
+        ['setup'], ['setup', '--upgrade'], ['eval', 'tools'],
+        ['package', 'status'], ['package', 'install', 'demo.palpkg'],
+        ['package', 'prepare', 'web_fetch'], ['llm', 'list'],
+        ['provider', 'install', 'demo.whl'],
+        ['bunshin', 'efficiency', 'wf-1'],
+    ]
+    parser = _build_parser()
+    for command in commands:
+        assert parser.parse_args(command).runtime_root.expanduser() == Path.home() / '.pal'
+        assert parser.parse_args([*command, '--runtime-root', '/tmp/custom-pal']).runtime_root == Path('/tmp/custom-pal')
+
+
+def test_setup_default_and_quoted_tilde_are_normalized(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    for extra, expected in [([], tmp_path / '.pal'), (['--runtime-root', '~/custom'], tmp_path / 'custom')]:
+        monkeypatch.setattr(sys, 'argv', ['pal', 'setup', *extra])
+        with patch('pal.wizard.cli.run_setup_wizard', return_value=0) as setup:
+            assert main() == 0
+        setup.assert_called_once_with(runtime_root=expected)
+    monkeypatch.setattr(sys, 'argv', ['pal', 'setup', '--upgrade'])
+    with patch('pal.wizard.cli.run_setup_upgrade', return_value=0) as upgrade:
+        assert main() == 0
+    upgrade.assert_called_once_with(runtime_root=tmp_path / '.pal')
+
+
+def test_missing_default_runtime_does_not_create_another_pal(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setattr(sys, 'argv', ['pal', 'run'])
+    with patch('pal.main.build_runtime_app') as build:
+        assert main() == 2
+        build.assert_not_called()
+    assert not (tmp_path / '.pal').exists()
+    error = capsys.readouterr().err
+    assert str(tmp_path / '.pal') in error
+    assert '--runtime-root' in error and 'pal setup' in error
+
+
+def test_missing_socket_reports_actual_root_without_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['pal', 'client', '--runtime-root', str(tmp_path), '--message', 'hello'])
+    assert main() == 2
+    error = capsys.readouterr().err
+    assert str(tmp_path) in error and '--runtime-root' in error
+    assert 'Traceback' not in error
+
+
+def test_pal_home_is_fallback_and_explicit_root_wins(tmp_path, monkeypatch):
+    from pal.cli_paths import default_runtime_root
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('PAL_HOME', '~/other-pal')
+    alternate = tmp_path / 'other-pal'
+    alternate.mkdir()
+    assert default_runtime_root() == alternate
+    assert _build_parser().parse_args(['tty']).runtime_root == alternate
+    assert _build_parser().parse_args(['tty', '--runtime-root', '/explicit']).runtime_root == Path('/explicit')
+    (tmp_path / '.pal').mkdir()
+    assert default_runtime_root() == tmp_path / '.pal'
+    assert _build_parser().parse_args(['package', 'status']).runtime_root == tmp_path / '.pal'
+
+
+def test_missing_root_hint_includes_environment_option(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('PAL_HOME', raising=False)
+    monkeypatch.setattr(sys, 'argv', ['pal', 'package', 'status'])
+    assert main() == 2
+    error = capsys.readouterr().err
+    assert 'PAL_HOME' in error and '--runtime-root' in error
+    assert not (tmp_path / '.pal').exists()
+
+
+def test_stale_tty_socket_returns_failure(tmp_path, monkeypatch):
+    import socket
+    from unittest.mock import AsyncMock
+    from pal.socket_client import default_socket_path
+    path = default_socket_path(tmp_path)
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.bind(str(path))
+    monkeypatch.setattr(sys, 'argv', ['pal', 'tty', '--runtime-root', str(tmp_path)])
+    with patch('pal.main.run_tty', new=AsyncMock(return_value=False)):
+        assert main() == 2

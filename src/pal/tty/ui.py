@@ -47,7 +47,7 @@ class TtyRepl:
         self,
         *,
         input_fn: Callable[[str], str] | None = None,
-    ) -> None:
+    ) -> bool:
         renderer = self._renderer
         if renderer is None:
             renderer = TtyRenderer(OutputBoundary(self._console or Console()))
@@ -64,11 +64,12 @@ class TtyRepl:
         try:
             reader, writer = await self._open_unix_connection(str(self._socket_path))
         except (OSError, ConnectionError) as exc:
+            from pal.cli_paths import RUNTIME_ROOT_HINT
             await renderer.error(
                 "connection",
-                f"cannot connect to {self._socket_path}: {exc}",
+                f"cannot connect to {self._socket_path}: {exc}. Start Pal for this runtime. {RUNTIME_ROOT_HINT}",
             )
-            return
+            return False
 
         session = SocketSession(
             reader,
@@ -127,6 +128,7 @@ class TtyRepl:
             with contextlib.suppress(asyncio.CancelledError):
                 await notification_task
             await session.aclose()
+        return True
 
     async def _render_notifications(
         self,

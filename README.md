@@ -49,7 +49,8 @@ The installer:
 
 - selects a supported Python and creates a dedicated virtualenv;
 - installs Pal and its runtime-root overlay;
-- verifies the SQLite vector extension;
+- prepares and verifies built-in dependencies, including SQLite vector support
+  and the full Chromium browser used by `web_fetch`;
 - creates the `pal` launcher;
 - runs the five-step setup wizard for a new runtime;
 - preserves existing configuration and applies migrations during an upgrade;
@@ -69,11 +70,16 @@ registers a LaunchAgent. No manual `pal run` is needed after a normal install.
 systemctl --user status pal
 
 # Interactive local session
-pal tty --runtime-root ~/.pal
+pal tty
 
 # One-shot, scriptable message
-pal client --runtime-root ~/.pal --message "hello"
+pal client --message "hello"
 ```
+
+Runtime commands use an explicit `--runtime-root` first. Otherwise they use
+`~/.pal` when it exists, then `$PAL_HOME` if configured. For a custom installation,
+set `export PAL_HOME=/actual/path` or pass `--runtime-root /actual/path`.
+`pal run` starts the selected runtime; `pal setup` can create a new one.
 
 `pal run --runtime-root <dir>` still exists for development / foreground runs
 and as a fallback on platforms without service registration.
@@ -95,6 +101,30 @@ working tree instead of a packaged copy, invoke `scripts/pal_source.sh`; it
 prepends `src/` to `PYTHONPATH` and accepts the same arguments as `pal`.
 Set `PAL_PYTHON` when the desired interpreter is not `python3`. The setup
 aliases `pal wizard` and `pal wizzard` remain available.
+
+### Install a plugin package
+
+With Pal stopped, install a local `.palpkg` and its dependencies:
+
+```bash
+pal package install ./my-plugin.palpkg
+pal package status
+```
+
+Start Pal afterward to activate the installed plugin. In a running Pal, ask it
+in natural language to install the package; its `package_install` tool queues
+preparation and switches the plugin through the existing lifecycle owner.
+Use `package_status` to follow the returned job id.
+
+Packages with Python backends get private virtualenvs; their dependencies do
+not replace Pal's own Python dependencies. Existing hand-deployed plugins and
+legacy provider wheels remain supported. To repair dependencies, use
+`pal package prepare <plugin-id>` while Pal is stopped, or ask the running Pal
+to use `package_prepare`. Built-in browser dependencies can be prepared with
+`pal package prepare web_fetch --kind builtin`.
+
+See [Plugin package installation](./docs/pal_package_installation.md) for
+building packages, lifecycle hooks, environment access, and failure recovery.
 
 ### Pal Debugging Pal
 

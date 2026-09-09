@@ -60,8 +60,8 @@ def test_bunshin_subparser_registers_efficiency(tmp_path: Path) -> None:
     )
     assert json_args.json is True
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(["bunshin", "efficiency", "wf-42"])
+    from pal.cli_paths import default_runtime_root
+    assert parser.parse_args(["bunshin", "efficiency", "wf-42"]).runtime_root == default_runtime_root()
 
 
 def test_pal_main_parser_wires_bunshin_efficiency(tmp_path: Path) -> None:

@@ -12,6 +12,8 @@ import argparse
 from pathlib import Path
 from typing import TextIO
 
+from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP
+
 from pal.bunshin.config import bunshin_db_path
 from pal.bunshin.v2.efficiency_metrics import compute_workflow_metrics
 from pal.bunshin.v2.efficiency_report import render_json, render_text
@@ -44,7 +46,7 @@ def resolve_db_path(runtime_root: Path) -> Path:
     Errors:
         Never raises; resolution is a pure path computation.
     """
-    return bunshin_db_path(Path(runtime_root))
+    return bunshin_db_path(Path(runtime_root).expanduser().resolve())
 
 
 def register_bunshin_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -57,7 +59,7 @@ def register_bunshin_subparser(subparsers: argparse._SubParsersAction) -> argpar
     Returns:
         The ``bunshin`` argument parser, with an ``efficiency`` subcommand
         accepting one positional ``workflow_id``, an optional ``--json``
-        flag, and the same required ``--runtime-root`` flag convention as
+        flag, and the same optional ``--runtime-root`` flag convention as
         every other ``pal`` subcommand.
 
     Errors:
@@ -87,8 +89,8 @@ def register_bunshin_subparser(subparsers: argparse._SubParsersAction) -> argpar
     efficiency_parser.add_argument(
         "--runtime-root",
         type=Path,
-        required=True,
-        help="Pal runtime root holding the Bunshin v2 storage",
+        default=default_runtime_root(),
+        help=RUNTIME_ROOT_HELP,
     )
     efficiency_parser.set_defaults(command="bunshin", bunshin_command="efficiency")
     return bunshin_parser

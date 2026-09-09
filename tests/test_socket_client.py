@@ -114,3 +114,17 @@ class PalV2SocketClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"/status", writer.written)
         self.assertIn(b"slash_command", writer.written)
         self.assertTrue(writer.closed)
+
+
+def test_tty_reports_connection_failure_as_false():
+    from unittest.mock import AsyncMock
+    import asyncio
+    from pal.tty.ui import TtyRepl
+    renderer = AsyncMock()
+    repl = TtyRepl(
+        Path('/tmp/missing-pal-review.sock'),
+        open_unix_connection=AsyncMock(side_effect=ConnectionRefusedError('stale socket')),
+        read_message=AsyncMock(), request_id_factory=lambda: 'request', renderer=renderer,
+    )
+    assert asyncio.run(repl.run(input_fn=lambda _: '/quit')) is False
+    assert 'PAL_HOME' in renderer.error.call_args.args[1]
