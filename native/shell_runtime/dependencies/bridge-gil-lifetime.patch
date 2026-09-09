@@ -1,0 +1,95 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d7668f4..80c7092 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -141,6 +141,13 @@ if(DYNABRIDGE_BUILD_TESTS)
+
+     if(TARGET dynabridge_ff_python_executor_demo)
+         add_test(NAME ff_python_executor COMMAND dynabridge_ff_python_executor_demo)
++        add_executable(dynabridge_ff_python_executor_lifetime tests/python_executor_lifetime.cpp)
++        set_property(TARGET dynabridge_ff_python_executor_lifetime PROPERTY CXX_STANDARD 17)
++        target_include_directories(dynabridge_ff_python_executor_lifetime SYSTEM PRIVATE "${FLUX_FOUNDRY_INCLUDE_DIR}")
++        target_link_libraries(dynabridge_ff_python_executor_lifetime PRIVATE
++            dynabridge::dynabridge Python3::Python Threads::Threads)
++        add_test(NAME ff_python_executor_lifetime COMMAND dynabridge_ff_python_executor_lifetime)
++        set_tests_properties(ff_python_executor_lifetime PROPERTIES TIMEOUT 20)
+     endif()
+     if(TARGET dynabridge_ff_uv_executor_demo)
+         add_test(NAME ff_uv_executor COMMAND dynabridge_ff_uv_executor_demo)
+diff --git a/dynabridge/extensions/flux_foundry/python_interpreter_executor.h b/dynabridge/extensions/flux_foundry/python_interpreter_executor.h
+index 688c1fa..5322387 100644
+--- a/dynabridge/extensions/flux_foundry/python_interpreter_executor.h
++++ b/dynabridge/extensions/flux_foundry/python_interpreter_executor.h
+@@ -1,7 +1,7 @@
+ #ifndef DYNABRIDGE_EXTENSIONS_FLUX_FOUNDRY_PYTHON_INTERPRETER_EXECUTOR_H
+ #define DYNABRIDGE_EXTENSIONS_FLUX_FOUNDRY_PYTHON_INTERPRETER_EXECUTOR_H
+
+-#include <Python.h>
++#include "dynabridge/backends/python_api.h"
+
+ #include <cassert>
+ #include <condition_variable>
+@@ -112,6 +112,9 @@ namespace dynabridge {
+                     for (auto& task : batch) {
+                         task();
+                     }
++                    // Captures may own Python references. Invocation does not
++                    // consume task_wrapper, so destroy the captures under GIL too.
++                    batch.clear();
+                     PyGILState_Release(gil);
+                 }
+             }
+diff --git a/tests/python_executor_lifetime.cpp b/tests/python_executor_lifetime.cpp
+new file mode 100644
+index 0000000..03d3565
+--- /dev/null
++++ b/tests/python_executor_lifetime.cpp
+@@ -0,0 +1,48 @@
++#include "dynabridge/extensions/flux_foundry/python_interpreter_executor.h"
++#include <atomic>
++#include <cstdio>
++
++struct owned_task {
++    PyObject* object;
++    std::atomic<int>* invoked;
++    std::atomic<int>* unsafe;
++    owned_task(PyObject* obj, std::atomic<int>& ran, std::atomic<int>& bad)
++        : object(obj), invoked(&ran), unsafe(&bad) { Py_INCREF(object); }
++    owned_task(owned_task&& other) noexcept
++        : object(other.object), invoked(other.invoked), unsafe(other.unsafe) {
++        other.object = nullptr;
++    }
++    owned_task(const owned_task&) = delete;
++    void operator()() noexcept {
++        if (!PyGILState_Check()) ++*unsafe;
++        ++*invoked;
++    }
++    ~owned_task() noexcept {
++        if (!object) return;
++        if (!PyGILState_Check()) {
++            ++*unsafe; // Report regression without invoking unsafe Python code.
++            return;
++        }
++        Py_DECREF(object);
++    }
++};
++
++int main() {
++    Py_Initialize();
++    std::atomic<int> invoked{0}, unsafe{0};
++    PyObject* object = PyList_New(0);
++    const auto references = Py_REFCNT(object);
++    {
++        dynabridge::flux_foundry_extensions::python_interpreter_executor executor;
++        for (int i = 0; i < 1000; ++i)
++            executor.dispatch(flux_foundry::task_wrapper_sbo(owned_task(object, invoked, unsafe)));
++        executor.shutdown();
++        executor.shutdown();
++    }
++    const bool ok = invoked == 1000 && unsafe == 0 && Py_REFCNT(object) == references;
++    std::printf("invoked=%d unsafe=%d remaining_refs=%zd\n",
++        invoked.load(), unsafe.load(), Py_REFCNT(object));
++    Py_DECREF(object);
++    Py_Finalize();
++    return ok ? 0 : 1;
++}
