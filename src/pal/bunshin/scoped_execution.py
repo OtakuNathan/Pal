@@ -920,6 +920,10 @@ def _scope_descriptor(
             "retry_notification retries a failed completion turn; inspect its previous effects before retrying.",
             "The role runner delivers completions automatically; retry_notification is available only in the resident host.",
         )})
+    if canonical == "op_exec_status":
+        guidance = guidance.model_copy(update={
+            "failure_next_steps": "If this role's backend is unavailable, report the failure through the role result; do not inspect or repair the resident runtime.",
+        })
     execution = descriptor.execution
     if execution is not None and canonical not in {"op_exec_session", "op_exec_status", "op_exec_recover_output"}:
         execution = execution.model_copy(update={"invocation_mode": InvocationMode.DIRECT})

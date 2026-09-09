@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from pal.execution.contracts import CapabilityCall
 from pal.execution.tool_facade import CompleteResult, PagedResult
@@ -23,6 +24,11 @@ class BunshinShellSessions:
     @property
     def has_work(self):
         return self.owner.has_work
+
+    def execution_delegate(self, runtime, check_cancel):
+        async def execute(call, **kwargs):
+            return await self.run_tool(runtime.execute_tool_async(call, **kwargs), check_cancel)
+        return SimpleNamespace(execute_tool_async=execute)
 
     async def run_tool(self, operation, check_cancel):
         task = asyncio.create_task(operation)

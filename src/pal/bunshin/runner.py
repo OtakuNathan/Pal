@@ -1823,11 +1823,6 @@ class BunshinRunner:
                 state.execution_runtime, call, allow_tools=allow_tools,
                 budget=budget, turn_id=turn_id or continuation.turn_id,
             )
-            if self._shell_sessions is not None:
-                from pal.bunshin.v2.verification_builder import SHELL_EVIDENCE_CAPABILITIES
-                canonical = state.execution_runtime.resolve_capability_address(target_name)
-                if canonical in SHELL_EVIDENCE_CAPABILITIES | {"op_exec_shell", "op_exec_session"}:
-                    operation = self._shell_sessions.run_tool(operation, self._raise_if_cancel_requested)
             result = await self._await_with_progress_heartbeat(
                 operation,
                 phase="tool_call_waiting",
@@ -1920,8 +1915,15 @@ class BunshinRunner:
         if not admission.ok:
             self.blocked_summary = f"{admission.message}: {target_name}"
             return admission.to_result()
+        delegate = execution_runtime
+        if self._shell_sessions is not None:
+            from pal.bunshin.v2.verification_builder import SHELL_EVIDENCE_CAPABILITIES
+            if target_name in SHELL_EVIDENCE_CAPABILITIES | {"op_exec_shell", "op_exec_session"}:
+                # Approval and cancellation share the Manager control reader.
+                # Start the cancellation watcher only after approval settles.
+                delegate = self._shell_sessions.execution_delegate(execution_runtime, self._raise_if_cancel_requested)
         approval_runtime = ApprovalExecutionDecorator(
-            delegate=execution_runtime,
+            delegate=delegate,
             classify=lambda _call: self._execution_approval_request(target_name),
             request=lambda request, call: self._request_execution_approval(
                 request,

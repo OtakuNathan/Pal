@@ -103,7 +103,11 @@ class BunshinNativeTests(unittest.IsolatedAsyncioTestCase):
         _, written = await self.tool("call_tool", {"name": "shell_session", "args": {
             "session_id": result.structured["session_id"], "action": "write", "text": "hello-role\n"}})
         self.assertTrue(written.ok, written.text)
-        await asyncio.sleep(.05)
+        async def completion_ready():
+            while not self.host.owner.shell._completions:
+                self.host.ready.clear()
+                await self.host.ready.wait()
+        await asyncio.wait_for(completion_ready(), 5)
         await self.host.before_model(self.memory, "role", noop, wait_seconds=0)
         self.assertFalse(self.host.has_work)
 
@@ -160,6 +164,17 @@ class BunshinNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_role_loop_observes_background_completion_without_polling(self):
         requests = []
+        approving = False
+        approvals = 0
+        async def approve(*args, **kwargs):
+            nonlocal approving, approvals
+            approving = True
+            await asyncio.sleep(.35)
+            approving = False
+            approvals += 1
+            return "accept"
+        async def control(timeout=None):
+            self.assertFalse(approving, "cancellation watcher must not compete with approval for Manager replies")
         class Model:
             supports_streaming = False
             async def agenerate(inner, request):
@@ -173,10 +188,13 @@ class BunshinNativeTests(unittest.IsolatedAsyncioTestCase):
         bundle.llm_runtime = Model()
         runner = BunshinRunner(runtime_root=self.root / "loop", pack=BunshinInvocationPack(
             invocation_id="role-loop", instruction="run the command", allowed_capabilities=["op_exec_shell"],
-            workspace={"repo_path": str(self.root)}, metadata={"max_tool_rounds": 3}),
-            bunshin_id="role-loop", run_id="role-loop", write_event=noop, read_decision=noop)
+            workspace={"repo_path": str(self.root)}, metadata={"max_tool_rounds": 3},
+            approval_policy={"high_risk_capabilities": ["op_exec_shell"]}),
+            bunshin_id="role-loop", run_id="role-loop", write_event=noop, read_decision=control)
         try:
-            reply = await runner._run_agent_loop(bundle)
+            with patch.object(runner, "_request_execution_approval", side_effect=approve):
+                reply = await runner._run_agent_loop(bundle)
+            self.assertEqual(approvals, 1)
             self.assertEqual(reply, "role complete")
             self.assertEqual(len(requests), 2)
             self.assertTrue(any(m.semantic_kind == "runtime_context_artifact" and "FULL_ROLE_COMPLETION" in m.text
