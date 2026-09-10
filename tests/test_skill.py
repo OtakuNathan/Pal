@@ -457,6 +457,61 @@ Run the workflow.
         self.assertIn("Pal Plugin Development", injected.structured["title"])
         self.assertIn("ModuleHandle", injected.structured["manual_text"])
 
+    def test_self_maintenance_is_discoverable_for_configuration_and_repair(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        behavior = BehaviorService(repository=self.behavior_repository)
+        register_behavior_with_core(core.context, behavior)
+        core.publish_module_capabilities("skill")
+
+        skill_id = "pal.self.maintenance"
+        skill = self.skill_repository.get_skill(skill_id)
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertTrue(skill.active)
+        for query in ("如何配置 Pal", "pal cli", "自我修改", "pal self maintenance"):
+            with self.subTest(query=query):
+                search = SkillSearchTool(service=self.service).invoke({"query": query, "top_k": 3})
+                self.assertEqual(search.structured["hits"][0]["skill_id"], skill_id)
+                self.assertTrue(search.structured["hits"][0]["injectable"])
+                advice = asyncio.run(behavior.advise_async(BehaviorAdviceRequest(scenario=query, top_k=5)))
+                self.assertTrue(any(skill_id in candidate.skill_refs for candidate in advice.candidates))
+
+        injected = SkillInjectTool(service=self.service).invoke({"skill_id": skill_id})
+        self.assertEqual(injected.status, "ok")
+        self.assertEqual(injected.structured["manual_text"], skill.manual_text)
+        prompt = core.build_canonical_prompt(PromptAssemblyContext())
+        self.assertNotIn(skill.manual_text, prompt.messages[0].text)
+        self.assertIn(skill_id, prompt.messages[0].text)
+
+        core.withdraw_module_capabilities("skill")
+        self.assertIsNone(self.skill_repository.get_skill(skill_id))
+        core.publish_module_capabilities("skill")
+        restored = SkillInjectTool(service=self.service).invoke({"skill_id": skill_id})
+        self.assertEqual(restored.status, "ok")
+        self.assertEqual(restored.structured["manual_text"], skill.manual_text)
+
+    def test_self_maintenance_cli_examples_parse_without_executing(self) -> None:
+        import re
+        import shlex
+
+        from pal.main import _build_parser
+        from pal.skill.builtin_skills import PAL_SELF_MAINTENANCE_MANUAL
+
+        parser = _build_parser()
+        examples = re.findall(r"```sh\n(.*?)```", PAL_SELF_MAINTENANCE_MANUAL, re.DOTALL)
+        self.assertTrue(examples)
+        for block in examples:
+            for line in block.strip().splitlines():
+                with self.subTest(command=line):
+                    argv = shlex.split(line)
+                    self.assertEqual(argv[0], "pal")
+                    parsed = parser.parse_args(argv[1:])
+                    if hasattr(parsed, "runtime_root"):
+                        self.assertEqual(parsed.runtime_root, Path("/path/to/runtime"))
+
     def test_skill_module_declares_internal_llm_adapter_endpoint_skill(self) -> None:
         core = PalCore()
         register_core_with_core(core)
@@ -501,7 +556,7 @@ Run the workflow.
         self.assertIn("<runtime_root>/channel/providers/<provider_id>/", skill.manual_text)
         self.assertIn("provider.toml", skill.manual_text)
         self.assertIn("build_channel_provider", skill.manual_text)
-        self.assertIn("default deployment step is one `channel_provider_rescan`", skill.manual_text)
+        self.assertIn("rescan does not detect or reload in-place source changes", skill.manual_text)
         self.assertIn("do not restart the Pal service", skill.manual_text)
         self.assertIn("channel_provider_rescan", skill.capability_refs)
 

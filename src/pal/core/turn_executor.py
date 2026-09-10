@@ -1644,7 +1644,10 @@ class TurnExecutor:
                 messages.append(
                     LLMMessageIR(
                         role=MessageRole.USER,
-                        parts=(TextPartIR(context_message.content),),
+                        parts=(
+                            TextPartIR(context_message.content),
+                            *(ArtifactRefPartIR(artifact_id=artifact_id) for artifact_id in context_message.artifact_ids),
+                        ),
                         message_id=f"tool-context:{call.call_id}:{index}",
                         semantic_kind=context_message.semantic_kind,
                         metadata={

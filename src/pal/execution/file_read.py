@@ -46,6 +46,7 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_UNSUPPORTED_TEXT_ENCODING: (
         "The file could not be decoded as UTF-8 text. "
         "Binary files, images, and PDFs are not supported by read_file. "
+        "Use artifact_import with the local path to attach an image or process a document. "
         "For a channel-delivered artifact, use artifact_info to inspect its representations; "
         "inspect image pixels only when the image is already inline and the active model supports vision."
     ),

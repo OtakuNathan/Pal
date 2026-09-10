@@ -45,6 +45,7 @@ from pal.skill.builtin_skills import (
     PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
     PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
+    PAL_SELF_MAINTENANCE_SKILL_ID,
     builtin_declared_skills,
 )
 from pal.skill.contracts import SkillDescriptor
@@ -169,6 +170,22 @@ if TYPE_CHECKING:
     priority=35,
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "channel/providers"},
+)
+@affordance(
+    affordance_id="declared.skill.pal_self_maintenance",
+    title="Pal self maintenance skill",
+    scenario_text="The user asks how to configure Pal, use its CLI, or perform Pal self-modification, source/config repair, or prompt boundary refactoring.",
+    prompt_hint="If this route matches, inject skill `pal.self.maintenance` to explain configuration or carry out authorized maintenance.",
+    activation_terms=(
+        "pal self maintenance", "self maintenance", "repair pal", "pal source repair",
+        "prompt boundary", "system prompt refactoring", "自我维护", "维护 Pal",
+        "修复 Pal", "维护流程", "提示词边界", "内置维护 skill",
+        "自我修改", "如何配置 Pal", "怎么配置 Pal", "Pal怎么配置", "pal cli", "configure pal", "pal configuration",
+    ),
+    skill_refs=(PAL_SELF_MAINTENANCE_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False},
 )
 @dataclass
 class SkillIntrospectionProvider:

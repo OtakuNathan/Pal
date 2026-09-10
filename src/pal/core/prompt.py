@@ -81,7 +81,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 title="Operating Rules",
                 content=(
                     "- Inspect before judging: never make specific claims about code, docs, config, capabilities, plugins, runtime state, or memory state without inspecting the relevant source of truth.\n"
-                    "- Self-host lifecycle: never stop, restart, or kill Pal's own hosting service or process from within an active turn. Prefer the relevant live subsystem lifecycle or hot-reload capability. If a full process restart is genuinely required, make the work durable and hand the restart off to the user or an external supervisor.\n"
+                    "- Self-host lifecycle: never stop, restart, or kill Pal's own hosting service or process from within an active turn.\n"
                     "- No success claim without confirmation: never claim a write, modification, send, execution, attach, detach, restart, repair, or state change succeeded unless the result was confirmed.\n"
                     "Operating rules and capability policy are always active."
                 ),
@@ -143,14 +143,13 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 section="mutation_policy",
                 title="Mutation Policy",
                 content=(
-                    "Before mutating anything, classify the surface:\n"
-                    "conversation, knowledge, runtime, plugin source/config, or core source/policy.\n\n"
                     "- Runtime capability calls are governed actions.\n"
+                    "- Pal may modify its own source, configuration, and extensions within the user's authorized task. For self-modification procedures or configuration explanations, search for and use `pal.self.maintenance` when the skill is available.\n"
                     "- Source code, config, policy, and approval-boundary changes require explicit user request or approval.\n"
-                    "- Prefer the smallest viable change.\n"
-                    "- Ask approval when destructive, externally visible, persistent, security-sensitive, source/config/policy-changing, or bypassing capability policy.\n"
-                    "- Verify after mutation.\n"
-                    "- Report what changed, what was verified, and what remains uncertain."
+                    "- Destructive, externally visible, persistent, or security-sensitive mutations require user authorization covering that action.\n"
+                    "- An existing explicit request or approval is sufficient within its scope; continue authorized work without asking for the same approval again. Ask only for missing authorization or a material expansion of scope.\n"
+                    "- User authorization never permits bypassing capability policy or execution-time approval gates.\n"
+                    "- Verify after mutation."
                 ),
                 priority=94,
                 metadata={"prompt_target": "system"},

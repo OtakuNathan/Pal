@@ -439,6 +439,13 @@ class CoreTurnIOPort:
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         return self.core.artifact_scope_for_turn(turn_id)
 
+    def llm_capabilities_for_turn(self, turn_id: str | None) -> dict[str, Any]:
+        """Expose the same endpoint facts core uses for this turn's prompt projection."""
+        continuation = self.core.state.active_turns.get(str(turn_id or ""))
+        if continuation is None:
+            return {}
+        return self.core.turn_executor._resolve_llm_capabilities(continuation)
+
     def capture_delivery_binding(self, turn_id: str | None) -> dict[str, Any]:
         return self.core.capture_delivery_binding(turn_id)
 

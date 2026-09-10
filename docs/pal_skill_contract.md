@@ -122,6 +122,31 @@ Commit rejects unresolved exact duplicates unless the caller explicitly chooses 
 
 ## Prompt Rules
 
+### Built-in self-maintenance entry
+
+`pal.self.maintenance` is a source-declared built-in manual for both configuration
+explanations and authorized changes to Pal itself. Core's system prompt names the
+entry and preserves authorization, capability, verification, and self-host lifecycle
+boundaries. The full procedure is loaded through normal skill search/injection;
+it is not an always-present system block or a new source of permission.
+
+The manual explains the current CLI, identifies the owner of each configuration
+surface, and distinguishes saved configuration from loaded runtime state. It routes
+development to the existing plugin, channel provider, model-hook/endpoint, and LSP
+manuals. Pal reads the relevant references itself and gives users concrete commands,
+parameter explanations, activation steps, and verification instructions.
+
+Configuration questions do not authorize writes. Existing explicit authorization
+continues to cover its agreed actions without another confirmation. Full host
+restart remains an external handoff; a configuration refresh or plugin attach is
+not a general-purpose replacement for that restart.
+
+Keep this map synchronized with the CLI parser and lifecycle implementations when
+those interfaces change. Use the [self-maintenance scenarios](pal_self_maintenance_regression.md)
+to review explanation, execution, and handoff behavior.
+
+### General skill use
+
 Use `skill_search` before `skill_inject` when the user explicitly asks Pal to use a named skill. Do not guess `skill_id` from raw text.
 
 Use skill assimilation when the user explicitly asks Pal to learn a skill, summarize a reusable workflow, sanitize an external skill, import SKILL.md content, or remember how to do a class of future tasks.

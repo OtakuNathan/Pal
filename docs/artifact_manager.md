@@ -2,22 +2,21 @@
 
 ## Boundary
 
-`pal.artifact` is a first-party core-foundation subsystem for short-lived conversation attachments.
+`pal.artifact` is a built-in, detachable plugin for short-lived conversation attachments.
 
 An artifact is not:
 
 - A local filesystem path exposed to the LLM.
 - Durable memory or an L3 document.
-- A plugin-owned capability.
 
 An artifact is:
 
 - A scoped conversation resource identified by `artifact_id`.
 - Stored and normalized under the runtime root.
-- Read only through artifact tools.
+- Read through artifact tools or projected into model input as inline images.
 - Visible only inside the matching `control_scope_key`.
 
-The module is not detachable. Channel endpoints may receive bytes or local cached files, but `PalCore` owns the handoff into `ArtifactManager`.
+The `artifact` plugin uses `raii.v1` and reloads `pal.artifact` when attached again. Channel endpoints may receive bytes or local cached files; `PalCore` owns the channel-ingress handoff into `ArtifactManager`. Changes to the core/shared context protocol require an external host restart; reattaching this plugin alone cannot reload those layers.
 
 ## Data Flow
 
@@ -30,6 +29,11 @@ flowchart LR
     AM --> PROMPT["Available Artifacts user-context"]
     LLM["LLM"] --> TOOLS["artifact tools by artifact_id"]
     TOOLS --> AM
+    LOCAL["Local screenshot/file"] --> IMPORT["artifact_import(path)"]
+    IMPORT --> AM
+    IMPORT --> REF["ToolContextMessageIR.artifact_ids"]
+    REF --> L1["L1 user message with ArtifactRefPartIR"]
+    L1 --> PIXELS["Scoped prompt projection to inline pixels"]
 ```
 
 The channel layer only normalizes incoming attachment metadata. `PalCore` passes attachments to the artifact port and replaces raw `attachments` with prompt-safe `artifact_refs`.
@@ -103,7 +107,28 @@ Rules:
   workspace path before editing it; the copied/output file is not governed by
   artifact TTL.
 - Tool-generated files (for example, web screenshots) stay ordinary stored
-  files and are not automatically re-registered as conversation artifacts.
+  files until explicitly imported with `artifact_import(path=...)`.
+
+For self-inspection, call `browser_screenshot`, then pass its
+`artifact.local_cached_path` to `artifact_import`. The import copies the file
+into managed storage and emits a user-authority context message containing a
+stable artifact reference. On the next model request, core resolves that
+reference using the current conversation scope, live lease, vision capability,
+and image budget. Only prompt projection contains image data URLs; L1 and the
+tool result keep references and metadata. A stored-file ID or local path alone
+does not mean Pal has seen pixels. Text-only models receive metadata, and
+retired or foreign-scope references never expose images. Importing a borrowed
+local path does not transfer ownership of the source file.
+
+Local image import first asks the existing `core:turn_io` port for
+`llm_capabilities_for_turn(turn_id)`. Core resolves the current turn's selected
+endpoint using the same resolver as prompt projection; the artifact plugin
+does not inspect LLM configuration or use a global default independently.
+Unsupported or unknown vision capability returns `unsupported` before creating
+an artifact or context reference, with guidance to discover a local-path OCR or
+image-analysis tool. Text document import remains available. The metadata-only
+projection above still applies to channel attachments and previously imported
+images when the model changes.
 
 Prompt projection resolves internal image references to normalized local data
 URLs. Provider codecs then encode that same payload in their native image-part
@@ -113,6 +138,7 @@ shape; no provider fetch of a channel URL is required.
 
 Artifact capabilities:
 
+- `artifact_import`: import a local image, screenshot, or document into the current conversation and emit its reference for the next model request.
 - `artifact_list`: list hot artifacts visible to the current turn.
 - `artifact_info`: inspect metadata and available representations for one artifact.
 - `artifact_read`: read text-like representations by `artifact_id`.
@@ -121,12 +147,8 @@ Artifact capabilities:
 - `artifact_grep`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
 - `artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
 
-Resident LLM tools currently include only:
-
-- `artifact_info`
-- `artifact_read`
-
-Other artifact capabilities remain discoverable through execution discovery.
+Artifact capabilities are indirect: discover their current aliases with
+`search_tools` and invoke them through `call_tool`.
 
 Tool boundary:
 

@@ -2145,6 +2145,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             initial_system = initial_prompt.messages[0].text
             initial_developer = initial_prompt.messages[1].text
             repository.update_user_preferences(style_preference="Externally changed style")
+            persona = repository.get_persona()
+            persona.display_name = "Externally changed name"
+            persona.core_policy = ["Externally changed policy"]
+            persona.save()
             before_refresh = core.build_canonical_prompt(PromptAssemblyContext())
 
             self.assertEqual(initial_system, before_refresh.messages[0].text)
@@ -2156,6 +2160,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(initial_system, after_refresh.messages[0].text)
             self.assertNotEqual(initial_developer, after_refresh.messages[1].text)
             self.assertIn("Style: Externally changed style", after_refresh.messages[1].text)
+            self.assertEqual(snapshot.persona["display_name"], "Externally changed name")
+            self.assertNotIn("Externally changed name", after_refresh.messages[0].text)
+            self.assertNotIn("Externally changed policy", after_refresh.messages[0].text)
+            from pal.identity.prompt import IdentityPromptFragmentProvider
+
+            rebuilt = IdentityPromptFragmentProvider(service).build_prompt_fragments(PromptAssemblyContext())
+            identity = next(fragment for fragment in rebuilt if fragment.section == "identity")
+            self.assertIn("Externally changed name", identity.content)
+            self.assertIn("Externally changed policy", identity.content)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -4647,7 +4660,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_policy = by_section["tool_policy"]
         self.assertIn("Pal capabilities are the execution path", operating_guidance.content)
         self.assertIn("never stop, restart, or kill Pal's own hosting service", rules.content)
-        self.assertIn("hot-reload capability", rules.content)
+        self.assertNotIn("hot-reload capability", rules.content)
+        self.assertIn("pal.self.maintenance", mutation_policy.content)
+        self.assertIn("within the user's authorized task", mutation_policy.content)
+        self.assertIn("without asking for the same approval again", mutation_policy.content)
+        self.assertIn("never permits bypassing capability policy", mutation_policy.content)
         self.assertIn("shell", operating_guidance.content)
         self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
         self.assertIn("result-specific recovery affordances", tool_policy.content)

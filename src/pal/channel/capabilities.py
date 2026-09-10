@@ -493,7 +493,7 @@ class ChannelIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Explicitly detach, unload, load, and reattach one runtime-root provider.",
             use_when="A known provider's source, manifest, or provider-wide resources changed in place.",
-            do_not_use_when="Only one endpoint connection is stuck (use channel_restart_endpoint). Discovering provider additions/removals/changes (use channel_provider_rescan).",
+            do_not_use_when="Only one endpoint connection is stuck (use channel_restart_endpoint). Discovering provider additions/removals or enabled/disabled state (use channel_provider_rescan).",
             failure_next_steps="The endpoint hubs retain queued delivery while code stays unloaded and capabilities remain withdrawn. Fix the provider and retry.",
         ),
         aliases=("channel_reload_provider",),

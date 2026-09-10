@@ -21,7 +21,7 @@ from pal.artifact import (
     ArtifactRepresentationModel,
     register_with_core as register_artifact_with_core,
 )
-from pal.artifact.tools import ArtifactContentSearchTool, ArtifactReadTool, ArtifactTranscribeTool
+from pal.artifact.tools import ArtifactContentSearchTool, ArtifactImportTool, ArtifactReadTool, ArtifactTranscribeTool
 from pal.artifact.prompt import ArtifactPromptFragmentProvider
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
@@ -43,6 +43,9 @@ class _TurnIO:
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         _ = turn_id
         return self.scope_key
+
+    def llm_capabilities_for_turn(self, turn_id: str | None) -> dict:
+        return {"supports_vision": True}
 
 
 class _ToolRuntime:
@@ -75,6 +78,144 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return path
+
+    async def test_local_import_reaches_vision_prompt_through_tool_context(self) -> None:
+        import base64
+        from PIL import Image
+        from pal.llm.ir import ArtifactRefPartIR, ImagePartIR, MessageRole
+        from pal.web_fetch import BrowserScreenshotTool
+
+        path = self.root / "screenshot.png"
+        Image.new("RGB", (24, 16), color=(255, 0, 0)).save(path)
+        original = path.read_bytes()
+        screenshot = await BrowserScreenshotTool(service=SimpleNamespace(
+            execute=lambda **kwargs: {"png_base64": base64.b64encode(original).decode("ascii")},
+        )).ainvoke({}, session_key="a" * 64, persistent=True,
+                   runtime=SimpleNamespace(runtime_root=self.root), turn_id=self.turn_id)
+        self.assertEqual(screenshot.status, RuntimeStatus.OK)
+        self.assertIn("artifact_import", screenshot.structured["next_step"])
+        path = Path(screenshot.structured["artifact"]["local_cached_path"])
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        register_artifact_with_core(core.context, self.manager)
+        core.publish_module_capabilities("artifact")
+        call = new_tool_call(name="call_tool", args={"name": "artifact_import", "args": {"path": str(path)}})
+        result = await core.context.execution_runtime.execute_tool_async(call, turn_id=self.turn_id)
+        self.assertTrue(result.ok, result.llm_text)
+        artifact_id = result.structured["artifact_id"]
+        self.assertEqual(result.context_messages[0].artifact_ids, (artifact_id,))
+        self.assertNotIn("base64", result.llm_text)
+        self.assertEqual(path.read_bytes(), original)
+
+        captured = []
+        core.context.port_registry["memory:memory"] = SimpleNamespace(
+            append_l1_user_contexts=lambda turn_id, messages: captured.extend(messages)
+        )
+        await core.turn_executor._append_l1_tool_context_messages_async(
+            SimpleNamespace(turn_id=self.turn_id), (call,), (result,),
+        )
+        self.assertEqual(captured[0].role, MessageRole.USER)
+        self.assertTrue(any(isinstance(part, ArtifactRefPartIR) for part in captured[0].parts))
+        projected = core.turn_executor._project_messages_for_prompt(
+            captured, turn_id=self.turn_id, artifact_scope_key=self.scope_key,
+            capabilities={"supports_vision": True},
+        )
+        images = [part for part in projected[0].parts if isinstance(part, ImagePartIR)]
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].source.startswith("data:image/"))
+        self.assertIn("attached_inline", projected[0].text)
+        self.assertTrue(any(isinstance(part, ArtifactRefPartIR) for part in captured[0].parts))
+        for scope, vision in ((self.scope_key, False), ("another-conversation", True)):
+            denied = core.turn_executor._project_messages_for_prompt(
+                captured, turn_id=self.turn_id, artifact_scope_key=scope,
+                capabilities={"supports_vision": vision},
+            )
+            self.assertFalse(any(isinstance(part, ImagePartIR) for part in denied[0].parts))
+
+        self.repository.delete_hot_states(artifact_id)
+        self.manager.reap_expired(scope_key=self.scope_key)
+        self.assertEqual(path.read_bytes(), original)
+        retired = core.turn_executor._project_messages_for_prompt(
+            captured, turn_id=self.turn_id, artifact_scope_key=self.scope_key,
+            capabilities={"supports_vision": True},
+        )
+        self.assertFalse(any(isinstance(part, ImagePartIR) for part in retired[0].parts))
+
+    async def test_local_import_rejects_invalid_sources_and_scope(self) -> None:
+        tool = ArtifactImportTool(self.manager)
+        for path, reason in (("", "path_required"), (str(self.root / "absent.png"), "source_not_found"), (str(self.root), "not_regular_file")):
+            result = await tool.ainvoke({"path": path}, runtime=_ToolRuntime(self.scope_key), turn_id=self.turn_id)
+            self.assertEqual(result.structured["reason"], reason)
+            self.assertFalse(result.context_messages)
+        path = self._write_source("test.txt")
+        result = await tool.ainvoke({"path": str(path)}, runtime=None, turn_id=self.turn_id)
+        self.assertEqual(result.structured["reason"], "artifact_scope_unavailable")
+        self.assertEqual(len(self.repository.list_records()), 0)
+        limited = replace(self.manager, policy=replace(self.manager.policy, limits=replace(self.manager.policy.limits, max_original_bytes=1)))
+        result = await ArtifactImportTool(limited).ainvoke({"path": str(path)}, runtime=_ToolRuntime(self.scope_key), turn_id=self.turn_id)
+        self.assertEqual(result.structured["reason"], "artifact_too_large")
+        self.assertEqual(len(self.repository.list_records()), 0)
+
+    async def test_local_image_import_requires_known_vision_support(self) -> None:
+        from PIL import Image
+
+        # Custom processor suffixes must use the same vision gate as standard PNGs.
+        path = self.root / "local.capture"
+        Image.new("RGB", (8, 8)).save(path, format="PNG")
+        self.manager.processor_registry.suffix_kind_map[".capture"] = "image"
+        for facts, reason in (({"supports_vision": False}, "vision_not_supported"), ({}, "vision_capability_unavailable")):
+            before = len(self.repository.list_records())
+            runtime = _ToolRuntime(self.scope_key)
+            runtime.provider_registry["core:turn_io"].llm_capabilities_for_turn = lambda turn_id: facts
+            result = await ArtifactImportTool(self.manager).ainvoke(
+                {"path": str(path)}, runtime=runtime, turn_id=self.turn_id,
+            )
+            self.assertEqual(result.status, RuntimeStatus.UNSUPPORTED)
+            self.assertEqual(result.structured["reason"], reason)
+            self.assertIn("search_tools", result.structured["next_step"])
+            self.assertFalse(result.context_messages)
+            self.assertEqual(len(self.repository.list_records()), before)
+            self.assertTrue(path.is_file())
+            text_path = self._write_source("document.txt")
+            text_result = await ArtifactImportTool(self.manager).ainvoke(
+                {"path": str(text_path)}, runtime=runtime, turn_id=self.turn_id,
+            )
+            self.assertEqual(text_result.status, RuntimeStatus.OK)
+
+    def test_core_turn_io_resolves_the_turn_endpoint_capabilities(self) -> None:
+        from pal.core.runtime import CoreTurnIOPort
+
+        core = PalCore()
+        requested = []
+
+        def resolve_endpoint_facts(*, preferred_endpoint_id):
+            requested.append(preferred_endpoint_id)
+            return {"endpoint_id": preferred_endpoint_id, "supports_vision": preferred_endpoint_id == "vision"}
+
+        core.context.port_registry["llm:llm"] = SimpleNamespace(resolve_endpoint_facts=resolve_endpoint_facts)
+        port = CoreTurnIOPort(core)
+        self.assertEqual(port.llm_capabilities_for_turn("unknown"), {})
+        for endpoint in ("vision", "text"):
+            core.state.active_turns[self.turn_id] = SimpleNamespace(preferred_llm_endpoint_id=endpoint)
+            facts = port.llm_capabilities_for_turn(self.turn_id)
+            self.assertEqual(facts["supports_vision"], endpoint == "vision")
+        self.assertEqual(requested, ["vision", "text"])
+
+    async def test_local_import_supports_text_and_reports_image_processing_failure(self) -> None:
+        tool = ArtifactImportTool(self.manager)
+        text_path = self._write_source("local.txt", "imported local document")
+        result = await tool.ainvoke({"path": str(text_path)}, runtime=_ToolRuntime(self.scope_key), turn_id=self.turn_id)
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        read = self.manager.read(result.structured["artifact_id"], self.scope_key)
+        self.assertIn("imported local document", read.text)
+        broken = self._write_source("broken.png", "not an image")
+        result = await tool.ainvoke({"path": str(broken)}, runtime=_ToolRuntime(self.scope_key), turn_id=self.turn_id)
+        self.assertEqual(result.status, RuntimeStatus.UNSUPPORTED)
+        self.assertEqual(result.structured["reason"], "artifact_processing_failed")
+        self.assertFalse(result.context_messages)
 
     def _register_text(self, name: str = "refund.txt", text: str = "refund terms are on page one"):
         return self.manager.register_ingested(

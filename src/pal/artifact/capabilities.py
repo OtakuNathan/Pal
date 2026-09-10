@@ -3,8 +3,10 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import StrictToolModel, ToolGuidance
+from pydantic import Field
 
 from pal.execution.generated_tool_models import (
     ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
@@ -30,6 +32,7 @@ from pal.artifact.service import ArtifactManager
 from pal.artifact.tools import (
     ArtifactContentSearchTool,
     ArtifactInfoTool,
+    ArtifactImportTool,
     ArtifactListTool,
     ArtifactReadTool,
     ArtifactSearchTool,
@@ -53,6 +56,10 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
+class ArtifactImportInput(StrictToolModel):
+    path: str = Field(min_length=1, description="Local file path to copy into the current conversation's managed artifacts.")
+
+
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="module",
@@ -72,6 +79,27 @@ class ArtifactIntrospectionProvider:
     service: ArtifactManager
     execution_runtime: Any | None = None
     module_id: str = "artifact"
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="artifact",
+        action_name="import",
+        guidance=ToolGuidance(
+            purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
+            use_when="A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing.",
+            do_not_use_when="The image is already inline or the artifact_id is already available. Reading ordinary source text (use read_file).",
+            failure_next_steps="Check the local path and size. Images require vision support reported by core for the current turn; otherwise import returns unsupported without creating an artifact. Use search_tools to find a local-path OCR or image-analysis capability; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with artifact_info. Reconcile uncertain outcomes with list_artifacts before retrying.",
+        ),
+        InputModel=ArtifactImportInput,
+        metadata={"async_required": True},
+        aliases=("artifact_import",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+    )
+    async def import_file(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactImportTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -106,8 +134,8 @@ class ArtifactIntrospectionProvider:
         action_name="list",
         guidance=ToolGuidance(
             purpose="List recent tagged conversation artifacts visible to the current turn.",
-            use_when="The user sent a file (PDF, image, audio, document) through a channel and you need to discover what's available.",
-            do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were sent in this conversation.",
+            use_when="A file was received or imported into this conversation and you need to discover what is available.",
+            do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were received or imported in this conversation.",
             failure_next_steps="If empty, artifacts may have expired (hot state TTL exceeded) or none were sent. Ask the user to resend.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
@@ -129,7 +157,7 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Inspect metadata and available representations for one artifact id.",
             use_when="You have an artifact_id and need to know what representations exist (text, page_text, transcript, image) before reading.",
-            do_not_use_when="You already know the representation and just want content (use read_artifact). Inspecting local files (use read_file).",
+            do_not_use_when="You already know the representation and just want content (use read_artifact). Importing local images/documents (use artifact_import).",
             failure_next_steps="If artifact_not_found, recover a current artifact_id with list_artifacts or search_artifacts. If artifact_handler_retired, its managed bytes were deleted; ask the user to attach it again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
@@ -151,7 +179,7 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). Supports page/chunk selection and max_chars.",
-            do_not_use_when="Reading local filesystem files (use read_file). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use artifact_transcribe first).",
+            do_not_use_when="Reading local source text (use read_file); importing local images/documents (use artifact_import). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use artifact_transcribe first).",
             failure_next_steps="If representation_unavailable, use artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If artifact_handler_retired, ask the user to attach the source again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,

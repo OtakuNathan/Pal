@@ -6,7 +6,223 @@ from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
 PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.model_hook_endpoint.development"
 PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID = "pal.channel.provider.development"
+PAL_SELF_MAINTENANCE_SKILL_ID = "pal.self.maintenance"
 
+
+PAL_SELF_MAINTENANCE_MANUAL = """# Pal Self Maintenance
+
+Use this entry manual to explain how to configure Pal, or to carry out requested
+self-modification, repair, extension development, and deployment. Pal is its own
+configuration documentation: answer the user directly in their language with the
+relevant commands, parameter meanings, where to run them, when changes take
+effect, and how to verify them. Read contracts and CLI help yourself; do not make
+reading a README or skill a prerequisite for the user.
+
+## Explain or execute
+
+A question such as "how do I configure this?" calls for an explanation, not a
+mutation. Give a concrete example with clearly identified placeholders. Inspect
+current public settings when needed to tailor the answer, without exposing secrets.
+A request to implement or configure calls for action within its authorized scope.
+Carry forward explicit requests, approved plans, constraints, and completed checks;
+do not ask for the same approval again. Diagnosis alone does not authorize repair.
+Ask only for missing information or authorization for an uncovered action after
+preparing the relevant diagnosis, patch, or command preview. Capability policy and
+execution-time approval gates always apply; this manual grants no permission.
+
+Interactive setup, secret entry, service registration, and full host restart may
+need the user. Prepare the commands and explain the exact remaining step and its
+expected result. Do not delegate work Pal can already perform within the request.
+When the user only wants instructions, explain these operations without running them.
+
+## Establish the target and inspect the change
+
+Distinguish the source checkout, installed Pal package/interpreter, selected
+runtime root, and running service. A checkout edit does not prove the installed or
+running code changed. Use live introspection for runtime state, source inspection
+for implementation, and current capability discovery for usable tools and inputs.
+Confirm the actual CLI version's `--help` before using unfamiliar flags.
+
+Use an explicit `--runtime-root` on runtime-specific CLI commands. The current CLI
+prefers `~/.pal` if that directory exists, otherwise `PAL_HOME`, then `~/.pal`.
+Do not assume exporting PAL_HOME selects a different instance when ~/.pal exists.
+Resolve the actual service name and its executable/root before preparing a restart;
+installations may use pal.service, a pal@... service, launchd, or a manual process.
+
+For a Git checkout inspect `git status --short`, working-tree and staged diffs,
+and targeted history when needed. For installed/runtime files without Git, review
+the scoped before/after changes instead. Preserve unrelated user edits. Classify the
+owner and choose the smallest change that meets the request. Recall relevant repair
+lessons when useful and check them against current errors and code. For prompt
+changes inspect system/developer fragments, reminders, tool guidance, and relevant
+skills together to catch contradictory instructions.
+
+## CLI map
+
+Commands below describe the current interface; flags follow the subcommand.
+There is no general `pal config`, `pal channel add`, or arbitrary `pal tool-call`.
+Discover runtime capabilities separately with `search_tools`. Package `--kind`
+accepts `plugin`, `provider`, or `builtin`.
+
+| Command | Purpose and effect |
+| --- | --- |
+| `pal setup` (aliases `wizard`, `wizzard`) | Interactive initial setup or reconfiguration: identity, endpoints, channel, embeddings, and optional OS service registration. It writes multiple surfaces and can start or replace a service. Use the narrow existing operation for a narrow edit; explain the wizard to a user requesting interactive configuration. |
+| `pal setup --check`, `pal doctor` | Check local dependencies and report remediation. These are diagnostic entrypoints, not configuration reloads. |
+| `pal setup --upgrade` | Non-interactive runtime upgrade: LLM/browser schema migration and Bunshin cutover, potentially archiving old data. It is not a hot refresh or ordinary settings editor. Prepare upgrade/recovery instructions for the operator and account for running work before migrations. |
+| `pal llm list [--all] [--json]` | Inspect persisted endpoint configuration, optionally including disabled rows; not proof that the running endpoint cache has refreshed. |
+| `pal llm add ENDPOINT [--replace]` | Add or update endpoint metadata and optionally credentials/active selection. Replace preserves omitted fields. Refresh the running LLM afterwards. |
+| `pal llm delete ENDPOINT` | Delete an endpoint; shared credentials remain. Deleting the active endpoint selects the next enabled endpoint or clears active selection. Refresh afterwards. |
+| `pal package build SOURCE [--output DIR]` | Build a .palpkg from package.toml and a wheel project. Building does not install or activate it. |
+| `pal package install PATH...` | Install/prepare .palpkg or legacy provider wheels offline. Publication is protected by the runtime lock; it cannot replace files under an active Pal. |
+| `pal package prepare NAME [--kind KIND]` | Prepare dependencies/hooks for an installed package; `--all-builtin` prepares built-ins. Check status afterwards; preparation is not proof of runtime activation. |
+| `pal package status [NAME] [--kind KIND]` | Inspect installation records and failures. Runtime `package_status` also reports asynchronous jobs. |
+| `pal provider install WHEEL... [--force]` | Install channel-provider wheels offline; force permits reinstalling the same version. It shares the package runtime lock. |
+| `pal run` | Start the host for the selected existing runtime. Do not start another copy against an already running runtime. |
+| `pal client --message TEXT`, `pal tty` | Send a message or open an interactive connection to a running Pal. Disconnecting a client does not restart Pal. Slash commands are control requests, not arbitrary tool calls. |
+| `pal eval tools` | Run a tool-usability evaluation using configured LLM endpoints; it can consume API usage. It is not a configuration command. |
+| `pal bunshin efficiency WORKFLOW_ID [--json]` | Read-only workflow telemetry. It does not configure Bunshin. |
+| `pal browser-service` | Internal browser sidecar entrypoint with host/port/token/runtime arguments. Normal browser maintenance uses the browser/plugin owner instead of manually launching this command. |
+
+### LLM configuration and user cooperation
+
+Use `pal llm` for endpoint metadata instead of ad hoc SQL when its options cover
+the request. `add` supports model/provider/display name, wire shape/base URL,
+auth kind/credential ref, context/output limits, supported thinking levels/default,
+priority, tools/streaming/vision, enabled state, notes, and `--set-active`.
+Boolean options accept `--no-...`; for example `--no-enabled` prepares a disabled
+endpoint. Enabling and choosing an endpoint are separate choices. `--set-active`
+requires an enabled endpoint. Do not invent flags for arbitrary capabilities_blob
+fields that the CLI does not expose.
+
+Runnable command shapes (replace the example values with verified user choices):
+
+```sh
+pal llm list --all --json --runtime-root /path/to/runtime
+pal llm add example --model-id example-model --provider example-provider --wire-shape openai_completion --base-url https://api.example.com/v1 --store-api-key --no-enabled --runtime-root /path/to/runtime
+pal llm add example --replace --enabled --set-active --runtime-root /path/to/runtime
+pal llm delete example --runtime-root /path/to/runtime
+pal doctor --runtime-root /path/to/runtime
+pal setup --runtime-root /path/to/runtime
+pal setup --upgrade --runtime-root /path/to/runtime
+pal package build /path/to/plugin-project --output /path/to/dist
+pal package install /path/to/plugin.palpkg --runtime-root /path/to/runtime
+pal package prepare example --kind plugin --runtime-root /path/to/runtime
+pal package status example --kind plugin --runtime-root /path/to/runtime
+pal provider install /path/to/provider.whl --force --runtime-root /path/to/runtime
+pal tty --runtime-root /path/to/runtime
+```
+
+`--store-api-key` prompts securely in the user's terminal; `--api-key-stdin`
+reads a secret from stdin. Never place a secret in command arguments or expose it
+in chat/logs. `--api-key-env ENV_VAR` sets a reference: the running service must
+actually have that variable. Exporting it in a new shell does not update the host's
+environment. If changing the service environment requires a restart, hand that step
+to the operator. Stored credentials and model hooks can use the LLM refresh path.
+
+After the configuration is written and checked, explain: "Send
+`/refresh_llm_endpoint` in your conversation with Pal to load these changes."
+This reloads endpoints, runtime settings, model hooks under `llm/models/`, and
+credentials, and refreshes participating dependent runtimes. Inspect the result
+for errors and the effective endpoint. Without an explicit refresh request, leave
+that timing to the user; with one, use the existing control path without requesting
+the same approval again. `pal client` can deliver the slash command to the selected
+runtime when that is the available authorized path. A fresh process also loads it.
+Do not claim this command reloads all config.toml settings or Python implementation.
+
+Use `llm_list`, `llm_show`, and `llm_active` to verify running endpoint metadata.
+`llm_set_active_endpoint` or `/model ENDPOINT` selects an already loaded enabled
+endpoint; `/think LEVEL` changes the supported thinking choice. These affect future
+requests, not a request already in flight. `/control` lists available controls;
+`/status` reports runtime statistics. `/reset` resets the conversation, not the host.
+`/log start` and `/log end` control diagnostic logging; `/compact` and `/interrupt`
+are conversation controls, not configuration activation mechanisms.
+
+## Choose how a change becomes effective
+
+Resident modules are core, execution, llm, channel (including the recovery socket),
+identity, memory, control, and failure. Resident means the whole module cannot be
+unloaded; some of its data has explicit refresh paths. Optional modules such as
+skill, behavior, checklist, proactive, artifact, Bunshin, MCP, LSP, sqlite_vec_l3,
+and web integrations belong to plugins. Check actual availability before use.
+
+| Surface | Change and activation | Verification / limits |
+| --- | --- | --- |
+| Resident Python implementation, shared contracts, core system prompt | Update the actual installed source/package, test, and hand off a full host restart. | Hot-loading a plugin does not reload its resident dependencies. Reconnect and verify after the external restart. |
+| Identity in durable storage | Setup exposes name, language, vibe, tone, core policy, timezone. After an authorized external edit, `identity_show` refreshes the resident projection. | Language/tone/preferences update in subsequent prompt assembly; system name and core policy are captured at startup and require host restart. There is no identity-write CLI subcommand. |
+| config.toml `[read]`, `[budget]`, `[stagnation]`, `[llm]` | File configuration covers read/output limits, prompt/tool budgets, stagnation thresholds, LLM retry/timeouts/wait notices. Resident consumers load at startup; hand off restart. | Validate TOML and supported keys/types: the loader can silently fall back to defaults or ignore invalid fields. Endpoint refresh does not reload this file for the resident core. |
+| config.toml `[memory]` embedding settings | Configure remote/local Ollama URLs, model, keep-alive, timeouts and fallback cooldown. Setup exposes remote URLs and model. Reattach `sqlite_vec_l3` to rebuild its embedding provider from the file. | Inspect the active memory provider and embedding health; changing a model does not prove existing embeddings were rebuilt. Index refresh is a distinct operation, not a config reload. |
+| Existing plugin source | `plugin_attach` on an already attached enabled plugin reloads its generation; inspect declared reload_modules and ownership. | Check load errors, attached state and the affected capabilities; dependencies may be suspended/reloaded. Do not promise zero interruption. |
+| New plugin / manifest changes | `plugin_rescan` discovers metadata; then attach the enabled plugin. `plugin_enable` enables and attaches a disabled plugin. | Rescan alone does not reload existing code. Verify discovery, lifecycle result, and a representative operation. |
+| Online package installation | Prefer `package_install` and follow its job with `package_status`; `package_prepare` repairs dependencies. The installer coordinates the relevant lifecycle owner. | Inspect both preparation and activation results. Preserve intentionally inactive state and avoid another attach/reload if installation already performed it. |
+| New/removed/enabled/disabled channel provider | `channel_provider_rescan` discovers physical provider changes and eligible endpoint rows. | Inspect scan/load errors, provider mapping, endpoint health/auth/backlog. A provider without configured usable endpoint rows is not a working channel. |
+| Existing channel provider code/manifest/resources | `channel_reload_provider` explicitly stops transports, unloads code, loads and reattaches that provider. | Failure leaves code unloaded and capabilities withdrawn while hubs retain queued delivery; fix and retry. Do not promise automatic rollback to the old generation. |
+| One channel connection or authorization | `channel_restart_endpoint` rebuilds the connection without code reload. Use channel enable/disable/attach/detach and set_auth_material capabilities for their named operations. | Inspect endpoint state, authorization, health and backlog. The recovery socket has a resident boundary. |
+| MCP server configuration | Edit TOML/JSON under `plugins/mcp/`, then `mcp_rescan`; use mcp_attach/mcp_detach for configured server connections. | Rescan reconnects changed enabled server configurations and updates tool discovery; inspect mcp_server_list/read. Editing manager implementation requires plugin reload. |
+| LSP server configuration | Runtime overrides under `plugins/lsp/servers/`, then `lsp_rescan`; prepare/doctor the target workspace. | Rescan updates config and invalidates changed sessions; workspace preparation/use starts the needed server. Templates have their own development skill. |
+| Bunshin profile/family customization | Use catalog read, set/reset_profile_override, set/reset_family_override, and catalog_refresh capabilities. | Overrides affect future Tasks, not existing snapshots. Catalog refresh reloads catalog data, not arbitrary sidecar Python code. |
+| Core mode and cache reminder | `core_configure` changes in-memory mode; `core_configure_cache_warm_deadline` persists reminder settings. | Inspect core_observe/core_cache_warm_deadline; mode is not a permanent config change. Reminder changes apply to scheduling, not a host restart. |
+| Search / browser settings | Use web_search provider config/auth/enable/active operations; browser_extension_manage controls local browser extensions. | Verify provider health/operation. Browser extension changes close current tabs; navigate again and verify the extension behavior. |
+| Memory provider, learned behavior and skills | Use their live management tools. Facts belong to memory, routing rules to behavior, reusable procedures to skills. | A learned behavior change does not edit system policy. Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
+| Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
+
+## Route to specialist manuals
+
+Search and inject only the matching manual if it is not already in context:
+
+- `pal.plugin.development`: plugin layout, build_plugin/start(scope), capability
+  contracts, packaging/private dependencies, RAII cleanup and hot reload.
+- `pal.channel.provider.development`: transport communication plus provider.toml,
+  provider registration, matching channel_endpoints records, auth, ingress/replies,
+  control interactions and endpoint/provider lifecycle. Implementing transport
+  communication alone does not integrate a channel into Pal.
+- `pal.llm.model_hook_endpoint.development`: exact-model hooks, endpoint metadata,
+  isolated request tests and refresh handoff.
+- `pal.lsp.template.development`: LSP template schema, configuration and workspace
+  verification; this skill is available when its owning LSP module is mounted.
+
+Use current tool guidance for surfaces without a dedicated skill. If a skill or
+capability is unavailable, inspect its owning plugin and the current tool surface;
+do not invent it or infer that all self-maintenance is forbidden. Keep explaining
+from verified evidence and identify the specific missing capability. For custom
+endpoint rows or fields without a dedicated CLI/tool, inspect the repository/schema,
+prepare an exact scoped patch, and apply only within the user's authorization.
+Do not rerun the whole setup wizard merely to work around a missing narrow setter.
+
+## Verify and hand off
+
+For screenshot-based self-inspection, save the screenshot through the appropriate
+browser/desktop capability, then call `artifact_import` with the local image path.
+The import copies the file into current-conversation artifacts and attaches a
+reference for prompt projection. `browser_screenshot` returns its source path in
+`artifact.local_cached_path`. A path or stored_artifact_id alone is not pixel
+input. Inspect pixels only when the next model request attaches the image inline
+and the model supports vision; read_artifact is text-only. Image import checks
+current-turn capabilities through core and rejects missing or unsupported vision
+before creating an artifact. On that error, discover an OCR or image-analysis
+tool with search_tools and verify that it accepts local paths. OCR extracts text;
+it does not establish full visual inspection. If no suitable tool exists, explain
+the limitation and the concrete endpoint-switching steps. Missing vision support,
+processing failure, size limits, or an expired reference must be reported rather
+than treated as a successful visual check.
+
+Review the final working-tree/staged diff, including new files, and exercise the
+changed behavior with focused tests. Reuse passing checks unless later changes
+invalidate them. For lifecycle work verify the actual loaded version/behavior and
+reported errors, not just a successful compile or saved file. An uncertain mutation
+result calls for state reconciliation before any retry.
+
+Before a required user step, make changes durable and provide: the target runtime,
+what is ready, the exact command or conversation action, expected result, and the
+follow-up check. Full host restart always belongs to the user or external supervisor.
+Explain how to reconnect afterwards; do not guess the service name or restart it
+through a delayed shell job. Avoid installing into Pal's Python to satisfy private
+plugin dependencies; use the package owner.
+
+Report separately what was edited, what was validated, what the running instance
+has loaded, and what remains pending. Do not claim that a written configuration is
+already effective. Store repair lessons or procedures only through the appropriate
+knowledge tools and authorization; live state is not durable truth.
+"""
 
 PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development
 
@@ -63,8 +279,10 @@ the package venv. Optional `hooks="install_hooks.py"` supplies check/prepare/ver
 functions returning a JSON object with boolean `ok`. Check must work before the
 backend is installed. Prepare/verify use its private interpreter.
 
-Use indirect `package_install` to install and activate a local package, then
-`package_status` to follow its job. Use `package_prepare` to retry dependency
+Use indirect `package_install` to install and activate a local package in a running Pal, then
+`package_status` to follow its job and actual activation state. CLI installation
+is offline and cannot replace files while that runtime is running. Do not repeat
+attach/reload if the installation already activated the requested generation. Use `package_prepare` to retry dependency
 preparation. Do not manually pip-install plugin dependencies into Pal's Python.
 
 `PluginBuildContext.environment` supplies `python_executable` and `child_env()`
@@ -196,7 +414,7 @@ Attach, detach, and reattach must be clean:
 2. Return a `ModuleHandle` whose module ID is stable.
 3. Let core/plugin host publish and withdraw capabilities; do not manually mutate the compiled index.
 4. Put external resources in `cleanup_callbacks` or provider `detach` methods.
-5. After code changes, use plugin detach/attach or core module reattach to load a fresh instance.
+5. After code changes, call `plugin_attach` on the already attached enabled plugin to reload it. Rescan first if manifest metadata changed. Explicit detach is for taking the plugin offline, not a prerequisite for every reload.
 
 Useful operations:
 
@@ -211,7 +429,7 @@ Useful operations:
 
 - Do not ask the user to do work Pal can do with existing capabilities.
 - Do not bypass approval, access, identity, or constitutional boundaries.
-- For high-risk actions, destructive filesystem changes, credentials, public network changes, or persistent system changes, route through the control/approval path.
+- Keep destructive changes, credentials, public network changes, and persistent system changes within explicit user authorization and execution-time capability policy. Continue within existing authorization without requesting the same approval again.
 - Keep large outputs in files or artifacts. Return short summaries and file paths.
 - Prefer structured APIs over fragile string scraping.
 - Keep plugin state in plugin-owned storage or the runtime root, not in Pal core globals.
@@ -301,7 +519,7 @@ The exact-model preset uses OpenAI Responses, the official 1,050,000-token conte
 
 OpenRouter exposes the same model as `openai/gpt-6-astra`. Configure that exact model id with the OpenRouter base URL and credential; Pal applies the same Responses and unsupported-parameter profile. OpenRouter advertises the full 1,050,000-token context, while a deployment may deliberately cap it at 272,000 tokens to avoid the higher long-context pricing tier.
 
-Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoint-management capability exists. Mutating the production database or secrets requires explicit user approval.
+For endpoint configuration, use `pal llm list --all --json`, `pal llm add ENDPOINT --replace`, and `pal llm delete ENDPOINT` with the verified `--runtime-root`. Add without --replace creates a new endpoint; replace preserves omitted fields. Use --store-api-key for secure user input or --api-key-stdin for authorized secret input, never secrets in argv. Use --enabled/--no-enabled and --set-active only as requested. CLI writes require `/refresh_llm_endpoint` to refresh a running instance. For a field the CLI cannot express, inspect the current repository/schema and prepare a scoped patch. Existing explicit authorization covers its agreed actions; ask only for uncovered database or credential changes.
 
 ## Verification Workflow
 
@@ -313,8 +531,8 @@ Before asking the user to refresh:
 4. Load it through `ModelHookRegistry` in an isolated test.
 5. Build a representative `LLMRequestIR` and assert only messages or tool definitions change.
 6. Confirm routing, provider, credential, and wire shape cannot change.
-8. If endpoint metadata changes are needed, verify them against a temporary database or produce an exact patch for user approval.
-9. Do not switch the active endpoint during development.
+7. Verify endpoint CLI changes against a temporary database, or review the exact patch for fields without CLI support.
+8. Do not switch the active endpoint during development unless the user requested that switch.
 
 ## Handoff
 
@@ -324,7 +542,7 @@ When the model hook and endpoint are ready, report:
 - tests or smoke checks run
 - endpoint/database/secret changes made or still pending
 - any load errors found in isolated checks
-- a clear statement that the running endpoint was not switched
+- whether the running endpoint was switched/refreshed, with its confirmed result or pending user step
 
 If the user has not asked for a refresh, hand off with: "Please run `/refresh_llm_endpoint` when you want to load the verified endpoint and model hook." If the user explicitly asks you to refresh, use the normal LLM refresh path and report model-hook load errors.
 """
@@ -488,7 +706,7 @@ The provider only handles endpoint types it declares in `endpoint_types`. A usab
 - `binding_metadata`: channel-owned structured metadata; do not store raw secrets unless the existing channel explicitly does so.
 - `send_policy_blob`: optional delivery/chunking policy.
 
-If there is no endpoint-management capability for the needed row, prepare a clear SQL or repository patch and ask before mutating the production database.
+There is no generic `pal channel add` CLI. If no current endpoint-management capability covers the row, inspect the repository/schema and prepare an exact scoped patch. Apply it within existing explicit authorization; ask only if that production change is not covered. Do not rerun the entire setup wizard for one custom endpoint row.
 
 ## Interactions and Commands
 
@@ -508,25 +726,25 @@ The shared contract is typed data, not UI widgets. Core/control may produce `Int
 
 Provider rescan means:
 
-1. Scan `<runtime_root>/channel/providers/*/provider.toml`.
-2. Fingerprint each provider tree and compute added/changed/removed/disabled providers; unchanged providers remain running.
-3. Load each added or changed provider into an isolated candidate generation and validate ids and endpoint type ownership.
-4. Fence only that provider's endpoint delivery slots, recreate its running endpoints, and publish only after every candidate endpoint starts successfully.
-5. On failure, dispose the candidate and restore the previous provider/endpoints. On success, dispose the old generation in reverse cleanup order.
-6. Automatically hydrate enabled, attached endpoint rows for newly discovered providers; removed/disabled providers detach only from runtime and leave durable rows unchanged.
-7. Republish channel introspection capabilities so LLM can see new endpoint ids.
+1. Scan `<runtime_root>/channel/providers/*/provider.toml` for additions, removals, enabled and disabled providers.
+2. Keep already discovered providers running; rescan does not detect or reload in-place source changes. Discover eligible new endpoint rows for known providers.
+3. Build newly discovered providers, validate provider ids and endpoint type ownership, and hydrate enabled endpoint rows that are not durably detached.
+4. Runtime-detach removed/disabled providers without deleting durable endpoint rows. Malformed manifests are reported rather than treating a known provider as physically removed.
+5. Republish introspection capabilities and inspect scan/load errors.
 
-Provider build code may call `context.register_cleanup(callback)` for generation-owned resources and may expose optional `attach(context)` / `detach(context)` hooks. Treat those as RAII. Do not start unmanaged resources that cannot be released during candidate rollback.
+Use `channel_reload_provider` for an existing provider's source, manifest, or provider-wide resource changes. It withdraws endpoint capabilities, stops transports, unloads the old provider, loads the replacement, and restores previously attached endpoints. On failure the provider stays unloaded and capabilities stay withdrawn; endpoint hubs retain queued delivery. Fix the reported problem and retry. This path does not promise an atomic switch or automatic rollback to the old provider.
 
-Endpoint restart means rebuilding one runtime endpoint instance through its already loaded provider. It does not reload modules. Do not use endpoint restart as provider discovery.
+Provider build code may call `context.register_cleanup(callback)` and expose optional `attach(context)` / `detach(context)` hooks. Own resources through that lifecycle so load failure and unload can release them.
 
-After changing runtime-root provider source, `provider.toml`, or provider configuration, the default deployment step is one `channel_provider_rescan`. It reloads only changed provider generations; do not restart the Pal service and do not add a redundant endpoint restart. Use `channel_reload_provider` to force one known provider generation reload, and `channel_restart_endpoint` when only one endpoint connection is stuck or needs a fresh transport session.
+Use `channel_restart_endpoint` to rebuild one connection through its already loaded provider. It does not reload provider modules or discover new providers. Do not add a redundant endpoint restart after a successful provider reload.
+
+For installation, `pal provider install WHEEL --runtime-root ROOT` and `pal package install PATH --runtime-root ROOT` are offline commands guarded by the runtime lock. In a running Pal use `package_install`, follow `package_status`, and inspect the owner's activation result before adding any rescan/reload. A successful package installation can already perform the provider load.
 
 Never stop, restart, or kill Pal's own hosting service or process from inside the active Pal turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
 
 Useful operations:
 
-- `channel_provider_rescan`: discover the provider diff; add, atomically reload, or runtime-detach only affected providers.
+- `channel_provider_rescan`: discover additions/removals/enabled/disabled providers and eligible endpoint rows; leave existing provider code loaded.
 - `channel_list`: list configured channel endpoints and provider ids.
 - `channel_endpoint_inspect`: inspect one endpoint.
 - `channel_endpoint_auth_state`: inspect authorization without revealing secrets.
@@ -534,7 +752,7 @@ Useful operations:
 - `channel_endpoint_backlog`: inspect queue sizes.
 - `channel_attach`: attach one endpoint through its provider.
 - `channel_detach`: detach one endpoint through its provider.
-- `channel_reload_provider`: atomically reload one runtime-root provider by provider id.
+- `channel_reload_provider`: explicitly unload and reload one known runtime-root provider by provider id.
 - `channel_restart_endpoint`: restart one endpoint runtime instance without reloading provider code.
 
 ## Verification Workflow
@@ -546,7 +764,7 @@ Before calling a channel provider done:
 3. Compile provider source with `python -m py_compile`.
 4. Test provider loading in isolation or with a temporary runtime root first.
 5. Add or preview the `channel_endpoints` row for the provider's endpoint type.
-6. Run `channel_provider_rescan` once and check `runtime_provider_load_errors`; do not restart the Pal service.
+6. For a new provider use `channel_provider_rescan`; for in-place code changes use `channel_reload_provider`. Skip a duplicate load if package installation already performed it. Check load errors and the operation result; do not restart the Pal service.
 7. Verify `channel_list` shows `provider_id`.
 8. Verify endpoint `inspect`, `auth_state`, `health`, and `backlog`.
 9. Dogfood through the real channel if safe; for socket, send `/control` before sending LLM-consuming messages.
@@ -556,7 +774,7 @@ Before calling a channel provider done:
 
 - Do not expose tokens or secrets in introspection payloads.
 - Do not start multiple long-polling instances for the same external account or Telegram bot token.
-- Do not silently mutate production channel endpoint rows, credentials, or live polling state without user approval.
+- Production endpoint rows, credentials, and live polling changes need explicit authorization covering the action. Reuse existing authorization within its scope; do not ask for the same approval again.
 - Keep provider failures structured and visible through `runtime_provider_load_errors` or endpoint health.
 - Prefer small deterministic transport adapters. Put large protocol clients or sidecars behind provider-owned lifecycle code.
 - A provider that touches hardware, local IPC, OS devices, sensors, cameras, microphones, serial ports, GPIO, Bluetooth, or other privileged resources must make that ownership explicit in introspection and cleanly release the resource on detach/reload.
@@ -566,6 +784,34 @@ Before calling a channel provider done:
 
 def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescriptor, ...]:
     return (
+        SkillDescriptor(
+            skill_id=PAL_SELF_MAINTENANCE_SKILL_ID,
+            module_id=module_id,
+            title="Pal Self Maintenance",
+            summary="Explain Pal configuration directly to users and carry out authorized self-modification with precise CLI, reload, and restart guidance.",
+            manual_text=PAL_SELF_MAINTENANCE_MANUAL,
+            activation_terms=(
+                "pal self maintenance", "self maintenance", "repair pal", "pal source repair",
+                "prompt boundary", "system prompt refactoring", "自我维护", "维护 Pal",
+                "修复 Pal", "维护流程", "提示词边界", "内置维护 skill",
+                "自我修改", "如何配置 Pal", "怎么配置 Pal", "Pal怎么配置", "pal cli", "configure pal", "pal configuration",
+            ),
+            capability_refs=("search_tools", "skill_search", "skill_inject", "run_shell"),
+            applicability_star=SkillApplicabilitySTAR(
+                situation="The user asks how to configure Pal or requests modification of Pal itself.",
+                task="Explain the exact configuration steps or implement an authorized change with an accurate activation outcome.",
+                action="Inspect evidence and diffs, choose the owning surface, implement, verify, and load or hand off.",
+                result="The requested maintenance is verified without redundant approval or unsafe self-restart.",
+            ),
+            use_when="Use for Pal configuration questions, CLI guidance, self-modification, source/config repairs, and prompt-boundary refactoring.",
+            avoid_when="Avoid for ordinary user projects or runtime status questions that need only live introspection.",
+            source_format="internal_skill",
+            source_refs=(
+                "pal.skill.builtin_skills", "pal.core.prompt", "pal.main",
+                "pal.core.runtime_config", "docs/pal_skill_contract.md",
+            ),
+            metadata={"internal": True},
+        ),
         SkillDescriptor(
             skill_id=PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
             module_id=module_id,

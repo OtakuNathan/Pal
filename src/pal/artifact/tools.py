@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import mimetypes
 from typing import Any
 
+from pal.artifact.contracts import ARTIFACT_KIND_IMAGE
 from pal.artifact.service import ArtifactManager
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.tool_protocol import ToolContextMessageIR
 
 
 def _scope_from_runtime(runtime: Any, turn_id: str | None) -> str:
@@ -33,6 +37,80 @@ def _key_error_reason(exc: KeyError) -> str:
     """Expose stable machine-readable reasons without KeyError's repr quotes."""
 
     return str(exc.args[0]) if exc.args else "artifact_not_found"
+
+
+@dataclass
+class ArtifactImportTool:
+    service: ArtifactManager
+
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        try:
+            scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
+            raw_path = str(args.get("path") or "").strip()
+            if not raw_path:
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "path_required"})
+            path = Path(raw_path).expanduser().resolve(strict=True)
+            if not path.is_file():
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "not_regular_file"})
+            if path.stat().st_size > self.service.policy.limits.max_original_bytes:
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "artifact_too_large"})
+            kind = self.service.processor_registry.resolve_kind(
+                mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                file_name=path.name,
+            )
+            if kind == ARTIFACT_KIND_IMAGE:
+                runtime = kwargs.get("runtime")
+                turn_io = getattr(runtime, "provider_registry", {}).get("core:turn_io")
+                resolve = getattr(turn_io, "llm_capabilities_for_turn", None)
+                facts = resolve(kwargs.get("turn_id")) if callable(resolve) else {}
+                if not isinstance(facts, dict) or not facts.get("supports_vision"):
+                    return _result(RuntimeStatus.UNSUPPORTED, "Image import unavailable", {
+                        "reason": "vision_not_supported" if isinstance(facts, dict) and "supports_vision" in facts else "vision_capability_unavailable",
+                        "next_step": (
+                            "Use search_tools to find an OCR or image-analysis tool that explicitly accepts local paths, "
+                            "then pass this source path using that tool's schema. OCR provides text, not full visual inspection. "
+                            "If no suitable tool exists, explain the missing capability and how to select a vision-capable endpoint. "
+                            "Do not retry artifact_import unchanged or claim to have inspected pixels."
+                        ),
+                    })
+                from PIL import Image
+
+                try:
+                    with Image.open(path) as source_image:
+                        source_image.verify()
+                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                    return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", {"reason": "artifact_processing_failed"})
+            ref = self.service.register_ingested(
+                path,
+                scope_key=scope_key,
+                turn_id=str(kwargs.get("turn_id") or ""),
+                source_channel="local_file",
+            )
+            payload = {"artifact": ref.to_dict(), "artifact_id": ref.artifact_id}
+            if ref.status == "failed":
+                payload["reason"] = "artifact_processing_failed"
+                return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", payload)
+            return CapabilityResult(
+                status=RuntimeStatus.OK,
+                text="Local file imported",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Local file imported", payload),
+                context_messages=(ToolContextMessageIR(
+                    content=(
+                        "<runtime_context_update>Local file imported into the current conversation. "
+                        "The artifact reference follows; inspect image pixels only when they are attached inline "
+                        "for a vision-capable model. Import alone is not visual inspection.</runtime_context_update>"
+                    ),
+                    semantic_kind="artifact_import",
+                    artifact_ids=(ref.artifact_id,),
+                ),),
+            )
+        except KeyError as exc:
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed", {"reason": _key_error_reason(exc)})
+        except FileNotFoundError:
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed", {"reason": "source_not_found"})
+        except (OSError, RuntimeError, ValueError) as exc:
+            return _result(RuntimeStatus.ERROR, "Artifact import failed", {"reason": str(exc)})
 
 
 @dataclass

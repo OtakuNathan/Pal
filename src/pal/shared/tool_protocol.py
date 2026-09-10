@@ -119,6 +119,7 @@ class ToolContextMessageIR:
     content: str
     semantic_kind: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    artifact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.content or "").strip():
@@ -128,6 +129,12 @@ class ToolContextMessageIR:
         object.__setattr__(self, "content", str(self.content))
         object.__setattr__(self, "semantic_kind", str(self.semantic_kind))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+        if isinstance(self.artifact_ids, str) or any(
+            not isinstance(item, str) or not item.strip() for item in self.artifact_ids
+        ):
+            raise ValueError("tool context artifact_ids must contain non-empty ids")
+        object.__setattr__(self, "artifact_ids", tuple(dict.fromkeys(self.artifact_ids)))
+
 
 class EffectOutcome(str, Enum):
     NONE = "none"

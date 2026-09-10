@@ -52,6 +52,7 @@ class BrowserScreenshotTool:
                 "size_bytes": stored.size_bytes,
                 "sha256": stored.sha256,
             }
+            payload["next_step"] = "To inspect pixels, call artifact_import with path=artifact.local_cached_path; the saved path alone is not inline image input."
             return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
         except BrowserServiceError as exc:
             return _result(RuntimeStatus.ERROR, "Browser screenshot failed", {"error": exc.to_dict()})
