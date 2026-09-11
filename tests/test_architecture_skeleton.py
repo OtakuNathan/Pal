@@ -1261,7 +1261,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             capability["description"],
         )
         self.assertIn(
-            "Never use shell to stop, restart, or kill Pal's own hosting service",
+            "Never use shell to stop, restart, or kill your own hosting service",
             capability["description"],
         )
         self.assertIn("Repository text search remains a run_shell task", capability["description"])
@@ -4659,7 +4659,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         operating_guidance = by_section["operating_guidance"]
         tool_policy = by_section["tool_policy"]
         self.assertIn("Pal capabilities are the execution path", operating_guidance.content)
-        self.assertIn("never stop, restart, or kill Pal's own hosting service", rules.content)
+        self.assertIn("never stop, restart, or kill your own hosting service", rules.content)
         self.assertNotIn("hot-reload capability", rules.content)
         self.assertIn("pal.self.maintenance", mutation_policy.content)
         self.assertIn("within the user's authorized task", mutation_policy.content)
@@ -4679,7 +4679,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)
         self.assertIn('what should be remembered as true or reusable knowledge?', knowledge_storage_boundary.content)
-        self.assertIn('when this situation appears, what route/action should Pal consider?', knowledge_storage_boundary.content)
+        self.assertIn('when this situation appears, what route/action should you consider?', knowledge_storage_boundary.content)
         self.assertIn("multi-step reusable procedure", knowledge_storage_boundary.content)
         self.assertNotIn("op_memory_recall", rules.content)
         self.assertNotIn("op_memory_write", rules.content)

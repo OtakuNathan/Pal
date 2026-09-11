@@ -178,13 +178,13 @@ def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
             section="memory_guide",
             title="Memory Guide",
             content=(
-                "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, "
+                "Memory is the source of truth for durable user facts, preferences, your prior decisions, project history, "
                 "repair lessons, and reusable case knowledge. Use memory tools for durable records only; current runtime "
                 "state and current external facts require live inspection or external verification.\n\n"
                 "When work hits an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation, "
                 "prefer recall_memory with kind=case and concrete error/symptom/fix terms before inventing a new repair.\n\n"
-                "Boundary: memory answers \"what should Pal remember as true or reusable knowledge?\" Behavior guidance "
-                "answers \"when this situation appears, what route/action should Pal consider?\" If the user teaches a "
+                "Boundary: memory answers \"what should you remember as true or reusable knowledge?\" Behavior guidance "
+                "answers \"when this situation appears, what route/action should you consider?\" If the user teaches a "
                 "future route trigger, condition, or recurring decision rule, use behavior guidance instead of memory. "
                 "Reusable procedures/playbooks belong to the skill system, not memory.\n\n"
                 "Memory tool descriptions define the recall, de-duplication, update, and delete procedures. Recalled "

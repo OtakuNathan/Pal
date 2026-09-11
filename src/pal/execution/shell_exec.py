@@ -40,9 +40,12 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     ),
     do_not_use_when=(
         "Do not use for Pal runtime, module, capability, or Bunshin state when a Pal tool is available. "
-        "Never use shell to stop, restart, or kill Pal's own hosting service or process from within an active turn; "
-        "prefer Pal's subsystem lifecycle or hot-reload capabilities, or hand a genuinely required full restart off "
+        "Never use shell to stop, restart, or kill your own hosting service or process from within an active turn; "
+        "prefer your subsystem lifecycle or hot-reload capabilities, or hand a genuinely required full restart off "
         "to the user or an external supervisor. "
+        "To change your own state, configuration, or endpoints, use a dedicated capability or the official "
+        "`pal` CLI when it supports the change; never bypass it by hand-editing runtime storage, the database, "
+        "or config files. For unsupported changes, follow pal.self.maintenance and the mutation policy. "
         "Use read_file for UTF-8 file reads, edit_file for focused edits, write_file for complete writes, and "
         "delete_path for deletion. Repository text search remains a run_shell task: use rg, as described above. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "

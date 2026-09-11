@@ -50,13 +50,13 @@ class BehaviorPromptFragmentProvider:
                 section="behavior_guidance_guide",
                 title="Behavior Guidance Guide",
                 content=(
-                    "Behavior guidance answers: \"When this situation appears, what route should Pal consider?\"\n\n"
+                    "Behavior guidance answers: \"When this situation appears, what route should you consider?\"\n\n"
                     "Use behavior guidance for future routing rules and recurring decision hints. It is not durable factual "
                     "memory, current runtime state, or a step-by-step procedure. Behavior tools define advice, learn, update, "
                     "and forget boundaries; injected/plugin guidance is read-only through those tools. "
                     "Temporary behavior guidance produced by advise_behavior may appear in <behavior_guidance> and retires automatically.\n\n"
-                    "Boundary: behavior guidance answers \"when should Pal consider a route/action?\" Memory answers "
-                    "\"what durable fact, preference, project history, prior decision, or repair lesson should Pal remember?\" "
+                    "Boundary: behavior guidance answers \"when should you consider a route/action?\" Memory answers "
+                    "\"what durable fact, preference, project history, prior decision, or repair lesson should you remember?\" "
                     "Use memory for remembered facts and reusable case knowledge. Use the skill system for reusable procedures/playbooks."
                 ),
                 priority=72,

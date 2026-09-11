@@ -47,8 +47,11 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
             ),
             do_not_use_when=(
                 "A dedicated file or Pal runtime/module/Bunshin introspection tool directly handles the task."
-                " Never stop, restart or kill Pal's own hosting service/process from an active turn; use subsystem"
+                " Never stop, restart or kill your own hosting service/process from an active turn; use subsystem"
                 " lifecycle/hot-reload tools or hand a required full restart to the user or an external supervisor."
+                " To change your own state, configuration, or endpoints, use a dedicated capability or the official"
+                " `pal` CLI when it supports the change; never bypass it by hand-editing runtime storage, the database,"
+                " or config files. For unsupported changes, follow pal.self.maintenance and the mutation policy."
                 " Use read_file, edit_file, write_file or delete_path for file operations. Do not pipe long-running"
                 " tests/builds through head, tail or grep to shorten output; result budgeting handles it. Do not rerun a command"
                 " that returned a live session or repeatedly poll it just to wait for completion."

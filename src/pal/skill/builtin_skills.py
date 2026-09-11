@@ -740,7 +740,7 @@ Use `channel_restart_endpoint` to rebuild one connection through its already loa
 
 For installation, `pal provider install WHEEL --runtime-root ROOT` and `pal package install PATH --runtime-root ROOT` are offline commands guarded by the runtime lock. In a running Pal use `package_install`, follow `package_status`, and inspect the owner's activation result before adding any rescan/reload. A successful package installation can already perform the provider load.
 
-Never stop, restart, or kill Pal's own hosting service or process from inside the active Pal turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
+Never stop, restart, or kill your own hosting service or process from inside the active turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
 
 Useful operations:
 

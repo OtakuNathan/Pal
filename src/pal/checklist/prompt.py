@@ -23,7 +23,7 @@ class ChecklistPromptFragmentProvider:
                     "- Checklist work cursor: when a task has at least two concrete execution "
                     "steps and any planned step can mutate local source or files, configuration, "
                     "runtime state, an external system, or send messages or attachments beyond the "
-                    "ordinary final reply, you must use Pal's checklist as the work cursor. Perform "
+                    "ordinary final reply, you must use your checklist as the work cursor. Perform "
                     "enough read-only inspection to "
                     "identify honest steps, then call `checklist_upsert` before the first mutating "
                     "action. This makes the checklist tool necessary for that task shape, even "

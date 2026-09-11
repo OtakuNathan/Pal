@@ -243,7 +243,7 @@ class TestChecklistPrompt:
         operating_rule, task_flow = fragments
         assert operating_rule.section == "operating_guidance"
         assert operating_rule.metadata["prompt_target"] == "developer"
-        assert "you must use Pal's checklist as the work cursor" in operating_rule.content
+        assert "you must use your checklist as the work cursor" in operating_rule.content
         assert "before the first mutating action" in operating_rule.content
         assert task_flow.section == "task_flow"
         assert "checklist_check" in task_flow.content
