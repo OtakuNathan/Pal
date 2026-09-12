@@ -1018,7 +1018,7 @@ class PalCore(MemoryMaintenanceMixin):
         self.notify_ready()
 
     async def handle_control_action_async(self, action: ControlAction, *, require_provider: bool = False) -> bool | None:
-        if self.state.memory_maintenance and action.delivery is None and action.action_kind not in {"memory_dreaming", "show_llm_status", "route_reply", "show_panel"}:
+        if self.state.memory_maintenance and action.delivery is None and action.action_kind not in {"memory_dreaming", "show_status", "show_llm_status", "route_reply", "show_panel"}:
             await self.deliver_memory_notice_async(action.route, SLEEP_REPLY, require_provider=False)
             return False
         if not self.state.memory_maintenance and action.delivery is None and action.route is not None:
@@ -1052,6 +1052,9 @@ class PalCore(MemoryMaintenanceMixin):
                 )
             if action.action_kind == "show_panel":
                 await self._handle_show_panel_async(action)
+                return
+            if action.action_kind == "show_status":
+                await self._handle_show_status_async(action)
                 return
             if action.action_kind == "show_think":
                 await self._handle_show_think_async(action)
@@ -1171,6 +1174,36 @@ class PalCore(MemoryMaintenanceMixin):
         if action.route is not None:
             await self.publish_control_catalog_async(endpoint_id=action.route.endpoint_id)
         await self._deliver_control_delivery_async(control_interactions.control_panel_delivery(control_plane, action.route))
+
+    async def _handle_show_status_async(self, action: ControlAction) -> None:
+        active_turns = len(self.state.active_turns)
+        queued_messages = len(self.state.pending_channel_turns)
+        if self.state.resident_quiescing:
+            activity = "quiescing (preparing to stop)"
+        elif self.state.memory_maintenance:
+            activity = "memory_maintenance (sleeping)"
+        elif active_turns:
+            activity = "in_turn (processing a turn)"
+        elif queued_messages:
+            activity = "queued (waiting to start a turn)"
+        else:
+            activity = "idle"
+        lines = [
+            "🤖 Pal status",
+            f"State: {activity}",
+            f"Active turns: {active_turns}",
+            f"Queued messages: {queued_messages}",
+        ]
+        llm_status = await self.context.control_action_registry.handle(
+            ControlAction(action_kind="show_llm_status", target_scope="llm", route=action.route)
+        )
+        if llm_status.handled and llm_status.message.strip():
+            lines.extend(("", llm_status.message.strip()))
+        else:
+            lines.extend(("", "LLM statistics unavailable."))
+        await self._deliver_control_delivery_async(
+            control_interactions.terminal_delivery_for_action(action, "\n".join(lines))
+        )
 
     async def _handle_show_think_async(self, action: ControlAction) -> None:
         llm_runtime = self.context.require_port("llm:llm")

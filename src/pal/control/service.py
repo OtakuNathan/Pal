@@ -417,12 +417,12 @@ class ControlPlane(ControlPlanePort):
             ControlCommandSpec(
                 name="status",
                 handler=self._handle_status,
-                description="Show active LLM, prompt-cache, token, request, and cost statistics.",
+                description="Show Pal activity, queued messages, active LLM, and usage statistics.",
                 usage="/status",
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
-                panel_label="LLM Status",
+                panel_label="Pal Status",
             )
         )
         self.register_command(
@@ -511,8 +511,8 @@ class ControlPlane(ControlPlanePort):
 
     def _handle_status(self, invocation: ControlCommandInvocation) -> ControlAction:
         return ControlAction(
-            action_kind="show_llm_status",
-            target_scope="llm",
+            action_kind="show_status",
+            target_scope="runtime",
             route=invocation.route,
         )
 

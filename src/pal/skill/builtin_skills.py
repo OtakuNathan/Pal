@@ -133,7 +133,8 @@ Use `llm_list`, `llm_show`, and `llm_active` to verify running endpoint metadata
 `llm_set_active_endpoint` or `/model ENDPOINT` selects an already loaded enabled
 endpoint; `/think LEVEL` changes the supported thinking choice. These affect future
 requests, not a request already in flight. `/control` lists available controls;
-`/status` reports runtime statistics. `/reset` resets the conversation, not the host.
+`/status` reports Pal's current activity (idle, in a turn, queued, or in maintenance),
+active turns, queued messages, and LLM statistics. `/reset` resets the conversation, not the host.
 `/log start` and `/log end` control diagnostic logging; `/compact` and `/interrupt`
 are conversation controls, not configuration activation mechanisms.
 

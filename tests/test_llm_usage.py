@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock
 
 from pal.control import ControlEvent, ControlPlane
 from pal.core import PalCore
@@ -369,7 +370,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
             status["message"],
         )
 
-    def test_status_command_routes_to_llm_module(self) -> None:
+    def test_status_command_reports_runtime_activity_and_llm_usage(self) -> None:
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=(_endpoint(),)),
             settings_repository=_Settings(),
@@ -388,11 +389,16 @@ class LLMUsageLedgerTests(unittest.TestCase):
 
         self.assertIsNotNone(action)
         assert action is not None
-        self.assertEqual(action.action_kind, "show_llm_status")
-        self.assertEqual(action.target_scope, "llm")
-        handled = asyncio.run(core.context.control_action_registry.handle(action))
-        self.assertTrue(handled.handled)
-        self.assertIn("LLM status", handled.message)
+        self.assertEqual(action.action_kind, "show_status")
+        self.assertEqual(action.target_scope, "runtime")
+        core._deliver_control_delivery_async = AsyncMock()
+        asyncio.run(core.handle_control_action_async(action))
+        core._deliver_control_delivery_async.assert_awaited_once()
+        message = core._deliver_control_delivery_async.await_args.args[0].text
+        self.assertIn("State: idle", message)
+        self.assertIn("Active turns: 0", message)
+        self.assertIn("Queued messages: 0", message)
+        self.assertIn("LLM status", message)
 
 
 if __name__ == "__main__":
