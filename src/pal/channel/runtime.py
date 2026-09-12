@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from collections import deque
 from collections.abc import Callable
@@ -274,6 +275,7 @@ class ChannelRuntime(ChannelRuntimePort):
     on_hub_visibility_changed: Callable[[], None] | None = None
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
+    runtime_state: dict[str, object] = field(default_factory=lambda: {"sleeping": False})
     ingress_compiler: ChannelIngressCompiler | None = None
     _reported_outbox_failures: dict[str, tuple[str, float]] = field(
         default_factory=dict,
@@ -327,6 +329,23 @@ class ChannelRuntime(ChannelRuntimePort):
     def _bind_endpoint_ready(self, endpoint: ChannelEndpointBase) -> None:
         endpoint_id = endpoint.endpoint.endpoint_id
         endpoint.on_ready = lambda: self._notify_endpoint_ready(endpoint_id)
+        self._project_runtime_state(endpoint)
+
+    def publish_runtime_state(self, *, sleeping: bool) -> None:
+        """Broadcast resident state independently of the last conversation route.
+
+        Keep the latest snapshot for replacement and newly attached endpoints.
+        Providers own reconnect replay; this is not a chat/history delivery.
+        """
+        self.runtime_state = {"sleeping": sleeping}
+        for endpoint in tuple(self.endpoint_registry.endpoints.values()):
+            self._project_runtime_state(endpoint)
+
+    def _project_runtime_state(self, endpoint: ChannelEndpointBase) -> None:
+        try:
+            endpoint.on_runtime_state(dict(self.runtime_state))
+        except Exception:
+            logging.getLogger(__name__).exception("Channel runtime state projection failed")
 
     def ensure_endpoint_hub(
         self,

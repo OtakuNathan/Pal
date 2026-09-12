@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pal.llm.ir import LLMMessageIR, LLMResponseIR, TextPartIR
 from pal.memory.contracts import L3CommitRequest
@@ -232,7 +232,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             return True
         core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
             memory_notification_route=lambda: "fixed-route", deliver_memory_notice_async=AsyncMock(return_value=True),
-            leave_memory_maintenance_async=AsyncMock())
+            leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
         service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), core=core)
         original_open = self.storage.open
         def open_generation(generation_id=None, **kwargs):
@@ -245,8 +245,31 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.storage.current(), self.head)
         self.assertEqual(service.status()["status"], "completed")
         self.assertFalse(service.status()["service_ready"])
+        core.begin_memory_sleep.assert_called_once()
         core.leave_memory_maintenance_async.assert_not_awaited()
         self.assertFalse(self.provider.repository.frozen)
+
+    async def test_sleep_notification_and_failure_recovery_boundaries(self):
+        for notice_delivered in (False, True):
+            with self.subTest(notice_delivered=notice_delivered):
+                def admit(provider):
+                    provider.repository.freeze()
+                    return True
+                states = []
+                core = SimpleNamespace(
+                    try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
+                    memory_notification_route=lambda: "fixed-route",
+                    deliver_memory_notice_async=AsyncMock(return_value=notice_delivered),
+                    begin_memory_sleep=lambda: states.append("sleeping"),
+                    leave_memory_maintenance_async=AsyncMock(side_effect=lambda: states.append("awake")),
+                )
+                service = DreamingService(storage=self.storage, provider=self.provider,
+                    llm=ReviewingLLM(fail_review=True), core=core)
+                with patch.object(service, "_resolve_main_provider"):
+                    result = await service.run()
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(states, ["sleeping", "awake"] if notice_delivered else ["awake"])
+                self.assertEqual(self.storage.current(), self.head)
 
     async def test_lost_commit_acknowledgement_recovers_the_published_generation(self):
         publish = self.storage.publish

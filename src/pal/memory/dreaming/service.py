@@ -199,6 +199,8 @@ class DreamingService:
                 if not await self.core.deliver_memory_notice_async(route, "Pal 开始 dreaming，正在整理重复记忆。期间暂不接收消息，醒来后会通知你。"):
                     raise RuntimeError("dreaming notification delivery failed")
             sleeping = True
+            if self.core is not None:
+                self.core.begin_memory_sleep()
             self._phase(run_id, "sleeping")
             report.update({"input_records": sum(len(item.members) for item in clusters), "groups": len(clusters),
                            "endpoints": pipeline.endpoints, "config_fingerprint": pipeline.config_fingerprint})

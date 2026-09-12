@@ -29,9 +29,20 @@ class MemoryMaintenanceMixin:
     async def wait_for_memory_maintenance_async(self) -> None:
         await self.state.memory_maintenance_changed.wait()
 
+    def begin_memory_sleep(self) -> None:
+        """Publish sleep only after admission and the required notice succeed."""
+        if not self.state.memory_maintenance:
+            raise RuntimeError("memory sleep requires maintenance admission")
+        channel = self.context.port_registry.get("channel:channel")
+        if channel is not None:
+            channel.publish_runtime_state(sleeping=True)
+
     async def leave_memory_maintenance_async(self) -> None:
         async with self.state.channel_turn_transition_lock:
             self.state.memory_maintenance = False
+            channel = self.context.port_registry.get("channel:channel")
+            if channel is not None:
+                channel.publish_runtime_state(sleeping=False)
             self.state.memory_maintenance_changed.set()
         self.notify_ready()
 

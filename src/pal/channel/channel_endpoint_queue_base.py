@@ -85,6 +85,12 @@ class ChannelEndpointQueueBase(ABC):
     def supports_stream_delivery(self) -> bool:
         return False
 
+    def on_runtime_state(self, state: dict[str, object]) -> None:
+        """Receive the latest resident state; UI providers may retain/replay it.
+
+        This synchronous hook must not block or send ordinary chat messages.
+        """
+
     def derive_default_reply_target(self) -> dict[str, Any]:
         return {}
 

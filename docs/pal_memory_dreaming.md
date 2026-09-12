@@ -163,6 +163,15 @@ originals, not by rolling back a whole publicly used database.
 
 ## Operation and activation
 
+After the required sleep notice is delivered, Core broadcasts a retained
+`runtime_state` snapshot (`sleeping: true`) to channel endpoints through
+`on_runtime_state`. This UI signal is independent of the notification route and
+does not enter chat history. Newly attached/replacement endpoints receive the
+latest snapshot; providers replay it to reconnected clients. Maintenance exit
+broadcasts `sleeping: false` only when service can reopen, including failed runs
+that recover the original generation. A published generation that cannot mount
+keeps the sleep state. Offline/online copy audits do not put the resident to sleep.
+
 Resident commands:
 
 ```text

@@ -44,6 +44,20 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await decorator.invoke(call, execute, turn_id='a'), result)
         self.assertEqual(count, 2)
 
+    async def test_reused_model_call_ids_do_not_overwrite_activity(self):
+        events = []
+        decorator = ExecutionActivityDecorator(lambda _: events.append)
+        call = new_tool_call(name='read_file', args={}, call_id='call_0')
+        result = ToolExecutionResult(name=call.name, ok=True, text='ok', llm_text='ok')
+        async def execute():
+            return result
+        for _ in range(3):
+            await decorator.invoke(call, execute, turn_id='same-turn')
+        self.assertEqual(len({event['call_id'] for event in events}), 3)
+        for start, end in zip(events[::2], events[1::2]):
+            self.assertEqual(start['call_id'], end['call_id'])
+        self.assertEqual(call.call_id, 'call_0')
+
     async def test_real_file_calls_diff_before_paging_and_indirect_dedup(self):
         runtime = ExecutionRuntime()
         core = PalCore(context=MainContext(execution_runtime=runtime))

@@ -110,8 +110,10 @@ class ExecutionActivityDecorator:
             name, arguments = arguments["name"], arguments.get("args", {})
         try:
             text, truncated = display_arguments(arguments)
+            # Provider IDs may repeat across generation rounds in the same turn.
+            # The UI identity belongs to this execution, not the model protocol.
             record = {"action": "call", "turn_id": str(turn_id or ""),
-                      "call_id": call.call_id or uuid4().hex, "tool": name,
+                      "call_id": uuid4().hex, "tool": name,
                       "arguments": text, "arguments_truncated": truncated, "status": "running"}
         except Exception:
             return await delegate()

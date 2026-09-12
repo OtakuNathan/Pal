@@ -21,6 +21,25 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.route = ControlRoute(endpoint_id="test", channel_kind="test", reply_target={"chat_id": "123", "thread_id": "456"})
         self.channel.remember_user_route(self.route)
 
+    async def test_sleep_broadcast_is_after_admission_and_cleared_on_service_recovery(self):
+        first = SimpleNamespace(on_runtime_state=Mock())
+        broken = SimpleNamespace(on_runtime_state=Mock(side_effect=RuntimeError("UI offline")))
+        self.channel.endpoint_registry.endpoints.update(first=first, broken=broken)
+        with self.assertRaises(RuntimeError):
+            self.core.begin_memory_sleep()
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        first.on_runtime_state.assert_not_called()
+        with self.assertLogs("pal.channel.runtime", level="ERROR"):
+            self.core.begin_memory_sleep()
+        first.on_runtime_state.assert_called_once_with({"sleeping": True})
+        replacement = SimpleNamespace(endpoint=SimpleNamespace(endpoint_id="replacement"), on_runtime_state=Mock())
+        self.channel._bind_endpoint_ready(replacement)
+        replacement.on_runtime_state.assert_called_once_with({"sleeping": True})
+        with self.assertLogs("pal.channel.runtime", level="ERROR"):
+            await self.core.leave_memory_maintenance_async()
+        first.on_runtime_state.assert_called_with({"sleeping": False})
+        self.assertEqual(self.channel.runtime_state, {"sleeping": False})
+
     async def test_admission_waits_for_preparing_ingress_and_fences_before_return(self):
         self.core.state.memory_ingress_reservations = 1
         self.assertFalse(await self.core.try_enter_memory_maintenance_async(self.provider))
