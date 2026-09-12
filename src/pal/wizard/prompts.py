@@ -297,7 +297,7 @@ def _prompt_thinking_levels(
             current_default if current_default in levels else levels[0],
         ).strip().lower()
         if default not in levels:
-            print("  Default thinking level must be one of the declared levels.")
+            print(f"  Default thinking level must be one of the declared levels; available: {', '.join(levels)}")
             continue
         return levels, default
 

@@ -47,6 +47,22 @@ def decode_frames(codec, frames, context):
 
 
 class LLMIRShapeTests(unittest.TestCase):
+    def test_openai_effort_is_transmitted_without_mapping(self) -> None:
+        for shape in (WireShape.OPENAI_COMPLETION, WireShape.OPENAI_RESPONSE):
+            for level in ThinkingLevel:
+                with self.subTest(shape=shape, level=level):
+                    request = LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
+                        max_output_tokens=4096, thinking_level=level,
+                    ))
+                    payload = codec_for_shape(shape).encode(request, _context(shape)).payload
+                    if level == ThinkingLevel.OFF:
+                        self.assertNotIn("reasoning_effort", payload)
+                        self.assertNotIn("reasoning", payload)
+                    elif shape == WireShape.OPENAI_COMPLETION:
+                        self.assertEqual(payload["reasoning_effort"], level.value)
+                    else:
+                        self.assertEqual(payload["reasoning"], {"effort": level.value})
+
     def test_anthropic_effort_is_transmitted_without_mapping(self) -> None:
         codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
         for level in ("low", "medium", "high", "xhigh", "max", "off"):

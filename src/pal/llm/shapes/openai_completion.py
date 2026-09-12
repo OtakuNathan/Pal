@@ -140,7 +140,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
             if policy.tool_choice != "omit":
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
-            payload["reasoning_effort"] = _openai_reasoning_effort(policy.thinking_level)
+            payload["reasoning_effort"] = policy.thinking_level.value
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":
@@ -418,14 +418,3 @@ class OpenAICompletionDecoder:
                 for call in calls
             ]
         self.builder.replay_payload = {"message": message}
-
-
-def _openai_reasoning_effort(level: ThinkingLevel) -> str:
-    return {
-        ThinkingLevel.MINIMAL: "minimal",
-        ThinkingLevel.LOW: "low",
-        ThinkingLevel.MEDIUM: "medium",
-        ThinkingLevel.HIGH: "high",
-        ThinkingLevel.XHIGH: "xhigh",
-        ThinkingLevel.MAX: "max",
-    }.get(level, "medium")

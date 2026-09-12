@@ -140,7 +140,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
             if policy.tool_choice != "omit":
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
-            payload["reasoning"] = {"effort": _responses_effort(policy.thinking_level)}
+            payload["reasoning"] = {"effort": policy.thinking_level.value}
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
@@ -455,14 +455,3 @@ def _semantic_response_items(parts: list[Any]) -> list[dict[str, Any]]:
 def _output_index(payload: Mapping[str, Any]) -> int:
     value = payload.get("output_index")
     return int(value) if isinstance(value, int) else 0
-
-
-def _responses_effort(level: ThinkingLevel) -> str:
-    return {
-        ThinkingLevel.MINIMAL: "minimal",
-        ThinkingLevel.LOW: "low",
-        ThinkingLevel.MEDIUM: "medium",
-        ThinkingLevel.HIGH: "high",
-        ThinkingLevel.XHIGH: "xhigh",
-        ThinkingLevel.MAX: "max",
-    }.get(level, "medium")

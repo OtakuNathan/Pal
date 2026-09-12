@@ -382,7 +382,8 @@ class WizardService(WizardServicePort):
             levels = validate_thinking_levels(ep.thinking_levels, wire_shape=ep.wire_shape)
             if ep.default_thinking_level.strip().lower() not in levels:
                 raise LLMEndpointSpecError(
-                    f"endpoint {ep.endpoint_id} default thinking level is not declared"
+                    f"endpoint {ep.endpoint_id} default thinking level is not declared; "
+                    f"available: {', '.join(levels)}"
                 )
 
         # 1. Identity — ensure_defaults creates if missing, then upsert fields
