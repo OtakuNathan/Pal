@@ -26,5 +26,29 @@ def render_tool_inventory(payload: dict[str, Any]) -> str:
 
 
 def render_tool_search(generation: Any, payload: dict[str, Any]) -> str:
-    """Keep baseline search presentation intact except for JSON whitespace."""
-    return render_structured_for_llm(payload)
+    """Render selection and routing guidance without repeating index fields."""
+    from pal.execution.tool_registry import _compile_next_tool_lines
+
+    hits = []
+    for hit in payload["hits"]:
+        record = generation.record_for_alias(hit["alias"])
+        item = {
+            "alias": hit["alias"],
+            "purpose": generation.project_llm_text(record.guidance.purpose),
+            "use_when": generation.project_llm_text(record.guidance.use_when),
+            "invocation_mode": hit["invocation_mode"],
+            "input_shape": record.compact_input_shape(),
+        }
+        next_tools = _compile_next_tool_lines(
+            record, direct_aliases=generation.direct_aliases,
+            indirect_aliases=generation.indirect_aliases,
+        )
+        if next_tools:
+            item["next_tools"] = generation.project_llm_value(next_tools)
+        hits.append(item)
+    return render_structured_for_llm({
+        **{key: payload[key] for key in (
+            "total_count", "truncated", "applied_filters", "facets", "usage_hint"
+        ) if key in payload},
+        "hits": hits,
+    })
