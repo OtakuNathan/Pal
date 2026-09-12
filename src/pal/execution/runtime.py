@@ -50,6 +50,8 @@ from pal.execution.tool_facade import (
     validate_output,
     validation_error_details,
 )
+from pal.execution.tool_presentation import render_tool_definition, render_tool_search
+from pal.shared.result_rendering import render_structured_for_llm
 from pal.execution.tool_registry import (
     CompiledToolRecord,
     ToolRegistryGeneration,
@@ -787,7 +789,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
     ) -> ToolInvocationResult | None:
         args = validated.model_dump(mode="python") if isinstance(validated, BaseModel) else dict(validated)
         if record.alias == "search_tools":
-            return self._complete_builtin(record, self._search_generation(generation, args))
+            payload = self._search_generation(generation, args)
+            return self._complete_builtin(record, payload, llm_text=render_tool_search(generation, payload))
         if record.alias == "read_tool":
             payload = self._read_generation_tool(generation, str(args.get("name") or ""))
             if payload is None:
@@ -796,7 +799,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     f"unknown tool alias: {args.get('name')}",
                     affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
                 )
-            return self._complete_builtin(record, payload)
+            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload))
         if record.alias == "call_tool":
             target = new_tool_call(
                 call_id=call.call_id,
@@ -833,7 +836,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
     ) -> ToolInvocationResult | None:
         args = validated.model_dump(mode="python") if isinstance(validated, BaseModel) else dict(validated)
         if record.alias == "search_tools":
-            return self._complete_builtin(record, self._search_generation(generation, args))
+            payload = self._search_generation(generation, args)
+            return self._complete_builtin(record, payload, llm_text=render_tool_search(generation, payload))
         if record.alias == "read_tool":
             payload = self._read_generation_tool(generation, str(args.get("name") or ""))
             if payload is None:
@@ -842,7 +846,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     f"unknown tool alias: {args.get('name')}",
                     affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
                 )
-            return self._complete_builtin(record, payload)
+            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload))
         if record.alias == "call_tool":
             target = new_tool_call(
                 call_id=call.call_id,
@@ -1008,7 +1012,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         namespace = str(args.get("namespace") or "").strip().lower()
         namespace = {"inspect": "introspection", "action": "operation"}.get(namespace, namespace)
         family = str(args.get("family") or "").strip().lower()
-        module_id = str(args.get("module_id") or "").strip().lower()
+        module_id = str(args.get("module_name") or args.get("module_id") or "").strip().lower()
         tags = {
             str(item).strip().lower()
             for item in list(args.get("tags") or ())
@@ -1125,7 +1129,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return CompleteResult(
             output=validated,
             effect=EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.APPLIED,
-            llm_text=llm_text.strip() or json.dumps(validated, ensure_ascii=False, sort_keys=True),
+            llm_text=llm_text or render_structured_for_llm(validated),
             affordances=list(affordances or ()),
             context_delivery=(
                 dict(context_delivery)
@@ -1284,15 +1288,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 llm_text=f"Tool output failed validation for {record.alias}; effect={outcome.value}.",
                 details={"output_schema": record.output_schema},
             )
-        # File delivery spans are offsets into the exact LLM-visible text.
-        # Trimming a trailing newline here would make an otherwise complete
-        # edit proof one byte shorter than its manifest.
-        rendered = (
-            llm_text
-            if isinstance(context_delivery, dict) and llm_text
-            else llm_text.strip()
-            or json.dumps(output, ensure_ascii=False, sort_keys=True)
-        )
+        # Handler text is data, including leading/trailing whitespace. Only
+        # Pal-owned structured serialization may change presentation.
+        rendered = llm_text or render_structured_for_llm(output)
         paged, replay_result_ref = self._page_validated_output(
             record,
             call,
@@ -1359,7 +1357,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             },
             context_delivery=context_delivery,
         )
-        if char_limit is None or len(serialized) <= char_limit:
+        if char_limit is None or len(rendered) <= char_limit:
             return None, handle.result_ref
         page = self.tool_result_pager.read_page(
             result_ref,
@@ -1515,13 +1513,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _render_invocation_for_llm(result: ToolInvocationResult) -> str:
-        preserves_delivery_offsets = isinstance(
-            getattr(result, "context_delivery", None),
-            dict,
-        )
         base = str(result.llm_text or "")
-        if not preserves_delivery_offsets:
-            base = base.strip()
         metadata: dict[str, Any] = {
             "kind": result.kind,
             "effect": result.effect.value,
@@ -1539,11 +1531,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
             metadata["affordances"] = [item.model_dump(mode="json") for item in result.affordances]
         if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:
             return base
-        rendered_metadata = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        rendered_metadata = render_structured_for_llm(metadata)
         rendered = f"{base}\n\nTool result metadata: {rendered_metadata}"
         if isinstance(result, (RejectedResult, FailedResult)):
             rendered = f"{rendered}\nFailure next step: {_FAILURE_MEMORY_NEXT_STEP}"
-        return rendered.rstrip() if preserves_delivery_offsets else rendered.strip()
+        return rendered
 
     def execute_tool(
         self,

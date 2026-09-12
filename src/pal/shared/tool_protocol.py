@@ -234,7 +234,7 @@ class ToolExecutionResult:
     context_messages: tuple[ToolContextMessageIR, ...] = ()
 
     def __post_init__(self) -> None:
-        if not str(self.llm_text or "").strip():
+        if not str(self.llm_text or ""):
             raise ValueError("ToolExecutionResult.llm_text must be non-empty")
         if not str(self.status or "").strip():
             object.__setattr__(self, "status", "ok" if self.ok else "error")
@@ -248,10 +248,10 @@ def default_tool_result_text(
     fallback_ok: str = "ok",
     fallback_error: str = "error",
 ) -> str:
-    llm_text = str(getattr(result, "llm_text", "") or "").strip()
+    llm_text = str(getattr(result, "llm_text", "") or "")
     if llm_text:
         return llm_text
-    text = str(getattr(result, "text", "") or "").strip()
+    text = str(getattr(result, "text", "") or "")
     if text:
         return text
     structured = getattr(result, "structured", None)

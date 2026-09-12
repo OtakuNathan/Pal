@@ -4,20 +4,13 @@ import json
 from typing import Any
 
 
-_PRETTY_JSON_CHAR_LIMIT = 8_000
-
-
 def render_structured_for_llm(structured: Any, *, fallback_text: str = "") -> str:
     if structured is None:
-        return str(fallback_text or "").strip()
+        return str(fallback_text or "")
     if isinstance(structured, str):
-        return structured.strip()
+        return structured
     try:
-        compact = json.dumps(structured, ensure_ascii=False, sort_keys=True)
-        pretty = json.dumps(structured, ensure_ascii=False, indent=2, sort_keys=True)
-        if len(pretty) <= _PRETTY_JSON_CHAR_LIMIT:
-            return pretty
-        return compact
+        return json.dumps(structured, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     except TypeError:
         return str(structured)
 

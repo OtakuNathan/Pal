@@ -273,7 +273,6 @@ def compile_tool_description(
         sections.append("Possible next tools:\n" + "\n".join(f"- {line}" for line in next_tool_lines))
     sections.extend(
         [
-            f"Output shape: {json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}",
             f"Invoke using the exact alias `{alias}`.",
         ]
     )

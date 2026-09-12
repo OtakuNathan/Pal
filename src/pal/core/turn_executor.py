@@ -1369,8 +1369,8 @@ class TurnExecutor:
     def _render_tool_result_content(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
         if isinstance(getattr(result, "context_delivery", None), dict):
             return str(result.llm_text or "")
-        if str(result.llm_text or "").strip():
-            return str(result.llm_text).strip()
+        if str(result.llm_text or ""):
+            return str(result.llm_text)
         return default_tool_result_text(result)
 
     @staticmethod

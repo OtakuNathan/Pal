@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import suppress, asynccontextmanager
 import asyncio
 from dataclasses import dataclass
-import json
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
@@ -11,6 +10,7 @@ from pal.execution.tool_facade import (
     CompleteResult, PagedResult, EffectOutcome, EffectReceipt, ToolRejectedError,
     ToolAffordance,
 )
+from pal.shared.result_rendering import render_structured_for_llm
 from pal.shared import RuntimeStatus
 
 from .adapter import ShellRuntime, ShellRejected, TERMINAL, READ_EFFECTS
@@ -25,7 +25,7 @@ def output_result(result):
                if not key.endswith(("_bytes", "_path")) and key not in {"output_id", "request_id"}}
     if result.get("status") not in TERMINAL:
         payload["returncode"] = None
-    text = json.dumps(payload, ensure_ascii=False)
+    text = render_structured_for_llm(payload)
     return CapabilityResult(status=RuntimeStatus.OK, structured=payload, text=text, llm_text=text,
                             effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED))
 

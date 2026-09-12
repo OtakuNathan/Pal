@@ -101,7 +101,7 @@ class CapabilityResult:
     context_messages: tuple[ToolContextMessageIR, ...] = ()
 
     def __post_init__(self) -> None:
-        if not str(self.llm_text or "").strip():
+        if not str(self.llm_text or ""):
             raise ValueError("CapabilityResult.llm_text must be non-empty")
         object.__setattr__(self, "context_messages", tuple(self.context_messages or ()))
 

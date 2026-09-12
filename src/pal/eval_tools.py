@@ -37,6 +37,8 @@ class EvalCase:
     forbidden_aliases: tuple[str, ...] = ()
     confusable_pair: bool = False
     max_rounds: int = 5
+    required_aliases: tuple[str, ...] = ()
+    expected_output: dict[str, Any] | None = None
 
 
 def load_tools_benchmark(path: Path) -> tuple[dict[str, Any], list[EvalCase]]:
@@ -64,6 +66,8 @@ def load_tools_benchmark(path: Path) -> tuple[dict[str, Any], list[EvalCase]]:
                 ),
                 confusable_pair=bool(raw.get("confusable_pair")),
                 max_rounds=max(1, int(raw.get("max_rounds") or 5)),
+                required_aliases=tuple(raw.get("required_aliases") or ()),
+                expected_output=raw.get("expected_output"),
             )
         )
     if not cases or any(
@@ -164,6 +168,7 @@ async def _run_case(
     llm_runtime: Any,
     execution_runtime: Any,
     endpoint_id: str | None = None,
+    max_output_tokens: int = 1024,
 ) -> dict[str, Any]:
     messages: list[LLMMessageIR] = [
         message_ir_from_dict({
@@ -203,11 +208,17 @@ async def _run_case(
             "effect": _enum_value(getattr(seeded_invocation, "effect", "")),
             "retry": _enum_value(getattr(seeded_invocation, "retry", "")),
         }
-        messages.extend((
-            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(seeded_tool_call,)),
-            _eval_tool_result_message(seeded_tool_call, seeded_result),
-        ))
+        # This call was made by the evaluator, not by this model. Supply its
+        # actual rejection as fixture context rather than inventing assistant
+        # tool history (which may require provider-owned reasoning/signatures).
+        messages.append(message_ir_from_dict({
+            "role": "user",
+            "content": "Evaluator seed call: " + json.dumps(case.seed_call, ensure_ascii=False)
+                + "\nObserved result:\n" + seeded_result.llm_text,
+        }))
     first_result_kind = ""
+    usage_rows: list[dict[str, Any]] = []
+    truncated = False
     for round_index in range(case.max_rounds):
         metadata: dict[str, Any] = {
             "eval": "tools",
@@ -224,12 +235,23 @@ async def _run_case(
         outcome = await llm_runtime.agenerate(
             LLMRequestIR(
                 messages=tuple(messages),
-                policy=GenerationPolicyIR(max_output_tokens=1024, temperature=temperature),
+                policy=GenerationPolicyIR(max_output_tokens=max_output_tokens, temperature=temperature),
                 model_hint=model,
                 tools=tuple(tool_definition_ir_from_dict(item) for item in tool_contracts),
                 metadata=metadata,
             )
         )
+        usage = getattr(outcome.response, "usage", None)
+        usage_rows.append({
+            **{key: int(getattr(usage, key, 0) or 0) for key in (
+                "input_tokens", "output_tokens", "cached_input_tokens", "uncached_input_tokens",
+                "cache_write_input_tokens", "reasoning_tokens")},
+            "reported": bool(getattr(usage, "reported", False)),
+            "reasoning_tokens_reported": bool(getattr(usage, "reasoning_tokens_reported", False)),
+            "request_chars": len(json.dumps([message_to_payload(message) for message in messages], ensure_ascii=False)),
+            "tool_result_chars": 0,
+        })
+        truncated |= _enum_value(outcome.response.finish_reason) in {"length", "max_tokens", "compact_required"}
         actual_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", None) or "").strip()
         actual_model_id = str(getattr(outcome, "preferred_model_id", None) or "").strip()
         if actual_endpoint_id:
@@ -260,15 +282,25 @@ async def _run_case(
                     "args": dict(tool_call.args),
                     "result_kind": kind,
                     "status": result.status,
+                    "ok": bool(getattr(result, "ok", kind not in {"rejected", "failed"})),
+                    "output_matches": _matches_output(getattr(result, "structured", None), case.expected_output)
+                        if effective_alias == case.expected_alias else True,
                     "effect": _enum_value(getattr(invocation, "effect", "")),
                     "retry": _enum_value(getattr(invocation, "retry", "")),
                 }
             )
             results.append(result)
+            usage_rows[-1]["tool_result_chars"] += len(result.llm_text)
         messages.append(outcome.response.message)
         messages.extend(_eval_tool_result_message(call, result) for call, result in zip(tool_calls, results))
     effective = [item["effective_alias"] for item in calls]
     expected_positions = [index for index, alias in enumerate(effective) if alias == case.expected_alias]
+    successful = [item["effective_alias"] for item in calls
+                  if item.get("ok") and item["result_kind"] in {"complete", "paged"}]
+    remaining = iter(successful)
+    chain_complete = all(any(alias == wanted for alias in remaining) for wanted in case.required_aliases)
+    completed = any(calls[index].get("ok") and calls[index].get("output_matches")
+                    and calls[index]["result_kind"] in {"complete", "paged"} for index in expected_positions)
     dangerous_retry = _detect_dangerous_retry(calls, forbidden_aliases=case.forbidden_aliases)
     return {
         "case_id": case.case_id,
@@ -278,8 +310,11 @@ async def _run_case(
         "confusable_pair": case.confusable_pair,
         "expected_first_alias": case.expected_first_alias,
         "top_1_correct": bool(effective and effective[0] == case.expected_first_alias),
-        "eventual_correct": bool(expected_positions),
-        "first_pass_arguments": bool(expected_positions and calls[expected_positions[0]]["result_kind"] != "rejected"),
+        "eventual_correct": bool(completed and chain_complete and not truncated and not dangerous_retry),
+        "chain_complete": chain_complete,
+        "truncated": truncated,
+        "usage": usage_rows,
+        "first_pass_arguments": bool(expected_positions and calls[expected_positions[0]].get("ok") and calls[expected_positions[0]].get("output_matches")),
         "enum_repaired": bool(
             case.category == "enum_repair"
             and (
@@ -288,11 +323,11 @@ async def _run_case(
             )
             and any(item["provider_alias"] == "read_tool" for item in calls)
             and expected_positions
-            and calls[expected_positions[-1]]["result_kind"] != "rejected"
+            and calls[expected_positions[-1]].get("ok")
         ),
         "recovered": bool(
             case.category in {"detach_recovery", "not_found_recovery"}
-            and expected_positions
+            and completed
             and any(item["provider_alias"] in {"search_tools", "read_tool"} for item in calls)
         ),
         "dangerous_retry": dangerous_retry,
@@ -324,6 +359,15 @@ def _eval_tool_result_message(call: ToolCallIR, result: Any) -> LLMMessageIR:
             ),
         ),
     )
+
+
+def _matches_output(actual: Any, expected: Any) -> bool:
+    if expected is None:
+        return True
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(key in actual and _matches_output(actual[key], value)
+                                               for key, value in expected.items())
+    return actual == expected
 
 
 def _detect_dangerous_retry(

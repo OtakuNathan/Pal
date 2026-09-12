@@ -282,7 +282,7 @@ def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_re
     if page.status:
         attrs["status"] = page.status
     open_tag = f"<{tag} " + " ".join(f'{key}="{escape(value, quote=True)}"' for key, value in attrs.items()) + ">"
-    parts = [open_tag, page.content.rstrip()]
+    parts = [open_tag, page.content]
     if page.anchor == "tail":
         if page.anchor_page > 1 and page.has_more_after:
             parts.append(

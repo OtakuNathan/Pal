@@ -14,6 +14,7 @@ from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput,
 )
 from pal.execution.tool_semantics import DIRECT_NONE
+from pal.execution.tool_presentation import render_tool_definition, render_tool_inventory, render_tool_search
 from uuid import uuid4
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -50,7 +51,7 @@ class ExecutionToolSearchMixin:
             status=RuntimeStatus.OK,
             text="execution tools",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Execution tools", payload),
+            llm_text=render_tool_inventory(payload),
         )
 
 
@@ -117,7 +118,7 @@ class ExecutionDiscoveryCapabilityMixin:
             status=RuntimeStatus.OK,
             text="capability search results",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Capability search results", payload),
+            llm_text=render_tool_search(self.runtime.registry_generation, payload),
         )
 
     @capability_action(
@@ -127,7 +128,7 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="read",
         guidance=ToolGuidance(
             purpose="Read the full capability contract for an execution capability by exact alias.",
-            use_when="Before invoking an indirect capability via call_tool — inspect its input schema, output schema, and execution semantics.",
+            use_when="Before invoking an indirect capability via call_tool — inspect its input schema, usage guidance, and execution semantics.",
             do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use exec_tools).",
             failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
             next_tool_hints=(
@@ -164,7 +165,7 @@ class ExecutionDiscoveryCapabilityMixin:
             status=RuntimeStatus.OK,
             text="capability definition",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Capability definition", payload),
+            llm_text=render_tool_definition(payload),
         )
 
     @capability_action(

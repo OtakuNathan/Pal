@@ -7,6 +7,7 @@ from pal.execution.capabilities import ExecutionIntrospectionProvider
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EmptyToolInput, StrictToolModel, StructuredToolOutput, ToolGuidance, NextToolHint, ToolRejectedError
 from pal.execution.tool_semantics import DIRECT_CONTROL, INDIRECT_CONTROL, INDIRECT_LOCAL_READ
+from pal.shared.result_rendering import render_structured_for_llm
 from pal.shared import RuntimeStatus, capability_action
 
 from .tools import RunInput, SessionInput
@@ -171,6 +172,5 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
 
     @staticmethod
     def _result(payload):
-        import json
-        text = json.dumps(payload, ensure_ascii=False)
+        text = render_structured_for_llm(payload)
         return CapabilityResult(status=RuntimeStatus.OK, structured=payload, text=text, llm_text=text)

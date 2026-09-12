@@ -136,7 +136,8 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("invocation_mode=indirect", record.compiled_description)
         self.assertIn('["plain", "upper"]', record.compiled_description)
         self.assertIn("Valid example:", record.compiled_description)
-        self.assertIn("Output shape:", record.compiled_description)
+        self.assertNotIn("Output shape:", record.compiled_description)
+        self.assertTrue(record.output_schema)
         self.assertNotIn("Input schema:", record.compiled_description)
         self.assertEqual(
             self.runtime.registry_generation.capability_index.aliases["echo"],

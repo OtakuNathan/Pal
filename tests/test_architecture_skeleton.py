@@ -1293,7 +1293,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "invalid_arguments")
         self.assertIn("name", result.llm_text)
-        self.assertIn('"retry": "correct_input"', result.llm_text)
+        self.assertIn('"retry":"correct_input"', result.llm_text)
 
     def test_successful_introspection_llm_text_contains_key_structured_content(self) -> None:
         core = PalCore()
@@ -3627,7 +3627,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn('"value": "rich"', tool_message.text)
         self.assertNotIn("placeholder", tool_message.text)
 
-    def test_default_tool_result_text_pretty_prints_structured_fallback(self) -> None:
+    def test_default_tool_result_text_compacts_structured_fallback(self) -> None:
         result = type(
             "Result",
             (),
@@ -3641,8 +3641,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         rendered = default_tool_result_text(result)
 
-        self.assertIn('{\n  "a": {', rendered)
-        self.assertIn('"nested": true', rendered)
+        self.assertEqual(rendered, '{"a":{"nested":true},"z":2}')
+        self.assertEqual(json.loads(rendered), result.structured)
 
     def test_l3_recall_tool_protocol_uses_minimal_observation_text(self) -> None:
         core = PalCore()
@@ -3702,7 +3702,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_message = next(message for message in generate_requests[1].messages if message.role.value == "tool")
         self.assertIn('<recalled_memories view="summary">', tool_message.text)
         self.assertIn("[fact:1]:", tool_message.text)
-        self.assertIn('"kind": "complete"', tool_message.text)
+        self.assertIn('"kind":"complete"', tool_message.text)
         self.assertNotIn("legacy assistant", tool_message.text)
         self.assertIn("The test user built Pal and wants it to act directly.", tool_message.text)
 
@@ -3743,7 +3743,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for message in request.messages
             if message.role.value == "tool"
         )
-        self.assertIn('{"bad": true}', tool_message.parts[0].content)
+        self.assertEqual(json.loads(tool_message.parts[0].content), {"bad": True})
         self.assertNotIn("memory recall", tool_message.parts[0].content)
 
     def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
@@ -3881,8 +3881,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0].text)
         tool_message = next(message for message in generate_requests[-1].messages if message.role.value == "tool")
-        self.assertIn('"kind": "paged"', tool_message.text)
-        self.assertIn('"tool": "read_tool_result"', tool_message.text)
+        self.assertIn('"kind":"paged"', tool_message.text)
+        self.assertIn('"tool":"read_tool_result"', tool_message.text)
 
     def test_turn_runtime_preserves_delivered_tool_results_until_compaction(self) -> None:
         class MultiToolLLMRuntime:
@@ -3969,8 +3969,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             result_handle = result.structured["result_handle"]
             self.assertEqual(result_handle["result_ref"], "call_spill")
             self.assertNotIn("backing_path", result_handle)
-            self.assertIn('"result_ref": "call_spill"', result.llm_text)
-            self.assertIn('"tool": "read_tool_result"', result.llm_text)
+            self.assertIn('"result_ref":"call_spill"', result.llm_text)
+            self.assertIn('"tool":"read_tool_result"', result.llm_text)
             self.assertNotIn("backing_path", result.llm_text)
             self.assertNotIn(str(tmpdir), result.llm_text)
 
@@ -3986,7 +3986,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.structured["kind"], "paged")
         self.assertTrue(str(result.structured["result_handle"]["result_ref"]))
-        self.assertIn('"kind": "paged"', result.llm_text)
+        self.assertIn('"kind":"paged"', result.llm_text)
 
     def test_shell_output_uses_runtime_pager_without_tool_level_truncation(self) -> None:
         core = PalCore()

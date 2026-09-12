@@ -226,6 +226,8 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
     )
 
     assert run["seed_call"]["result_kind"] == "rejected"
+    assert llm_runtime.requests[0].messages[-1].role.value == "user"
+    assert "Observed result:" in llm_runtime.requests[0].messages[-1].text
     assert run["top_1_correct"]
     assert run["enum_repaired"]
     assert run["actual_endpoint_ids"] == ["fixed-endpoint"]
