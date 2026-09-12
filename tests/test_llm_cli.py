@@ -26,6 +26,23 @@ class LLMCLITests(unittest.TestCase):
         configure_llm_parser(parser)
         return parser.parse_args(list(argv))
 
+    def test_invalid_thinking_levels_show_shape_choices(self) -> None:
+        for shape in ("openai_completion", "openai_response", "anthropic_messages"):
+            for invalid in ("ultra", ""):
+                with self.subTest(shape=shape, invalid=invalid):
+                    args = self._parse(
+                        "add", "demo", "--runtime-root", str(self.runtime_root),
+                        "--model-id", "demo", "--base-url", "https://example.test",
+                        "--wire-shape", shape, "--thinking-levels", invalid,
+                    )
+                    with contextlib.redirect_stderr(io.StringIO()) as error:
+                        self.assertEqual(run_llm_cli(args), 2)
+                    hint = error.getvalue().split("available for ", 1)[1]
+                    self.assertIn(shape, hint)
+                    self.assertIn("off,", hint)
+                    self.assertIn("low, medium, high, xhigh, max", hint)
+                    self.assertEqual("minimal" in hint, shape != "anthropic_messages")
+
     def test_invalid_anthropic_effort_does_not_mutate_add_or_replace(self) -> None:
         from unittest.mock import patch
 

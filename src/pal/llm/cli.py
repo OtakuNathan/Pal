@@ -12,7 +12,8 @@ from typing import Any, Iterator
 
 from pal.foundation import PalV2Database
 from pal.llm.credentials import LLMCredentialResolver
-from pal.llm.ir import ThinkingLevel, WireShape
+from pal.llm.ir import WireShape
+from pal.llm.endpoint_spec import validate_thinking_levels
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.schema import migrate_llm_endpoint_schema
@@ -233,6 +234,7 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         args.thinking_levels,
         existing=existing,
         model_id=model_id,
+        wire_shape=wire_shape,
     )
     default_level = str(
         args.default_thinking_level
@@ -433,7 +435,9 @@ def _endpoint_identity_defaults(
     return normalized_provider, normalized_shape, normalized_url
 
 
-def _thinking_levels(raw: str | None, *, existing: LLMEndpointModel | None, model_id: str) -> list[str]:
+def _thinking_levels(
+    raw: str | None, *, existing: LLMEndpointModel | None, model_id: str, wire_shape: str,
+) -> list[str]:
     model_defaults = _model_endpoint_defaults(model_id)
     if raw is not None:
         candidates = [item.strip().lower() for item in str(raw).split(",")]
@@ -445,18 +449,7 @@ def _thinking_levels(raw: str | None, *, existing: LLMEndpointModel | None, mode
         candidates = list(model_defaults["thinking_levels"])
     else:
         candidates = ["off"]
-    allowed = {item.value for item in ThinkingLevel}
-    levels: list[str] = []
-    for item in candidates:
-        if not item:
-            continue
-        if item not in allowed:
-            raise ValueError(f"unknown thinking level: {item}")
-        if item not in levels:
-            levels.append(item)
-    if not levels:
-        raise ValueError("at least one thinking level is required")
-    return levels
+    return list(validate_thinking_levels(candidates, wire_shape=wire_shape))
 
 
 def _endpoint_payload(endpoint: LLMEndpointModel, *, active_endpoint_id: str | None) -> dict[str, Any]:

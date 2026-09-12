@@ -518,3 +518,18 @@ class LLMErrorSemanticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingValidationHintTests(unittest.TestCase):
+    def test_endpoint_contract_reports_shape_and_declared_choices(self) -> None:
+        for shape in ("openai_completion", "openai_response", "anthropic_messages"):
+            endpoint = _endpoint("demo")
+            endpoint.wire_shape = shape
+            endpoint.thinking_levels_blob = ["ultra"]
+            with self.subTest(shape=shape), self.assertRaises(LLMEndpointSpecError) as raised:
+                LLMEndpointSpec.from_value(endpoint)
+            self.assertIn(f"available for {shape}:", str(raised.exception))
+            endpoint.thinking_levels_blob = ["low", "high"]
+            endpoint.default_thinking_level = "max"
+            with self.assertRaisesRegex(LLMEndpointSpecError, "available: low, high"):
+                LLMEndpointSpec.from_value(endpoint)
