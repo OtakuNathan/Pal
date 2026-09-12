@@ -17,6 +17,7 @@ class MemoryFactModel(BaseModel):
     dedupe_fingerprint = TextField(null=True)
     payload_blob = JSONField(default=dict)
     lifecycle = CharField(default="active")
+    content_revision = IntegerField(default=1)
     use_count = IntegerField(default=0)
     last_used_at = TextField(null=True)
     created_at = TextField(default=utc_now)
@@ -42,9 +43,11 @@ class MemoryCaseModel(BaseModel):
     action_text = TextField(default="")
     result_text = TextField(default="")
     search_text = TextField(default="")
+    canonical_key = TextField(null=True)
     dedupe_fingerprint = TextField(null=True)
     payload_blob = JSONField(default=dict)
     lifecycle = CharField(default="active")
+    content_revision = IntegerField(default=1)
     use_count = IntegerField(default=0)
     last_used_at = TextField(null=True)
     created_at = TextField(default=utc_now)
@@ -80,6 +83,7 @@ class MemoryEmbeddingModel(BaseModel):
     provider_id = TextField(default="ollama_local_embedding")
     model_name = TextField()
     model_revision = TextField(null=True)
+    text_processing_version = TextField(default="search_text_v1")
     source_text_hash = TextField()
     embedding_norm = TextField(null=True)
     index_status = CharField(
@@ -107,3 +111,23 @@ class MemoryEmbeddingVecModel(BaseModel):
 
     class Meta:
         table_name = "memory_embedding_vec"
+
+
+MEMORY_MODELS = (
+    MemoryFactModel, MemoryCaseModel, MemoryTopicModel,
+    MemoryEmbeddingModel, MemoryEmbeddingVecModel,
+)
+
+
+def memory_model_set(database):
+    """Bind independent model classes, never mutate another repository's models."""
+    return tuple(
+        type(
+            model.__name__, (model,),
+            {"Meta": type("Meta", (), {
+                "database": database,
+                "table_name": model._meta.table_name,
+            })},
+        )
+        for model in MEMORY_MODELS
+    )

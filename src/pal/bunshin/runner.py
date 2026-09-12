@@ -169,6 +169,7 @@ class BunshinRuntimeBundle:
     runtime_state_coordinator: RuntimeSnapshotCoordinator
     config: RuntimeConfig | None = None
     close_async: Callable[[], Awaitable[None]] | None = None
+    memory_generation_id: str = ""
 
     async def close(self) -> None:
         if self.close_async is not None:
@@ -424,6 +425,8 @@ class BunshinRunner:
     auto_accept_approvals: bool = False
     user_interaction: BunshinUserInteractionPort | None = field(default=None, init=False, repr=False)
     _memory_candidate_sink: MockL3Plugin | None = field(default=None, init=False, repr=False)
+    _memory_generation_id: str = field(default="", init=False, repr=False)
+    _result_memory_service: MemoryService | None = field(default=None, init=False, repr=False)
     _pending_control_messages: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
@@ -449,7 +452,11 @@ class BunshinRunner:
                 self.runtime_root,
                 run_id=self.run_id,
                 llm_authority="manager_proxy",
+                memory_workflow_id=str((self.pack.workspace.get("bunshin_v2") or {}).get("workflow_id")
+                    or (self.pack.metadata.get("bunshin_v2") or {}).get("workflow_id") or ""),
             )
+            self._memory_generation_id = str(getattr(bundle, "memory_generation_id", "") or "")
+            self._result_memory_service = getattr(bundle, "memory_service", None)
             accepted_payload = {
                 "phase": "accepted",
                 "summary": "bunshin accepted task context",
@@ -2430,6 +2437,11 @@ class BunshinRunner:
             "system_lessons": list(lesson_payload.get("system_lessons") or []),
             "memory_candidates": [dict(item) for item in self.memory_candidates],
         }
+        if self._memory_generation_id:
+            experience_payload["memory_generation_id"] = self._memory_generation_id
+            entries = self._result_memory_service.l2_store.items.values() if self._result_memory_service is not None else ()
+            experience_payload["memory_refs"] = sorted({entry.source_ref for entry in entries
+                if entry.source_ref.startswith(("fact:", "case:"))})
         payload = {
             "status": resolved_status,
             "summary": summary_text,
@@ -2685,6 +2697,7 @@ def build_slim_bunshin_runtime(
     *,
     run_id: str = "",
     llm_authority: Literal["manager_proxy", "host", "none"],
+    memory_workflow_id: str = "",
 ) -> BunshinRuntimeBundle:
     """Build one runtime with an explicit LLM owner.
 
@@ -2779,10 +2792,19 @@ def build_slim_bunshin_runtime(
             runtime_root=Path(runtime_root),
         ),
     )
+    memory_repository_args = {}
+    from pal.memory.storage import MemoryStorage
+    memory_storage = MemoryStorage(Path(runtime_root), read_only=True)
+    if memory_storage.catalog_path.exists():
+        # Workers never choose current. Only the host can create a durable pin;
+        # a missing recovered binding must fail instead of switching versions.
+        memory_repository_args["repository"] = memory_storage.open(
+            memory_storage.pinned(memory_workflow_id), read_only=True)
     l3_plugin = SQLiteVecL3Plugin(
         service=memory_service,
         embedding_provider=build_ollama_embedding_provider_from_config(config),
         read_only=True,
+        **memory_repository_args,
     )
     memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
     register_l3_with_core(context, l3_plugin)
@@ -2821,6 +2843,8 @@ def build_slim_bunshin_runtime(
 
     async def close() -> None:
         failures: list[Exception] = []
+        if memory_repository_args:
+            l3_plugin.repository.close()
         close_llm = getattr(llm_runtime, "close", None)
         if callable(close_llm):
             try:
@@ -2852,6 +2876,7 @@ def build_slim_bunshin_runtime(
         runtime_state_coordinator=RuntimeSnapshotCoordinator(context.module_registry),
         config=config,
         close_async=close,
+        memory_generation_id=l3_plugin.repository.generation_id,
     )
 
 

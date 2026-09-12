@@ -258,11 +258,7 @@ def _is_recalled_memory_entry(entry) -> bool:
 
 
 def _entry_render_dedupe_key(entry) -> str:
-    for field_name in ("canonical_key", "dedupe_fingerprint", "source_ref"):
-        value = str(getattr(entry, field_name, "") or "").strip()
-        if value:
-            return f"{field_name}:{value}"
-    return f"entry:{str(getattr(entry, 'entry_id', '') or '').strip()}"
+    return f"{entry.kind}:{entry.scope}:{entry.task_id or ''}:{entry.source_ref or entry.entry_id}"
 
 
 def _entry_mem_ref(entry) -> str:

@@ -492,6 +492,20 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
 def run_setup_upgrade(*, runtime_root: Path) -> int:
     """Apply runtime-owned upgrade steps without changing user configuration."""
 
+    from pal.packages.process import PackageError, runtime_lease
+    runtime_root = Path(runtime_root).expanduser().resolve()
+    if not (runtime_root / DEFAULT_DB_FILENAME).is_file():
+        return _run_setup_upgrade_offline(runtime_root=runtime_root)
+    try:
+        with runtime_lease(runtime_root):
+            return _run_setup_upgrade_offline(runtime_root=runtime_root)
+    except PackageError:
+        print("  Stop Pal before running pal setup --upgrade; the runtime is in use.")
+        return 2
+
+
+def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
+
     resolved_root = Path(runtime_root).expanduser().resolve()
     db_path = resolved_root / DEFAULT_DB_FILENAME
     if not db_path.is_file():
@@ -500,17 +514,24 @@ def run_setup_upgrade(*, runtime_root: Path) -> int:
             f"{db_path}. Set PAL_HOME or use --runtime-root /actual/path, or run pal setup for a new installation."
         )
         return 2
-    from pal.bunshin.cutover import cutover_bunshin_runtime
+    from pal.bunshin.cutover import cutover_bunshin_runtime, require_bunshin_runtime_stopped
     from pal.bunshin.v2.schema import BUNSHIN_V2_SCHEMA_VERSION
     from pal.llm.schema import migrate_llm_endpoint_schema
     from pal.web_fetch.schema import migrate_web_fetch_schema
 
+    require_bunshin_runtime_stopped(resolved_root)
     llm_result = migrate_llm_endpoint_schema(db_path)
     web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
+    from pal.memory.storage import MemoryStorage
+    from pal.bunshin.memory_binding import initialize_existing_workflow_pins
+    memory_storage = MemoryStorage(resolved_root)
+    generation = memory_storage.migrate(db_path)
+    initialize_existing_workflow_pins(resolved_root, memory_storage)
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
     print(f"  Browser schema: {web_fetch_result.status}")
+    print(f"  Memory generation: {generation} ({memory_storage.path(generation)})")
     if web_fetch_result.archive_path:
         print(f"  Legacy browser providers archived at: {web_fetch_result.archive_path}")
     print(f"  Bunshin schema: v{BUNSHIN_V2_SCHEMA_VERSION} ({result.status})")

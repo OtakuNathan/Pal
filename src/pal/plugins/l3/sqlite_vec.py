@@ -15,8 +15,6 @@ from pal.execution.generated_tool_models import (
     PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
 )
 
-import hashlib
-import json
 import math
 import uuid
 from dataclasses import InitVar, dataclass, field
@@ -33,8 +31,9 @@ from pal.memory import (
     L3RetireResult,
     MemoryQuery,
 )
+from pal.memory.mutations import mutation_id_from_call
 from pal.memory.candidates import memory_star_from_args, star_text_fields
-from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD, VECTOR_DEDUP_THRESHOLD
+from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD
 from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
 from pal.memory.repository import (
     MemoryDurableRepository,
@@ -93,61 +92,6 @@ MEMORY_STAR_SCHEMA = {
 }
 
 
-def _stable_hash(payload: dict[str, Any]) -> str:
-    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def _stable_fact_fingerprint(
-    *,
-    title: str,
-    summary: str,
-    payload: dict[str, Any],
-    canonical_key: str | None,
-    scope: str,
-    task_id: str | None,
-) -> str:
-    return _stable_hash(
-        {
-            "canonical_key": canonical_key or "",
-            "kind": "fact",
-            "payload": payload,
-            "scope": scope,
-            "summary": summary,
-            "task_id": task_id or "",
-            "title": title,
-        }
-    )
-
-
-def _stable_case_fingerprint(
-    *,
-    title: str,
-    summary: str,
-    situation_text: str,
-    task_text: str,
-    action_text: str,
-    result_text: str,
-    payload: dict[str, Any],
-    scope: str,
-    task_id: str | None,
-) -> str:
-    return _stable_hash(
-        {
-            "action_text": action_text,
-            "kind": "case",
-            "payload": payload,
-            "result_text": result_text,
-            "scope": scope,
-            "situation_text": situation_text,
-            "summary": summary,
-            "task_id": task_id or "",
-            "task_text": task_text,
-            "title": title,
-        }
-    )
-
-
 def _extract_entry_topics(entry: L2Entry) -> list[str]:
     raw_topics = entry.payload.get("topics") if isinstance(entry.payload, dict) else None
     if not isinstance(raw_topics, list):
@@ -199,6 +143,7 @@ class SQLiteVecL3Plugin:
     last_embedding_error: str = ""
 
     def __post_init__(self, embedder: EmbeddingProviderPort | None) -> None:
+        self.repository.read_only = self.read_only
         if not self.read_only:
             self.repository.ensure_schema()
         if self.embedding_provider is None and embedder is not None:
@@ -220,7 +165,7 @@ class SQLiteVecL3Plugin:
         return provider.provider_id
 
     def inspect(self) -> dict[str, Any]:
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.repository.database)
         inventory = self.repository.inventory()
         provider_health = self._embedding_health()
         inventory.update(
@@ -364,6 +309,7 @@ class SQLiteVecL3Plugin:
         star_fields = star_text_fields(star) if star else {}
         result = self.commit(
             L3CommitRequest(
+                mutation_id=mutation_id_from_call(call),
                 kind=kind,
                 title=title,
                 summary=summary,
@@ -418,6 +364,7 @@ class SQLiteVecL3Plugin:
         star_fields = star_text_fields(star) if star else {}
         result = self.correct(
             L3CorrectRequest(
+                mutation_id=mutation_id_from_call(call),
                 document_id=mem_ref,
                 title=str(call.args.get("title")) if call.args.get("title") is not None else None,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
@@ -479,6 +426,9 @@ class SQLiteVecL3Plugin:
         ), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
+        if not self.mounted and self.repository.catalog is not None:
+            self.repository = self.repository.catalog.open(
+                self.repository.generation_id if self.read_only else None, read_only=self.read_only)
         self.mounted = True
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -496,7 +446,10 @@ class SQLiteVecL3Plugin:
         ), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
+        if self.repository.frozen:
+            return IntrospectionResult(status="unavailable", text="memory maintenance owns the connection")
         self.mounted = False
+        self.repository.close()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory provider detached",
@@ -532,298 +485,57 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
         )
 
-    def _find_vector_duplicate(self, search_text: str) -> tuple[dict[str, Any], float] | None:
-        if not search_text or self.embedding_provider is None:
-            return None
-        candidates = self._vector_candidates(search_text, limit=1)
-        if not candidates:
-            return None
-        doc_id, score = next(iter(candidates.items()))
-        if score < VECTOR_DEDUP_THRESHOLD:
-            return None
-        hit = self.repository.get_document(doc_id)
-        if hit is None:
-            return None
-        return hit, score
-
-    def _confirm_duplicate(self, candidate: dict[str, Any], request: L3CommitRequest) -> bool:
-        candidate_key = str(candidate.get("canonical_key") or "").strip()
-        if candidate_key and candidate_key == (request.canonical_key or ""):
-            return True
-        candidate_title = str(candidate.get("title") or "").strip().lower()
-        candidate_topics = set(str(t).strip().lower() for t in (candidate.get("topics") or []))
-        request_title = str(request.title or "").strip().lower()
-        request_topics = set(str(t).strip().lower() for t in request.topics)
-        if candidate_title and request_title and candidate_title == request_title:
-            return True
-        if candidate_topics and request_topics and len(candidate_topics & request_topics) >= 2:
-            return True
-        return False
-
-    def _merge_from_commit(self, candidate: dict[str, Any], request: L3CommitRequest) -> L3MutationResult:
-        document_id = str(candidate.get("document_id", ""))
-        correct_request = L3CorrectRequest(
-            document_id=document_id,
-            title=request.title or None,
-            summary=request.summary or None,
-            search_text=request.search_text or None,
-            topics=request.topics or None,
-        )
-        return self.correct(correct_request)
-
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
-        if not self.mounted:
-            return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id="")
-        search_text = request.search_text or request.summary or request.title or ""
-        vector_match = self._find_vector_duplicate(search_text)
-        if vector_match is not None:
-            candidate, score = vector_match
-            print(f"[memory] memory_vector_dedup_candidate new_title={request.title} candidate_id={candidate.get('document_id')} score={score:.3f}")
-            if self._confirm_duplicate(candidate, request):
-                print(f"[memory] memory_vector_dedup_confirmed merged_into={candidate.get('document_id')} score={score:.3f}")
-                return self._merge_from_commit(candidate, request)
-        now = utc_now()
-        if request.kind == "fact":
-            summary = request.summary or request.title
-            dedupe_fingerprint = request.dedupe_fingerprint or _stable_fact_fingerprint(
-                title=request.title or "",
-                summary=summary,
-                payload=dict(request.payload),
-                canonical_key=request.canonical_key,
-                scope=request.scope,
-                task_id=request.task_id,
-            )
-            existing = None
-            if request.canonical_key:
-                existing = self.repository.find_fact_by_canonical_key(request.canonical_key)
-            if existing is None and dedupe_fingerprint:
-                existing = self.repository.find_fact_by_dedupe_fingerprint(dedupe_fingerprint)
-            fact_id = existing.fact_id if existing is not None else f"fact_{uuid.uuid4().hex[:12]}"
-            model = self.repository.upsert_fact(
-                fact_id=fact_id,
-                payload={
-                    "scope": request.scope,
-                    "task_id": request.task_id,
-                    "title": request.title,
-                    "summary": summary,
-                    "search_text": request.search_text or summary,
-                    "canonical_key": request.canonical_key,
-                    "dedupe_fingerprint": dedupe_fingerprint,
-                    "payload_blob": dict(request.payload),
-                    "last_used_at": now,
-                },
-            )
-            document_id = f"fact:{model.fact_id}"
-        elif request.kind == "case":
-            summary = request.summary or request.title or request.task_text or request.situation_text
-            dedupe_fingerprint = request.dedupe_fingerprint or _stable_case_fingerprint(
-                title=request.title or "",
-                summary=summary,
-                situation_text=request.situation_text,
-                task_text=request.task_text,
-                action_text=request.action_text,
-                result_text=request.result_text,
-                payload=dict(request.payload),
-                scope=request.scope,
-                task_id=request.task_id,
-            )
-            existing = self.repository.find_case_by_dedupe_fingerprint(dedupe_fingerprint)
-            case_id = existing.case_id if existing is not None else f"case_{uuid.uuid4().hex[:12]}"
-            model = self.repository.upsert_case(
-                case_id=case_id,
-                payload={
-                    "scope": request.scope,
-                    "task_id": request.task_id,
-                    "title": request.title,
-                    "summary": summary,
-                    "situation_text": request.situation_text,
-                    "task_text": request.task_text,
-                    "action_text": request.action_text,
-                    "result_text": request.result_text,
-                    "search_text": request.search_text or summary,
-                    "dedupe_fingerprint": dedupe_fingerprint,
-                    "payload_blob": dict(request.payload),
-                    "last_used_at": now,
-                },
-            )
-            document_id = f"case:{model.case_id}"
-        else:
-            return L3MutationResult(status=RuntimeStatus.INVALID, document_id="")
-        self.repository.sync_fts_row(document_id)
-        self.repository.replace_topics(document_id, request.topics)
-        self._mark_document_pending(document_id)
-        hit = self.repository.get_document(document_id) or {"document_id": document_id}
-        entry = self._project_entry(hit, source_kind="explicit_commit", candidate_state="stable")
-        result = L3MutationResult(
-            status=RuntimeStatus.OK,
-            document_id=document_id,
-            hit=hit,
-            projected_entry=entry,
-            metadata={"index_status": "pending"},
-        )
-        self.service.project_mutation(result)
-        return result
+        from pal.memory.mutations import commit
+        return commit(self, request)
 
     def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
-        if not self.mounted:
-            return L3RetireResult(status=RuntimeStatus.UNAVAILABLE)
-        document_ids: list[str] = []
-        reused_document_ids: list[str] = []
+        document_ids, reused = [], []
         for entry in entries:
-            if entry.kind not in {"fact", "case"}:
-                continue
-            if entry.kind == "fact":
-                existing = None
-                if entry.canonical_key:
-                    existing = self.repository.find_fact_by_canonical_key(entry.canonical_key)
-                if existing is None and entry.dedupe_fingerprint:
-                    existing = self.repository.find_fact_by_dedupe_fingerprint(entry.dedupe_fingerprint)
-                if existing is not None:
-                    document_id = f"fact:{existing.fact_id}"
-                    reused_document_ids.append(document_id)
-                    self._mark_document_pending(document_id, stale=True)
-                    document_ids.append(document_id)
-                    continue
-                model = self.repository.upsert_fact(
-                    fact_id=f"fact_{uuid.uuid4().hex[:12]}",
-                    payload={
-                        "scope": entry.scope,
-                        "task_id": entry.task_id,
-                        "title": entry.title,
-                        "summary": entry.summary,
-                        "search_text": entry.search_text or entry.summary,
-                        "canonical_key": entry.canonical_key,
-                        "dedupe_fingerprint": entry.dedupe_fingerprint,
-                        "payload_blob": dict(entry.payload),
-                        "last_used_at": utc_now(),
-                    },
-                )
-                document_id = f"fact:{model.fact_id}"
-            else:
-                existing = self.repository.find_case_by_dedupe_fingerprint(entry.dedupe_fingerprint or "")
-                if existing is not None:
-                    document_id = f"case:{existing.case_id}"
-                    reused_document_ids.append(document_id)
-                    self._mark_document_pending(document_id, stale=True)
-                    document_ids.append(document_id)
-                    continue
-                payload = dict(entry.payload or {})
-                model = self.repository.upsert_case(
-                    case_id=f"case_{uuid.uuid4().hex[:12]}",
-                    payload={
-                        "scope": entry.scope,
-                        "task_id": entry.task_id,
-                        "title": entry.title,
-                        "summary": entry.summary,
-                        "situation_text": str(payload.get("situation") or payload.get("situation_text") or ""),
-                        "task_text": str(payload.get("task") or payload.get("task_text") or ""),
-                        "action_text": str(payload.get("action") or payload.get("action_text") or ""),
-                        "result_text": str(payload.get("result") or payload.get("result_text") or ""),
-                        "search_text": entry.search_text or entry.summary,
-                        "dedupe_fingerprint": entry.dedupe_fingerprint,
-                        "payload_blob": payload,
-                        "last_used_at": utc_now(),
-                    },
-                )
-                document_id = f"case:{model.case_id}"
-            topics = _extract_entry_topics(entry)
-            self.repository.sync_fts_row(document_id)
-            self.repository.replace_topics(document_id, topics)
-            self._mark_document_pending(document_id)
-            document_ids.append(document_id)
-        return L3RetireResult(
-            status=RuntimeStatus.OK,
-            document_ids=document_ids,
-            reused_document_ids=reused_document_ids,
-            metadata={"retired": len(document_ids), "reused": len(reused_document_ids)},
-        )
+            payload = dict(entry.payload or {})
+            result = self.commit(L3CommitRequest(
+                kind=entry.kind, scope=entry.scope, task_id=entry.task_id,
+                title=entry.title, summary=entry.summary, search_text=entry.search_text,
+                canonical_key=entry.canonical_key, payload=payload, topics=_extract_entry_topics(entry),
+                mutation_id=f"retire:{entry.entry_id}",
+                situation_text=str(payload.get("situation") or payload.get("situation_text") or ""),
+                task_text=str(payload.get("task") or payload.get("task_text") or ""),
+                action_text=str(payload.get("action") or payload.get("action_text") or ""),
+                result_text=str(payload.get("result") or payload.get("result_text") or ""),
+            ))
+            if result.status != "ok":
+                return L3RetireResult(status=result.status, document_ids=document_ids)
+            document_ids.append(result.document_id)
+            if result.metadata.get("replayed") or result.metadata.get("deduplicated"):
+                reused.append(result.document_id)
+        return L3RetireResult(status="ok", document_ids=document_ids, reused_document_ids=reused,
+                              metadata={"retired": len(document_ids), "reused": len(reused)})
 
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
-        if not self.mounted:
-            return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id=request.document_id)
-        kind, _, raw_id = request.document_id.partition(":")
-        topic_values = list(request.topics) if request.topics is not None else self.repository.list_document_topics(request.document_id)
-        topic_text = " ".join(topic_values) if topic_values else ""
-        if kind == "fact":
-            model = self.repository.get_fact(raw_id)
-            if model is None:
-                return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
-            if request.title is not None:
-                model.title = request.title
-            if request.summary is not None:
-                model.summary = request.summary
-            payload = dict(model.payload_blob or {})
-            payload.update(request.payload_patch)
-            model.payload_blob = payload
-            if request.search_text is not None:
-                model.search_text = request.search_text
-            model.updated_at = utc_now()
-            model.save()
-        elif kind == "case":
-            model = self.repository.get_case(raw_id)
-            if model is None:
-                return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
-            if request.title is not None:
-                model.title = request.title
-            if request.summary is not None:
-                model.summary = request.summary
-            if request.situation_text is not None:
-                model.situation_text = request.situation_text
-            if request.task_text is not None:
-                model.task_text = request.task_text
-            if request.action_text is not None:
-                model.action_text = request.action_text
-            if request.result_text is not None:
-                model.result_text = request.result_text
-            payload = dict(model.payload_blob or {})
-            payload.update(request.payload_patch)
-            model.payload_blob = payload
-            if request.search_text is not None:
-                model.search_text = request.search_text
-            model.updated_at = utc_now()
-            model.save()
-        else:
-            return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
-        if request.topics is not None:
-            self.repository.replace_topics(request.document_id, request.topics)
-        self.repository.sync_fts_row(request.document_id)
-        self._mark_document_pending(request.document_id, stale=True)
-        hit = self.repository.get_document(request.document_id) or {"document_id": request.document_id}
-        entry = self._project_entry(hit, source_kind="correction", candidate_state="stable")
-        result = L3MutationResult(
-            status=RuntimeStatus.OK,
-            document_id=request.document_id,
-            hit=hit,
-            projected_entry=entry,
-            metadata={"index_status": "stale"},
-        )
-        self.service.project_mutation(result)
-        return result
+        from pal.memory.mutations import correct
+        return correct(self, request)
 
     def delete(self, request: L3DeleteRequest) -> L3MutationResult:
-        if not self.mounted:
-            return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id=request.document_id)
+        if not self.mounted or self.read_only or self.repository.frozen:
+            return L3MutationResult(status="unavailable", document_id=request.document_id)
         document_id = str(request.document_id or "").strip()
         if not document_id:
-            return L3MutationResult(status=RuntimeStatus.INVALID, document_id="")
-        deleted = self.repository.delete_document(document_id)
-        if deleted is None:
-            return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=document_id)
-        remove_projected_entries = getattr(self.service, "remove_projected_entries", None)
-        if callable(remove_projected_entries):
-            remove_projected_entries([document_id])
-        payload = {
-            "document_id": document_id,
-            "deleted": True,
-            "deleted_document": deleted,
-            "reason": str(request.reason or ""),
-        }
-        return L3MutationResult(
-            status=RuntimeStatus.OK,
-            document_id=document_id,
-            hit=payload,
-            metadata={"deleted": True},
-        )
+            return L3MutationResult(status="invalid", document_id="")
+        with self.repository.write_lock:
+            if self.repository.frozen:
+                return L3MutationResult(status="unavailable", document_id=document_id)
+            if self.repository.catalog is not None:
+                refs = self.repository.catalog.forget(self.repository, document_id)
+                self.repository.catalog.purge_forgotten(self.repository, refs)
+            else:
+                with self.repository.write_transaction():
+                    deleted = self.repository.delete_document(document_id)
+                if deleted is None:
+                    return L3MutationResult(status="not_found", document_id=document_id)
+                refs = {document_id}
+            self.service.remove_projected_entries(list(refs))
+        return L3MutationResult(status="ok", document_id=document_id,
+            hit={"document_id": document_id, "deleted": True}, metadata={"deleted": True})
 
     def recall(self, query: MemoryQuery) -> L3RecallResult:
         if not self.mounted:
@@ -916,6 +628,7 @@ class SQLiteVecL3Plugin:
             projected_entries=projected_entries,
             metadata={
                 "refreshed_embeddings": refreshed.get("refreshed", 0),
+                "generation_id": self.repository.generation_id,
                 "vector_available": refreshed.get("vector_available", False),
                 "candidate_count": len(candidate_ids),
                 "candidate_sources": {
@@ -937,14 +650,18 @@ class SQLiteVecL3Plugin:
         )
 
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, Any]:
+        if self.read_only or self.repository.frozen or not self.mounted:
+            return {"refreshed": 0, "read_only": True, "vector_available": True}
         if self.embedding_provider is None:
             return {"refreshed": 0, "vector_available": False, "detail": "embedding-provider-unavailable"}
         active_provider_id = self._embedding_provider_id()
         active_model_name = self._embedding_model_name()
-        retargeted = self.repository.retarget_embeddings(
-            provider_id=active_provider_id,
-            model_name=active_model_name,
-        )
+        with self.repository.write_lock:
+            if self.repository.frozen:
+                return {"refreshed": 0, "read_only": True}
+            with self.repository.write_transaction():
+                retargeted = self.repository.retarget_embeddings(
+                    provider_id=active_provider_id, model_name=active_model_name, **self._embedding_profile())
         refreshed = 0
         failed_retried = 0
         failed_again = 0
@@ -965,10 +682,16 @@ class SQLiteVecL3Plugin:
             self.last_embedding_error = ""
         except Exception as exc:
             self.last_embedding_error = str(exc)
-            for metadata, _ in pending:
-                self.repository.mark_embedding_failed(embedding_id=metadata.embedding_id, error_text=self.last_embedding_error)
-                failed_again += 1
-            sqlite_vec_status = ensure_sqlite_vec_loaded()
+            with self.repository.write_lock:
+                if not self.repository.frozen:
+                    with self.repository.write_transaction():
+                        for metadata, document in pending:
+                            current = self.repository.get_embedding(metadata.embedding_id)
+                            fields = ("provider_id", "model_name", "model_revision", "text_processing_version", "source_text_hash", "updated_at", "index_status")
+                            if current is not None and all(getattr(current, field) == getattr(metadata, field) for field in fields):
+                                self.repository.mark_embedding_failed(embedding_id=metadata.embedding_id, error_text=self.last_embedding_error)
+                                failed_again += 1
+            sqlite_vec_status = ensure_sqlite_vec_loaded(self.repository.database)
             return {
                 "refreshed": 0,
                 "vector_available": bool(sqlite_vec_status.available),
@@ -981,16 +704,31 @@ class SQLiteVecL3Plugin:
                 "embedding_model": active_model_name,
                 "last_embedding_error": self.last_embedding_error,
             }
-        for (metadata, _), vector in zip(pending, vectors):
-            self.repository.upsert_vector_blob(
-                embedding_id=metadata.embedding_id,
-                vector_blob=serialize_vector(vector),
-                dimension=len(vector),
-            )
-            norm = math.sqrt(sum(value * value for value in vector))
-            self.repository.mark_embedding_ready(embedding_id=metadata.embedding_id, norm=norm)
-            refreshed += 1
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        for (metadata, document), vector in zip(pending, vectors):
+            with self.repository.write_lock:
+                if self.repository.frozen:
+                    break
+                current = self.repository.get_embedding(metadata.embedding_id)
+                current_document = self.repository.get_document(metadata.document_id)
+                if current is None or current_document is None:
+                    continue
+                expected = (metadata.provider_id, metadata.model_name, metadata.source_text_hash)
+                profile = self._embedding_profile()
+                if any(getattr(current, key) != value or getattr(metadata, key) != value for key, value in profile.items()):
+                    continue
+                if (current.provider_id, current.model_name, current.source_text_hash) != expected:
+                    continue
+                if current_document.get("content_revision") != document.get("content_revision"):
+                    continue
+                if self._embedding_provider_id() != metadata.provider_id or self._embedding_model_name() != metadata.model_name:
+                    continue
+                with self.repository.write_transaction():
+                    self.repository.upsert_vector_blob(embedding_id=metadata.embedding_id,
+                        vector_blob=serialize_vector(vector), dimension=len(vector))
+                    self.repository.mark_embedding_ready(embedding_id=metadata.embedding_id,
+                        norm=math.sqrt(sum(value * value for value in vector)))
+                refreshed += 1
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.repository.database)
         return {
             "refreshed": refreshed,
             "vector_available": bool(sqlite_vec_status.available),
@@ -1014,6 +752,7 @@ class SQLiteVecL3Plugin:
             provider_id=self._embedding_provider_id(),
             model_name=self._embedding_model_name(),
             index_status="stale" if stale else "pending",
+            **self._embedding_profile(),
         )
 
     def _project_entry(self, hit: dict[str, Any], *, source_kind: str, candidate_state: str) -> L2Entry:
@@ -1047,6 +786,7 @@ class SQLiteVecL3Plugin:
         sqlite_vec_scores = self.repository.query_vector_candidates_sqlite_vec(
             provider_id=self._embedding_provider_id(),
             model_name=self._embedding_model_name(),
+            **self._embedding_profile(),
             query_vector=query_vector,
             limit=limit,
         )
@@ -1056,8 +796,11 @@ class SQLiteVecL3Plugin:
         for metadata, blob in self.repository.list_vector_rows(
             provider_id=self._embedding_provider_id(),
             model_name=self._embedding_model_name(),
+            **self._embedding_profile(),
         ):
             candidate = deserialize_vector(blob)
+            if len(candidate) != len(query_vector):
+                continue
             similarity = cosine_similarity(query_vector, candidate)
             if similarity < self.min_vector_similarity:
                 continue
@@ -1086,6 +829,10 @@ class SQLiteVecL3Plugin:
         if len(active_sources) == 1:
             return active_sources[0]
         return "+".join(active_sources)
+
+    def _embedding_profile(self) -> dict[str, Any]:
+        return {"model_revision": getattr(self.embedding_provider, "model_revision", None),
+                "text_processing_version": str(getattr(self.embedding_provider, "text_processing_version", "search_text_v1"))}
 
     def _embedding_provider_id(self) -> str:
         return str(getattr(self.embedding_provider, "provider_id", "unavailable") or "unavailable")

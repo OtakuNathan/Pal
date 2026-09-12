@@ -39,6 +39,10 @@ class CoreRuntimeState:
     resident_interrupting_turn_id: str | None = None
     resident_interrupt_task: asyncio.Task[bool] | None = None
     resident_quiescing: bool = False
+    memory_maintenance: bool = False
+    memory_ingress_reservations: int = 0
+    memory_control_reservations: int = 0
+    memory_maintenance_changed: asyncio.Event = field(default_factory=asyncio.Event)
     resident_drained_event: asyncio.Event = field(default_factory=asyncio.Event)
     resident_execution_lifetime_id: str = "pal:resident"
     prompt_log_enabled: bool = False

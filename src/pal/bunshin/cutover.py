@@ -45,7 +45,7 @@ def cutover_bunshin_runtime(runtime_root: Path) -> BunshinRuntimeCutoverResult:
             ),
             previous_version=previous_version,
         )
-    _require_manager_stopped(root)
+    require_bunshin_runtime_stopped(root)
 
     profile_source = source / "catalog" / "profile_overrides"
     family_source = source / "catalog" / "family_overrides"
@@ -137,7 +137,7 @@ def _bunshin_schema_version(db_path: Path) -> int:
         return -1
 
 
-def _require_manager_stopped(runtime_root: Path) -> None:
+def require_bunshin_runtime_stopped(runtime_root: Path) -> None:
     try:
         health = BunshinManagerClient(
             runtime_root,
@@ -166,4 +166,5 @@ def _fsync_directory(path: Path) -> None:
 __all__ = [
     "BunshinRuntimeCutoverResult",
     "cutover_bunshin_runtime",
+    "require_bunshin_runtime_stopped",
 ]

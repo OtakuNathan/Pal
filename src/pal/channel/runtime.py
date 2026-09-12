@@ -259,6 +259,9 @@ class ChannelEndpointRegistry:
 
 @dataclass
 class ChannelRuntime(ChannelRuntimePort):
+    user_route_path: Any = None
+    _last_user_route: Any = None
+    _reply_waiters: dict[str, asyncio.Future] = field(default_factory=dict, init=False, repr=False)
     adapter_registry: ChannelAdapterRegistry = field(default_factory=ChannelAdapterRegistry)
     endpoint_registry: ChannelEndpointRegistry = field(default_factory=ChannelEndpointRegistry)
     mailbox: Mailbox[EventEnvelope] = field(default_factory=Mailbox)
@@ -282,6 +285,29 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def __post_init__(self) -> None:
         self.mailbox.on_put = self._notify_ready
+
+    def remember_user_route(self, route) -> None:
+        from pal.channel.user_route import save_user_route
+        if self.user_route_path is not None:
+            save_user_route(self.user_route_path, route)
+        self._last_user_route = route
+
+    def last_user_route(self):
+        from pal.channel.user_route import load_user_route
+        if self._last_user_route is None and self.user_route_path is not None:
+            self._last_user_route = load_user_route(self.user_route_path)
+        return self._last_user_route
+
+    async def wait_for_reply(self, reply_id: str, *, timeout: float = 30.0) -> bool:
+        future = asyncio.get_running_loop().create_future()
+        self._reply_waiters[reply_id] = future
+        self._notify_ready()
+        try:
+            return bool(await asyncio.wait_for(future, timeout=timeout))
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._reply_waiters.pop(reply_id, None)
 
     def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
         self._bind_endpoint_ready(endpoint)
@@ -1630,6 +1656,16 @@ class ChannelRuntime(ChannelRuntimePort):
         )
 
     def _notify_ready(self) -> None:
+        if self._reply_waiters:
+            for event in self.mailbox.peek_all():
+                if event.event_kind not in {EventKind.REPLY_DELIVERED, EventKind.REPLY_FAILED} or not isinstance(event.payload, dict):
+                    continue
+                future = self._reply_waiters.get(str(event.payload.get("reply_id") or ""))
+                if future is not None and not future.done():
+                    def resolve(waiter=future, delivered=event.event_kind == EventKind.REPLY_DELIVERED):
+                        if not waiter.done():
+                            waiter.set_result(delivered)
+                    future.get_loop().call_soon_threadsafe(resolve)
         if self.on_ready is not None:
             self.on_ready()
 

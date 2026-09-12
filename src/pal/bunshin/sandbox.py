@@ -654,6 +654,9 @@ def _append_runtime_root_binds(
         if path.exists():
             _append_dir_scaffold(args, path)
             args.extend(["--ro-bind", str(path), str(path)])
+    memory_root = runtime_root / "memory"
+    if memory_root.is_dir():
+        _append_bind_path(args, memory_root, read_only=True)
     run_dir_value = str(pack.workspace.get("run_dir") or "").strip()
     run_dir = Path(run_dir_value).expanduser() if run_dir_value else None
     if run_dir is not None and run_dir.is_dir():

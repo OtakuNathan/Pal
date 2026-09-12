@@ -483,31 +483,33 @@ class BunshinV2WorkflowService:
                 *(((input_binding_ref.sha256, "input_binding"),) if input_binding_ref else ()),
             ),
         )
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_WORKFLOW",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor=actor,
-                source_channel=source_channel,
-                expected_version=0,
-                idempotency_key=f"create-workflow:{workflow_id}",
-                payload={
-                    "request_ref": request_ref.to_dict(),
-                    "task_id": task_id,
-                    "workflow_name": workflow_name,
-                    "task_revision_ref": task_revision_ref,
-                    "family_binding_ref": family_binding_ref,
-                    "operation": operation,
-                    "research_mode": research_mode.value,
-                    "owner": actor,
-                    "desired_state": "ACTIVE",
-                    "orchestration_contract_version": "6",
-                    **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
-                },
+        from pal.bunshin.memory_binding import workflow_memory_binding
+        with workflow_memory_binding(self.runtime_root, self.repository, workflow_id):
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="CREATE_WORKFLOW",
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow_id,
+                    actor=actor,
+                    source_channel=source_channel,
+                    expected_version=0,
+                    idempotency_key=f"create-workflow:{workflow_id}",
+                    payload={
+                        "request_ref": request_ref.to_dict(),
+                        "task_id": task_id,
+                        "workflow_name": workflow_name,
+                        "task_revision_ref": task_revision_ref,
+                        "family_binding_ref": family_binding_ref,
+                        "operation": operation,
+                        "research_mode": research_mode.value,
+                        "owner": actor,
+                        "desired_state": "ACTIVE",
+                        "orchestration_contract_version": "6",
+                        **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
+                    },
+                )
             )
-        )
         task_rows = self.repository.search_tasks(
             task_id=task_id,
             include_archived=True,

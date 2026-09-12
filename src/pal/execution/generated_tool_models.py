@@ -763,6 +763,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderWriteInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderWriteInput',
     {
         'kind': (Literal['fact', 'case'], Field(..., description='Use fact for stable facts, preferences, project context, or decisions. Use case for reusable task/failure/repair lessons; case requires star.')),
+        'source_event_id': (str, Field(None, description='For a case, optional exact incident/event identifier from current context, copied from observed source evidence. Do not invent one or use a shared task, endpoint, symptom or repair name as event identity. Omit when unknown; such cases remain separate during dreaming.')),
         'summary': (str, Field(..., description='Concise prompt-ready memory text future Pal can read directly.')),
         'search_text': (str, Field(..., description='Retrieval/source text with concrete names, symptoms, decisions, or wording. This can be longer than summary but should not be raw unrelated context.')),
         'topics': (list[str], Field(None, description='Optional short semantic topic tags such as project, subsystem, preference area, or failure domain.')),

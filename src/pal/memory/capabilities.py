@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_READ,
     DIRECT_LOCAL_WRITE,
     INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from pal.control.contracts import ControlAction
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
+from pal.memory.mutations import mutation_id_from_call
+from pal.memory.dreaming.tool_models import DreamingInput, MemoryHistoryInput
 from pal.memory.candidates import l3_commit_args_from_memory_candidate, memory_star_from_args, star_text_fields
 from pal.memory.contracts import L3CommitRequest, L3CorrectRequest, L3DeleteRequest, MemoryQuery
 from pal.memory.rendering import (
@@ -119,6 +122,55 @@ class MemoryIntrospectionProvider:
     service: MemoryService
     context: MainContext
     module_id: str = "memory"
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="dreaming",
+        InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("memory_dreaming",),
+        async_handler_name="dreaming_async",
+        examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
+        guidance=ToolGuidance(purpose="Inspect, start or resume conservative memory duplicate consolidation.",
+            use_when="The user requests dreaming, a dry run, or its status/report.",
+            do_not_use_when="For immediate memory corrections, use update.",
+            failure_next_steps="Read the run report; failed runs preserve the published generation."))
+    def dreaming(self, call: IntrospectionCall) -> IntrospectionResult:
+        service = self.context.port_registry.get("memory.dreaming:dreaming")
+        if service is None:
+            return IntrospectionResult(status="unavailable", text="Dreaming is only available on the main Pal runtime.")
+        operation = str(call.args.get("operation") or "status")
+        run_id = call.args.get("run_id")
+        if operation in {"status", "report"}:
+            result = service.status(run_id)
+        elif operation == "start":
+            result = service.start(dry_run=bool(call.args.get("dry_run")))
+        elif operation == "resume":
+            result = service.start(resume=run_id or service.status().get("run_id"))
+        else:
+            return IntrospectionResult(status="invalid", text="Unsupported dreaming operation.")
+        return IntrospectionResult(status="ok", text="Dreaming", structured=result,
+            llm_text=render_titled_structured_for_llm("Dreaming", result))
+
+    async def dreaming_async(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self.dreaming(call)
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="history",
+        InputModel=MemoryHistoryInput, aliases=("memory_history",),
+        execution=INDIRECT_LOCAL_READ,
+        examples=({"query": "prior API preference"},),
+        guidance=ToolGuidance(purpose="Explicitly read archived original memories and successor references.",
+            use_when="Current recall lacks historical details or a memory reference has been replaced.",
+            do_not_use_when="Do not treat historical results as current facts or install them into L2 HOT.",
+            failure_next_steps="Try the current successor reference or a more specific archive query."))
+    def history(self, call: IntrospectionCall) -> IntrospectionResult:
+        provider = self.service._resolve_l3_provider()
+        repo = getattr(provider, "repository", None)
+        storage = getattr(repo, "catalog", None)
+        if storage is None:
+            return IntrospectionResult(status="unavailable", text="No memory archive is available.")
+        ref = str(call.args.get("mem_ref") or "")
+        query = str(call.args.get("query") or "")
+        results = storage.history(ref, repo=repo) if ref else storage.search_archive(query, limit=int(call.args.get("limit") or 8), repo=repo)
+        payload = {"historical": True, "items": results}
+        return IntrospectionResult(status="ok", text="Historical memory originals", structured=payload,
+            llm_text=render_titled_structured_for_llm("Historical memory originals", payload))
 
     async def handle_memory_candidate_decision_async(self, action: ControlAction) -> str:
         decision = str(action.args.get("decision") or "").strip().lower()
@@ -277,7 +329,7 @@ class MemoryIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="update_memory",
-                    use_when="A recalled mem_ref should be corrected, merged, or brought up to date.",
+                    use_when="The user explicitly corrects a known memory; semantic consolidation belongs to dreaming.",
                 ),
                 NextToolHint(
                     name="forget_memory",
@@ -324,13 +376,13 @@ class MemoryIntrospectionProvider:
                 "Only when the user explicitly asks to remember/save, or states a clear durable fact/preference. "
                 "For facts, preferences, project context, prior decisions. "
                 "After fixing a bug or completing a debugging session with reusable lessons — write kind='case'. "
-                "Before writing, recall_memory with the candidate and limit 3-5 to check for duplicates. "
-                "If a recalled record covers or corrects the candidate, use update_memory instead."
+                "Remember creates a new record; semantic duplicates are handled by dreaming. "
+                "Use update_memory only for an explicit correction to a known record, never for speculative consolidation."
             ),
             do_not_use_when=(
                 "Not for behavior rules (use learn_behavior). "
                 "Not for current runtime state or external facts. "
-                "Do not write duplicates or invent mem_ref values."
+                "Do not invent mem_ref values. Canonical conflicts require explicit update."
             ),
             failure_next_steps=(
                 "Use summary for prompt-ready text and search_text for retrieval; mem_ref prefixes (fact:/case:) are "
@@ -372,12 +424,15 @@ class MemoryIntrospectionProvider:
             )
         task_id = _read_task_id(call.args)
         payload = dict(call.args.get("payload") or {})
+        if kind == "case" and call.args.get("source_event_id"):
+            payload["source_event_id"] = str(call.args["source_event_id"])
         if star:
             payload.update(star)
         star_fields = star_text_fields(star) if star else {}
         provider = self.service.l3_selector.resolve()
         result = provider.commit(
             L3CommitRequest(
+                mutation_id=mutation_id_from_call(call),
                 kind=kind,
                 title=_memory_title_from_summary(summary),
                 summary=summary,
@@ -443,6 +498,7 @@ class MemoryIntrospectionProvider:
         provider = self.service.l3_selector.resolve()
         result = provider.correct(
             L3CorrectRequest(
+                mutation_id=mutation_id_from_call(call),
                 document_id=mem_ref,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
                 search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,

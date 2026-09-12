@@ -5,9 +5,13 @@ import json
 import math
 import os
 import sqlite3
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from peewee import Value
 
 from pal.foundation import utc_now
 from pal.memory.models import (
@@ -16,6 +20,7 @@ from pal.memory.models import (
     MemoryEmbeddingVecModel,
     MemoryFactModel,
     MemoryTopicModel,
+    memory_model_set,
 )
 from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
 
@@ -33,20 +38,90 @@ class L3ProviderSelector:
 
 
 class MemoryDurableRepository:
+    def __init__(self, database=None, *, read_only: bool = False) -> None:
+        self.database = database if database is not None else MemoryFactModel._meta.database
+        self.read_only = read_only
+        self.Fact, self.Case, self.Topic, self.Embedding, self.Vector = memory_model_set(self.database)
+        self.generation_id = ""
+        self.catalog = None
+        self.excluded_refs: set[str] = set()
+        self.write_lock = threading.RLock()
+        self._frozen = False
+        self._frozen_writer = None
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen or bool(self.catalog is not None and self.catalog.is_frozen(self.generation_id))
+
+    @contextmanager
+    def write_transaction(self):
+        with self.write_lock:
+            if self.read_only or self.frozen:
+                raise PermissionError("memory generation is read-only or frozen")
+            lease = self.catalog.writer_lock(self.generation_id) if self.catalog is not None and not self.database.in_transaction() else None
+            try:
+                if self.frozen:
+                    raise PermissionError("memory generation was frozen while waiting for a writer")
+                if self.catalog is not None:
+                    with self.catalog.connection() as connection:
+                        retired = connection.execute("SELECT retired_at FROM generations WHERE generation_id=?", (self.generation_id,)).fetchone()
+                    if retired and retired[0]:
+                        raise PermissionError("retired memory generation cannot accept writes")
+                with self.database.atomic():
+                    yield
+            finally:
+                if lease is not None:
+                    lease.close()
+
+    def freeze(self) -> None:
+        with self.write_lock:
+            if self._frozen:
+                return
+            if self.catalog is not None:
+                self._frozen_writer = self.catalog.writer_lock(self.generation_id)
+                try:
+                    self.catalog.set_frozen(self.generation_id, True)
+                except BaseException:
+                    self._frozen_writer.close()
+                    self._frozen_writer = None
+                    raise
+            self._frozen = True
+
+    def thaw(self) -> None:
+        with self.write_lock:
+            if self.catalog is not None:
+                self.catalog.set_frozen(self.generation_id, False)
+            self._frozen = False
+            if self._frozen_writer is not None:
+                self._frozen_writer.close()
+                self._frozen_writer = None
+
+    def close(self) -> None:
+        if hasattr(self.database, "close_all"):
+            self.database.close_all()
+        elif not self.database.is_closed():
+            self.database.close()
+        lease = getattr(self, "connection_lease", None)
+        if lease is not None:
+            lease.close()
+            self.connection_lease = None
+
     def ensure_schema(self) -> None:
-        if os.environ.get("PAL_DATABASE_READ_ONLY") == "1":
+        if self.read_only or os.environ.get("PAL_DATABASE_READ_ONLY") == "1":
             return
-        ensure_memory_schema()
+        self.database.create_tables([self.Fact, self.Case, self.Topic, self.Embedding, self.Vector], safe=True)
+        ensure_memory_schema(self.database)
         self.ensure_fts_indexes_synced()
 
-    def find_fact_by_canonical_key(self, canonical_key: str) -> MemoryFactModel | None:
+    def find_fact_by_canonical_key(self, canonical_key: str, *, scope="system", task_id=None) -> MemoryFactModel | None:
         normalized = str(canonical_key or "").strip()
         if not normalized:
             return None
         query = (
-            MemoryFactModel.select()
-            .where(MemoryFactModel.canonical_key == normalized)
-            .order_by(MemoryFactModel.updated_at.desc(), MemoryFactModel.fact_id.desc())
+            self.Fact.select()
+            .where((self.Fact.canonical_key == normalized) & (self.Fact.scope == scope)
+                   & (self.Fact.task_id == task_id) & (self.Fact.lifecycle == "active"))
+            .order_by(self.Fact.updated_at.desc(), self.Fact.fact_id.desc())
         )
         return query.first()
 
@@ -55,9 +130,9 @@ class MemoryDurableRepository:
         if not normalized:
             return None
         query = (
-            MemoryFactModel.select()
-            .where(MemoryFactModel.dedupe_fingerprint == normalized)
-            .order_by(MemoryFactModel.updated_at.desc(), MemoryFactModel.fact_id.desc())
+            self.Fact.select()
+            .where(self.Fact.dedupe_fingerprint == normalized)
+            .order_by(self.Fact.updated_at.desc(), self.Fact.fact_id.desc())
         )
         return query.first()
 
@@ -66,17 +141,17 @@ class MemoryDurableRepository:
         if not normalized:
             return None
         query = (
-            MemoryCaseModel.select()
-            .where(MemoryCaseModel.dedupe_fingerprint == normalized)
-            .order_by(MemoryCaseModel.updated_at.desc(), MemoryCaseModel.case_id.desc())
+            self.Case.select()
+            .where(self.Case.dedupe_fingerprint == normalized)
+            .order_by(self.Case.updated_at.desc(), self.Case.case_id.desc())
         )
         return query.first()
 
     def upsert_fact(self, *, fact_id: str, payload: dict[str, Any]) -> MemoryFactModel:
         now = utc_now()
-        instance = MemoryFactModel.get_or_none(MemoryFactModel.fact_id == fact_id)
+        instance = self.Fact.get_or_none(self.Fact.fact_id == fact_id)
         if instance is None:
-            return MemoryFactModel.create(
+            return self.Fact.create(
                 fact_id=fact_id,
                 created_at=now,
                 updated_at=now,
@@ -90,9 +165,9 @@ class MemoryDurableRepository:
 
     def upsert_case(self, *, case_id: str, payload: dict[str, Any]) -> MemoryCaseModel:
         now = utc_now()
-        instance = MemoryCaseModel.get_or_none(MemoryCaseModel.case_id == case_id)
+        instance = self.Case.get_or_none(self.Case.case_id == case_id)
         if instance is None:
-            return MemoryCaseModel.create(
+            return self.Case.create(
                 case_id=case_id,
                 created_at=now,
                 updated_at=now,
@@ -105,16 +180,18 @@ class MemoryDurableRepository:
         return instance
 
     def get_fact(self, fact_id: str) -> MemoryFactModel | None:
-        return MemoryFactModel.get_or_none(MemoryFactModel.fact_id == fact_id)
+        return self.Fact.get_or_none(self.Fact.fact_id == fact_id)
 
     def get_case(self, case_id: str) -> MemoryCaseModel | None:
-        return MemoryCaseModel.get_or_none(MemoryCaseModel.case_id == case_id)
+        return self.Case.get_or_none(self.Case.case_id == case_id)
 
-    def get_document(self, document_id: str) -> dict[str, Any] | None:
+    def get_document(self, document_id: str, *, include_retired: bool = False) -> dict[str, Any] | None:
+        if document_id in self.excluded_refs or (self.catalog is not None and self.catalog.is_deleted(document_id)):
+            return None
         kind, _, raw_id = document_id.partition(":")
         if kind == "fact":
             fact = self.get_fact(raw_id)
-            if fact is None:
+            if fact is None or (not include_retired and fact.lifecycle != "active"):
                 return None
             return {
                 "document_id": document_id,
@@ -132,10 +209,13 @@ class MemoryDurableRepository:
                 "last_used_at": fact.last_used_at,
                 "created_at": fact.created_at,
                 "updated_at": fact.updated_at,
+                "content_revision": fact.content_revision,
+                "topics": self.list_document_topics(document_id),
+                "generation_id": self.generation_id,
             }
         if kind == "case":
             case = self.get_case(raw_id)
-            if case is None:
+            if case is None or (not include_retired and case.lifecycle != "active"):
                 return None
             return {
                 "document_id": document_id,
@@ -168,11 +248,15 @@ class MemoryDurableRepository:
                 "last_used_at": case.last_used_at,
                 "created_at": case.created_at,
                 "updated_at": case.updated_at,
+                "canonical_key": case.canonical_key,
+                "content_revision": case.content_revision,
+                "topics": self.list_document_topics(document_id),
+                "generation_id": self.generation_id,
             }
         return None
 
     def list_projection_rows(self) -> list[dict[str, Any]]:
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         cursor = db.execute_sql(
             """
             SELECT
@@ -202,67 +286,70 @@ class MemoryDurableRepository:
         self.rebuild_fts_indexes()
 
     def rebuild_fts_indexes(self) -> None:
-        db = MemoryFactModel._meta.database
-        db.execute_sql("DELETE FROM memories_fts")
-        for row in self.list_projection_rows():
-            self._insert_fts_row("memories_fts", row)
+        db = self.Fact._meta.database
+        with db.atomic():
+            db.execute_sql("DELETE FROM memories_fts")
+            for row in self.list_projection_rows():
+                self._insert_fts_row("memories_fts", row)
+            db.execute_sql("INSERT INTO memories_fts(memories_fts) VALUES ('optimize')")
 
     def _count_projection_rows(self) -> int:
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         cursor = db.execute_sql("SELECT COUNT(*) FROM memory_document_projection")
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
     def _count_fts_rows(self, table_name: str) -> int:
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         cursor = db.execute_sql(f"SELECT COUNT(*) FROM {table_name}")
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
     def sync_fts_row(self, document_id: str) -> None:
         row = self.get_document(document_id)
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         db.execute_sql("DELETE FROM memories_fts WHERE document_id = ?", (document_id,))
         if row is None:
             return
         self._insert_fts_row("memories_fts", row)
 
-    def delete_document(self, document_id: str) -> dict[str, Any] | None:
+    def delete_document(self, document_id: str, *, physical=False) -> dict[str, Any] | None:
         normalized = str(document_id or "").strip()
         if not normalized:
             return None
         existing = self.get_document(normalized)
-        if existing is None:
+        if existing is None and not physical:
             return None
         kind, _, raw_id = normalized.partition(":")
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         embedding_ids = [
             str(row.embedding_id)
-            for row in MemoryEmbeddingModel.select(MemoryEmbeddingModel.embedding_id).where(
-                MemoryEmbeddingModel.document_id == normalized
+            for row in self.Embedding.select(self.Embedding.embedding_id).where(
+                self.Embedding.document_id == normalized
             )
         ]
         vector_rowids = [rowid for embedding_id in embedding_ids if (rowid := self._get_vector_rowid(embedding_id)) is not None]
         with db.atomic():
+            db.execute_sql("DELETE FROM memory_revisions WHERE document_id = ?", (normalized,))
             db.execute_sql("DELETE FROM memories_fts WHERE document_id = ?", (normalized,))
-            MemoryTopicModel.delete().where(MemoryTopicModel.document_id == normalized).execute()
+            self.Topic.delete().where(self.Topic.document_id == normalized).execute()
             if vector_rowids:
                 self._delete_vec_index_rows(vector_rowids)
             if embedding_ids:
-                MemoryEmbeddingVecModel.delete().where(MemoryEmbeddingVecModel.embedding_id.in_(embedding_ids)).execute()
-            MemoryEmbeddingModel.delete().where(MemoryEmbeddingModel.document_id == normalized).execute()
+                self.Vector.delete().where(self.Vector.embedding_id.in_(embedding_ids)).execute()
+            self.Embedding.delete().where(self.Embedding.document_id == normalized).execute()
             if kind == "fact":
-                MemoryFactModel.delete().where(MemoryFactModel.fact_id == raw_id).execute()
+                self.Fact.delete().where(self.Fact.fact_id == raw_id).execute()
             elif kind == "case":
-                MemoryCaseModel.delete().where(MemoryCaseModel.case_id == raw_id).execute()
+                self.Case.delete().where(self.Case.case_id == raw_id).execute()
             else:
                 return None
-        return existing
+        return existing or {"document_id": normalized}
 
     def _delete_vec_index_rows(self, rowids: list[int]) -> None:
         if not rowids:
             return
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         cursor = db.execute_sql("SELECT name FROM sqlite_master WHERE sql LIKE '%USING vec0%'")
         table_names = [str(row[0]) for row in cursor.fetchall()]
         for table_name in table_names:
@@ -273,7 +360,7 @@ class MemoryDurableRepository:
                 continue
 
     def _insert_fts_row(self, table_name: str, row: dict[str, Any]) -> None:
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         db.execute_sql(
             f"INSERT INTO {table_name}(document_id, title, summary, search_text) VALUES (?, ?, ?, ?)",
             (
@@ -285,7 +372,7 @@ class MemoryDurableRepository:
         )
 
     def replace_topics(self, document_id: str, topics: list[str]) -> None:
-        MemoryTopicModel.delete().where(MemoryTopicModel.document_id == document_id).execute()
+        self.Topic.delete().where(self.Topic.document_id == document_id).execute()
         if not topics:
             return
         now = utc_now()
@@ -295,7 +382,7 @@ class MemoryDurableRepository:
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            MemoryTopicModel.create(
+            self.Topic.create(
                 topic_id=f"{document_id}:{normalized}",
                 document_id=document_id,
                 topic=str(topic).strip(),
@@ -305,9 +392,9 @@ class MemoryDurableRepository:
 
     def list_document_topics(self, document_id: str) -> list[str]:
         query = (
-            MemoryTopicModel.select()
-            .where(MemoryTopicModel.document_id == document_id)
-            .order_by(MemoryTopicModel.normalized_topic, MemoryTopicModel.topic_id)
+            self.Topic.select()
+            .where(self.Topic.document_id == document_id)
+            .order_by(self.Topic.normalized_topic, self.Topic.topic_id)
         )
         return [str(row.topic).strip() for row in query if str(row.topic or "").strip()]
 
@@ -321,19 +408,22 @@ class MemoryDurableRepository:
         embedding_kind: str = "primary",
         index_status: str = "pending",
         last_error: str | None = None,
+        model_revision: str | None = None,
+        text_processing_version: str = "search_text_v1",
     ) -> MemoryEmbeddingModel:
         embedding_id = f"{document_id}:{embedding_kind}"
         source_text_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         now = utc_now()
-        instance = MemoryEmbeddingModel.get_or_none(MemoryEmbeddingModel.embedding_id == embedding_id)
+        instance = self.Embedding.get_or_none(self.Embedding.embedding_id == embedding_id)
         if instance is None:
-            return MemoryEmbeddingModel.create(
+            return self.Embedding.create(
                 embedding_id=embedding_id,
                 document_id=document_id,
                 embedding_kind=embedding_kind,
                 provider_id=provider_id,
                 model_name=model_name,
-                model_revision=None,
+                model_revision=model_revision,
+                text_processing_version=text_processing_version,
                 source_text_hash=source_text_hash,
                 embedding_norm=None,
                 index_status=index_status,
@@ -345,6 +435,8 @@ class MemoryDurableRepository:
         instance.embedding_kind = embedding_kind
         instance.provider_id = provider_id
         instance.model_name = model_name
+        instance.model_revision = model_revision
+        instance.text_processing_version = text_processing_version
         instance.source_text_hash = source_text_hash
         instance.index_status = index_status
         instance.last_error = last_error
@@ -358,17 +450,22 @@ class MemoryDurableRepository:
         provider_id: str,
         model_name: str,
         embedding_kind: str = "primary",
+        model_revision: str | None = None,
+        text_processing_version: str = "search_text_v1",
     ) -> int:
         now = utc_now()
-        query = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.embedding_kind == embedding_kind)
+        query = self.Embedding.select().where(self.Embedding.embedding_kind == embedding_kind)
         updated = 0
         for instance in query:
             current_provider_id = str(getattr(instance, "provider_id", "") or "").strip()
             current_model_name = str(instance.model_name or "").strip()
-            if current_provider_id == provider_id and current_model_name == model_name:
+            if (current_provider_id == provider_id and current_model_name == model_name
+                    and instance.model_revision == model_revision and instance.text_processing_version == text_processing_version):
                 continue
             instance.provider_id = provider_id
             instance.model_name = model_name
+            instance.model_revision = model_revision
+            instance.text_processing_version = text_processing_version
             instance.index_status = "stale"
             instance.last_error = None
             instance.updated_at = now
@@ -376,11 +473,15 @@ class MemoryDurableRepository:
             updated += 1
         return updated
 
+    def _active_embedding_condition(self):
+        return (self.Embedding.document_id.in_(self.Fact.select(Value("fact:").concat(self.Fact.fact_id)).where(self.Fact.lifecycle == "active"))
+                | self.Embedding.document_id.in_(self.Case.select(Value("case:").concat(self.Case.case_id)).where(self.Case.lifecycle == "active")))
+
     def list_pending_embeddings(self, *, limit: int) -> list[MemoryEmbeddingModel]:
         query = (
-            MemoryEmbeddingModel.select()
-            .where(MemoryEmbeddingModel.index_status.in_(("pending", "stale")))
-            .order_by(MemoryEmbeddingModel.updated_at, MemoryEmbeddingModel.embedding_id)
+            self.Embedding.select()
+            .where(self.Embedding.index_status.in_(("pending", "stale")), self._active_embedding_condition())
+            .order_by(self.Embedding.updated_at, self.Embedding.embedding_id)
             .limit(limit)
         )
         return list(query)
@@ -390,18 +491,18 @@ class MemoryDurableRepository:
         if retry_failed:
             statuses.append("failed")
         query = (
-            MemoryEmbeddingModel.select()
-            .where(MemoryEmbeddingModel.index_status.in_(tuple(statuses)))
-            .order_by(MemoryEmbeddingModel.updated_at, MemoryEmbeddingModel.embedding_id)
+            self.Embedding.select()
+            .where(self.Embedding.index_status.in_(tuple(statuses)), self._active_embedding_condition())
+            .order_by(self.Embedding.updated_at, self.Embedding.embedding_id)
             .limit(limit)
         )
         return list(query)
 
     def list_failed_embeddings(self, *, limit: int = 5) -> list[dict[str, Any]]:
         rows = (
-            MemoryEmbeddingModel.select()
-            .where(MemoryEmbeddingModel.index_status == "failed")
-            .order_by(MemoryEmbeddingModel.updated_at.desc(), MemoryEmbeddingModel.embedding_id.desc())
+            self.Embedding.select()
+            .where(self.Embedding.index_status == "failed", self._active_embedding_condition())
+            .order_by(self.Embedding.updated_at.desc(), self.Embedding.embedding_id.desc())
             .limit(limit)
         )
         return [
@@ -418,16 +519,16 @@ class MemoryDurableRepository:
         ]
 
     def get_embedding(self, embedding_id: str) -> MemoryEmbeddingModel | None:
-        return MemoryEmbeddingModel.get_or_none(MemoryEmbeddingModel.embedding_id == embedding_id)
+        return self.Embedding.get_or_none(self.Embedding.embedding_id == embedding_id)
 
     def get_vector_blob(self, embedding_id: str) -> bytes | None:
-        vector = MemoryEmbeddingVecModel.get_or_none(MemoryEmbeddingVecModel.embedding_id == embedding_id)
+        vector = self.Vector.get_or_none(self.Vector.embedding_id == embedding_id)
         if vector is None:
             return None
         return bytes(vector.vector_blob)
 
     def _get_vector_rowid(self, embedding_id: str) -> int | None:
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         cursor = db.execute_sql(
             "SELECT rowid FROM memory_embedding_vec WHERE embedding_id = ?",
             (embedding_id,),
@@ -439,9 +540,9 @@ class MemoryDurableRepository:
 
     def upsert_vector_blob(self, *, embedding_id: str, vector_blob: bytes, dimension: int) -> None:
         now = utc_now()
-        instance = MemoryEmbeddingVecModel.get_or_none(MemoryEmbeddingVecModel.embedding_id == embedding_id)
+        instance = self.Vector.get_or_none(self.Vector.embedding_id == embedding_id)
         if instance is None:
-            MemoryEmbeddingVecModel.create(
+            self.Vector.create(
                 embedding_id=embedding_id,
                 vector_blob=vector_blob,
                 dimension=dimension,
@@ -486,8 +587,8 @@ class MemoryDurableRepository:
         if not normalized:
             return {}
         query = (
-            MemoryTopicModel.select(MemoryTopicModel.document_id)
-            .where(MemoryTopicModel.normalized_topic.in_(normalized))
+            self.Topic.select(self.Topic.document_id)
+            .where(self.Topic.normalized_topic.in_(normalized))
         )
         scores: dict[str, float] = {}
         for row in query:
@@ -498,6 +599,11 @@ class MemoryDurableRepository:
     def list_fts_candidates(self, text: str, *, limit: int) -> dict[str, float]:
         scores, _ = self.collect_lexical_candidates(text, limit=limit)
         return scores
+
+    def list_fts_term_candidates(self, terms, *, limit: int) -> dict[str, float]:
+        """One bounded lexical discovery query, for document-to-document work."""
+        query = " OR ".join('"' + str(term).replace('"', '""') + '"' for term in terms if term)
+        return self._run_fts_queries("memories_fts", [(query, 1.0)], limit=limit) if query else {}
 
     def collect_lexical_candidates(self, text: str, *, limit: int) -> tuple[dict[str, float], dict[str, int]]:
         normalized = _normalize_query_text(text)
@@ -526,7 +632,7 @@ class MemoryDurableRepository:
     def _run_fts_queries(self, table_name: str, queries: list[tuple[str, float]], *, limit: int) -> dict[str, float]:
         if not queries:
             return {}
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         scores: dict[str, float] = {}
         for query_text, query_weight in queries:
             try:
@@ -552,7 +658,7 @@ class MemoryDurableRepository:
         if not normalized:
             return {}
         lowered = normalized.lower()
-        db = MemoryFactModel._meta.database
+        db = self.Fact._meta.database
         cursor = db.execute_sql(
             """
             SELECT
@@ -577,16 +683,18 @@ class MemoryDurableRepository:
         )
         return {str(document_id): float(score) for document_id, score in cursor.fetchall() if float(score) > 0.0}
 
-    def list_vector_rows(self, *, provider_id: str, model_name: str) -> list[tuple[MemoryEmbeddingModel, bytes]]:
+    def list_vector_rows(self, *, provider_id: str, model_name: str, model_revision=None, text_processing_version="search_text_v1") -> list[tuple[MemoryEmbeddingModel, bytes]]:
         rows: list[tuple[MemoryEmbeddingModel, bytes]] = []
         query = (
-            MemoryEmbeddingModel.select()
+            self.Embedding.select()
             .where(
-                (MemoryEmbeddingModel.index_status == "ready")
-                & (MemoryEmbeddingModel.provider_id == str(provider_id))
-                & (MemoryEmbeddingModel.model_name == str(model_name))
+                (self.Embedding.index_status == "ready")
+                & (self.Embedding.provider_id == str(provider_id))
+                & (self.Embedding.model_name == str(model_name))
+                & (self.Embedding.model_revision == model_revision)
+                & (self.Embedding.text_processing_version == text_processing_version)
             )
-            .order_by(MemoryEmbeddingModel.embedding_id)
+            .order_by(self.Embedding.embedding_id)
         )
         for metadata in query:
             blob = self.get_vector_blob(metadata.embedding_id)
@@ -602,10 +710,12 @@ class MemoryDurableRepository:
         model_name: str,
         query_vector: list[float],
         limit: int,
+        model_revision: str | None = None,
+        text_processing_version: str = "search_text_v1",
     ) -> dict[str, float] | None:
         if not query_vector:
             return {}
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.database)
         if not sqlite_vec_status.available:
             return None
         dimension = len(query_vector)
@@ -616,32 +726,31 @@ class MemoryDurableRepository:
         )
         if not table_name:
             return {}
-        db = MemoryEmbeddingModel._meta.database
+        db = self.Embedding._meta.database
         query_payload = json.dumps([float(value) for value in query_vector], ensure_ascii=True, separators=(",", ":"))
         try:
+            # Keep KNN separate from metadata joins. SQLite can otherwise
+            # evaluate the virtual nearest-neighbor scan once per metadata row.
+            matches = db.execute_sql(
+                f"SELECT rowid,distance FROM {table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                (query_payload, limit),
+            ).fetchall()
+            if not matches:
+                return {}
+            distances = {int(rowid): float(distance) for rowid, distance in matches}
             cursor = db.execute_sql(
-                f"""
-                SELECT me.document_id, matches.distance
-                FROM (
-                    SELECT rowid, distance
-                    FROM {table_name}
-                    WHERE embedding MATCH ?
-                    ORDER BY distance
-                    LIMIT ?
-                ) AS matches
-                JOIN memory_embedding_vec mev ON mev.rowid = matches.rowid
-                JOIN memory_embeddings me ON me.embedding_id = mev.embedding_id
-                WHERE me.index_status = 'ready'
-                  AND me.provider_id = ?
-                  AND me.model_name = ?
-                ORDER BY matches.distance, me.document_id
-                """,
-                (query_payload, limit, str(provider_id), str(model_name)),
+                f"""SELECT me.document_id,mev.rowid
+                    FROM memory_embedding_vec mev JOIN memory_embeddings me ON me.embedding_id=mev.embedding_id
+                    WHERE mev.rowid IN ({','.join('?' for _ in distances)})
+                    AND me.index_status='ready' AND me.provider_id=? AND me.model_name=?
+                    AND me.model_revision IS ? AND me.text_processing_version=?""",
+                (*distances, str(provider_id), str(model_name), model_revision, text_processing_version),
             )
+            resolved = [(document_id, distances[rowid]) for document_id, rowid in cursor.fetchall()]
         except sqlite3.OperationalError:
             return None
         scores: dict[str, float] = {}
-        for document_id, distance in cursor.fetchall():
+        for document_id, distance in sorted(resolved, key=lambda item: (item[1], item[0])):
             normalized_document_id = str(document_id)
             distance_value = float(distance)
             score = 1.0 / (1.0 + max(distance_value, 0.0))
@@ -651,27 +760,35 @@ class MemoryDurableRepository:
     def ensure_vec_index_synced(self, *, provider_id: str, model_name: str, dimension: int) -> str | None:
         if dimension <= 0:
             return None
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.database)
         if not sqlite_vec_status.available:
             return None
         table_name = self._vec_index_table_name(provider_id=provider_id, model_name=model_name, dimension=dimension)
-        self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
-        ready_count = self._count_ready_vector_group(
-            provider_id=provider_id,
-            model_name=model_name,
-            dimension=dimension,
-        )
-        if ready_count <= 0:
-            return table_name
-        index_count = self._count_vec_index_rows(table_name)
-        if index_count != ready_count:
-            self.rebuild_vec_index_group(
-                provider_id=provider_id,
-                model_name=model_name,
-                dimension=dimension,
-                table_name=table_name,
-            )
-        return table_name
+        if self.read_only or self.frozen:
+            exists = self.database.execute_sql("SELECT 1 FROM sqlite_master WHERE name=?", (table_name,)).fetchone()
+            return table_name if exists else None
+        with self.write_lock:
+            if self.frozen:
+                exists = self.database.execute_sql("SELECT 1 FROM sqlite_master WHERE name=?", (table_name,)).fetchone()
+                return table_name if exists else None
+            with self.write_transaction():
+                self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
+                ready_count = self._count_ready_vector_group(
+                    provider_id=provider_id,
+                    model_name=model_name,
+                    dimension=dimension,
+                )
+                if ready_count <= 0:
+                    return table_name
+                index_count = self._count_vec_index_rows(table_name)
+                if index_count != ready_count:
+                    self.rebuild_vec_index_group(
+                        provider_id=provider_id,
+                        model_name=model_name,
+                        dimension=dimension,
+                        table_name=table_name,
+                    )
+                return table_name
 
     def rebuild_vec_index_group(
         self,
@@ -681,7 +798,7 @@ class MemoryDurableRepository:
         dimension: int,
         table_name: str | None = None,
     ) -> str | None:
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.database)
         if not sqlite_vec_status.available:
             return None
         resolved_table_name = table_name or self._vec_index_table_name(
@@ -690,7 +807,7 @@ class MemoryDurableRepository:
             dimension=dimension,
         )
         self._ensure_vec_index_table(table_name=resolved_table_name, dimension=dimension)
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         db.execute_sql(f"DELETE FROM {resolved_table_name}")
         for rowid, vector_blob in self._list_ready_vector_group_rows(
             provider_id=provider_id,
@@ -712,7 +829,7 @@ class MemoryDurableRepository:
         dimension: int,
         vector_blob: bytes,
     ) -> None:
-        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        sqlite_vec_status = ensure_sqlite_vec_loaded(self.database)
         if not sqlite_vec_status.available or dimension <= 0:
             return
         rowid = self._get_vector_rowid(embedding_id)
@@ -720,7 +837,7 @@ class MemoryDurableRepository:
             return
         table_name = self._vec_index_table_name(provider_id=provider_id, model_name=model_name, dimension=dimension)
         self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         try:
             db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
             db.execute_sql(
@@ -731,7 +848,7 @@ class MemoryDurableRepository:
             return
 
     def _ensure_vec_index_table(self, *, table_name: str, dimension: int) -> None:
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         db.execute_sql(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING vec0(embedding float[{int(dimension)}])"
         )
@@ -743,7 +860,7 @@ class MemoryDurableRepository:
         return f"memory_vec_idx_{int(dimension)}_{suffix}"
 
     def _count_ready_vector_group(self, *, provider_id: str, model_name: str, dimension: int) -> int:
-        db = MemoryEmbeddingModel._meta.database
+        db = self.Embedding._meta.database
         cursor = db.execute_sql(
             """
             SELECT COUNT(*)
@@ -760,7 +877,7 @@ class MemoryDurableRepository:
         return int(row[0]) if row else 0
 
     def _count_vec_index_rows(self, table_name: str) -> int:
-        db = MemoryEmbeddingVecModel._meta.database
+        db = self.Vector._meta.database
         try:
             cursor = db.execute_sql(f"SELECT COUNT(*) FROM {table_name}")
         except sqlite3.OperationalError:
@@ -775,7 +892,7 @@ class MemoryDurableRepository:
         model_name: str,
         dimension: int,
     ) -> list[tuple[int, bytes]]:
-        db = MemoryEmbeddingModel._meta.database
+        db = self.Embedding._meta.database
         cursor = db.execute_sql(
             """
             SELECT mev.rowid, mev.vector_blob
@@ -797,36 +914,40 @@ class MemoryDurableRepository:
         return rows
 
     def bump_usage(self, document_ids: list[str]) -> None:
-        now = utc_now()
-        for document_id in document_ids:
-            kind, _, raw_id = document_id.partition(":")
-            if kind == "fact":
-                fact = self.get_fact(raw_id)
-                if fact is None:
-                    continue
-                fact.use_count += 1
-                fact.last_used_at = now
-                fact.updated_at = now
-                fact.save()
-            elif kind == "case":
-                case = self.get_case(raw_id)
-                if case is None:
-                    continue
-                case.use_count += 1
-                case.last_used_at = now
-                case.updated_at = now
-                case.save()
+        if self.read_only or self.frozen:
+            return
+        with self.write_lock:
+            if self.read_only or self.frozen:
+                return
+            with self.write_transaction():
+                now = utc_now()
+                for document_id in document_ids:
+                    kind, _, raw_id = document_id.partition(":")
+                    if kind == "fact":
+                        fact = self.get_fact(raw_id)
+                        if fact is None:
+                            continue
+                        fact.use_count += 1
+                        fact.last_used_at = now
+                        fact.save()
+                    elif kind == "case":
+                        case = self.get_case(raw_id)
+                        if case is None:
+                            continue
+                        case.use_count += 1
+                        case.last_used_at = now
+                        case.save()
 
     def inventory(self) -> dict[str, Any]:
-        ready_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "ready").count()
-        pending_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "pending").count()
-        stale_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "stale").count()
-        failed_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "failed").count()
+        ready_embeddings = self.Embedding.select().where(self.Embedding.index_status == "ready", self._active_embedding_condition()).count()
+        pending_embeddings = self.Embedding.select().where(self.Embedding.index_status == "pending", self._active_embedding_condition()).count()
+        stale_embeddings = self.Embedding.select().where(self.Embedding.index_status == "stale", self._active_embedding_condition()).count()
+        failed_embeddings = self.Embedding.select().where(self.Embedding.index_status == "failed", self._active_embedding_condition()).count()
         return {
-            "fact_count": MemoryFactModel.select().count(),
-            "case_count": MemoryCaseModel.select().count(),
-            "topic_count": MemoryTopicModel.select().count(),
-            "embedding_count": MemoryEmbeddingModel.select().count(),
+            "fact_count": self.Fact.select().where(self.Fact.lifecycle == "active").count(),
+            "case_count": self.Case.select().where(self.Case.lifecycle == "active").count(),
+            "topic_count": self.Topic.select().count(),
+            "embedding_count": self.Embedding.select().count(),
             "ready_embeddings": ready_embeddings,
             "pending_embeddings": pending_embeddings,
             "stale_embeddings": stale_embeddings,

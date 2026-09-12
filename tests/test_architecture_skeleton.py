@@ -1424,8 +1424,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             memory_write = generation.indirect_aliases["remember_memory"]
             memory_write_description = memory_write.compiled_description
             self.assertIn("recall_memory", memory_write_description)
-            self.assertIn("use update_memory instead", memory_write_description)
-            self.assertIn("Do not write duplicates", memory_write_description)
+            self.assertIn("Use update_memory only for an explicit correction", memory_write_description)
+            self.assertIn("semantic duplicates are handled by dreaming", memory_write_description)
             self.assertIn("fact:/case:", memory_write_description)
             memory_write_properties = memory_write.input_schema["properties"]
             self.assertIn("star", memory_write_properties)
@@ -4497,7 +4497,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("probe_tool", l1_fragments[0].content)
         self.assertIn("probe result", l1_fragments[0].content)
 
-    def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
+    def test_memory_prompt_preserves_distinct_refs_with_the_same_canonical_key(self) -> None:
         from pal.memory import MemoryPack
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
@@ -4539,7 +4539,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn('<recalled_memories view="summary">', remembered_facts.content)
         self.assertNotIn("Test user profile:", remembered_facts.content)
         self.assertNotIn("origin available", remembered_facts.content)
-        self.assertNotIn("The test user built Pal again.", remembered_facts.content)
+        self.assertIn("[fact:2]: The test user built Pal again.", remembered_facts.content)
 
     def test_typed_l1_projection_keeps_summary_and_recalled_memory(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider

@@ -1303,6 +1303,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "scope": "task",
                     "task_id": "task-1",
                     "summary": "Recovered the bunshin after memory pressure crash.",
+                    "source_event_id": "observed-crash-1",
                     "search_text": "Bunshin crashed under memory pressure. Restarted the bunshin and reduced concurrency. Queue drain recovered and latency normalized.",
                     "situation_text": "Bunshin crashed under memory pressure",
                     "task_text": "Stabilize the bunshin",
@@ -1313,6 +1314,9 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
         )
         mem_ref = committed.structured["mem_ref"]
+
+        stored = handle.memory_service.l3_selector.resolve().repository.get_document(mem_ref)
+        self.assertEqual(stored["payload"]["source_event_id"], "observed-crash-1")
 
         recalled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
@@ -1373,9 +1377,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("projected_entries", recalled_origin.llm_text)
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
-        self.assertIn(mem_ref, handle.memory_service.l2_store.items)
-        self.assertIn(mem_ref, handle.memory_service.l2_store.heat_registry)
-        self.assertEqual(handle.memory_service.l2_store.items[mem_ref].summary, "Recovered the bunshin after memory pressure.")
+        successor = corrected.structured["mem_ref"]
+        self.assertNotEqual(successor, mem_ref)
+        self.assertNotIn(mem_ref, handle.memory_service.l2_store.items)
+        self.assertIn(successor, handle.memory_service.l2_store.heat_registry)
+        self.assertEqual(handle.memory_service.l2_store.items[successor].summary, "Recovered the bunshin after memory pressure.")
 
     def test_sqlite_vec_l3_commit_truth_topics_and_pending_index(self) -> None:
         service = MemoryService()
@@ -1628,7 +1634,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("Action: Restarted the bunshin", st_hit.hits[0]["rendered"])
         self.assertGreaterEqual(len(ar_only.hits), 0)
 
-    def test_sqlite_vec_l3_correct_marks_stale_and_updates_topics(self) -> None:
+    def test_sqlite_vec_l3_correct_versions_content_and_queues_new_index(self) -> None:
         service = MemoryService()
         provider = SQLiteVecL3Plugin(service=service, embedder=HashingEmbedder())
         result = provider.commit(
@@ -1654,9 +1660,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(corrected.status, "ok")
-        self.assertEqual(corrected.metadata["index_status"], "stale")
+        self.assertNotEqual(corrected.document_id, result.document_id)
+        self.assertIsNone(provider.repository.get_document(result.document_id))
+        self.assertEqual(corrected.metadata["index_status"], "pending")
         inventory = provider.inspect()
-        self.assertGreaterEqual(inventory["stale_embeddings"], 1)
+        self.assertGreaterEqual(inventory["pending_embeddings"], 1)
         self.assertGreaterEqual(inventory["retryable_embeddings"], 1)
 
     def test_sqlite_vec_l3_correct_preserves_existing_topics_when_topics_not_provided(self) -> None:
@@ -1673,7 +1681,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
         )
 
-        provider.correct(
+        corrected = provider.correct(
             L3CorrectRequest(
                 document_id=result.document_id,
                 summary="Redis stores hot cache entries in memory.",
@@ -1681,12 +1689,12 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
         )
 
-        document = provider.repository.get_document(result.document_id)
+        document = provider.repository.get_document(corrected.document_id)
         self.assertIsNotNone(document)
         assert document is not None
         self.assertIn("cache", document["search_text"].lower())
         self.assertIn("redis", document["search_text"].lower())
-        self.assertEqual(provider.repository.list_document_topics(result.document_id), ["cache", "redis"])
+        self.assertEqual(provider.repository.list_document_topics(corrected.document_id), ["cache", "redis"])
 
     def test_sqlite_vec_l3_inventory_surfaces_failed_embedding_diagnostics(self) -> None:
         class BrokenEmbedder(HashingEmbedder):
@@ -2637,11 +2645,21 @@ class PalV2BootstrapTests(unittest.TestCase):
 
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
-        handle = self._compose_runtime(
-            wizard=self.wizard,
-            registration=self.registration,
-            database=self.database,
-        )
+        from pal.memory.storage import MemoryStorage
+        from pal.plugins.host import PluginHost
+        original = PluginHost.bootstrap
+        def bootstrap(host):
+            storage = MemoryStorage(self.runtime_root)
+            self.assertTrue(storage.current())
+            with storage.connection() as connection:
+                self.assertIsNotNone(connection.execute("SELECT value FROM memory_settings WHERE key='workflow_pins_initialized'").fetchone())
+            return original(host)
+        with patch.object(PluginHost, "bootstrap", new=bootstrap):
+            handle = self._compose_runtime(
+                wizard=self.wizard,
+                registration=self.registration,
+                database=self.database,
+            )
 
         self.assertEqual(handle.database.db_path, self.registration.runtime.db_path)
         self.assertEqual(handle.registration.display_name, "PalV2 Test")

@@ -100,6 +100,7 @@ class L3RecallResult:
 @dataclass(frozen=True)
 class L3CommitRequest:
     kind: str
+    mutation_id: str | None = None
     title: str = ""
     summary: str = ""
     search_text: str = ""
@@ -118,6 +119,7 @@ class L3CommitRequest:
 @dataclass(frozen=True)
 class L3CorrectRequest:
     document_id: str
+    mutation_id: str | None = None
     title: str | None = None
     summary: str | None = None
     search_text: str | None = None
@@ -133,6 +135,7 @@ class L3CorrectRequest:
 class L3DeleteRequest:
     document_id: str
     reason: str = ""
+    mutation_id: str | None = None
 
 
 @dataclass(frozen=True)

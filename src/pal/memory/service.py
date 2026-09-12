@@ -291,6 +291,12 @@ class MemoryService(MemoryServicePort):
         if self.l3_selector is None:
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
 
+    def clear_generation_projection(self) -> None:
+        """Drop this runtime's L2 after reconnecting, preserving its L1."""
+        self.l2_store.items.clear()
+        self.l2_store.heat_registry.clear()
+        self.l2_store.top_of_mind_refs.clear()
+
     def begin_l1_turn(
         self,
         turn_id: str,
@@ -591,6 +597,12 @@ class MemoryService(MemoryServicePort):
         return self.commit_l1(request)
 
     def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
+        provider = self._resolve_l3_provider()
+        catalog = getattr(getattr(provider, "repository", None), "catalog", None)
+        if catalog is not None:
+            deleted = catalog.deleted_refs()
+            self.remove_projected_entries([key for key, entry in self.l2_store.items.items()
+                                           if key in deleted or entry.source_ref in deleted])
         if request.turn_kind == "proactive_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
         current_summary = current_summary_from_l1(self.l1_store.items)
@@ -646,6 +658,11 @@ class MemoryService(MemoryServicePort):
 
     def project_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         memory_entries = [entry for entry in entries if _is_memory_projection_entry(entry)]
+        provider = self._resolve_l3_provider()
+        catalog = getattr(getattr(provider, "repository", None), "catalog", None)
+        if catalog is not None:
+            deleted = catalog.deleted_refs()
+            memory_entries = [entry for entry in memory_entries if entry.entry_id not in deleted and entry.source_ref not in deleted]
         evicted = self.l2_store.upsert_entries(memory_entries, touch=touch, top_of_mind=top_of_mind)
         self._retire_entries(evicted)
 
@@ -655,6 +672,9 @@ class MemoryService(MemoryServicePort):
         self.project_l3_entries([result.projected_entry], touch=True, top_of_mind=True)
 
     def remove_projected_entries(self, entry_ids: list[str]) -> None:
+        removed = set(entry_ids)
+        self.failed_retirements[:] = [entry for entry in self.failed_retirements
+                                      if entry.entry_id not in removed and entry.source_ref not in removed]
         for entry_id in entry_ids:
             self.l2_store.items.pop(entry_id, None)
             self.l2_store.top_of_mind_refs = [value for value in self.l2_store.top_of_mind_refs if value != entry_id]
@@ -843,7 +863,9 @@ def _should_retire_entry(entry: L2Entry) -> bool:
         return False
     if entry.candidate_state != "stable":
         return False
-    return entry.source_kind != "l3_recall"
+    # A successful explicit L3 commit already persisted this projection.
+    # Eviction must not remember it again (especially cases without event IDs).
+    return entry.source_kind not in {"l3_recall", "explicit_commit"}
 
 
 def _is_memory_projection_entry(entry: L2Entry) -> bool:

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
+from pal.core.memory_maintenance import MemoryMaintenanceMixin, SLEEP_REPLY
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.core.agent_turn_runtime import AgentTurnRuntime
 from pal.core.cache_warm_deadline import (
@@ -372,6 +373,8 @@ class MainLoop:
             return None
         for derived in await self.dispatcher.dispatch_async(envelope, context):
             self.enqueue(derived)
+        if core_port is not None:
+            core_port.state.memory_maintenance_changed.set()
         return envelope
 
     def run_until_idle(self, context: MainContext, state: CoreRuntimeState, *, max_iterations: int = 64) -> list[EventEnvelope]:
@@ -451,7 +454,7 @@ class CoreTurnIOPort:
 
 
 @dataclass
-class PalCore:
+class PalCore(MemoryMaintenanceMixin):
     context: MainContext = field(default_factory=MainContext)
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
@@ -573,6 +576,7 @@ class PalCore:
         self.main_loop.enqueue(envelope)
 
     def notify_ready(self) -> None:
+        self.state.memory_maintenance_changed.set()
         self.main_loop.notify_ready()
 
     def bind_async_wakeup_sources(self) -> None:
@@ -591,10 +595,16 @@ class PalCore:
         candidates: list[float] = []
         proactive_manager = self.context.port_registry.get("proactive:proactive_manager")
         seconds_until_next_due = getattr(proactive_manager, "seconds_until_next_due", None)
-        if callable(seconds_until_next_due):
+        if callable(seconds_until_next_due) and not self.state.memory_maintenance:
             service_timeout = seconds_until_next_due()
             if service_timeout is not None:
                 candidates.append(float(service_timeout))
+        for source in self.context.event_source_registry.iter_sources():
+            deadline = getattr(source, "seconds_until_next_due", None)
+            if callable(deadline):
+                timeout = deadline()
+                if timeout is not None:
+                    candidates.append(float(timeout))
         control_timeout = self._seconds_until_next_control_request_expiry()
         if control_timeout is not None:
             candidates.append(control_timeout)
@@ -774,6 +784,21 @@ class PalCore:
                 return
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
+        async with self.state.channel_turn_transition_lock:
+            sleeping = self.state.memory_maintenance
+            if not sleeping:
+                self.state.memory_ingress_reservations += 1
+                self.remember_user_route(channel_envelope)
+        if sleeping:
+            await self.deliver_memory_notice_async(self._route_from_channel_envelope(channel_envelope), SLEEP_REPLY, require_provider=False)
+            return
+        try:
+            await self._schedule_admitted_channel_turn_async(channel_envelope)
+        finally:
+            self.state.memory_ingress_reservations -= 1
+            self.state.memory_maintenance_changed.set()
+
+    async def _schedule_admitted_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         # Any new user activity makes the old idle-cache deadline irrelevant,
         # even if this turn must queue behind the current one.
         await self.cache_warm_deadline.clear_for_user_activity()
@@ -803,8 +828,19 @@ class PalCore:
         self,
         channel_envelope: ChannelEnvelope,
     ) -> TurnOutcome:
-        if self.state.resident_quiescing:
-            raise RuntimeError("resident runtime is quiescing")
+        async with self.state.channel_turn_transition_lock:
+            if self.state.resident_quiescing or self.state.memory_maintenance:
+                raise RuntimeError("resident runtime is quiescing or dreaming")
+            self.state.memory_ingress_reservations += 1
+        try:
+            return await self._process_admitted_channel_turn_async(channel_envelope)
+        finally:
+            self.state.memory_ingress_reservations -= 1
+            self.state.memory_maintenance_changed.set()
+
+    async def _process_admitted_channel_turn_async(
+        self, channel_envelope: ChannelEnvelope,
+    ) -> TurnOutcome:
         await self.cache_warm_deadline.clear_for_user_activity()
         channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         # The hot path is: start turn -> interpret yielded effects -> resume
@@ -981,7 +1017,23 @@ class PalCore:
             task.result()
         self.notify_ready()
 
-    async def handle_control_action_async(
+    async def handle_control_action_async(self, action: ControlAction, *, require_provider: bool = False) -> bool | None:
+        if self.state.memory_maintenance and action.delivery is None and action.action_kind not in {"memory_dreaming", "show_llm_status", "route_reply", "show_panel"}:
+            await self.deliver_memory_notice_async(action.route, SLEEP_REPLY, require_provider=False)
+            return False
+        if not self.state.memory_maintenance and action.delivery is None and action.route is not None:
+            channel = self.context.port_registry.get("channel:channel")
+            remember = getattr(channel, "remember_user_route", None)
+            if callable(remember):
+                remember(action.route)
+        self.state.memory_control_reservations += 1
+        try:
+            return await self._handle_admitted_control_action_async(action, require_provider=require_provider)
+        finally:
+            self.state.memory_control_reservations -= 1
+            self.state.memory_maintenance_changed.set()
+
+    async def _handle_admitted_control_action_async(
         self,
         action: ControlAction,
         *,

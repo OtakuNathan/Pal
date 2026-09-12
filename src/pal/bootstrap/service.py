@@ -76,6 +76,9 @@ class StubRuntimeHandle:
         return self._optional_port("artifact:artifact")
 
     async def stop_async(self) -> None:
+        dreaming = self.core.context.port_registry.get("memory.dreaming:dreaming")
+        if dreaming is not None:
+            await dreaming.shutdown()
         self.plugin_host.shutdown()
         for module_id, handle in tuple(self.core.context.module_registry.modules.items()):
             if module_id == "channel":
@@ -114,11 +117,20 @@ def compose_runtime(
     runtime_settings_repository = RuntimeSettingRepository()
 
     config = RuntimeConfig.load(registration.runtime.runtime_root)
+    from pal.memory.storage import MemoryStorage
+    memory_storage = MemoryStorage(registration.runtime.runtime_root)
+    if memory_storage.catalog_path.exists():
+        memory_storage.recover_abandoned_fence()
+    # Reconcile the memory owner before optional plugins can launch workers.
+    # In particular, Bunshin must never race the initial generation migration.
+    memory_storage.migrate(registration.runtime.db_path)
+    from pal.bunshin.memory_binding import initialize_existing_workflow_pins
+    initialize_existing_workflow_pins(registration.runtime.runtime_root, memory_storage)
     from pal.core.main_context import MainContext
     from pal.execution.backend import build_execution_runtime
     core = PalCore(config=config, context=MainContext(execution_runtime=build_execution_runtime()))
     core.context.execution_runtime.runtime_root = registration.runtime.runtime_root
-    channel_runtime = ChannelRuntime()
+    channel_runtime = ChannelRuntime(user_route_path=registration.runtime.runtime_root / "channel" / "last_user_route.json")
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))
     credential_resolver = LLMCredentialResolver(secret_store=secret_store)
@@ -164,6 +176,10 @@ def compose_runtime(
     register_failure_with_core(core, failure_runtime)
     plugin_host.publish_management_capabilities()
     plugin_host.bootstrap()
+    provider = memory_service._resolve_l3_provider()
+    if getattr(getattr(provider, "repository", None), "catalog", None) is not None:
+        from pal.memory.dreaming.runtime import register_dreaming
+        register_dreaming(core, provider, llm_runtime, registration.runtime.runtime_root)
     channel_provider_manager = core.context.require_port("channel:provider_manager")
     channel_provider_manager.plugin_host = plugin_host
     channel_provider_manager.rescan_providers()

@@ -292,18 +292,19 @@ HOT prompt projection 是 L2 中所有 HOT memory 条目的 prompt 投影。当�
 - `commit`（写入后自动进入 HOT）
 - `recall` 命中后进入 working set
 
-### L3 Commit 向量去重
+### 在线写入与 Dreaming
 
-写入前先 embed search_text，向量搜索已有记忆（top_k=1）。两阶段确认：
+`remember` 不再通过向量相似、title 或 topic 重叠覆盖已有记忆。相同请求的重试
+通过 mutation ID 幂等；只有身份、范围、正文和检索信息全部相同才允许机械去重。
+case 的机械去重还要求明确的同一事件标识。canonical key 按 kind / scope /
+task_id 定义身份；相同 key、不同正文返回冲突和已有引用，要求显式 update。
 
-1. **Candidate 阶段**：cosine similarity > 0.85 → 标记为 candidate duplicate
-2. **Confirm 阶段**：检查 candidate 的 canonical_key 是否匹配，或 title/topic 是否强重叠
-   - 确认重叠 → merge（更新旧条目的 title/summary/search_text）
-   - 不确认 → 创建新条目（相似但不同主题）
+`update` 产生新 ID 和递增的 content_revision，保留旧正文及后继关系。旧引用不能
+静默修改后继记录。使用次数、访问时间不会改变内容版本。
 
-这避免了误合并——比如两条关于不同编程语言的 fact 可能向量相似但主题不同。
-
-embedding provider 不可用时退化为原有 hash 去重。
+Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 复核后发布。
+没有获准修改时以 no_changes 完成，不改正文、不生成新 generation。
+运行、归档、迁移和恢复约束见 [Dreaming](pal_memory_dreaming.md)。
 
 ## L3
 
@@ -388,7 +389,7 @@ embedding provider 不可用时退化为原有 hash 去重。
 
 - `task_id` 为空表示 system scope
 - `payload_blob` 只允许承载扩展属性，不应重复主列内容
-- `canonical_key` 用于显式 fact identity 和幂等 upsert
+- `canonical_key` 用于有作用域的显式 identity；正文冲突要求显式 update
 
 ### `memory_cases`
 
@@ -525,7 +526,7 @@ embedding provider 不可用时退化为原有 hash 去重。
 | `title` | `TEXT` | yes | 面向检索和展示的短标题 |
 | `summary` | `TEXT` | yes | 主摘要 |
 | `search_text` | `TEXT` | yes | lexical search 的归一化检索文本 |
-| `canonical_key` | `TEXT` | no | 显式 fact identity，用于幂等 upsert |
+| `canonical_key` | `TEXT` | no | 有作用域的显式 identity；不授权自动覆盖 |
 | `dedupe_fingerprint` | `TEXT` | no | 退火/归档时的去重指纹 |
 | `payload_blob` | `JSON TEXT` | no | 扩展属性；不得重复主列信息 |
 | `lifecycle` | `TEXT` | yes | `active | archived` |
@@ -812,7 +813,7 @@ recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL
 - `commit` 的 durable 目标是 `L3`
 - `commit` 不带 `level`
 - `commit` 成功后立即进入 L2 HOT 状态
-- `commit` 写入前先做向量去重检查，相似度 > 0.85 且 canonical_key/title/topic 重叠时 merge 已有条目
+- `commit` 允许语义重复，向量与 topic 只用于 dreaming 候选发现，不授权在线覆盖
 
 ## correct
 
@@ -896,7 +897,7 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 - L2 条目有 HOT / GHOST / DORMANT 生命周期，TTL 续命封顶 3 次。
 - `task-wise memory` 是 scope，不是 bucket。
 - `page_fault` 正式废弃。
-- `commit` 写入前做向量去重，避免重复记忆。
+- 在线语义去重由独立的 dreaming 流程替代。
 - recall 只在涉及用户/Pal 特定事实、过去事件引用、行为承诺时触发，不用于通用知识问题。
 - recall 结果中 final score < 0.3 的条目不进入 HOT，避免低相关性噪音污染 prompt。
 

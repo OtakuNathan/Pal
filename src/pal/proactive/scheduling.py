@@ -80,18 +80,13 @@ def _parse_user_datetime(value: str, *, timezone_name: str | None = None) -> dat
 
 
 def _next_cron_run(schedule: dict[str, Any], now_utc: datetime) -> datetime:
-    import croniter
-
+    from pal.shared.cron import cron_occurrence
     cron_expr = str(schedule.get("cron") or "")
     tz_name = resolve_timezone_name(schedule.get("timezone"))
-    tz = ZoneInfo(tz_name)
-    local_now = now_utc.astimezone(tz)
     try:
-        cron = croniter.croniter(cron_expr, local_now)
+        return cron_occurrence(cron_expr, tz_name, now_utc)
     except (ValueError, KeyError):
         return now_utc + __import__("datetime").timedelta(hours=1)
-    next_local = cron.get_next(datetime)
-    return next_local.astimezone(timezone.utc)
 
 
 def _next_once_run(schedule: dict[str, Any], now_utc: datetime) -> str | None:
