@@ -881,7 +881,11 @@ class LLMRuntime(LLMRuntimePort):
         )
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)
-        if level is None:
+        budget = hooked.policy.thinking_budget_tokens
+        if hooked.policy.thinking_selection == "lowest_supported":
+            level = next(item for item in ThinkingLevel if item.value in levels)
+            budget = None
+        elif level is None:
             effective = self._effective_thinking_level(endpoint)
             level = ThinkingLevel(effective) if effective else None
         elif level.value not in levels:
@@ -892,10 +896,21 @@ class LLMRuntime(LLMRuntimePort):
         max_output = hooked.policy.max_output_tokens
         if endpoint.max_output_tokens is not None:
             max_output = min(max_output, int(endpoint.max_output_tokens))
+        if budget is not None:
+            if endpoint.wire_shape != WireShape.ANTHROPIC_MESSAGES.value:
+                raise LLMRequestPreparationError(
+                    "thinking_budget_tokens is only supported by anthropic_messages"
+                )
+            if level == ThinkingLevel.OFF or not 1024 <= budget < max_output:
+                raise LLMRequestPreparationError(
+                    "manual thinking requires a non-off level and "
+                    "1024 <= thinking_budget_tokens < effective max_output_tokens"
+                )
         policy = replace(
             hooked.policy,
             max_output_tokens=max_output,
             thinking_level=level,
+            thinking_budget_tokens=budget,
         )
         prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id)
         target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)

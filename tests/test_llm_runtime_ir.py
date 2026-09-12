@@ -474,6 +474,77 @@ class LLMRuntimeIRTests(unittest.TestCase):
         self.assertIsInstance(invoker, ShapeEndpointInvoker)
         self.assertIs(runtime.provider_response_hooks, invoker.response_hooks)
 
+    def test_lowest_thinking_is_resolved_per_endpoint_without_setting_changes(self) -> None:
+        first, second = _endpoint("first"), _endpoint("second")
+        first.thinking_levels_blob = ["high", "low"]
+        first.default_thinking_level = "high"
+        second.thinking_levels_blob = ["high", "off", "low"]
+        settings = _Settings()
+        settings.values.update({"think:first": "high", "think:second": "high"})
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(first, second)), settings,
+            endpoint_invoker=_Invoker(),
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+        before = dict(settings.values)
+        request = replace(_request(), policy=GenerationPolicyIR(
+            max_output_tokens=4096, thinking_level="high", thinking_budget_tokens=2048,
+            thinking_selection="lowest_supported",
+        ))
+        for endpoint, expected in ((first, "low"), (second, "off")):
+            prepared = runtime._compile_request(endpoint, request)
+            self.assertEqual(prepared.request.policy.thinking_level.value, expected)
+            self.assertIsNone(prepared.request.policy.thinking_budget_tokens)
+            self.assertEqual(prepared.request.policy.max_output_tokens, 1000)
+        self.assertEqual(settings.values, before)
+        self.assertEqual(runtime._compile_request(first, _request()).request.policy.thinking_level.value, "high")
+
+    def test_lowest_thinking_survives_generation_endpoint_fallback(self) -> None:
+        class FallbackInvoker(_Invoker):
+            def invoke(self, endpoint, request, **kwargs):
+                if endpoint.endpoint_id == "first":
+                    self.requests.append(request)
+                    raise OSError("synthetic endpoint unavailable")
+                return super().invoke(endpoint, request, **kwargs)
+
+        first, second = _endpoint("first"), _endpoint("second")
+        first.thinking_levels_blob = ["high", "low"]
+        second.thinking_levels_blob = ["high", "off", "low"]
+        invoker = FallbackInvoker()
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(first, second)), _Settings(),
+            endpoint_invoker=invoker,
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp()), llm_endpoint_retry_attempts=1),
+        )
+        request = replace(_request(), policy=GenerationPolicyIR(
+            max_output_tokens=6144, thinking_selection="lowest_supported",
+        ))
+        advice = runtime.preflight(LLMPreflightRequest(request=request))
+        result = runtime.generate(request)
+        self.assertEqual(result.text, "ok")
+        self.assertEqual([r.policy.thinking_level.value for r in invoker.requests], ["low", "off"])
+        self.assertEqual(advice.reserved_output_tokens, invoker.requests[0].policy.max_output_tokens)
+
+    def test_manual_budget_checks_actual_endpoint_cap_and_shape(self) -> None:
+        from pal.llm.runtime import LLMRequestPreparationError
+        endpoint = _endpoint()
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(endpoint,)), _Settings(),
+            endpoint_invoker=_Invoker(),
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+        request = replace(_request(), policy=GenerationPolicyIR(
+            max_output_tokens=4096, thinking_level="low", thinking_budget_tokens=1024,
+        ))
+        with self.assertRaises(LLMRequestPreparationError):
+            runtime._compile_request(endpoint, request)
+        endpoint.wire_shape = "anthropic_messages"
+        with self.assertRaises(LLMRequestPreparationError):
+            runtime._compile_request(endpoint, request)
+        endpoint.max_output_tokens = 2048
+        prepared = runtime._compile_request(endpoint, request)
+        self.assertEqual(prepared.request.policy.thinking_budget_tokens, 1024)
+
     def test_db_thinking_enum_drives_request_without_provider_heuristics(self) -> None:
         invoker = _Invoker()
         settings = _Settings()

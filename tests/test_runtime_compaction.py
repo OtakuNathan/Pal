@@ -477,7 +477,9 @@ class SharedCompactionEngineTests(unittest.TestCase):
                 ),
             ),
             tools=(),
-            policy=GenerationPolicyIR(max_output_tokens=1024),
+            policy=GenerationPolicyIR(
+                max_output_tokens=8192, thinking_level="high", thinking_budget_tokens=4096,
+            ),
             logical_scope_id="pal:resident",
         )
         snapshot = CompactionSnapshot.capture(
@@ -510,6 +512,13 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
+        self.assertEqual(replay_request.policy.thinking_level.value, "high")
+        self.assertEqual(replay_request.policy.thinking_budget_tokens, 4096)
+        for request in llm.generate_requests:
+            self.assertEqual(request.policy.thinking_selection, "lowest_supported")
+            self.assertIsNone(request.policy.thinking_level)
+            self.assertIsNone(request.policy.thinking_budget_tokens)
+
         self.assertEqual(result.attempts, 2)
         self.assertEqual(
             [request.logical_scope_id for request in llm.generate_requests],
@@ -621,7 +630,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
             "small-endpoint",
         )
         self.assertEqual(retry.model_hint, "small-model")
-        self.assertEqual(retry.policy.max_output_tokens, 64_000)
+        self.assertEqual(retry.policy.max_output_tokens, 2304)
+        self.assertEqual(retry.policy.thinking_selection, "lowest_supported")
         self.assertEqual(
             retry.messages[0].text,
             llm.generate_requests[0].messages[0].text,
@@ -629,7 +639,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertNotIn("256 tokens", retry.messages[0].text)
         self.assertIn("must not exceed 256 tokens", retry.messages[-1].text)
 
-    def test_compactor_uses_provider_output_ceiling_for_reasoning_headroom(self) -> None:
+    def test_compactor_reserves_summary_headroom_instead_of_provider_ceiling(self) -> None:
         service = _memory_with_turns(2)
         llm = _ScriptedLLM(
             [generation_result_from_values(text=_valid_pal_payload())]
@@ -648,7 +658,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "compacted")
-        self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 128_000)
+        self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 6144)
+        self.assertEqual(llm.generate_requests[0].policy.thinking_selection, "lowest_supported")
         self.assertNotIn("4,096 tokens", llm.generate_requests[0].messages[0].text)
         self.assertIn(
             "must not exceed 4,096 tokens",

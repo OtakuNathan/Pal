@@ -183,14 +183,25 @@ class AnthropicMessagesCodec(ShapeCodecBase):
             payload["tools"] = [anthropic_tool_definition(tool) for tool in request.tools]
             if policy.tool_choice not in {"", "auto", "omit"}:
                 payload["tool_choice"] = {"type": policy.tool_choice}
-        if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
+        if policy.thinking_level == ThinkingLevel.MINIMAL:
+            raise ValueError("anthropic_messages does not support effort 'minimal'")
+        if policy.thinking_budget_tokens is not None and (
+            policy.thinking_level in {None, ThinkingLevel.OFF}
+            or not 1024 <= policy.thinking_budget_tokens < policy.max_output_tokens
+        ):
+            raise ValueError(
+                "manual thinking requires a non-off level and "
+                "1024 <= thinking_budget_tokens < max_output_tokens"
+            )
+        if policy.thinking_level == ThinkingLevel.OFF:
+            payload["thinking"] = {"type": "disabled"}
+        elif policy.thinking_level is not None:
+            payload["output_config"] = {"effort": policy.thinking_level.value}
             if policy.thinking_budget_tokens is not None:
-                upper = int(policy.max_output_tokens) - 1
-                if upper >= 1024:
-                    payload["thinking"] = {
-                        "type": "enabled",
-                        "budget_tokens": min(max(1024, int(policy.thinking_budget_tokens)), upper),
-                    }
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": policy.thinking_budget_tokens,
+                }
             else:
                 payload["thinking"] = {"type": "adaptive"}
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))

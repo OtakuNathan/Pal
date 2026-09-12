@@ -186,9 +186,8 @@ class CompactionEngine:
     policy: CompactionPolicy
     max_attempts: int = 3
     timeout_seconds: float = 180.0
-    # Keep enough provider output headroom for models that count hidden
-    # reasoning against max_output_tokens. The policy prompt independently
-    # caps the visible checkpoint at half the input budget, up to 20k tokens.
+    # An explicit engine ceiling; each request reserves only its visible
+    # checkpoint allowance plus modest reasoning/serialization headroom.
     max_output_tokens: int = 64_000
 
     async def run(
@@ -200,11 +199,6 @@ class CompactionEngine:
         after_commit: Callable[[], None] | None = None,
         replay_guard: Callable[[], bool] | None = None,
     ) -> CompactionRunResult:
-        snapshot = await _with_compaction_output_limit(
-            snapshot,
-            llm_runtime=llm_runtime,
-            fallback=self.max_output_tokens,
-        )
         units = list(build_compaction_units(snapshot))
         retained = list(units)
         source_sizes: list[int] = []
@@ -425,13 +419,9 @@ class CompactionEngine:
             "The final visible JSON checkpoint for this request must not exceed "
             f"{visible_limit:,} tokens."
         )
-        max_output = max(
-            1,
-            int(
-                snapshot.metadata.get("compaction_max_output_tokens")
-                or self.max_output_tokens
-                or 0
-            ),
+        max_output = min(
+            max(1, int(self.max_output_tokens)),
+            visible_limit + max(2048, (visible_limit + 3) // 4),
         )
         metadata = {
             "preferred_endpoint_id": snapshot.metadata.get(
@@ -512,6 +502,9 @@ class CompactionEngine:
                     replay.policy,
                     max_output_tokens=max_output,
                     temperature=0.0,
+                    thinking_level=None,
+                    thinking_budget_tokens=None,
+                    thinking_selection="lowest_supported",
                 ),
                 model_hint=str(
                     snapshot.metadata.get("preferred_model_id")
@@ -561,6 +554,7 @@ class CompactionEngine:
             request,
             messages=messages,
             logical_scope_id=f"{scope}:compaction",
+            policy=replace(request.policy, thinking_selection="lowest_supported"),
         )
 
     async def _generate(
@@ -773,49 +767,6 @@ async def _preflight(
         except Exception:
             return None
     return None
-
-
-async def _with_compaction_output_limit(
-    snapshot: CompactionSnapshot,
-    *,
-    llm_runtime: Any,
-    fallback: int,
-) -> CompactionSnapshot:
-    """Use the selected provider's declared ceiling without reducing reasoning headroom."""
-
-    method = getattr(llm_runtime, "resolve_endpoint_facts", None)
-    if not callable(method):
-        return _snapshot_with_output_limit(snapshot, fallback)
-    try:
-        value = method(
-            preferred_endpoint_id=str(
-                snapshot.metadata.get("preferred_endpoint_id") or ""
-            )
-            or None,
-        )
-        facts = await value if inspect.isawaitable(value) else value
-    except Exception:
-        return _snapshot_with_output_limit(snapshot, fallback)
-    if not isinstance(facts, dict):
-        return _snapshot_with_output_limit(snapshot, fallback)
-    limit = (
-        _positive_int(facts.get("max_output_tokens_upper_limit"))
-        or _positive_int(facts.get("max_output_tokens"))
-        or max(1, int(fallback or 1))
-    )
-    return _snapshot_with_output_limit(snapshot, limit)
-
-
-def _snapshot_with_output_limit(
-    snapshot: CompactionSnapshot,
-    value: Any,
-) -> CompactionSnapshot:
-    metadata = deepcopy(snapshot.metadata)
-    metadata["compaction_max_output_tokens"] = max(
-        1,
-        _positive_int(value) or 1,
-    )
-    return replace(snapshot, metadata=metadata)
 
 
 def _positive_int(value: Any) -> int | None:

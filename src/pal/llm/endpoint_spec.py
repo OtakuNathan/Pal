@@ -63,6 +63,7 @@ class LLMEndpointSpec:
             )
 
         levels = _thinking_levels(source.get("thinking_levels_blob"), endpoint_id)
+        validate_thinking_levels(levels, wire_shape=wire_shape)
         default_level = str(source.get("default_thinking_level") or "").strip().lower()
         if default_level not in levels:
             raise LLMEndpointSpecError(
@@ -230,6 +231,17 @@ def _optional_positive_int(
             f"endpoint {endpoint_id} {field_name} must be positive"
         )
     return parsed
+
+
+def validate_thinking_levels(levels: Any, *, wire_shape: str) -> tuple[str, ...]:
+    """Validate endpoint declarations against the wire vocabulary, without aliases."""
+    values = _thinking_levels(levels, "configuration")
+    if wire_shape == WireShape.ANTHROPIC_MESSAGES.value and "minimal" in values:
+        raise LLMEndpointSpecError(
+            "anthropic_messages does not support thinking level 'minimal'; "
+            "available: off, low, medium, high, xhigh, max"
+        )
+    return values
 
 
 def _thinking_levels(value: Any, endpoint_id: str) -> tuple[str, ...]:

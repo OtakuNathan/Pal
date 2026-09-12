@@ -748,6 +748,10 @@ host policy 区分两类结构化 compact：
 - `pal.compaction.pal.v2`：本体会话连续性。保留当前焦点、用户请求、操作约束、决策、问题和近期对话。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
 - `pal.compaction.bunshin.v3`：只保存工作现场，包括技术路线、当前工作、活跃错误、活跃问题和下一步动作。角色任务由 `task.yaml` 或绑定的 `ModuleWorkView` 机械投影，不能由 compactor 重写。闭合的 tool protocol 增量进入 L1，冻结的 L1 是 compact 唯一输入；不再维护第二份 protocol journal，不生成 `memory_candidates`，也不保存原始思维链。
 
+本体和 Bunshin 的 compact 请求均使用 `lowest_supported`，在实际 endpoint 选定后取最低声明档位，不继承或修改普通对话的思考设置及手动思考预算。普通、replay、重试和 fallback 共用此规则。
+
+可见摘要上限 `V` 仍为目标输入预算的一半、最多 20,000 tokens（未知输入预算时为 20,000）。每次请求总输出额度为 `V + max(2048, ceil(V / 4))`，再受引擎显式上限及实际 endpoint 上限约束；preflight 使用相同额度。输入预算反馈改变 `V` 后重新计算，不再直接申请 provider 的全部输出额度。该余量供推理及序列化使用，不保证 provider 的思考用量；截断仍走既有有限重试，失败不提交摘要。
+
 自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
 ## retire

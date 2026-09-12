@@ -181,3 +181,32 @@ through the same hook instance again.
   attempt and never updates successful health or usage state.
 - Request/model quirks are exact-model hooks. Provider-wide branching is
   limited to response-syntax normalization and cannot alter behavior policy.
+
+## Thinking selection and Anthropic encoding
+
+`GenerationPolicyIR.thinking_selection` defaults to `configured`: an explicit
+request level wins, otherwise the endpoint's persisted setting/default applies.
+`lowest_supported` resolves against each actual endpoint during both preflight
+and generation, using `off < minimal < low < medium < high < xhigh < max`.
+It overrides inherited levels and clears manual budgets without writing settings.
+
+Anthropic declarations accept `off`, `low`, `medium`, `high`, `xhigh`, and `max`;
+`minimal` is rejected before endpoint writes, including add/replace and setup.
+The declared endpoint subset remains authoritative; vocabulary validation does
+not certify a remote model's capabilities. No effort aliases are mapped.
+Non-off levels are transmitted unchanged in `output_config.effort`. Without a
+manual budget, thinking is `adaptive`; `off` explicitly sends `disabled` and no
+effort. Explicit manual budgets send `enabled` and the exact budget alongside
+effort. They must be integers (not bools), at least 1024 and below the effective
+output cap, with thinking enabled. Invalid combinations fail preparation rather
+than being clamped or discarded. Other shapes reject explicit manual budgets.
+Pal does not enable the interleaved-thinking beta budget exception.
+
+Effort is not a hard token cap. Compatible services can ignore thinking budgets
+(DeepSeek documents this); total output is constrained by `max_tokens`.
+Changing thinking/effort may invalidate provider prompt caching even when the
+replayed messages are unchanged. Cache usage must be measured from responses.
+
+References: https://platform.claude.com/docs/en/build-with-claude/effort,
+https://platform.claude.com/docs/en/build-with-claude/extended-thinking,
+https://api-docs.deepseek.com/guides/anthropic_api/.

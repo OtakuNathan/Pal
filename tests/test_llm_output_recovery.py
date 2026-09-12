@@ -320,7 +320,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome.finish_reason, "compact_required")
         self.assertEqual(len(invoker.requests), 0)
 
-    def test_anthropic_explicit_budget_is_clamped_below_output_limit(self) -> None:
+    def test_anthropic_explicit_budget_exceeding_output_limit_is_rejected(self) -> None:
         request = request_ir_from_prompt(
             messages=[{"role": "user", "content": "work"}],
             max_output_tokens=32_000,
@@ -340,9 +340,8 @@ class LLMOutputRecoveryTests(unittest.TestCase):
             endpoint_id="anthropic",
             model_id="claude",
         )
-        payload = codec_for_shape(WireShape.ANTHROPIC_MESSAGES).encode(request, context).payload
-
-        self.assertEqual(payload["thinking"], {"type": "enabled", "budget_tokens": 31_999})
+        with self.assertRaisesRegex(ValueError, "thinking_budget_tokens < max_output_tokens"):
+            codec_for_shape(WireShape.ANTHROPIC_MESSAGES).encode(request, context)
 
 
 if __name__ == "__main__":

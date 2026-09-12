@@ -26,6 +26,33 @@ class LLMCLITests(unittest.TestCase):
         configure_llm_parser(parser)
         return parser.parse_args(list(argv))
 
+    def test_invalid_anthropic_effort_does_not_mutate_add_or_replace(self) -> None:
+        from unittest.mock import patch
+
+        base = ["add", "demo", "--runtime-root", str(self.runtime_root),
+                "--model-id", "demo", "--base-url", "https://example.test",
+                "--wire-shape", "anthropic_messages", "--credential-ref", "DEMO_KEY"]
+        def snapshot():
+            with sqlite3.connect(self.runtime_root / "pal.sqlite3") as db:
+                return (db.execute("SELECT * FROM llm_endpoints").fetchall(),
+                        db.execute("SELECT * FROM pal_runtime_settings").fetchall())
+        # A failed add must not create an endpoint or invoke credential storage.
+        for exists in (False, True):
+            if exists:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_llm_cli(self._parse(*base)), 0)
+            before = snapshot()
+            args = [*base, "--thinking-levels", "minimal,high",
+                    "--default-thinking-level", "minimal", "--set-active"]
+            if exists:
+                args.append("--replace")
+            with patch("pal.llm.cli._store_api_key_if_requested") as store:
+                with contextlib.redirect_stderr(io.StringIO()) as error:
+                    self.assertEqual(run_llm_cli(self._parse(*args)), 2)
+                self.assertIn("minimal", error.getvalue())
+                store.assert_not_called()
+            self.assertEqual(snapshot(), before)
+
     def test_add_deepseek_defaults_to_official_anthropic_shape(self) -> None:
         args = self._parse(
             "add",

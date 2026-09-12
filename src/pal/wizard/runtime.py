@@ -376,6 +376,15 @@ class WizardService(WizardServicePort):
         data: WizardCollectedData = collected
         runtime_root = registration.runtime.runtime_root
 
+        # Validate every thinking declaration before changing any setup state.
+        from pal.llm.endpoint_spec import LLMEndpointSpecError, validate_thinking_levels
+        for ep in data.endpoints:
+            levels = validate_thinking_levels(ep.thinking_levels, wire_shape=ep.wire_shape)
+            if ep.default_thinking_level.strip().lower() not in levels:
+                raise LLMEndpointSpecError(
+                    f"endpoint {ep.endpoint_id} default thinking level is not declared"
+                )
+
         # 1. Identity — ensure_defaults creates if missing, then upsert fields
         idata = data.identity
         id_repo = IdentityRepository()
@@ -430,13 +439,6 @@ class WizardService(WizardServicePort):
             if credential_ref is None:
                 credential_ref = f"{ep.endpoint_id}:api-key" if auth_kind == "api_key_ref" else ""
 
-            # Store API key in secret store
-            if ep.api_key:
-                secret_store.set_secret(
-                    SecretRef(service=ep.endpoint_id, account="api-key"),
-                    ep.api_key,
-                )
-
             payload = {
                 "endpoint_id": ep.endpoint_id,
                 "provider": provider,
@@ -463,6 +465,13 @@ class WizardService(WizardServicePort):
                 "notes": getattr(ep, "notes", None) or "Configured via setup wizard.",
             }
             llm_repo.upsert(**payload)
+
+            # Store API key in secret store
+            if ep.api_key:
+                secret_store.set_secret(
+                    SecretRef(service=ep.endpoint_id, account="api-key"),
+                    ep.api_key,
+                )
 
         # 3. Set active endpoint
         settings = RuntimeSettingRepository()

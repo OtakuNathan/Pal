@@ -280,23 +280,26 @@ def _prompt_int(prompt: str, default: int | None, fallback: int | None = None) -
 def _prompt_thinking_levels(
     current_levels: list[str],
     current_default: str,
+    *,
+    wire_shape: str = "openai_completion",
 ) -> tuple[list[str], str]:
-    allowed = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
-    raw = ask("  Thinking levels (comma-separated enum values)", ",".join(current_levels or ["off"]))
-    levels = [
-        value
-        for value in dict.fromkeys(item.strip().lower() for item in raw.split(","))
-        if value in allowed
-    ]
-    if not levels:
-        levels = ["off"]
-    default = ask(
-        "  Default thinking level",
-        current_default if current_default in levels else levels[0],
-    ).strip().lower()
-    if default not in levels:
-        default = levels[0]
-    return levels, default
+    from pal.llm.endpoint_spec import LLMEndpointSpecError, validate_thinking_levels
+
+    while True:
+        raw = ask("  Thinking levels (comma-separated enum values)", ",".join(current_levels or ["off"]))
+        try:
+            levels = list(validate_thinking_levels(raw.split(","), wire_shape=wire_shape))
+        except LLMEndpointSpecError as exc:
+            print(f"  Invalid thinking levels: {exc}")
+            continue
+        default = ask(
+            "  Default thinking level",
+            current_default if current_default in levels else levels[0],
+        ).strip().lower()
+        if default not in levels:
+            print("  Default thinking level must be one of the declared levels.")
+            continue
+        return levels, default
 
 
 def prompt_runtime_home() -> Path:
@@ -405,6 +408,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
             thinking_levels, default_thinking_level = _prompt_thinking_levels(
                 thinking_levels,
                 default_thinking_level,
+                wire_shape=wire_shape,
             )
             supports_vision = ask_yes_no("  Supports vision (image input)", supports_vision)
             supports_tools = ask_yes_no("  Supports tool calling", supports_tools)
@@ -413,7 +417,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         print("  Could not query metadata. Enter manually.")
         context_window = _prompt_int("  Context window size", 32768, 32768)
         max_output_tokens = _prompt_int("  Max output tokens (blank for default)", None, None)
-        thinking_levels, default_thinking_level = _prompt_thinking_levels(["off"], "off")
+        thinking_levels, default_thinking_level = _prompt_thinking_levels(["off"], "off", wire_shape=wire_shape)
         supports_vision = ask_yes_no("  Supports vision (image input)", False)
         supports_tools = ask_yes_no("  Supports tool calling", True)
         supports_streaming = ask_yes_no("  Supports streaming", True)

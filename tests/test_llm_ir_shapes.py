@@ -47,6 +47,44 @@ def decode_frames(codec, frames, context):
 
 
 class LLMIRShapeTests(unittest.TestCase):
+    def test_anthropic_effort_is_transmitted_without_mapping(self) -> None:
+        codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
+        for level in ("low", "medium", "high", "xhigh", "max", "off"):
+            with self.subTest(level=level):
+                request = LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
+                    max_output_tokens=4096, thinking_level=level,
+                ))
+                payload = codec.encode(request, _context(WireShape.ANTHROPIC_MESSAGES)).payload
+                if level == "off":
+                    self.assertEqual(payload["thinking"], {"type": "disabled"})
+                    self.assertNotIn("output_config", payload)
+                else:
+                    self.assertEqual(payload["output_config"], {"effort": level})
+                    self.assertEqual(payload["thinking"], {"type": "adaptive"})
+        with self.assertRaises(ValueError):
+            codec.encode(LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
+                max_output_tokens=4096, thinking_level="minimal",
+            )), _context(WireShape.ANTHROPIC_MESSAGES))
+
+    def test_anthropic_manual_budget_is_exact_and_validated(self) -> None:
+        codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
+        context = _context(WireShape.ANTHROPIC_MESSAGES)
+        for budget in (1024, 2048, 4095):
+            request = LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
+                max_output_tokens=4096, thinking_level="low", thinking_budget_tokens=budget,
+            ))
+            payload = codec.encode(request, context).payload
+            self.assertEqual(payload["thinking"], {"type": "enabled", "budget_tokens": budget})
+            self.assertEqual(payload["output_config"], {"effort": "low"})
+        for level, budget in (("low", 1023), ("low", 4096), ("off", 1024), (None, 1024)):
+            with self.subTest(level=level, budget=budget), self.assertRaises(ValueError):
+                codec.encode(LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
+                    max_output_tokens=4096, thinking_level=level, thinking_budget_tokens=budget,
+                )), context)
+        for budget in (True, 1024.0, "1024", 0, -1):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                GenerationPolicyIR(max_output_tokens=4096, thinking_budget_tokens=budget)
+
     def test_endpoint_capability_omits_unsupported_sampling_parameter(self) -> None:
         request = LLMRequestIR(
             messages=(LLMMessageIR(MessageRole.USER, (TextPartIR("work"),)),),

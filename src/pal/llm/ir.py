@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Mapping, TypeAlias
+from typing import Any, Literal, Mapping, TypeAlias
 from uuid import uuid4
 
 from pal.shared.enums import LLMFinishReason
@@ -202,8 +202,16 @@ class GenerationPolicyIR:
     thinking_level: ThinkingLevel | None = None
     thinking_budget_tokens: int | None = None
     tool_choice: str = "auto"
+    thinking_selection: Literal["configured", "lowest_supported"] = "configured"
 
     def __post_init__(self) -> None:
+        if self.thinking_selection not in {"configured", "lowest_supported"}:
+            raise ValueError("invalid thinking_selection")
+        if self.thinking_budget_tokens is not None and (
+            type(self.thinking_budget_tokens) is not int
+            or self.thinking_budget_tokens <= 0
+        ):
+            raise ValueError("thinking_budget_tokens must be a positive integer")
         if int(self.max_output_tokens) <= 0:
             raise ValueError("max_output_tokens must be positive")
         object.__setattr__(self, "max_output_tokens", int(self.max_output_tokens))

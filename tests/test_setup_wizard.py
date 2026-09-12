@@ -122,6 +122,19 @@ class TestSeedFromWizard(unittest.TestCase):
         self.database.close()
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_invalid_thinking_declaration_precedes_all_setup_writes(self) -> None:
+        from pal.llm.endpoint_spec import LLMEndpointSpecError
+
+        collected = _make_collected()
+        collected.endpoints[0].thinking_levels = ["minimal", "high"]
+        collected.endpoints[0].default_thinking_level = "minimal"
+        with patch("pal.identity.IdentityRepository.ensure_defaults") as identity:
+            with patch("pal.llm.secret_store.EncryptedFileSecretStore.set_secret") as secret:
+                with self.assertRaises(LLMEndpointSpecError):
+                    self.wizard.seed_from_wizard(self.registration, collected)
+                identity.assert_not_called()
+                secret.assert_not_called()
+
     def test_seed_from_wizard_writes_identity(self) -> None:
         from pal.identity import IdentityRepository
 
@@ -812,3 +825,15 @@ class TestDependencyDoctor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingLevelPromptTests(unittest.TestCase):
+    def test_invalid_levels_and_default_are_reprompted_without_mapping(self) -> None:
+        from pal.wizard.prompts import _prompt_thinking_levels
+
+        answers = ["minimal,high", "low,high", "max", "low,high", "low"]
+        with patch("pal.wizard.prompts.ask", side_effect=answers), patch("sys.stdout", new_callable=StringIO) as output:
+            result = _prompt_thinking_levels(["low", "high"], "high", wire_shape="anthropic_messages")
+        self.assertEqual(result, (["low", "high"], "low"))
+        self.assertIn("Invalid thinking levels", output.getvalue())
+        self.assertIn("Default thinking level", output.getvalue())
