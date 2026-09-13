@@ -44,7 +44,6 @@ class L1MessageKind(StrEnum):
     RUNTIME_CONTEXT_SUMMARY = "runtime_context_summary"
 
 
-VECTOR_DEDUP_THRESHOLD = 0.85
 RECALL_PROMOTION_THRESHOLD = 0.3
 
 
