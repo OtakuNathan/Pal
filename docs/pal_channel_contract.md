@@ -570,3 +570,10 @@ Telegram 分流策略至少应考虑：
 - 不在本文件定义 UI 样式
 - 不让 `channel` 承担业务解释或 agent 推理
 - 不让 manager 硬编码某个 provider 的 interaction realization
+
+## Core 状态观察
+
+Channel 订阅 Core bus，而不是拥有 sleeping 等系统状态。通过
+`on_runtime_state` 向 endpoint 投影最新快照，通过可选的 `on_core_event`
+投影瞬时通知；两者只入队、不执行阻塞 I/O，不进入普通投递失败恢复或历史。
+完整事件与插件订阅约定见 [Core system observations](pal_core_events.md)。

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from pal.channel.runtime import ChannelRuntime
+from pal.channel.capabilities import subscribe_core_state
 from pal.control import ControlAction, ControlRoute
 from pal.core.runtime import PalCore
 from pal.foundation import EventEnvelope
@@ -20,6 +21,7 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.provider = SimpleNamespace(repository=SimpleNamespace(freeze=Mock()))
         self.route = ControlRoute(endpoint_id="test", channel_kind="test", reply_target={"chat_id": "123", "thread_id": "456"})
         self.channel.remember_user_route(self.route)
+        self.addCleanup(subscribe_core_state(self.core.context, self.channel))
 
     async def test_sleep_broadcast_is_after_admission_and_cleared_on_service_recovery(self):
         first = SimpleNamespace(on_runtime_state=Mock())
@@ -31,14 +33,14 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         first.on_runtime_state.assert_not_called()
         with self.assertLogs("pal.channel.runtime", level="ERROR"):
             self.core.begin_memory_sleep()
-        first.on_runtime_state.assert_called_once_with({"sleeping": True})
+        first.on_runtime_state.assert_called_once_with({"sleeping": True, "failures": [], "safe_modes": [], "turns": []})
         replacement = SimpleNamespace(endpoint=SimpleNamespace(endpoint_id="replacement"), on_runtime_state=Mock())
         self.channel._bind_endpoint_ready(replacement)
-        replacement.on_runtime_state.assert_called_once_with({"sleeping": True})
+        replacement.on_runtime_state.assert_called_once_with({"sleeping": True, "failures": [], "safe_modes": [], "turns": []})
         with self.assertLogs("pal.channel.runtime", level="ERROR"):
             await self.core.leave_memory_maintenance_async()
-        first.on_runtime_state.assert_called_with({"sleeping": False})
-        self.assertEqual(self.channel.runtime_state, {"sleeping": False})
+        first.on_runtime_state.assert_called_with({"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
+        self.assertEqual(self.channel.runtime_state, {"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
 
     async def test_admission_waits_for_preparing_ingress_and_fences_before_return(self):
         self.core.state.memory_ingress_reservations = 1

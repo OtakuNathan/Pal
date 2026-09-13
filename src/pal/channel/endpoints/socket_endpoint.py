@@ -325,6 +325,9 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self._drain_replay_frames_to(replay_session)
         accepted = 0
         for frame in frames:
+            if self.is_ephemeral_frame(frame):
+                accepted += 1
+                continue
             if len(self._unacknowledged_frames) >= SOCKET_TRANSPORT_BACKLOG_MAX_ITEMS:
                 break
             self._unacknowledged_frames.append(dict(frame))
@@ -344,7 +347,9 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
 
     def _drain_replay_frames_to(self, session: _SocketSession) -> None:
         while self._unacknowledged_frames and not session.outbound.full():
-            session.outbound.put_nowait(self._unacknowledged_frames.popleft())
+            frame = self._unacknowledged_frames.popleft()
+            if not self.is_ephemeral_frame(frame):
+                session.outbound.put_nowait(frame)
 
     @staticmethod
     def _enqueue_frames(
@@ -361,19 +366,25 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         for frame in frames:
             session.outbound.put_nowait(frame)
 
+    def is_ephemeral_frame(self, frame: dict[str, Any]) -> bool:
+        """Provider opt-in for observations with no delivery ACK or replay."""
+        return False
+
     def _recover_session_outbound(self, session: _SocketSession) -> None:
         if session.outbound_recovered:
             return
         session.outbound_recovered = True
         if session.inflight_payload is not None:
-            self._unacknowledged_frames.append(session.inflight_payload)
+            if not self.is_ephemeral_frame(session.inflight_payload):
+                self._unacknowledged_frames.append(session.inflight_payload)
             session.inflight_payload = None
         while True:
             try:
                 payload = session.outbound.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            self._unacknowledged_frames.append(payload)
+            if not self.is_ephemeral_frame(payload):
+                self._unacknowledged_frames.append(payload)
             session.outbound.task_done()
 
     def replacement_delivery_ready(self) -> bool:
@@ -403,7 +414,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 waiter: asyncio.Future[None] | None = None
                 try:
                     wire_payload = payload
-                    if session.delivery_ack_enabled:
+                    if session.delivery_ack_enabled and not self.is_ephemeral_frame(payload):
                         delivery_id = str(payload.get("_pal_delivery_id") or uuid4())
                         wire_payload = dict(payload)
                         wire_payload["_pal_delivery_id"] = delivery_id

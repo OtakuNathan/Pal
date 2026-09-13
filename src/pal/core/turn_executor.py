@@ -34,6 +34,7 @@ from pal.core.turns import (
     ToolCallEffect,
     ToolObservation,
 )
+from pal.core.core_events import TURN_TOOL_CALL_FAILED
 from pal.failure import FailureSignal
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.conversions import tool_definition_ir_from_dict
@@ -414,10 +415,16 @@ class TurnExecutor:
                 execution_call = continuation.pending_tool_call_batch[pending_index]
         tool_budget = self._build_tool_call_budget(continuation, execution_call=execution_call)
         self._log_tool_call_start(continuation, execution_call)
-        self.context.turn_event_bus.emit("turn.tool_call_before", {
+        observed_name = execution_call.name
+        if observed_name == "call_tool" and isinstance(execution_call.args, dict):
+            observed_name = str(execution_call.args.get("name") or observed_name)
+        tool_event = {
             "turn_id": continuation.turn_id,
+            "call_id": getattr(execution_call, "call_id", ""),
             "tool_name": execution_call.name,
-        })
+            "subsystem": "execution", "component": observed_name,
+        }
+        self.context.core_event_bus.emit("turn.tool_call_before", tool_event)
         try:
             if self._execute_tool_async is not None:
                 tool_result = await self._execute_tool_async(
@@ -467,6 +474,8 @@ class TurnExecutor:
                 },
                 call_id=getattr(execution_call, "call_id", None),
             )
+        if not tool_result.ok:
+            self.context.core_event_bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
         if self._should_enter_failure_flow_for_tool_result(tool_result):
             failure_result = await self._handle_failure_async(
                 FailureSignal(
@@ -517,9 +526,7 @@ class TurnExecutor:
         if verdict.recommended_action == GuardAction.TERMINATE_TOOL_LOOP:
             continuation.finalization_only = True
         self.context.turn_event_bus.emit("turn.tool_call_after", {
-            "turn_id": continuation.turn_id,
-            "tool_name": execution_call.name,
-            "ok": tool_result.ok,
+            **tool_event, "ok": tool_result.ok,
         })
         if continuation.pending_tool_call_batch:
             continuation.pending_tool_results.append(tool_result)

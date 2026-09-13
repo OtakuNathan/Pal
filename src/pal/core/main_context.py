@@ -28,6 +28,10 @@ class MainContext:
     port_registry: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def core_event_bus(self) -> TurnEventBus:
+        return self.turn_event_bus
+
+    @property
     def capability_registry(self):
         return self.execution_runtime.capability_registry
 

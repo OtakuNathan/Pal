@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pal.control import ControlDelivery
+from pal.core.core_events import MEMORY_SLEEP
 
 
 SLEEP_REPLY = "Pal 正在 dreaming，暂不接收消息。请等睡醒通知后重新发送。"
@@ -33,16 +34,16 @@ class MemoryMaintenanceMixin:
         """Publish sleep only after admission and the required notice succeed."""
         if not self.state.memory_maintenance:
             raise RuntimeError("memory sleep requires maintenance admission")
-        channel = self.context.port_registry.get("channel:channel")
-        if channel is not None:
-            channel.publish_runtime_state(sleeping=True)
+        self.context.core_event_bus.emit(MEMORY_SLEEP, {
+            "subsystem": "memory", "component": "dreaming", "sleeping": True,
+        })
 
     async def leave_memory_maintenance_async(self) -> None:
         async with self.state.channel_turn_transition_lock:
             self.state.memory_maintenance = False
-            channel = self.context.port_registry.get("channel:channel")
-            if channel is not None:
-                channel.publish_runtime_state(sleeping=False)
+            self.context.core_event_bus.emit(MEMORY_SLEEP, {
+                "subsystem": "memory", "component": "dreaming", "sleeping": False,
+            })
             self.state.memory_maintenance_changed.set()
         self.notify_ready()
 

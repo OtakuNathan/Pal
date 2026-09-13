@@ -24,3 +24,8 @@ Plugin naming rules:
 - Reuse shared abbreviations such as `mgmt` and `disc` instead of inventing plugin-local variants.
 - Keep `action_name` descriptive; the compiler owns canonical path abbreviation.
 - Do not handcraft abbreviated canonical paths in plugins. New high-frequency abbreviations must be added centrally in the compiler.
+
+Plugins can observe resident state through `scope.subscribe_core_events(...)`.
+Subscriptions become active on publication and close with the plugin generation.
+See [Core system observations](../../../docs/pal_core_events.md) for the bounded
+mailbox, snapshot and worker cleanup contract.

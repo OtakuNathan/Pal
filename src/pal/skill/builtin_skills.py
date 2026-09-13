@@ -270,6 +270,19 @@ reload_modules = ["runtime", "capabilities"]
 
 For community plugins, Pal clears modules loaded from the plugin directory during refresh. `reload_modules` is still useful when the plugin imports helper modules through stable names.
 
+## System state observations
+
+Use `scope.subscribe_core_events(topics, max_pending=128)` during `start(scope)`
+for display/status plugins. Read `(topic, payload)` with `get(timeout=0.1)` in a
+plugin-owned worker, handle `queue.Empty`, and register worker cleanup with
+`scope.defer`. Publication activates the subscription; detach/reload closes it.
+The first item (and overflow resync) is `runtime.snapshot`, with sleeping, active
+turns, failures and safe_modes. Topics include `memory.sleep`,
+`turn.tool_call_failed`, `failure.started/finished` and
+`failure.safe_mode_started/safe_mode_finished`; module identity is in
+`subsystem/component`. Do not require a turn ID or perform hardware I/O in a
+synchronous Core bus callback. See `docs/pal_core_events.md` for the full contract.
+
 ## Packaging and private dependencies
 
 Use `pal package build` with a project-local `package.toml` to build a `.palpkg`.

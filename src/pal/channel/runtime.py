@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import time
+from copy import deepcopy
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -331,19 +332,28 @@ class ChannelRuntime(ChannelRuntimePort):
         endpoint.on_ready = lambda: self._notify_endpoint_ready(endpoint_id)
         self._project_runtime_state(endpoint)
 
-    def publish_runtime_state(self, *, sleeping: bool) -> None:
+    def publish_core_event(self, topic: str, event: dict[str, object]) -> None:
+        for endpoint in tuple(self.endpoint_registry.endpoints.values()):
+            callback = getattr(endpoint, "on_core_event", None)
+            if callable(callback):
+                try:
+                    callback(topic, deepcopy(event))
+                except Exception:
+                    logging.getLogger(__name__).exception("Channel core event projection failed")
+
+    def publish_runtime_state(self, *, sleeping: bool, **state) -> None:
         """Broadcast resident state independently of the last conversation route.
 
         Keep the latest snapshot for replacement and newly attached endpoints.
         Providers own reconnect replay; this is not a chat/history delivery.
         """
-        self.runtime_state = {"sleeping": sleeping}
+        self.runtime_state = {"sleeping": sleeping, **state}
         for endpoint in tuple(self.endpoint_registry.endpoints.values()):
             self._project_runtime_state(endpoint)
 
     def _project_runtime_state(self, endpoint: ChannelEndpointBase) -> None:
         try:
-            endpoint.on_runtime_state(dict(self.runtime_state))
+            endpoint.on_runtime_state(deepcopy(self.runtime_state))
         except Exception:
             logging.getLogger(__name__).exception("Channel runtime state projection failed")
 
@@ -1690,7 +1700,7 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def _notify_endpoint_ready(self, endpoint_id: str) -> None:
         hub = self.endpoint_hubs.get(str(endpoint_id or ""))
-        if hub is not None and (hub.buffer or hub.transport_backlog) and hub.state in {
+        if hub is not None and (hub.state == EndpointHubState.DRAINING or hub.buffer or hub.transport_backlog) and hub.state in {
             EndpointHubState.ATTACHED,
             EndpointHubState.DRAINING,
         }:

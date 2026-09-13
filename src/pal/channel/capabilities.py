@@ -837,6 +837,33 @@ def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
         enabled_count=sum(1 for item in targets if item.enabled),
     )
 
+def subscribe_core_state(context: MainContext, runtime: ChannelRuntime):
+    """Channel is a projection of Core state, not its owner."""
+    from pal.core.core_events import ALL_CORE_TOPICS
+
+    bus = context.core_event_bus
+    previous = None
+
+    def project(topic, event):
+        nonlocal previous
+        state = bus.snapshot()
+        if state != previous:
+            runtime.publish_runtime_state(**state)
+            previous = state
+        runtime.publish_core_event(topic, event)
+
+    for topic in ALL_CORE_TOPICS:
+        bus.subscribe(topic, project)
+    initial = bus.snapshot()
+    runtime.publish_runtime_state(**initial)
+    previous = initial
+
+    def close():
+        for topic in ALL_CORE_TOPICS:
+            bus.unsubscribe(topic, project)
+    return close
+
+
 class TypingSubscriber:
     def __init__(self, runtime: ChannelRuntime) -> None:
         self._runtime = runtime
@@ -902,6 +929,7 @@ def register_with_core(
     from pal.execution.activity import ExecutionActivityDecorator
     activity_router = ToolActivityRouter(runtime)
     context.execution_runtime.activity_decorator = ExecutionActivityDecorator(activity_router.open_sink)
+    handle.cleanup_callbacks.append(subscribe_core_state(context, runtime))
     context.turn_event_bus.subscribe(TURN_START, activity_router)
     context.turn_event_bus.subscribe(TURN_END, activity_router)
     typing_sub = TypingSubscriber(runtime)

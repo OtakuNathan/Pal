@@ -282,3 +282,41 @@ def test_cancelled_async_waiter_balances_late_gate_admission() -> None:
             return
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=2.0))
+
+
+def test_plugin_core_subscription_is_replaced_and_closed_with_generation(tmp_path):
+    from queue import Empty
+    import pytest
+    from pal.core.core_events import MEMORY_SLEEP, RUNTIME_SNAPSHOT
+
+    root = tmp_path / "builtin"
+    _write_plugin(root, "display_observer")
+    entrypoint = root / "display_observer_runtime.py"
+    entrypoint.write_text(entrypoint.read_text().replace(
+        "        scope.context.register_module(handle)",
+        "        handle.ports['events'] = scope.subscribe_core_events({'memory.sleep'})\n"
+        "        scope.context.register_module(handle)",
+    ))
+    core = PalCore()
+    host = PluginHost(context=core.context, runtime_root=tmp_path,
+                      builtin_root=root, services={"ledger": []})
+    sys.path.insert(0, str(root))
+    try:
+        host.bootstrap()
+        first = core.context.require_port("display_observer:events")
+        assert first.get(timeout=0)[0] == RUNTIME_SNAPSHOT
+        core.context.core_event_bus.emit(MEMORY_SLEEP, {"sleeping": True})
+        host.attach("display_observer")
+        assert first.closed
+        with pytest.raises(Empty):
+            first.get(timeout=0)
+        second = core.context.require_port("display_observer:events")
+        assert second is not first
+        assert second.get(timeout=0)[1]["sleeping"]
+        assert len(core.context.core_event_bus.subscribers_for(MEMORY_SLEEP)) == 1
+        host.detach("display_observer")
+        assert second.closed
+        assert not core.context.core_event_bus.subscribers_for(MEMORY_SLEEP)
+    finally:
+        host.shutdown()
+        sys.path.remove(str(root))

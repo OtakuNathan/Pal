@@ -726,6 +726,7 @@ class PluginHost:
             target[plugin_id] = handle
             self._bind_plugin_module(plugin_id, handle)
             self._replay_optional_contributions(plugin_id)
+            scope.publish_core_subscriptions()
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED)
             return RuntimeStatus.OK
         except Exception as exc:

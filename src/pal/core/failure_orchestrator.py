@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import asyncio
 import json
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from pal.core.core_events import (
+    FAILURE_STARTED, FAILURE_FINISHED, SAFE_MODE_STARTED, SAFE_MODE_FINISHED,
+    TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_TOOL_CALL_FAILED,
+)
 from pal.core.turns import EffectResult, FailureFlowOutcome, LLMRequestEffect, ToolCallEffect, failure_turn_program
 from pal.execution.contracts import CapabilityCall
 from pal.failure import (
@@ -62,6 +67,30 @@ class FailureOrchestrator:
         origin: str,
         route: str | None = None,
         conversation_context: dict[str, Any] | None = None,
+    ) -> FailureHandlingResult:
+        failure_id = uuid4().hex
+        event = {
+            "failure_id": failure_id, "subsystem": signal.subsystem,
+            "component": signal.component, "failure_kind": signal.failure_kind,
+            "severity": signal.severity, "related_ids": dict(signal.related_ids),
+        }
+        bus = self.context.core_event_bus
+        bus.emit(FAILURE_STARTED, event)
+        status = "failed"
+        try:
+            result = await self._handle_failure_async(signal, origin=origin, route=route,
+                conversation_context=conversation_context, failure_event=event)
+            status = result.verification.status
+            return result
+        except asyncio.CancelledError:
+            status = "interrupted"
+            raise
+        finally:
+            bus.emit(FAILURE_FINISHED, {**event, "status": status})
+
+    async def _handle_failure_async(
+        self, signal: FailureSignal, *, origin: str, route: str | None,
+        conversation_context: dict[str, Any] | None, failure_event: dict[str, Any],
     ) -> FailureHandlingResult:
         failure_runtime = self.failure_runtime()
         draft = failure_runtime.begin_draft(signal)
@@ -128,7 +157,16 @@ class FailureOrchestrator:
         try:
             allowed_descriptors = self.tool_surface.select_failure_descriptors(signal)
             allowed_tools = self.tool_surface.build_tool_contracts_from_descriptors(allowed_descriptors)
-            flow_outcome = await self._run_failure_flow_async(draft, allowed_tools=allowed_tools)
+            bus = self.context.core_event_bus
+            # LLM/persistence reports above do not enter safe mode.
+            if self.context.port_registry.get("llm:llm") is not None:
+                bus.emit(SAFE_MODE_STARTED, failure_event)
+                try:
+                    flow_outcome = await self._run_failure_flow_async(draft, allowed_tools=allowed_tools)
+                finally:
+                    bus.emit(SAFE_MODE_FINISHED, failure_event)
+            else:
+                flow_outcome = await self._run_failure_flow_async(draft, allowed_tools=allowed_tools)
         except Exception as exc:
             flow_outcome = _failure_flow_exception_outcome(exc, phase="orchestration")
         verification = flow_outcome.verification
@@ -204,6 +242,16 @@ class FailureOrchestrator:
                 current = EffectResult(status=RuntimeStatus.OK, payload=outcome)
                 continue
             if isinstance(effect, ToolCallEffect):
+                call = effect.tool_call
+                component = call.args.get("name", call.name) if call.name == "call_tool" else call.name
+                tool_event = {
+                    "subsystem": "execution", "component": str(component),
+                    "tool_name": call.name, "call_id": call.call_id,
+                    "scope_id": safe_mode_scope_id, "phase": "safe_mode",
+                    **({"turn_id": draft.related_ids["turn_id"]} if draft.related_ids.get("turn_id") else {}),
+                }
+                bus = self.context.core_event_bus
+                bus.emit(TURN_TOOL_CALL_BEFORE, tool_event)
                 try:
                     tool_result = await self._call_port_async(
                         self.context.execution_runtime,
@@ -221,6 +269,9 @@ class FailureOrchestrator:
                         text=text,
                         structured={"error_type": type(exc).__name__},
                     )
+                if not tool_result.ok:
+                    bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
+                bus.emit(TURN_TOOL_CALL_AFTER, {**tool_event, "ok": tool_result.ok})
                 self.failure_runtime().absorb_maintenance_outcome(
                     draft,
                     action_name=effect.tool_call.name,

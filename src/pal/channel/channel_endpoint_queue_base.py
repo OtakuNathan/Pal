@@ -85,6 +85,9 @@ class ChannelEndpointQueueBase(ABC):
     def supports_stream_delivery(self) -> bool:
         return False
 
+    def on_core_event(self, topic: str, event: dict[str, object]) -> None:
+        """Optional, ephemeral system observation. Must only enqueue, never do I/O."""
+
     def on_runtime_state(self, state: dict[str, object]) -> None:
         """Receive the latest resident state; UI providers may retain/replay it.
 

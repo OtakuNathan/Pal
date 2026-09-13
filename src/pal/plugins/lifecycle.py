@@ -219,9 +219,26 @@ class PluginScope:
     cleanups: list[Cleanup] = field(default_factory=list)
     handle: ModuleHandle | None = None
     published: bool = False
+    _core_subscriptions: list[Any] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         self.context = StagedMainContext(self.core_context, self)
+
+    def subscribe_core_events(self, topics=None, *, max_pending=128):
+        """Read system observations in a plugin-owned worker, never inline I/O."""
+        from pal.core.core_events import ALL_CORE_TOPICS
+
+        subscription = self.core_context.core_event_bus.open_subscription(
+            ALL_CORE_TOPICS if topics is None else topics,
+            max_pending=max_pending, active=self.published,
+        )
+        self._core_subscriptions.append(subscription)
+        self.defer(subscription.close)
+        return subscription
+
+    def publish_core_subscriptions(self):
+        for subscription in self._core_subscriptions:
+            subscription.activate()
 
     def defer(self, cleanup: Cleanup) -> Cleanup:
         self.cleanups.append(cleanup)

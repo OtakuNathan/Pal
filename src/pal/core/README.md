@@ -79,3 +79,7 @@ Interaction rule:
 - modules must not directly call other modules' runtime, service, or repository
   implementations
 - `PalCore` does not supervise OS processes; that belongs to `supervisor`
+
+System display notifications share `MainContext.core_event_bus`; the former
+`turn_event_bus` name aliases it. See [Core system observations](../../../docs/pal_core_events.md)
+for topics, snapshots and plugin mailbox subscriptions.
