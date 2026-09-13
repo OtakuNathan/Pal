@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
+import re
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Callable, Protocol, Sequence
+from uuid import uuid4
 
 from pal.llm.contracts import (
     LLMPreflightRequest,
@@ -27,6 +31,8 @@ from pal.memory.contracts import (
     MemoryCompactResult,
 )
 from pal.shared import LLMFinishReason, LLMPreflightStatus
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_COMPACTION_VISIBLE_TOKENS = 20_000
 
@@ -206,6 +212,43 @@ class CompactionEngine:
         attempts = 0
         validation_error = ""
         consecutive_schema_failures = 0
+        run_id = uuid4().hex[:12]
+        started_at = time.monotonic()
+        attempt_started_at = started_at
+        outcome = None
+
+        def log_failure(reason: str) -> None:
+            failures.append(reason)
+            response = getattr(outcome, "response", None)
+            details = getattr(getattr(response, "message", None), "metadata", {}) or {}
+            endpoint = (
+                getattr(outcome, "preferred_endpoint_id", None)
+                or getattr(llm_runtime, "last_endpoint_id", None)
+                or snapshot.metadata.get("preferred_endpoint_id")
+                or "unresolved"
+            )
+            _LOGGER.warning(
+                "compact attempt_failed run=%s policy=%s endpoint=%s attempt=%s "
+                "elapsed_seconds=%.3f replay=%s reason=%s failure_kind=%s error_type=%s "
+                "input_tokens=%s output_tokens=%s output_limit=%s timeout_seconds=%s",
+                run_id, self.policy.policy_id, endpoint, attempts,
+                time.monotonic() - attempt_started_at,
+                snapshot.replay_request is not None, _log_failure_reason(reason),
+                details.get("failure_kind", ""), details.get("error_type", ""),
+                getattr(outcome, "input_tokens", 0), getattr(outcome, "output_tokens", 0),
+                request.policy.max_output_tokens, self.timeout_seconds,
+            )
+
+        def finish(snapshot: CompactionSnapshot, **kwargs: Any) -> CompactionRunResult:
+            result = self._result(snapshot, **kwargs)
+            _LOGGER.log(
+                logging.INFO if result.success else logging.WARNING,
+                "compact finished run=%s policy=%s status=%s attempts=%s "
+                "elapsed_seconds=%.3f failure_count=%s",
+                run_id, self.policy.policy_id, result.status, result.attempts,
+                time.monotonic() - started_at, len(result.failures),
+            )
+            return result
 
         def hot_replay_unavailable() -> bool:
             return replay_guard is not None and (
@@ -213,8 +256,11 @@ class CompactionEngine:
             )
 
         while attempts < max(1, int(self.max_attempts or 1)):
+            # Preflight failures must not inherit the preceding model response.
+            outcome = None
+            attempt_started_at = time.monotonic()
             if hot_replay_unavailable():
-                return self._result(
+                return finish(
                     snapshot, status="hot_cache_unavailable", attempts=attempts,
                     source_sizes=source_sizes, failures=failures,
                 )
@@ -257,7 +303,7 @@ class CompactionEngine:
                     aggressive=False,
                 )
                 if shrunk is None:
-                    failures.append("input:base_context_over_budget")
+                    log_failure("input:base_context_over_budget")
                     break
                 retained = shrunk
                 continue
@@ -265,22 +311,24 @@ class CompactionEngine:
             # Preflight may await provider work. Recheck immediately before
             # every model attempt, including retries; never silently go cold.
             if hot_replay_unavailable():
-                return self._result(
+                return finish(
                     snapshot, status="hot_cache_unavailable", attempts=attempts,
                     source_sizes=source_sizes, failures=failures,
                 )
             source_sizes.append(len(source))
             attempts += 1
+            attempt_started_at = time.monotonic()
+            outcome = None
             try:
                 outcome = await self._generate(llm_runtime, request)
             except Exception as exc:
-                failures.append(f"endpoint:{type(exc).__name__}")
+                log_failure(f"endpoint:{type(exc).__name__}")
                 consecutive_schema_failures = 0
                 continue
 
             finish_reason = str(getattr(outcome, "finish_reason", "") or "")
             if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
-                failures.append("endpoint:compact_required")
+                log_failure("endpoint:compact_required")
                 consecutive_schema_failures = 0
                 if snapshot.replay_request is not None:
                     snapshot = replace(
@@ -300,13 +348,13 @@ class CompactionEngine:
                     aggressive=False,
                 )
                 if shrunk is None:
-                    failures.append("input:base_context_over_budget")
+                    log_failure("input:base_context_over_budget")
                     break
                 retained = shrunk
                 validation_error = ""
                 continue
             if _is_output_truncation(finish_reason):
-                failures.append(f"output:{finish_reason or 'truncated'}")
+                log_failure(f"output:{finish_reason or 'truncated'}")
                 consecutive_schema_failures = 0
                 if snapshot.replay_request is not None:
                     snapshot = replace(
@@ -331,7 +379,7 @@ class CompactionEngine:
                 validation_error = ""
                 continue
             if finish_reason == LLMFinishReason.ERROR:
-                failures.append("endpoint:error")
+                log_failure("endpoint:error")
                 consecutive_schema_failures = 0
                 continue
 
@@ -359,7 +407,7 @@ class CompactionEngine:
             except Exception as exc:
                 consecutive_schema_failures += 1
                 validation_error = _validation_error(exc)
-                failures.append(f"schema:{validation_error}")
+                log_failure(f"schema:{validation_error}")
                 if consecutive_schema_failures >= 2:
                     shrunk = self._shrink(
                         snapshot,
@@ -379,14 +427,15 @@ class CompactionEngine:
                 after_commit=after_commit,
             )
             if isinstance(committed, Exception):
-                return self._result(
+                log_failure(f"commit:{type(committed).__name__}")
+                return finish(
                     snapshot,
                     status="commit_failed",
                     attempts=attempts,
                     source_sizes=source_sizes,
-                    failures=(*failures, f"commit:{type(committed).__name__}"),
+                    failures=failures,
                 )
-            return self._result(
+            return finish(
                 snapshot,
                 status="compacted",
                 attempts=attempts,
@@ -396,7 +445,7 @@ class CompactionEngine:
                 failures=failures,
             )
 
-        return self._result(
+        return finish(
             snapshot,
             status="failed",
             attempts=attempts,
@@ -1002,6 +1051,24 @@ def _bounded_source_text(
         + f"\n[... {label} omitted {omitted} chars; head/tail projection only ...]\n"
         + text[-tail_chars:].lstrip()
     )
+
+
+def _log_failure_reason(reason: str) -> str:
+    if not reason.startswith("schema:"):
+        return reason
+    detail = reason.removeprefix("schema:")
+    if " has extra fields:" in detail:
+        detail = detail.split(" has extra fields:", 1)[0] + " has extra fields"
+    # Only known validator diagnostics are safe; custom policy exceptions may
+    # contain source text, credentials, or a provider response body.
+    if re.fullmatch(
+        r"(?:output (?:is not valid JSON|JSON must be an object)|"
+        r"(?:rendered )?checkpoint exceeds the [0-9,]+-token (?:visible )?output limit \(estimated [0-9]+\)|"
+        r"[a-zA-Z0-9_.\[\]]+ (?:must be [a-zA-Z0-9_. /-]+|is required for case|has extra fields|must be omitted for fact)|"
+        r"continuity missing fields: [a-z_, ]+)", detail,
+    ):
+        return "schema:" + detail
+    return "schema:checkpoint_validation_failed"
 
 
 def _validation_error(exc: Exception) -> str:

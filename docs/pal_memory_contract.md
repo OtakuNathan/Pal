@@ -743,6 +743,10 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 
 当前实现由 Core 的共享 compaction engine 负责预算防护、原子历史单元裁剪、模型尝试、结果校验和提交编排。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
 
+共享 engine 通过 `pal.core.compaction` 标准日志记录每次失败及整轮结果；systemd 部署可在 journal 中按 `compact attempt_failed` / `compact finished` 检索。记录运行 ID、尝试次数、耗时、endpoint、错误分类、校验原因和输出预算，不写入对话正文、模型输出或原始异常消息。未知自定义校验异常仅记录通用分类。
+
+本体生成的压缩块明确说明其用途是延续先前对话；正常回复应静默使用，不反复提及摘要或压缩过程。用户询问压缩或确需解释上下文缺失时可以说明。已有已渲染的摘要不自动重写，这条说明随后续成功 compact 生效。
+
 host policy 区分两类结构化 compact：
 
 - `pal.compaction.pal.v2`：本体会话连续性。保留当前焦点、用户请求、操作约束、决策、问题和近期对话。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
