@@ -35,6 +35,12 @@ Invariants:
 - provider is credential/display/telemetry identity and may select only a
   response-syntax normalizer; it never selects request semantics or a codec
 - the validated endpoint row is the only thinking-level truth source
+- non-off effort values are transmitted unchanged in each shape's wire field;
+  there is no effort mapping table or codec fallback to another level
+- configuration errors list shape-accepted levels; invalid defaults and runtime
+  selections list the endpoint's declared choices
+- `lowest_supported` resolves after endpoint selection, clears inherited manual
+  thinking budgets, and leaves the ordinary conversation's selection unchanged
 - endpoint-declared unsupported request parameters are omitted by codecs while
   the provider-neutral generation policy remains unchanged
 - exact-model hooks can modify only messages and tool definitions
@@ -54,3 +60,9 @@ Invariants:
 - streaming and single-shot responses pass through the same codec-owned JSON-frame iterator
 - decoder state and provider stream events never escape the codec
 - closed L1 turns contain neither reasoning parts nor replay envelopes
+
+The [LLM contract](../../../docs/pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)
+defines accepted configuration vocabulary, per-shape `off` behavior, manual
+budget validation, and configuration/restart boundaries. Core owns compact's
+visible summary limit and total output allowance; see the
+[compact contract](../../../docs/pal_memory_contract.md#compact).

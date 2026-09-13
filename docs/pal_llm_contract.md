@@ -182,7 +182,7 @@ through the same hook instance again.
 - Request/model quirks are exact-model hooks. Provider-wide branching is
   limited to response-syntax normalization and cannot alter behavior policy.
 
-## Thinking selection and Anthropic encoding
+## Thinking selection, validation, and wire encoding
 
 `GenerationPolicyIR.thinking_selection` defaults to `configured`: an explicit
 request level wins, otherwise the endpoint's persisted setting/default applies.
@@ -190,23 +190,70 @@ request level wins, otherwise the endpoint's persisted setting/default applies.
 and generation, using `off < minimal < low < medium < high < xhigh < max`.
 It overrides inherited levels and clears manual budgets without writing settings.
 
-Anthropic declarations accept `off`, `low`, `medium`, `high`, `xhigh`, and `max`;
-`minimal` is rejected before endpoint writes, including add/replace and setup.
-The declared endpoint subset remains authoritative; vocabulary validation does
-not certify a remote model's capabilities. No effort aliases are mapped.
-Non-off levels are transmitted unchanged in `output_config.effort`. Without a
-manual budget, thinking is `adaptive`; `off` explicitly sends `disabled` and no
-effort. Explicit manual budgets send `enabled` and the exact budget alongside
-effort. They must be integers (not bools), at least 1024 and below the effective
-output cap, with thinking enabled. Invalid combinations fail preparation rather
-than being clamped or discarded. Other shapes reject explicit manual budgets.
-Pal does not enable the interleaved-thinking beta budget exception.
+### Configuration and errors
+
+An endpoint declares supported levels and one default from that list. There is
+no configurable effort mapping table. Pal normalizes whitespace/case, but does
+not translate one level into another or fall back to `medium` during encoding.
+
+| Wire shape | Accepted Pal configuration vocabulary | Non-off wire field |
+| --- | --- | --- |
+| `openai_completion` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `reasoning_effort` |
+| `openai_response` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `reasoning.effort` |
+| `anthropic_messages` | `off`, `low`, `medium`, `high`, `xhigh`, `max` | `output_config.effort` |
+
+Every non-off value is transmitted unchanged. This table describes Pal's
+accepted vocabulary, not a guarantee that every remote model supports every
+listed level. Configure only the subset supported by the actual endpoint.
+
+`pal llm add`, `--replace`, setup, and repository writes share validation.
+An invalid or empty level list reports the shape's accepted choices; an invalid
+default reports the endpoint's declared choices. `/think` and explicit runtime
+request levels are likewise checked against that endpoint's list. For example:
+
+```text
+invalid thinking level: 'ultra'; available for openai_response: off, minimal, low, medium, high, xhigh, max
+```
+
+For an existing endpoint known to support `low`, `medium`, and `high`:
+
+```sh
+pal llm add my-endpoint --replace --thinking-levels low,medium,high --default-thinking-level low --runtime-root /path/to/runtime
+```
+
+Invalid thinking declarations are rejected before endpoint, credential, or active
+selection writes. Setup validates all collected thinking declarations before
+seeding, and interactive prompts ask again rather than silently dropping unknown
+levels or substituting a default. Existing legal declarations are preserved;
+historical invalid declarations require explicit correction, not runtime aliases.
+After an endpoint configuration edit, use `/refresh_llm_endpoint` to load it.
+Changing resident codec/runtime Python code requires a full external host restart.
+
+### Thinking switches and manual budgets
+
+`off` is Pal's thinking switch, not an effort keyword. Anthropic explicitly sends
+`thinking: {"type": "disabled"}` and no effort. The OpenAI codecs omit their
+reasoning field for `off`; omission does not itself guarantee that a remote
+service with reasoning enabled by default will disable it.
+
+Anthropic non-off requests without a manual budget send `thinking.type=adaptive`
+and the exact effort. Explicit `thinking_budget_tokens` requests send
+`thinking.type=enabled`, the exact budget, and the exact effort. The budget must
+be an integer (not a bool), at least 1024 and below the effective output cap after
+endpoint limiting. `off` with a manual budget is invalid. Invalid combinations
+fail preparation rather than being clamped or discarded. Other shapes reject
+explicit manual budgets. Pal does not enable the interleaved-thinking beta
+budget exception. This budget is a request IR field, not a `pal llm add` option.
+
+Compact uses `lowest_supported`, clears inherited manual budgets, and never
+converts an effort level into a synthetic token budget. Core chooses its total
+output allowance separately; see [the compact contract](pal_memory_contract.md#compact).
 
 Effort is not a hard token cap. Compatible services can ignore thinking budgets
 (DeepSeek documents this); total output is constrained by `max_tokens`.
 Changing thinking/effort may invalidate provider prompt caching even when the
 replayed messages are unchanged. Cache usage must be measured from responses.
 
-References: https://platform.claude.com/docs/en/build-with-claude/effort,
-https://platform.claude.com/docs/en/build-with-claude/extended-thinking,
-https://api-docs.deepseek.com/guides/anthropic_api/.
+References: [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort),
+[Anthropic manual thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking),
+[DeepSeek Anthropic compatibility](https://api-docs.deepseek.com/guides/anthropic_api/).

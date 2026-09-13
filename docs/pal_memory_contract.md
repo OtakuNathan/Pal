@@ -752,6 +752,10 @@ host policy 区分两类结构化 compact：
 
 可见摘要上限 `V` 仍为目标输入预算的一半、最多 20,000 tokens（未知输入预算时为 20,000）。每次请求总输出额度为 `V + max(2048, ceil(V / 4))`，再受引擎显式上限及实际 endpoint 上限约束；preflight 使用相同额度。输入预算反馈改变 `V` 后重新计算，不再直接申请 provider 的全部输出额度。该余量供推理及序列化使用，不保证 provider 的思考用量；截断仍走既有有限重试，失败不提交摘要。
 
+例如，`V=4,096` 时申请总输出 `6,144` tokens；`V=20,000` 时申请 `25,000`，实际仍服从 endpoint 的输出上限。这个额度包含可见输出和可能计入总输出的思考，不是预先承诺的消费量，也不是手动 `thinking_budget_tokens`。
+
+最低档位取声明集合的语义最小值，不取列表第一项：`[high, low]` 选择 `low`，`[high, off, low]` 选择 `off`。replay 保留原消息和闭合工具协议，但更改 effort 或 thinking 参数可能影响提供方的缓存命中；评估节省情况应比较实际总用量、缓存和耗时。各格式的直传字段、`off` 行为与预算校验见 [LLM 合约](pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)。
+
 自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
 ## retire
