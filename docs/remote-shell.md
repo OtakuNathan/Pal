@@ -307,6 +307,24 @@ locked or denied credentials fail authentication; no plaintext fallback exists.
 Installation must arrange noninteractive access appropriate to that OS account.
 Keychain/Secret Service provisioning and real sudo execution need target E2E.
 
+For interactive enrollment on the remote machine, run as the ordinary worker user:
+
+```sh
+pal-shell-worker --config /absolute/worker.toml --setup-sudo
+```
+
+The wizard asks for protected installation paths, prepares password-free auth and
+launcher templates, and asks for an explicit `STORE` confirmation before invoking
+the OS tool's hidden password prompt. Enter the password only in your own remote
+terminal, never through Pal's shell/PTY or conversation. Mac uses Keychain; Linux
+requires `secret-tool` and an unlocked user Secret Service/DBus session. Root and
+noninteractive invocation are rejected; Windows remains unsupported.
+Readability is checked with secret output discarded. Follow the generated
+`NEXT_STEPS.txt` to install the protected executables/configuration and merge the
+two helper fields into worker TOML. The wizard does not change the worker config,
+install root files, restart services, or claim sudo approval E2E has passed.
+Re-running the wizard explicitly updates the same worker/account credential.
+
 For shutdown, configure `shutdown_argv` as a fixed machine-owner-installed action
 and a non-disabled policy. A trusted `preauthorized` worker policy permits this fixed management action without
 a new prompt; sudo commands still always require one approval. Fixed least-privilege shutdown authorization can avoid storing

@@ -114,8 +114,17 @@ never substitute a shell shutdown command, sudo, reboot or another target.
 list_remote reports configured capabilities and timestamped probes separately.
 Unprobed is not unsupported, and offline does not make a configured target vanish.
 Shell readiness does not prove GUI/Automation permission or a logged-in desktop.
-Sudo setup is optional and separate: a stored password stays in the remote vault,
-each permitted privileged command uses the trusted approval path, and ordinary
+Sudo setup is optional and separate: a stored password stays in the remote vault.
+The machine owner can run
+`pal-shell-worker --config /absolute/worker.toml --setup-sudo`
+in their own remote terminal as the worker user. The OS credential
+tool prompts without echo; never run password enrollment via Pal's shell/PTY or
+ask for the password in conversation. Follow the generated NEXT_STEPS.txt for
+protected helper installation. The wizard neither restarts services nor verifies
+the full sudo approval path. Linux needs an unlocked user Secret Service session;
+macOS uses Keychain; Windows remains unsupported. After installation, verify an
+approved harmless command separately.
+Each permitted privileged command uses the trusted approval path, and ordinary
 PTY password prompts must never trigger credential injection. Do not add sudo or
 power capabilities just to prove a shell connection works.
 
