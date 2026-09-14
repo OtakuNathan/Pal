@@ -166,6 +166,35 @@ and web integrations belong to plugins. Check actual availability before use.
 | Memory provider, learned behavior and skills | Use their live management tools. Facts belong to memory, routing rules to behavior, reusable procedures to skills. | A learned behavior change does not edit system policy. Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
+## Reuse Core's system observation bus
+
+Pal already has `MainContext.core_event_bus`; `turn_event_bus` is a compatibility
+alias for the same bus. For user-requested progress reactions, desktop/hardware
+status, sleep indicators or failure displays, inspect this surface before adding
+a new notification mechanism or modifying Core. Current channel presentation is
+customizable provider behavior, not a fixed limitation of Pal.
+
+Channel already forwards observations to `endpoint.on_core_event(topic, payload)`
+and snapshots to `endpoint.on_runtime_state(state)`. A channel provider should use
+these hooks without adding a second bus subscription. Independent status plugins
+use `scope.subscribe_core_events(...)` in `start(scope)`. Both paths must enqueue
+work for their own worker/event loop; never perform transport or hardware I/O in
+a synchronous Core callback.
+
+Topics include `turn.start/end`, `turn.tool_call_before/after`,
+`turn.tool_call_failed`, `failure.started/finished`,
+`failure.safe_mode_started/safe_mode_finished`, and `memory.sleep`.
+Failure observations carry `subsystem/component`; `turn.end.status` distinguishes
+`success`, `failed` and `interrupted`. A recoverable tool failure is not a failed
+turn, and a successful turn is not proof that channel delivery succeeded.
+Observations are best effort, not a durable completion or delivery protocol.
+
+Read `docs/pal_core_events.md` and the matching channel/plugin manual for routing,
+snapshots and lifecycle details. Existing provider changes use
+`channel_reload_provider`; plugin changes use `plugin_attach`. Confirm the loaded
+runtime supports these hooks; adding/changing resident bus implementation still
+requires an external host restart.
+
 ## Route to specialist manuals
 
 Search and inject only the matching manual if it is not already in context:
@@ -723,6 +752,38 @@ The provider only handles endpoint types it declares in `endpoint_types`. A usab
 - `send_policy_blob`: optional delivery/chunking policy.
 
 There is no generic `pal channel add` CLI. If no current endpoint-management capability covers the row, inspect the repository/schema and prepare an exact scoped patch. Apply it within existing explicit authorization; ask only if that production change is not covered. Do not rerun the entire setup wizard for one custom endpoint row.
+
+## Core observations for channel feedback
+
+Channel subscribes to Core's existing bus and invokes optional endpoint hooks:
+
+- `on_core_event(topic, payload)` receives transient system observations.
+- `on_runtime_state(state)` receives current sleeping, turns, failures and
+  safe_modes state, including the snapshot supplied when the endpoint is ready.
+
+Implement these hooks on the endpoint; do not subscribe the provider to the bus
+again. They run synchronously and must only enqueue work onto the provider's own
+worker/event loop. Detach/reload must stop the worker and release its queue.
+Do not persist observations into normal chat history or replay transient reactions
+as durable messages. Socket providers can use `is_ephemeral_frame(frame)` to keep
+observation frames outside delivery ACK/replay. See `docs/pal_core_events.md`.
+
+For example, Telegram message feedback can show an accepted/processing reaction
+from its ingress path, then use `turn.start` and `turn.end` to track processing.
+`turn.start` means processing started, not merely that a message was received.
+Filter broadcast turn events by this endpoint's `endpoint_id` and associate the
+`turn_id` and routing fields with the original inbound message. Do not assume all
+broadcasts belong to the current chat, or that `reply_target` always contains an
+original message ID. Keep the necessary association in the provider.
+
+Map `turn.end.status` (`success`, `failed`, `interrupted`) according to the user's
+chosen presentation. Do not mark the whole message failed on
+`turn.tool_call_failed`: Pal may recover and finish successfully. A successful
+turn does not guarantee transport delivery; use the existing delivery lifecycle
+if the reaction is meant to certify that the reply was delivered. The bus is
+best effort and must not become the source of truth for durable acknowledgments.
+Use `subsystem/component` for module labels on failure displays; failure events
+may have no turn or chat route. Presentation choices belong to the provider.
 
 ## Interactions and Commands
 
