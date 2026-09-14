@@ -58,6 +58,7 @@ class ControlAction:
     route: ControlRoute | None = None
     delivery: ControlDelivery | None = None
     notes: str = ""
+    trusted_actor: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,8 @@ class InteractionResult:
     action_key: str
     action_args: dict[str, Any] = field(default_factory=dict)
     route: ControlRoute | None = None
+
+    trusted_actor: str = ""
 
 
 ControlCommandHandler = Callable[[ControlCommandInvocation], ControlAction | None]

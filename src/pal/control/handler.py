@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pal.control.contracts import ControlAction, ControlEvent, InteractionResult
 from pal.control.routing import route_from_channel_envelope
@@ -41,10 +41,12 @@ class ControlEventHandler(EventHandler):
                     action_key=interaction_result.action_key,
                     action_args=dict(interaction_result.action_args),
                     route=route,
+                    trusted_actor=interaction_result.trusted_actor,
                 )
             action = self.control_plane.handle_interaction(interaction_result)
             if action is None:
                 return []
+            action = replace(action, trusted_actor=interaction_result.trusted_actor if isinstance(event.payload, ChannelEnvelope) else "")
             return [
                 EventEnvelope(
                     event_kind=EventKind.CONTROL_ACTION,

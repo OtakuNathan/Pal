@@ -1200,7 +1200,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         context_delivery: dict[str, Any] | None = None
         context_messages: tuple[ToolContextMessageIR, ...] = ()
         from pal.execution.activity import capture_activity_output
-        capture_activity_output(record.alias, raw)
+        capture_activity_output(record.alias, raw, native_shell=bool(record.binding.descriptor.metadata.get("native_shell_action")))
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt

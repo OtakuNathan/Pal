@@ -124,10 +124,12 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
-        ports={"execution": resolved_runtime},
+        ports={"execution": resolved_runtime, **({"native_shell_targets": resolved_runtime.shell_owner}
+               if hasattr(resolved_runtime, "shell_owner") else {})},
         shutdown_sync=resolved_runtime.shutdown,
         shutdown_async=resolved_runtime.shutdown_async if native else None,
         runtime_state_port=state_port,
+        control_action_handlers={"shell_privilege_decision": resolved_runtime.shell_owner.approvals.decide} if native else {},
     )
     context.register_module(handle)
     return handle

@@ -13,6 +13,33 @@ from pal.shared import RuntimeStatus, capability_action
 from .tools import RunInput, SessionInput
 
 
+class NativeRunInput(RunInput):
+    target: int = Field(default=0, ge=0, strict=True, description="Execution target; 0 is always local. Paths belong to this target.")
+    sudo: bool = False
+
+
+class RemoteStartInput(StrictToolModel):
+    target: int = Field(gt=0, strict=True)
+    action: str = Field(min_length=1)
+
+
+class RemotePowerInput(StrictToolModel):
+    target: int = Field(gt=0, strict=True)
+    action: Literal["shutdown"] = "shutdown"
+
+
+class DesktopRunInput(RunInput):
+    sudo: bool = False
+
+
+class ReconcileInput(StrictToolModel):
+    operation_id: str = Field(min_length=1, max_length=128, description="Exact operation_id returned by a remote error affordance or shell_status.remote_operations.")
+
+
+class ListRemoteInput(StrictToolModel):
+    refresh: bool = False
+
+
 class RecoverInput(StrictToolModel):
     call_id: str = Field(min_length=1, description="Exact call_id returned by the failed output recovery action or shell_status.retained_outputs.")
 
@@ -34,8 +61,8 @@ STATUS_GUIDANCE = ToolGuidance(
 class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="shell", aliases=("run_shell",),
-        InputModel=RunInput, OutputModel=StructuredToolOutput, execution=DIRECT_CONTROL,
-        async_handler_name="shell_async", guidance=ToolGuidance(
+        InputModel=NativeRunInput, OutputModel=StructuredToolOutput, execution=DIRECT_CONTROL,
+        async_handler_name="shell_async", metadata={"native_shell_action": "run"}, guidance=ToolGuidance(
             purpose="Run a shell command; return its result or a live session for continued execution.",
             use_when=(
                 "Execute commands, builds or tests. Prefer rg for repository text search and rg --files for file"
@@ -53,7 +80,8 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
                 " To change your own state, configuration, or endpoints, use a dedicated capability or the official"
                 " `pal` CLI when it supports the change; never bypass it by hand-editing runtime storage, the database,"
                 " or config files. For unsupported changes, follow pal.self.maintenance and the mutation policy."
-                " Use read_file, edit_file, write_file or delete_path for file operations. Do not pipe long-running"
+                " Use file tools only for their own target; local file tools do not access remote paths. Use the selected"
+                " target shell for remote files when no corresponding file capability exists. Do not pipe long-running"
                 " tests/builds through head, tail or grep to shorten output; result budgeting handles it. Do not rerun a command"
                 " that returned a live session or repeatedly poll it just to wait for completion."
             ),
@@ -77,7 +105,10 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
         budget = call.meta.get("budget")
         limit = execution._resolve_char_limit(budget) if budget is not None else None
         turn_id = str(call.meta.get("turn_id") or "")
-        result = await owner.shell.run(**dict(call.args), turn_id=turn_id, retain_output=True, load_output=False,
+        continuation = owner.core.state.active_turns.get(turn_id) if owner.core is not None else None
+        delivery_context = {"origin_turn": turn_id, "budget": budget, "binding": getattr(continuation, "delivery_binding", None),
+                            "committed": False, "cmd": call.args["cmd"], "tty": bool(call.args.get("tty"))}
+        result = await owner.shell.run(**dict(call.args), turn_id=turn_id, delivery_context=delivery_context, retain_output=True, load_output=False,
                                        inline_limit=-1 if limit is None else min(limit, 2147483647))
         sid = result["session_id"]
         if sid:
@@ -92,7 +123,7 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="session", aliases=("shell_session",),
         InputModel=NativeSessionInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
-        async_handler_name="session_async", guidance=ToolGuidance(
+        async_handler_name="session_async", metadata={"native_shell_action": "session"}, guidance=ToolGuidance(
             purpose="Inspect or control an existing shell session without rerunning its command.",
             use_when=(
                 "Use the returned session_id. read returns a full snapshot; wait_ms waits for exit (default zero,"
@@ -133,7 +164,7 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="status", aliases=("shell_status",),
         InputModel=EmptyToolInput, OutputModel=StructuredToolOutput, execution=INDIRECT_LOCAL_READ,
-        guidance=STATUS_GUIDANCE, async_handler_name="shell_status_async",
+        guidance=STATUS_GUIDANCE, async_handler_name="shell_status_async", metadata={"native_shell_action": "status"},
     )
     def shell_status(self, call):
         owner = call.meta["execution_runtime"].shell_owner
@@ -144,6 +175,8 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
             "retained_outputs": [{"call_id": key, "session_id": item.result["session_id"], "status": item.result["status"]}
                                  for key, item in owner.pending.items()],
             "notification_failures": dict(owner.events.failures) if owner.events else {},
+            "remote_operations": [{"operation_id": t.operation_id, "target": t.target, "runtime_epoch": t.epoch,
+                                   "session_id": t.public_id} for t in owner._shell.operations.values()] if owner._shell else [],
         })
 
     async def shell_status_async(self, call):
@@ -152,7 +185,7 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
     @capability_action(
         namespace="operation", scope="module", family="exec", action_name="recover_output", aliases=("shell_recover_output",),
         InputModel=RecoverInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
-        async_handler_name="recover_output_async", guidance=ToolGuidance(
+        async_handler_name="recover_output_async", metadata={"native_shell_action": "recover_output"}, guidance=ToolGuidance(
             purpose="Retry delivery of retained shell output without executing the command again.",
             use_when="A shell response failed during file reading, validation or pagination and returned this recovery action.",
             do_not_use_when="Output was already delivered; use its result_handle or live session instead.",
@@ -169,6 +202,110 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
         if pending is None:
             raise ToolRejectedError("No retained output for that call ID. Inspect shell_status; do not replay the command.")
         return await owner.stage(call, pending.result, recovery_of=call_id, raw=pending.raw)
+
+    @capability_action(
+        namespace="operation", scope="module", family="exec", action_name="remote_list", aliases=("list_remote",),
+        InputModel=ListRemoteInput, OutputModel=StructuredToolOutput, execution=INDIRECT_LOCAL_READ,
+        async_handler_name="list_remote_async", metadata={"native_shell_action": "list_remote"}, guidance=ToolGuidance(
+            purpose="List legal execution targets with configured facts and timestamped observed resources.",
+            use_when="Choose a machine using OS, CPU architecture, shell and available compute; refresh probes without waking.",
+            do_not_use_when="A returned session already fixes its target.",
+            failure_next_steps="Offline entries remain valid targets; use only their configured explicit start actions.",
+        ),
+    )
+    def list_remote(self, call):
+        raise RuntimeError("Use asynchronous target discovery")
+
+    async def list_remote_async(self, call):
+        owner = call.meta["execution_runtime"].shell_owner
+        import os
+        import platform
+        items = [{"target": 0, "name": "local", "requires_wake": False, "registered": True,
+                  "os": platform.system(), "arch": platform.machine(), "logical_cpus": os.cpu_count(),
+                  "shell": {"executable": "/bin/bash", "invocation": ["-lc"]}}]
+        if owner.remote_port is not None:
+            items.extend(await owner.remote_port.list(call.args.get("refresh", False)))
+        return self._result({"targets": items, "remote_attached": owner.remote_port is not None})
+
+    @capability_action(
+        namespace="operation", scope="module", family="exec", action_name="reconcile", aliases=("shell_reconcile",),
+        InputModel=ReconcileInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
+        async_handler_name="reconcile_async", metadata={"native_shell_action": "reconcile"}, guidance=ToolGuidance(
+            purpose="Recover the outcome of an existing remote operation without submitting it again.",
+            use_when="Submission or PTY input confirmation was lost and an operation_id was returned.",
+            do_not_use_when="Output is already in a paged tool result.",
+            failure_next_steps="UNKNOWN does not mean not executed; restore access to the original Runtime and query again.",
+        ),
+    )
+    def reconcile(self, call):
+        raise RuntimeError("Use asynchronous reconciliation")
+
+    async def reconcile_async(self, call):
+        owner = call.meta["execution_runtime"].shell_owner
+        result = await owner.shell.reconcile(call.args["operation_id"])
+        if "session_id" not in result:
+            return self._result(result)
+        sid = result["session_id"]
+        if sid and sid not in owner.sessions:
+            ticket = owner.shell.tickets[sid]
+            owner.sessions[sid] = dict(owner.shell.operation_context[ticket.operation_id])
+        return await owner.stage(call, result)
+
+    @capability_action(
+        namespace="operation", scope="module", family="exec", action_name="remote_start", aliases=("remote_start",),
+        InputModel=RemoteStartInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
+        async_handler_name="remote_start_async", metadata={"native_shell_action": "remote_start"}, guidance=ToolGuidance(
+            purpose="Explicitly invoke one preconfigured target startup action.",
+            use_when="list_remote reports a configured wake or user-service start action that is needed.",
+            do_not_use_when="A target is already available; this is not command replay or worker restart.",
+            failure_next_steps="Refresh target metadata to verify readiness; action completion alone does not prove readiness.",
+        ),
+    )
+    def remote_start(self, call):
+        raise RuntimeError("Use asynchronous remote management")
+
+    async def remote_start_async(self, call):
+        owner = call.meta["execution_runtime"].shell_owner
+        return self._result(await owner.shell._port().call('start', dict(call.args)))
+
+    @capability_action(
+        namespace="operation", scope="module", family="exec", action_name="remote_power", aliases=("remote_power",),
+        InputModel=RemotePowerInput, OutputModel=StructuredToolOutput, execution=INDIRECT_CONTROL,
+        async_handler_name="remote_power_async", metadata={"native_shell_action": "remote_power"}, guidance=ToolGuidance(
+            purpose="Request target shutdown after a single human approval and atomic worker busy check.",
+            use_when="list_remote reports management.shutdown.supported=true and the target owner authorizes shutdown.",
+            do_not_use_when="Only disconnecting the plugin or stopping one command is intended; never shut down this Pal host.",
+            failure_next_steps="Accepted does not prove power-off. Reconcile UNKNOWN; busy rejects without scheduling later shutdown.",
+        ),
+    )
+    def remote_power(self, call):
+        raise RuntimeError("Use asynchronous remote management")
+
+    async def remote_power_async(self, call):
+        owner = call.meta["execution_runtime"].shell_owner
+        return self._result(await owner.shell.privileged(call.args['target'], 'shutdown', turn_id=str(call.meta.get('turn_id') or '')))
+
+    @capability_action(
+        namespace="operation", scope="module", family="exec", action_name="shell_desktop", aliases=("run_shell_desktop",),
+        InputModel=DesktopRunInput, OutputModel=StructuredToolOutput, execution=DIRECT_CONTROL,
+        async_handler_name="desktop_async", metadata={"native_shell_action": "run"}, guidance=ToolGuidance(
+            purpose="Run on the configured desktop target using the ordinary native shell contract.",
+            use_when="The configured desktop is the intended execution location.",
+            do_not_use_when="Another target is needed; use run_shell(target=...). This shortcut cannot override its target.",
+            failure_next_steps="Inspect list_remote. No configured desktop means rejection, never local fallback.",
+        ),
+    )
+    def desktop(self, call):
+        raise RuntimeError("Use asynchronous native shell")
+
+    async def desktop_async(self, call):
+        from dataclasses import replace
+        owner = call.meta['execution_runtime'].shell_owner
+        targets = await owner.shell._port().list(False)
+        desktops = [item['target'] for item in targets if item.get('shortcut') == 'desktop']
+        if len(desktops) != 1:
+            raise ToolRejectedError('Exactly one remote target must be configured with shortcut=desktop')
+        return await self.shell_async(replace(call, args={**call.args, 'target': desktops[0]}))
 
     @staticmethod
     def _result(payload):

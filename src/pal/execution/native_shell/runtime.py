@@ -8,21 +8,28 @@ from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
     CompleteResult, PagedResult, EffectOutcome, EffectReceipt, ToolRejectedError,
-    ToolAffordance,
+    ToolAffordance, ToolExecutionError,
 )
 from pal.shared.result_rendering import render_structured_for_llm
 from pal.shared import RuntimeStatus
 
 from .adapter import ShellRuntime, ShellRejected, TERMINAL, READ_EFFECTS
 from .tools import session_affordances
+from .remote_contract import RemoteFailure
 
 
-NATIVE_TOOLS = frozenset({"run_shell", "shell_session", "shell_status", "shell_recover_output"})
+REMOTE_PENDING_BYTES = 64 * 1024 * 1024
+
+NATIVE_TOOLS = frozenset({"run_shell", "shell_session", "shell_status", "shell_recover_output", "shell_reconcile", "list_remote", "remote_start", "remote_power", "run_shell_desktop"})
+
+
+def native_action(record):
+    return record.binding.descriptor.metadata.get("native_shell_action", "")
 
 
 def output_result(result):
     payload = {key: value for key, value in result.items()
-               if not key.endswith(("_bytes", "_path")) and key not in {"output_id", "request_id"}}
+               if not key.endswith(("_bytes", "_path")) and key not in {"output_id", "request_id", "snapshot"}}
     if result.get("status") not in TERMINAL:
         payload["returncode"] = None
     text = render_structured_for_llm(payload)
@@ -53,10 +60,13 @@ class NativeShellOwner:
         self.require_output_delivery = False
         self.on_ready = None
         self.write_task = None
+        self.remote_port = None
+        from .approval import ShellApprovals
+        self.approvals = ShellApprovals(self)
 
     @property
     def has_work(self):
-        return bool(self.sessions or self.pending or (self._shell is not None and self._shell._foreground))
+        return bool(self.sessions or self.pending or (self._shell is not None and (self._shell._foreground or self._shell.remote_work)))
 
     @asynccontextmanager
     async def write_scope(self):
@@ -75,8 +85,20 @@ class NativeShellOwner:
         if self.closed:
             raise ShellRejected("shell runtime is closed")
         if self._shell is None:
-            self._shell = ShellRuntime(on_ready=self.notify)
+            from .router import ShellRouter
+            self._shell = ShellRouter(owner=self, on_ready=self.notify)
         return self._shell
+
+    def attach_remote(self, port):
+        if self.remote_port is not None:
+            raise RuntimeError("Remote backend already attached")
+        self.remote_port = port
+        if self._shell is not None:
+            self._shell.loop.call_soon_threadsafe(self._shell.resume)
+
+    def detach_remote(self, port):
+        if self.remote_port is port:
+            self.remote_port = None
 
     def notify(self):
         if self.on_ready is not None:
@@ -88,6 +110,12 @@ class NativeShellOwner:
         tool_call = call.meta["tool_call"]
         pending = PendingOutput(result, str(call.meta.get("turn_id") or ""), recovery_of=recovery_of)
         self.pending[tool_call.call_id] = pending
+        if result.get("target") and raw is None:
+            retained = sum(item.result.get("stdout_total", 0) + item.result.get("stderr_total", 0)
+                           for item in self.pending.values() if item.result.get("target") and item.raw is not None)
+            incoming = result.get("stdout_total", 0) + result.get("stderr_total", 0)
+            if retained + incoming > REMOTE_PENDING_BYTES:
+                raise RemoteFailure("output_capacity", "Retained local deliveries exceed the output budget; recover or release existing results", effect="applied")
         pending.raw = raw if raw is not None else output_result(await self.shell.materialize(result))
         return pending.raw
 
@@ -122,12 +150,16 @@ class NativeShellOwner:
         await self.shell.interrupt_turn(turn_id)
         # The adapter's return alone does not establish delivery to the model.
         for sid, session in list(self.sessions.items()):
+            if sid >= 1 << 48:
+                continue  # Independent remote tasks and their delivery tickets survive turn interruption.
             if session["origin_turn"] == turn_id and not session["committed"]:
                 with suppress(ShellRejected):
                     await self.shell.terminate(sid)
                     await self.shell._discard_cancelled_session(sid)
                 self.sessions.pop(sid, None)
         for call_id, pending in list(self.pending.items()):
+            if pending.result.get("target"):
+                continue
             if pending.turn_id == turn_id and pending.result["session_id"] not in self.sessions:
                 with suppress(ShellRejected):
                     await self.shell.release_output(pending.result)
@@ -153,6 +185,8 @@ class NativeShellOwner:
         self.sessions.clear()
 
     async def reset(self):
+        if self._shell is not None and self._shell.remote_work:
+            raise ShellRejected("remote_busy: reconcile and release remote operations before reset")
         await self.close()
         self.closed = False
 
@@ -174,10 +208,12 @@ class NativeExecutionRuntime(ExecutionRuntime):
     async def _call_record_async(self, record, binding, call, validated, turn_id, budget, allow_tools):
         arguments = record, binding, call, validated, turn_id, budget, allow_tools
         try:
-            if record.execution.effect_kind.value in READ_EFFECTS or record.alias in NATIVE_TOOLS - {"run_shell"}:
+            if record.execution.effect_kind.value in READ_EFFECTS or (native_action(record) and native_action(record) != "run"):
                 return await super()._call_record_async(*arguments)
             async with self.shell_owner.write_scope():
-                if record.alias == "run_shell":
+                if self.shell_owner._shell is not None and self.shell_owner._shell.execution_work:
+                    raise ShellRejected("write_busy: reconcile or deliver retained remote operations before another mutation")
+                if native_action(record) == "run":
                     return await super()._call_record_async(*arguments)
                 if self.shell_owner.require_output_delivery and self.shell_owner.has_work:
                     raise ShellRejected("write_busy: deliver or explicitly release retained shell results before writing or submitting")
@@ -189,6 +225,15 @@ class NativeExecutionRuntime(ExecutionRuntime):
                     return await super()._call_record_async(*arguments)
                 async with self.shell_owner.shell.tool_admission(record.execution.effect_kind.value):
                     return await super()._call_record_async(*arguments)
+        except RemoteFailure as exc:
+            hints = [ToolAffordance(tool="call_tool", arguments={"name": "list_remote", "args": {}},
+                                   reason="Inspect target availability and supported next actions.")]
+            if exc.operation_id:
+                hints.insert(0, ToolAffordance(tool="call_tool", arguments={"name": "shell_reconcile", "args": {"operation_id": exc.operation_id}},
+                                             reason="Query the original operation; do not replay a command or PTY input."))
+            receipt = EffectReceipt(outcome=EffectOutcome(exc.effect), receipt={"operation_id": exc.operation_id})
+            raise ToolExecutionError(str(exc), error_code=exc.code, effect_receipt=receipt,
+                                     affordances=hints, details={"operation_id": exc.operation_id}) from exc
         except ShellRejected as exc:
             prefix = str(exc).partition(":")[0]
             code = {"write_busy": "shell_write_busy", "invalid_session": "invalid_session",
@@ -205,7 +250,7 @@ class NativeExecutionRuntime(ExecutionRuntime):
 
     def _normalize_invocation_result(self, record, call, raw, **kwargs):
         result = super()._normalize_invocation_result(record, call, raw, **kwargs)
-        if record.alias not in NATIVE_TOOLS:
+        if not native_action(record):
             return result
         pending = self.shell_owner.pending.get(call.call_id)
         if isinstance(result, (CompleteResult, PagedResult)):
@@ -218,7 +263,8 @@ class NativeExecutionRuntime(ExecutionRuntime):
 
     async def _invoke_tool_record_async(self, generation, call, **kwargs):
         result = await super()._invoke_tool_record_async(generation, call, **kwargs)
-        if call.name not in NATIVE_TOOLS:
+        record = generation.record_for_alias(call.name)
+        if record is None or not native_action(record):
             return result  # call_tool's resolved inner invocation owns the handoff.
         pending = self.shell_owner.pending.get(call.call_id)
         if pending is None:

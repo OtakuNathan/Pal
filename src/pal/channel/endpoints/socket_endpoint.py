@@ -579,6 +579,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 },),
             )
             return
+        from dataclasses import replace
+        result = replace(result, trusted_actor=session.session_id)
         self.emit_interaction_result(
             result,
             correlation_id=request_id,

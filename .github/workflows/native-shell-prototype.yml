@@ -5,12 +5,18 @@ on:
     paths:
       - "native/shell_runtime/**"
       - "src/pal/execution/**"
+      - "src/pal/control/**"
       - "src/pal/core/turn_executor.py"
       - "src/pal/bootstrap/service.py"
       - "src/pal/runtime_app.py"
       - "src/pal/bunshin/**"
       - ".github/workflows/native-shell-prototype.yml"
   workflow_dispatch:
+    inputs:
+      native_ref:
+        description: "Exact matching pal-shell-native revision (required for remote acceptance)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,13 +37,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: OtakuNathan/pal-shell-native
-          ref: e66d526acc8ce315572eb225d4abc9817384e828
+          ref: ${{ inputs.native_ref || 'dfdcd78e02ed8a86022822a1b27106faaddf87f6' }}
           path: .native-backend
       - name: Install Pal and independently packaged backend
         run: python -m pip install -e '.[test]' ./.native-backend
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      - name: Require matching remote Runtime, RPC and plugin sources
+        run: python -c "import pal_shell_worker, _pal_shell_rpc, pal_shell_remote"
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.native-backend/pal_plugin
       - name: Exercise native lifecycle and Pal hosts
         run: python -m unittest discover -s native/shell_runtime/tests -v
         env:
-          PYTHONPATH: native/shell_runtime/python:src
+          PYTHONPATH: ${{ github.workspace }}/.native-backend/pal_plugin:${{ github.workspace }}/native/shell_runtime/python:${{ github.workspace }}/src

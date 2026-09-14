@@ -62,7 +62,7 @@ class _Capture:
     tool: str
     extra: dict[str, Any] = field(default_factory=dict)
 
-    def observe(self, alias: str, raw: Any) -> None:
+    def observe(self, alias: str, raw: Any, *, native_shell: bool = False) -> None:
         if alias != self.tool:
             return
         payload = getattr(raw, "structured", None)
@@ -73,7 +73,7 @@ class _Capture:
         if alias in {"edit_file", "write_file"} and isinstance(payload.get("patch"), str):
             patch, truncated = bounded_text(payload["patch"], PATCH_BYTES)
             self.extra.update(patch=patch, patch_truncated=truncated)
-        if alias in {"run_shell", "shell_session", "shell_recover_output"}:
+        if native_shell or alias in {"run_shell", "shell_session", "shell_recover_output"}:
             status = payload.get("status")
             if status in {"running", "terminating"}:
                 self.extra.update(background=True, session_id=payload.get("session_id"))
@@ -82,11 +82,11 @@ class _Capture:
 _CAPTURE: ContextVar[_Capture | None] = ContextVar("tool_activity_capture", default=None)
 
 
-def capture_activity_output(alias: str, raw: Any) -> None:
+def capture_activity_output(alias: str, raw: Any, *, native_shell: bool = False) -> None:
     capture = _CAPTURE.get()
     if capture is not None:
         try:
-            capture.observe(alias, raw)
+            capture.observe(alias, raw, native_shell=native_shell)
         except Exception:
             pass  # Presentation must not affect normalization or delivery.
 

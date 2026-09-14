@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
+from pal.skill.remote_setup_manual import PAL_REMOTE_SETUP_MANUAL, PAL_REMOTE_SETUP_SKILL_ID
 
 
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
@@ -214,6 +215,8 @@ Search and inject only the matching manual if it is not already in context:
   isolated request tests and refresh handoff.
 - `pal.lsp.template.development`: LSP template schema, configuration and workspace
   verification; this skill is available when its owning LSP module is mounted.
+- `pal.remote.setup`: guide remote worker installation, SSH/RPC enrollment, target
+  configuration, capability trimming and connection/session acceptance.
 
 Use current tool guidance for surfaces without a dedicated skill. If a skill or
 capability is unavailable, inspect its owning plugin and the current tool surface;
@@ -866,6 +869,27 @@ Before calling a channel provider done:
 
 def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescriptor, ...]:
     return (
+        SkillDescriptor(
+            skill_id=PAL_REMOTE_SETUP_SKILL_ID,
+            module_id=module_id,
+            title="Pal Remote Host Setup",
+            summary="Help users install and enroll a remote worker, configure execution targets and verify supported remote shell capabilities.",
+            manual_text=PAL_REMOTE_SETUP_MANUAL,
+            activation_terms=("pal remote setup", "remote worker", "remote host setup", "remote shell setup",
+                              "远端接入", "远端安装", "远程主机配置", "安装remote端", "添加remote", "配置远端", "云主机接入"),
+            capability_refs=("skill_search", "skill_inject", "search_tools", "run_shell", "call_tool"),
+            applicability_star=SkillApplicabilitySTAR(
+                situation="The user wants help adding a remote execution host to Pal.",
+                task="Prepare or install a matching remote worker and enroll the execution target.",
+                action="Inspect platforms and identities, configure supported capabilities, and verify worker and Pal activation separately.",
+                result="A verified target or concrete remaining user step, without exposed credentials or unsupported capability claims.",
+            ),
+            use_when="Use for remote host onboarding, worker installation, SSH/RPC identity enrollment and execution target setup.",
+            avoid_when="Avoid for routine commands on an already configured target or unrelated SSH administration.",
+            source_format="internal_skill",
+            source_refs=("pal.skill.remote_setup_manual", "docs/remote-shell.md", "pal_shell_remote"),
+            metadata={"internal": True},
+        ),
         SkillDescriptor(
             skill_id=PAL_SELF_MAINTENANCE_SKILL_ID,
             module_id=module_id,
