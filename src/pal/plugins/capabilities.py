@@ -8,7 +8,7 @@ from pal.execution.tool_semantics import (
 )
 from pal.execution.tool_facade import NextToolHint, ToolGuidance
 from pal.packages.jobs import PackageJobs
-from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput
+from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput, PluginUninstallInput
 from pathlib import Path
 
 from pal.execution.generated_tool_models import (
@@ -94,6 +94,17 @@ class PluginsIntrospectionProvider:
     def package_prepare(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._package_result(self.jobs().start, operation="prepare", name=call.args["name"], kind=call.args.get("kind", "plugin"))
 
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="uninstall",
+        guidance=ToolGuidance(purpose="Uninstall a third-party plugin through detach and remove its installation registration; retain data by default.",
+            use_when="The user wants to remove an installed community plugin, optionally clearing declared owned data.",
+            do_not_use_when="Temporary detach or disabling startup. Built-in plugins and channel providers cannot be uninstalled here.",
+            failure_next_steps="Inspect package_status and retry the same uninstall. Cleanup failure preserves remaining resources; undeclared data cannot be purged.",
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Follow the uninstall job and inspect retained data or unfinished cleanup."),)),
+        InputModel=PluginUninstallInput, aliases=("plugin_uninstall",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    def uninstall(self, call: IntrospectionCall) -> IntrospectionResult:
+        return self._package_result(self.jobs().start, operation="uninstall", name=call.args["name"],
+                                    purge_data=bool(call.args.get("purge_data", False)))
+
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", family="package", action_name="status",
         guidance=ToolGuidance(purpose="Inspect package installation stages, failures, private environments and activation results.",
             use_when="Following an installation job or diagnosing dependencies.", do_not_use_when="Reading a plugin's application data.",
@@ -176,7 +187,7 @@ class PluginsIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Detach a plugin's runtime instance without disabling it.",
             use_when="Temporarily removing a plugin's capabilities from the runtime (e.g. isolating a misbehaving plugin).",
-            do_not_use_when="Permanently removing a plugin (use plugin_disable). Detaching a channel endpoint (use channel_detach).",
+            do_not_use_when="Uninstalling plugin files (use plugin_uninstall) or persistently disabling startup (use plugin_disable). Detaching a channel endpoint (use channel_detach).",
             failure_next_steps="If the plugin name is unknown, check plugins_list. Detached plugins can be re-attached with plugin_attach.",
         ),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,

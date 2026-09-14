@@ -26,17 +26,52 @@ class DreamingService:
         self.config = config or DreamingConfig()
         self.core = core
         self.task = None
+        self.active_config = None
         self.run_id = None
         self.on_ready = None
         self.activation_error = ""
+
+    def configure(self, changes):
+        if not isinstance(changes, dict):
+            raise ValueError("dreaming configuration must be an object")
+        config = replace(self.config, **changes)
+        if {"endpoint_id", "review_endpoint_id"}.intersection(changes):
+            resolver = getattr(self.llm, "endpoint_resolver", None)
+            endpoints = {e.endpoint_id for e in resolver.enabled()} if resolver else set()
+            for key in ("endpoint_id", "review_endpoint_id"):
+                value = getattr(config, key)
+                if value and value not in endpoints:
+                    raise ValueError(f"Unknown or disabled dreaming endpoint: {value}")
+        from datetime import datetime, timezone
+        from pal.shared.cron import cron_occurrence
+        reset_due = (config.enabled and not self.config.enabled) or (config.cron, config.timezone) != (self.config.cron, self.config.timezone)
+        active_id = (self.run_id or "") if self.task is not None and not self.task.done() else ""
+        with self.storage.connection(write=True) as db:
+            db.execute("INSERT OR REPLACE INTO memory_settings VALUES ('dreaming_config',?)", (json.dumps(asdict(config)),))
+            if reset_due:
+                due = cron_occurrence(config.cron, config.timezone, datetime.now(timezone.utc)).isoformat()
+                db.execute("INSERT OR REPLACE INTO memory_settings VALUES ('dreaming_next_due',?)", (due,))
+                db.execute("INSERT OR REPLACE INTO memory_settings VALUES ('dreaming_schedule',?)", (json.dumps([config.cron, config.timezone]),))
+            if not config.enabled or reset_due:
+                db.execute("UPDATE dreaming_runs SET status='failed', report_json=?, updated_at=? WHERE status='scheduled' AND slot IS NOT NULL AND run_id!=?",
+                           (json.dumps({"outcome": "not_started", "reason": "automatic_schedule_changed" if config.enabled else "automatic_schedule_disabled"}), utc_now(), active_id))
+        self.config = config
+        if self.on_ready:
+            self.on_ready()
+        return self.status()
 
     def status(self, run_id=None):
         with self.storage.connection() as connection:
             row = (connection.execute("SELECT * FROM dreaming_runs WHERE run_id=?", (run_id,)).fetchone() if run_id
                    else connection.execute("SELECT * FROM dreaming_runs ORDER BY created_at DESC LIMIT 1").fetchone())
+            due = connection.execute("SELECT value FROM memory_settings WHERE key='dreaming_next_due'").fetchone()
+        current = {"enabled": self.config.enabled, "current_configuration": asdict(self.config),
+                   "next_due": due[0] if due and self.config.enabled else None,
+                   "active_run_id": self.run_id if self.task is not None and not self.task.done() else None,
+                   "active_configuration": asdict(self.active_config) if self.active_config is not None and self.task is not None and not self.task.done() else None}
         if row is None:
-            return {"status": "not_found" if run_id else "idle", "enabled": self.config.enabled, "generation_id": self.storage.current()}
-        return {**{key: row[key] for key in ("run_id", "status", "source_generation", "created_at", "updated_at")},
+            return {**current, "status": "not_found" if run_id else "idle", "enabled": self.config.enabled, "generation_id": self.storage.current()}
+        return {**current, **{key: row[key] for key in ("run_id", "status", "source_generation", "created_at", "updated_at")},
                 "configuration": json.loads(row["config_json"]), "report": json.loads(row["report_json"]),
                 "generation_id": self.storage.current(),
                 **({"service_ready": False, "activation_error": self.activation_error} if self.activation_error else {})}
@@ -80,8 +115,10 @@ class DreamingService:
         if self.task is not None and not self.task.done():
             return {"status": "running", "run_id": self.run_id}
         if dry_run:
+            self.run_id = None
+            self.active_config = self.config
             target = self.storage.root / "dry_runs" / uuid4().hex
-            self.task = asyncio.create_task(self.dry_run(target), name="memory-dreaming-dry-run")
+            self.task = asyncio.create_task(self.dry_run(target, config=self.config), name="memory-dreaming-dry-run")
             self.task.add_done_callback(self._task_done)
             return {"status": "started", "dry_run_root": str(target)}
         if resume:
@@ -96,7 +133,8 @@ class DreamingService:
         if self.status(run_id)["status"] == "completed":
             return self.status(run_id)
         self.run_id = run_id
-        self.task = asyncio.create_task(self.run(run_id), name="memory-dreaming")
+        self.active_config = self.config
+        self.task = asyncio.create_task(self.run(run_id, config=self.config), name="memory-dreaming")
         self.task.add_done_callback(self._task_done)
         return {"status": "started", "run_id": run_id}
 
@@ -108,7 +146,7 @@ class DreamingService:
         if self.on_ready:
             self.on_ready()
 
-    def _prepare(self, run_id, review_scope):
+    def _prepare(self, run_id, review_scope, config=None):
         source_path = self.storage.root / "runs" / run_id / "source.sqlite3"
         self.storage.snapshot(self.provider.repository, source_path)
         db = MemoryDatabase(str(source_path), check_same_thread=False)
@@ -127,7 +165,7 @@ class DreamingService:
                 refreshed = prepared_provider.refresh_indexes(limit=8)
                 if not refreshed.get("refreshed"):
                     break
-            return discover_clusters(repo, self.config, storage=self.storage, review_scope=review_scope)
+            return discover_clusters(repo, config or self.config, storage=self.storage, review_scope=review_scope)
         finally:
             repo.close()
 
@@ -151,7 +189,8 @@ class DreamingService:
             raise RuntimeError("the active L3 provider does not own this dreaming storage")
         self.provider = provider
 
-    async def run(self, run_id=None):
+    async def run(self, run_id=None, *, config=None):
+        config = config or self.config
         run_id = run_id or self.create_run()
         if self.status(run_id).get("run_id") != run_id:
             raise ValueError("unknown dreaming run")
@@ -166,13 +205,13 @@ class DreamingService:
         try:
             self._resolve_main_provider()
             source = self.provider.repository
-            pipeline = DreamingPipeline(llm=self.llm, config=self.config, storage=self.storage)
+            pipeline = DreamingPipeline(llm=self.llm, config=config, storage=self.storage)
             with self.storage.connection(write=True) as connection:
                 connection.execute("UPDATE dreaming_runs SET config_json=?,source_generation=? WHERE run_id=?",
-                    (json.dumps(asdict(self.config)), source.generation_id, run_id))
+                    (json.dumps(asdict(config)), source.generation_id, run_id))
             report.update(endpoints=pipeline.endpoints, config_fingerprint=pipeline.config_fingerprint)
             self._phase(run_id, "preprocessing", report)
-            clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint)
+            clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint, config)
             self._phase(run_id, "waiting_idle")
             if self.core is not None:
                 while True:
@@ -192,7 +231,7 @@ class DreamingService:
             # by the full input/configuration fingerprint.
             source = self.provider.repository
             if not await self._work(self._source_matches, clusters):
-                clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint)
+                clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint, config)
             with self.storage.connection(write=True) as connection:
                 connection.execute("UPDATE dreaming_runs SET source_generation=? WHERE run_id=?", (source.generation_id, run_id))
             if self.core is not None:
@@ -234,7 +273,7 @@ class DreamingService:
             self.provider.repository = self.storage.open()
             from pal.bunshin.memory_binding import release_retired_workflow_pins
             await self._work(release_retired_workflow_pins, self.storage.root.parent, self.storage)
-            await self._work(self.storage.collect, retention_days=self.config.retention_days)
+            await self._work(self.storage.collect, retention_days=config.retention_days)
             return self.status(run_id)
         except BaseException as exc:
             # A committed publication is authoritative even if acknowledgement
@@ -328,7 +367,8 @@ class DreamingService:
         finally:
             private.close()
 
-    async def dry_run(self, target_root: Path):
+    async def dry_run(self, target_root: Path, *, config=None):
+        config = config or self.config
         storage = MemoryStorage(target_root)
         storage.deletion_source = self.storage
         storage.initialize()
@@ -339,7 +379,7 @@ class DreamingService:
         provider = replace(self.provider, repository=storage.open(), service=MemoryService(), read_only=False)
         try:
             await self._work(storage.purge_forgotten, provider.repository, storage.deleted_refs())
-            service = DreamingService(storage=storage, provider=provider, llm=self.llm, config=self.config)
+            service = DreamingService(storage=storage, provider=provider, llm=self.llm, config=config)
             result = await service.run()
             report_path = storage.root / "report.json"
             report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

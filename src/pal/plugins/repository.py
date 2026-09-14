@@ -36,6 +36,9 @@ class PluginBundleRepository:
         instance.save()
         return instance
 
+    def delete(self, plugin_id: str) -> None:
+        PluginBundleModel.delete().where(PluginBundleModel.plugin_id == plugin_id).execute()
+
     def get(self, plugin_id: str) -> PluginBundleModel | None:
         return PluginBundleModel.get_or_none(PluginBundleModel.plugin_id == plugin_id)
 

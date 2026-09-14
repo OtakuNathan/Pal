@@ -127,8 +127,8 @@ class MemoryIntrospectionProvider:
         InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("memory_dreaming",),
         async_handler_name="dreaming_async",
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
-        guidance=ToolGuidance(purpose="Inspect, start or resume conservative memory duplicate consolidation.",
-            use_when="The user requests dreaming, a dry run, or its status/report.",
+        guidance=ToolGuidance(purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
+            use_when="The user requests dreaming, a dry run, its status/report, or changes to automatic scheduling and configuration.",
             do_not_use_when="For immediate memory corrections, use update.",
             failure_next_steps="Read the run report; failed runs preserve the published generation."))
     def dreaming(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -137,7 +137,15 @@ class MemoryIntrospectionProvider:
             return IntrospectionResult(status="unavailable", text="Dreaming is only available on the main Pal runtime.")
         operation = str(call.args.get("operation") or "status")
         run_id = call.args.get("run_id")
-        if operation in {"status", "report"}:
+        if operation in {"configure", "enable", "disable"}:
+            try:
+                changes = call.args.get("config") if operation == "configure" else {"enabled": operation == "enable"}
+                result = service.configure(changes)
+            except (ValueError, TypeError) as exc:
+                return IntrospectionResult(status="invalid", text=f"Invalid dreaming configuration: {exc}")
+        elif operation == "config":
+            result = service.status()["current_configuration"]
+        elif operation in {"status", "report"}:
             result = service.status(run_id)
         elif operation == "start":
             result = service.start(dry_run=bool(call.args.get("dry_run")))

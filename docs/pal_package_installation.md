@@ -139,3 +139,51 @@ matching full Chromium, then verifies browser launch and a local MV3 extension
 in a scratch profile. Missing Chromium system libraries use Playwright's apt
 dependency installer; unavailable administrative privileges fail noninteractively.
 No live browser worker is constructed during installation verification.
+
+## Disable and uninstall
+
+`plugin_disable` persists the startup preference, including for builtins, and
+uses the existing dependency-aware detach. `plugin_detach` is temporary.
+`plugin_uninstall(name, purge_data=false)` removes a community installation; it
+runs as a package job and is followed with `package_status`. Builtins and channel
+providers are outside this operation's scope. Offline equivalent:
+
+```sh
+pal package uninstall my_plugin --runtime-root ~/.pal
+pal package uninstall my_plugin --purge-data --runtime-root ~/.pal
+```
+
+Uninstall holds the package lock and lifecycle write gate (or offline runtime
+lease). Dependents are suspended, not removed. Remaining generations, including
+failed cleanup on an already withdrawn plugin, must finish detaching before files
+or registrations are removed. Missing dependencies block their dependents without
+preventing unrelated plugins from starting or shutting down.
+
+By default, the complete installation directory is retired under
+`packages/previous/plugin/<id>/uninstall-<operation>/`, preserving legacy inline
+data. Application data and saved enabled/configuration preferences remain; a
+normal reinstall restores preferences but creates a fresh runtime generation.
+`package_prepare` cannot reinstall an uninstalled package implicitly.
+
+Explicit purge requires a complete ownership declaration in `plugin.toml`:
+
+```toml
+[uninstall]
+data_paths = ["data/my_plugin"]
+```
+
+Paths must be literal runtime-relative paths below `data/`. Runtime roots,
+shared resident namespaces, symlinks and overlaps with another declared owner are
+rejected. An absent declaration means unknown ownership and refuses purge before
+detaching; `data_paths = []` explicitly declares no external data. Purge deletes
+declared data, retained preferences, retired plugin copies and unreferenced private
+environments. It does not guess ownership of shared tables or shared artifacts.
+
+A persisted removal record prevents bootstrap/rescan from reattaching interrupted
+uninstalls. Retry the same uninstall after fixing cleanup errors; requested purge
+is retained across retries. Status reports `uninstalled` or `cleanup_failed`,
+including remaining cleanup progress. Deleted data is not rolled back. Ordinary
+reinstallation must use package installation to replace the removal record.
+
+These host/configuration changes require an external complete Pal restart for
+activation. Copying files or attaching a plugin alone does not load resident code.

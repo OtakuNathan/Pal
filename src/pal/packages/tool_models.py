@@ -15,3 +15,8 @@ class PackagePrepareInput(StrictToolModel):
 
 class PackageStatusInput(StrictToolModel):
     job_id: str | None = Field(default=None, description="Exact job_id returned by package_install or package_prepare, or listed by package_status. Omit for recent jobs and package records.")
+
+
+class PluginUninstallInput(StrictToolModel):
+    name: str = Field(description="Exact installed third-party plugin id from plugins_list.")
+    purge_data: bool = Field(default=False, description="Also delete declared plugin-owned data and retained configuration. Requires [uninstall] data_paths in the plugin manifest; absent declarations reject purge before detach.")

@@ -51,6 +51,10 @@ class PackageService:
         record.update(stage=stage, updated_at=time.time(), **updates)
         atomic_json(self._record_path(record["kind"], record["id"]), record)
 
+    def uninstall(self, name: str, *, purge_data: bool = False) -> dict:
+        from pal.packages.uninstall import uninstall
+        return uninstall(self, name, purge_data=purge_data)
+
     def install(self, path: Path) -> dict:
         path = Path(path).expanduser().resolve(strict=True)
         with install_lock(self.runtime_root):
@@ -94,6 +98,11 @@ class PackageService:
         return self.runtime_root / "plugins" / "community" / artifact.package_id
 
     def _install_artifact(self, artifact: PackageArtifact) -> dict:
+        if artifact.kind == "plugin":
+            from pal.packages.uninstall import removal_record
+            removal = removal_record(self.runtime_root, artifact.package_id)
+            if removal and removal["status"] != "uninstalled":
+                raise PackageError("Plugin uninstall is incomplete; retry plugin_uninstall first")
         target = self._target(artifact)
         if target.is_symlink():
             raise PackageError("Package target must not be a symlink")
@@ -229,6 +238,10 @@ class PackageService:
     def prepare(self, name: str, *, kind: str = "plugin") -> dict:
         valid_id(name)
         with install_lock(self.runtime_root):
+            if kind == "plugin":
+                from pal.packages.uninstall import removal_record
+                if removal_record(self.runtime_root, name):
+                    raise PackageError("Plugin is uninstalled or removal is incomplete; finish removal and use package_install")
             if kind == "builtin":
                 return self._prepare_builtin(name)
             path = self._record_path(kind, name)

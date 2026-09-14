@@ -245,9 +245,36 @@ class PluginScope:
         return cleanup
 
     def track_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        cancellation_requested = False
+
         def cancel() -> None:
-            if not task.done():
-                task.cancel()
+            nonlocal cancellation_requested
+            if task.done():
+                return
+            loop = task.get_loop()
+            try:
+                current = asyncio.get_running_loop()
+            except RuntimeError:
+                current = None
+            if current is loop:
+                if not cancellation_requested:
+                    cancellation_requested = True
+                    task.cancel()
+                # A synchronous lifecycle call cannot join its own event loop.
+                # Keep this cleanup for retry instead of releasing live resources.
+                raise RuntimeError("Plugin task cancellation is pending; retry detach after the task exits")
+            if not loop.is_running():
+                raise RuntimeError("Plugin task loop is stopped with unfinished work")
+            finished = threading.Event()
+            def request_cancel():
+                nonlocal cancellation_requested
+                task.add_done_callback(lambda _: finished.set())
+                if not cancellation_requested:
+                    cancellation_requested = True
+                    task.cancel()
+            loop.call_soon_threadsafe(request_cancel)
+            if not finished.wait(timeout=10):
+                raise RuntimeError("Plugin task has not completed cancellation; retry detach")
 
         self.defer(cancel)
         return task

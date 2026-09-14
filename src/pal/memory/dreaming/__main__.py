@@ -51,7 +51,7 @@ async def run(args):
     provider = SQLiteVecL3Plugin(service=MemoryService(), repository=storage.open(),
         embedding_provider=build_ollama_embedding_provider_from_config(RuntimeConfig.load(source_root)))
     storage.purge_forgotten(provider.repository, storage.deleted_refs())
-    config = DreamingConfig.load(source_root)
+    config = DreamingConfig.load(source_root, storage=source_storage if source_storage.catalog_path.exists() else None)
     if args.endpoint:
         config = replace(config, endpoint_id=args.endpoint)
     if args.review_endpoint:

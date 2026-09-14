@@ -118,6 +118,8 @@ class PluginHost:
     _attaching: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
+        from pal.plugins.settings import PluginSettings
+        self.settings = PluginSettings(self.runtime_root)
         if self.builtin_root is None:
             self.builtin_root = self.runtime_root / "plugins" / "_builtin"
         self.context.lifecycle_owner_registry.register_owner(self)
@@ -260,7 +262,18 @@ class PluginHost:
                 item["installation"] = {key: records[0].get(key) for key in ("status", "stage", "version", "environment", "error")}
         return sorted(items, key=lambda item: (item["source"], item["plugin_id"]))
 
+    def forget_uninstalled(self, plugin_id: str) -> None:
+        if plugin_id in self.generations:
+            raise RuntimeError("Cannot forget a plugin with a remaining generation")
+        self.manifests.pop(plugin_id, None)
+        self.third_party_handles.pop(plugin_id, None)
+        self.module_to_plugin = {key: owner for key, owner in self.module_to_plugin.items() if owner != plugin_id}
+        self.third_party_repository.delete(plugin_id)
+
     def attach(self, plugin_id: str) -> dict[str, Any]:
+        from pal.packages.uninstall import removal_record
+        if removal_record(self.runtime_root, plugin_id):
+            return {"status": RuntimeStatus.ERROR, "plugin_id": plugin_id, "reason": "plugin_uninstalled_or_removal_pending"}
         record = self._record(plugin_id)
         if record is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
@@ -310,6 +323,9 @@ class PluginHost:
         return self.attach_module(module_id)
 
     def enable(self, plugin_id: str) -> dict[str, Any]:
+        from pal.packages.uninstall import removal_record
+        if removal_record(self.runtime_root, plugin_id):
+            return {"status": RuntimeStatus.ERROR, "plugin_id": plugin_id, "reason": "plugin_uninstalled_or_removal_pending"}
         if plugin_id in self.first_party_records:
             record = self.first_party_records[plugin_id]
             was_disabled = plugin_id in self.first_party_disabled
@@ -317,12 +333,15 @@ class PluginHost:
             self.first_party_disabled.discard(plugin_id)
             record.enabled = True
             if record.attached:
+                self.settings.set("plugin.enabled:" + plugin_id, True)
                 return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
             status = self._attach_with_dependencies(plugin_id)
             if status != RuntimeStatus.OK:
                 record.enabled = previous_enabled
                 if was_disabled:
                     self.first_party_disabled.add(plugin_id)
+            if status == RuntimeStatus.OK:
+                self.settings.set("plugin.enabled:" + plugin_id, True)
             return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
         original = self.third_party_repository.get(plugin_id)
         if original is None:
@@ -347,6 +366,7 @@ class PluginHost:
                 status = self.detach(plugin_id)["status"]
                 if status != RuntimeStatus.OK:
                     return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
+            self.settings.set("plugin.enabled:" + plugin_id, False)
             self.first_party_disabled.add(plugin_id)
             record.enabled = False
             record.last_load_status = PLUGIN_STATUS_DISABLED
@@ -385,7 +405,8 @@ class PluginHost:
                     entrypoint=manifest.entrypoint,
                     version=manifest.version,
                     filesystem_path=manifest.filesystem_path,
-                    enabled=manifest.enabled_by_default,
+                    enabled=(manifest.enabled_by_default if self.settings.get("plugin.enabled:" + manifest.plugin_id) is None
+                             else self.settings.get("plugin.enabled:" + manifest.plugin_id)),
                     attached=False,
                     last_load_status=PLUGIN_STATUS_DISCOVERED,
                     config={
@@ -413,7 +434,14 @@ class PluginHost:
         root.mkdir(parents=True, exist_ok=True)
         for manifest_path in sorted(root.glob("*/plugin.toml")):
             try:
+                from pal.packages.uninstall import removal_record
                 manifest = self._read_manifest(manifest_path)
+                removal = removal_record(self.runtime_root, manifest.plugin_id)
+                if removal:
+                    # Failed cleanup still needs its dependency graph on retry.
+                    if manifest.plugin_id not in self.generations:
+                        self.manifests.pop(manifest.plugin_id, None)
+                    continue
             except Exception as exc:
                 self.scan_errors.append(f"{manifest_path}:{exc}")
                 try:
@@ -449,6 +477,7 @@ class PluginHost:
                 )
             else:
                 self.manifests[manifest.plugin_id] = manifest
+                new_record = self.third_party_repository.get(manifest.plugin_id) is None
                 self.third_party_repository.upsert_discovered(
                     plugin_id=manifest.plugin_id,
                     entrypoint=manifest.entrypoint,
@@ -456,6 +485,11 @@ class PluginHost:
                     filesystem_path=manifest.filesystem_path,
                     enabled_by_default=manifest.enabled_by_default,
                 )
+                retained = self.settings.get("plugin.retained:" + manifest.plugin_id) if new_record else None
+                if retained:
+                    self.third_party_repository.set_enabled(manifest.plugin_id, retained["enabled"])
+                    restored = {key: value for key, value in retained["config"].items() if key != "suspended_by"}
+                    self.third_party_repository.set_config(manifest.plugin_id, restored)
                 row = self.third_party_repository.get(manifest.plugin_id)
                 prior = dict(row.config_blob or {}) if row is not None else {}
                 self.third_party_repository.set_config(
@@ -475,6 +509,12 @@ class PluginHost:
     def _read_manifest(self, manifest_path: Path) -> PluginManifest:
         payload = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
         subscribed = payload.get("subscribed_events", [])
+        uninstall = payload.get("uninstall", {})
+        if not isinstance(uninstall, dict):
+            raise ValueError("uninstall must be a table")
+        data_paths = uninstall.get("data_paths")
+        if data_paths is not None and (not isinstance(data_paths, list) or any(not isinstance(p, str) for p in data_paths)):
+            raise ValueError("uninstall.data_paths must be an array of strings")
         protocol = str(payload.get("lifecycle_protocol") or "").strip()
         if protocol != PLUGIN_LIFECYCLE_RAII_V1:
             raise ValueError(f"unsupported lifecycle_protocol: {protocol or '<missing>'}")
@@ -495,6 +535,7 @@ class PluginHost:
             module_id=module_id,
             requires_plugins=tuple(str(e).strip() for e in payload.get("requires_plugins", []) if str(e).strip()),
             requires_ports=tuple(str(e).strip() for e in payload.get("requires_ports", []) if str(e).strip()),
+            data_paths=tuple(data_paths) if data_paths is not None else None,
         )
 
     # --- RAII v1 lifecycle ---
@@ -564,7 +605,7 @@ class PluginHost:
             manifest = self.manifests[plugin_id]
             for dependency in manifest.requires_plugins:
                 if dependency not in self.manifests:
-                    raise ValueError(f"unknown plugin dependency: {plugin_id} -> {dependency}")
+                    continue  # Missing dependencies block that plugin, not unrelated lifecycle work.
                 if dependency in nodes:
                     visit(dependency)
             visiting.remove(plugin_id)
@@ -627,6 +668,10 @@ class PluginHost:
         return was_suspended and not suspended
 
     def _attach_with_dependencies(self, plugin_id: str) -> str:
+        from pal.packages.uninstall import removal_record
+        if removal_record(self.runtime_root, plugin_id):
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error="plugin uninstall is pending or completed")
+            return RuntimeStatus.ERROR
         if plugin_id in self._attaching:
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"plugin dependency cycle at {plugin_id}")
             return RuntimeStatus.ERROR
@@ -791,8 +836,10 @@ class PluginHost:
             self._withdraw_generation_surface(handle)
         except Exception as exc:
             errors.append(f"surface: {exc.__class__.__name__}: {exc}")
-        with contextlib.suppress(Exception):
+        try:
             self.context.unregister_module(handle)
+        except Exception as exc:
+            errors.append(f"unregister: {exc.__class__.__name__}: {exc}")
         try:
             if plugin_id == "behavior":
                 skill = self.context.port_registry.get("skill:skill")

@@ -21,10 +21,13 @@ def configure_package_parser(parser: argparse.ArgumentParser) -> None:
     preparer.add_argument("name", nargs="?")
     preparer.add_argument("--all-builtin", action="store_true")
     preparer.add_argument("--kind", choices=("plugin", "provider", "builtin"), default="plugin")
+    uninstaller = commands.add_parser("uninstall", help="Uninstall a third-party plugin; retain data by default")
+    uninstaller.add_argument("name")
+    uninstaller.add_argument("--purge-data", action="store_true")
     status = commands.add_parser("status", help="Show installation results")
     status.add_argument("name", nargs="?")
     status.add_argument("--kind", choices=("plugin", "provider", "builtin"), default="plugin")
-    for command in (installer, preparer, status):
+    for command in (installer, preparer, status, uninstaller):
         command.add_argument("--runtime-root", type=Path, default=default_runtime_root(), help=RUNTIME_ROOT_HELP)
 
 
@@ -38,6 +41,8 @@ def run_package_cli(args: argparse.Namespace) -> int:
             for path in args.paths:
                 print(json.dumps(service.install(path), ensure_ascii=False))
             print("Prepared packages are installed. Rescan/attach through the running owner, or start Pal, to activate them.")
+        elif args.package_command == "uninstall":
+            print(json.dumps(service.uninstall(args.name, purge_data=args.purge_data), ensure_ascii=False))
         elif args.package_command == "prepare":
             if args.all_builtin:
                 from pal.plugins.host import _source_plugins_root

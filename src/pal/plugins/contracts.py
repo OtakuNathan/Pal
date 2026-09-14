@@ -38,6 +38,7 @@ class PluginManifest:
     module_id: str = ""
     requires_plugins: tuple[str, ...] = ()
     requires_ports: tuple[str, ...] = ()
+    data_paths: tuple[str, ...] | None = None
 
 
 @dataclass

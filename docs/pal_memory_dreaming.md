@@ -81,7 +81,10 @@ full dependency-bound independent review.
 
 Only the main Pal registers the independent `memory.dreaming` event source.
 It shares cron calculation and Core wake deadlines with other event sources;
-it is not a proactive prompt. Defaults:
+it is not a proactive prompt. Configuration lives in the memory catalog
+(`memory/archive.sqlite3`, `memory_settings.dreaming_config`). On first startup,
+the validated TOML section below is imported once; subsequent starts use the DB
+and do not overwrite it from TOML. Defaults:
 
 ```toml
 [memory.dreaming]
@@ -98,6 +101,22 @@ output_tokens = 32768
 request_timeout_seconds = 600
 retention_days = 7
 ```
+
+Use `/dreaming config`, `/dreaming enable`, `/dreaming disable`, or
+`/dreaming configure {"input_tokens": 10000}` to inspect or update this configuration.
+The `memory_dreaming` tool accepts the same operations and a partial `config`
+object for `configure`. Unknown fields and invalid values are rejected before
+writing. Endpoint changes must name enabled configured endpoints (or `""`).
+
+`enabled` controls automatic scheduling only; manual start, resume and dry run
+remain available. Updates persist immediately, notify Core, and apply to the next
+started round; an active round keeps its captured configuration. Status separates
+`current_configuration` from the reported round's `configuration`. Disabling
+retires automatic work that has not started without cancelling an active round.
+Re-enabling or changing the schedule starts at the next future occurrence; ordinary
+restart catch-up still coalesces missed occurrences. Configuration controls also
+work during deep sleep without starting a conversation LLM. Offline dry runs read
+source settings without modifying them; CLI overrides apply only to the copy.
 
 Empty endpoints resolve to the main endpoint at run start. Review uses an
 independent request. The round locks endpoint/model facts, uses strict endpoint

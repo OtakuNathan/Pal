@@ -25,7 +25,7 @@ class PackageJobs:
                 raise PackageError("Package manager is stopping")
             self.threads = {key: value for key, value in self.threads.items() if value[0].is_alive()}
             if self.threads:
-                raise PackageError("An installation is already running; inspect package_status before retrying")
+                raise PackageError("A package operation is already running; inspect package_status before retrying")
             job_id = uuid.uuid4().hex
             state = dict(job_id=job_id, operation=operation, status="running", started_at=time.time())
             atomic_json(self.root / f"{job_id}.json", state)
@@ -60,7 +60,7 @@ class PackageJobs:
             if path.is_file():
                 state = json.loads(path.read_text())
                 if state["status"] == "running" and state["job_id"] not in active:
-                    state.update(status="interrupted", next_step="Retry the same install or prepare operation")
+                    state.update(status="interrupted", next_step="Retry the same package operation, including its uninstall data option")
                 jobs.append(state)
         return {"jobs": jobs, **self.service.status()}
 

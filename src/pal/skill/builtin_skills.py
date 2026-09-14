@@ -434,7 +434,9 @@ Useful operations:
 
 - `plugin_rescan`: discover plugin manifests.
 - `plugin_attach`: attach or refresh a plugin.
-- `plugin_detach`: detach a plugin.
+- `plugin_detach`: temporarily detach a plugin.
+- `plugin_disable`: persistently disable startup and detach, including builtins.
+- `plugin_uninstall`: remove a community installation through a package job; retain data by default. Follow `package_status`. Explicit purge requires declared `[uninstall] data_paths`; builtins and providers are not supported.
 - `plugin_enable`: enable and attach a disabled plugin.
 - `search_tools`: find capabilities after attach.
 - `call_tool`: call a capability by discovered name.

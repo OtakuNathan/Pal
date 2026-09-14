@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,7 +26,23 @@ class DreamingConfig:
     def __post_init__(self):
         from croniter import croniter
         from zoneinfo import ZoneInfo
-        ZoneInfo(self.timezone)
+        if type(self.enabled) is not bool:
+            raise ValueError("dreaming enabled must be a boolean")
+        for name in ("cron", "timezone", "endpoint_id", "review_endpoint_id"):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"dreaming {name} must be a string")
+        for name in ("neighbors", "max_group_members", "max_clusters_per_request", "input_tokens", "output_tokens", "retention_days"):
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"dreaming {name} must be an integer")
+        if type(self.request_timeout_seconds) not in {int, float}:
+            raise ValueError("dreaming timeout must be a number")
+        import math
+        if not math.isfinite(self.request_timeout_seconds):
+            raise ValueError("dreaming timeout must be finite")
+        try:
+            ZoneInfo(self.timezone)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"invalid dreaming timezone: {self.timezone}") from exc
         if not croniter.is_valid(self.cron):
             raise ValueError("invalid dreaming cron expression")
         for name in ("neighbors", "max_group_members", "max_clusters_per_request", "input_tokens", "output_tokens", "request_timeout_seconds", "retention_days"):
@@ -37,7 +54,20 @@ class DreamingConfig:
             raise ValueError("old memory generations must be retained for at least seven days")
 
     @classmethod
-    def load(cls, runtime_root: Path):
+    def load(cls, runtime_root: Path, *, storage=None):
+        if storage is not None:
+            with storage.connection() as db:
+                row = db.execute("SELECT value FROM memory_settings WHERE key='dreaming_config'").fetchone()
+            if row is not None:
+                return cls(**json.loads(row[0]))
+            config = cls.load(runtime_root)
+            if not storage.read_only:
+                with storage.connection(write=True) as db:
+                    db.execute("INSERT OR IGNORE INTO memory_settings VALUES ('dreaming_config',?)",
+                               (json.dumps(asdict(config)),))
+                    row = db.execute("SELECT value FROM memory_settings WHERE key='dreaming_config'").fetchone()
+                return cls(**json.loads(row[0]))
+            return config
         path = Path(runtime_root) / "config.toml"
         if not path.exists():
             return cls()

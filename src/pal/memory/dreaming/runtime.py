@@ -62,7 +62,7 @@ class DreamingEventHandler:
         return event_kind == "memory.dreaming"
 
     def handle(self, event, context):
-        if self.service.status(event.payload["run_id"])["status"] == "scheduled":
+        if self.service.config.enabled and self.service.status(event.payload["run_id"])["status"] == "scheduled":
             self.service.start(resume=event.payload["run_id"])
         return []
 
@@ -70,7 +70,7 @@ class DreamingEventHandler:
 def register_dreaming(core, provider, llm, runtime_root):
     storage = provider.repository.catalog
     service = DreamingService(storage=storage, provider=provider, llm=llm,
-                              config=DreamingConfig.load(runtime_root), core=core)
+                              config=DreamingConfig.load(runtime_root, storage=storage), core=core)
     # Publication is already reconciled by opening catalog.current at startup.
     # Interrupted unpublished work keeps its cache but relinquishes admission.
     with storage.connection(write=True) as db:
@@ -81,14 +81,24 @@ def register_dreaming(core, provider, llm, runtime_root):
 
     def command(invocation):
         return ControlAction(action_kind="memory_dreaming", target_scope="memory", route=invocation.route,
-                             args={"argv": list(invocation.argv)})
+                             args={"argv": list(invocation.argv), "raw_text": invocation.raw_text})
 
     def control(action):
         argv = list(action.args.get("argv") or ["status"])
         operation = argv[0]
-        if core.state.memory_maintenance and operation not in {"status", "report"}:
-            return {"message": "Dreaming 正在运行；可使用 status 或 report。"}
-        if operation in {"status", "report"}:
+        if core.state.memory_maintenance and operation not in {"status", "report", "config", "configure", "enable", "disable"}:
+            return {"message": "Dreaming 正在运行；可查询状态或修改下一轮配置。"}
+        if operation in {"configure", "enable", "disable"}:
+            try:
+                raw = action.args.get("raw_text", "").split(None, 2)
+                material = raw[2] if len(raw) == 3 else " ".join(argv[1:])
+                changes = json.loads(material) if operation == "configure" else {"enabled": operation == "enable"}
+                result = service.configure(changes)
+            except (ValueError, TypeError) as exc:
+                return {"message": f"Invalid dreaming configuration: {exc}"}
+        elif operation == "config":
+            result = service.status()["current_configuration"]
+        elif operation in {"status", "report"}:
             result = service.status(argv[1] if len(argv) > 1 else None)
         elif operation == "start":
             result = service.start(dry_run="--dry-run" in argv)
@@ -96,7 +106,7 @@ def register_dreaming(core, provider, llm, runtime_root):
             run_id = argv[1] if len(argv) > 1 else service.status().get("run_id")
             result = service.start(resume=run_id)
         else:
-            return {"message": "/dreaming status | report [run_id] | start [--dry-run] | resume [run_id]"}
+            return {"message": "/dreaming status | report [run_id] | start [--dry-run] | resume [run_id] | config | configure <JSON> | enable | disable"}
         return {"message": json.dumps(result, ensure_ascii=False, indent=2)}
 
     core.context.register_module(ModuleHandle(module_id="memory.dreaming", tier=MODULE_TIER_MANAGED_ESSENTIAL,
@@ -106,5 +116,5 @@ def register_dreaming(core, provider, llm, runtime_root):
     core.context.event_handler_registry.register("memory.dreaming", handler, module_id="memory.dreaming")
     core.context.require_port("control:control").register_command(ControlCommandSpec(name="dreaming", handler=command,
         description="Inspect or start conservative memory duplicate consolidation.",
-        usage="/dreaming status | report | start [--dry-run] | resume"))
+        usage="/dreaming status | report | start [--dry-run] | resume | config | configure <JSON> | enable | disable"))
     return service
