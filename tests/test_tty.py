@@ -687,3 +687,23 @@ class OutputBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await OutputBoundary(console).render("hello")
 
         self.assertIn("hello", console.file.getvalue())
+
+
+class TtyFieldEditTests(unittest.IsolatedAsyncioTestCase):
+    async def test_field_editor_receives_prefill_and_preserves_saved_whitespace(self):
+        value = "def f():\n    return 1\n"
+        item = {"input_id": "value", "label": "正文", "value": "old\n",
+                "multiline": True, "submit": {"label": "保存", "token": "r1b1"}}
+        interaction = TtyInteraction.from_payload({"type": "interactive_update",
+            "interaction": {"interaction_id": "batch", "inputs": [item],
+                            "items": [{"title": "fact", "text": value, "state": "pending"}]}})
+        seen = []
+        async def editor(field):
+            seen.append(field["value"])
+            return value
+        repl = TtyRepl(Path("/unused"), open_unix_connection=None, read_message=None,
+                       request_id_factory=lambda: "test", interaction_editor=editor)
+        self.assertEqual(interaction.options[0].token, "r1b1")
+        self.assertIn(value, interaction.text)
+        self.assertEqual(await repl._interaction_values(interaction, "r1b1"), {"value": value})
+        self.assertEqual(seen, ["old\n"])

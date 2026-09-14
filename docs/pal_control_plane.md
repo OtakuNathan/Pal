@@ -15,6 +15,8 @@ The optional `@BotName` suffix is stripped before command lookup.
 
 `/refresh_llm_endpoint` is a built-in control command. It refreshes LLM endpoint topology from the local database for future turns. It is available in the textual `/control` list, the Telegram command catalog, and the inline control panel as `Refresh LLM`.
 
+/memory_review [batch_id] restores a host-owned memory proposal batch on its bound endpoint. Each candidate is marked or edited separately; only the final batch-submit action authorizes writes. Editing, navigation, retries and field replies remain deterministic control traffic outside L1 and conversational LLM requests.
+
 Inline control buttons should use typed actions. Generic command buttons use `control.command.run` with `command_name`; arbitrary module-specific actions use `control.action.dispatch` and carry a typed `ControlAction` payload. Channel endpoints own platform-specific rendering such as Telegram inline keyboards and callback tokens.
 
 > 目标：定义 `control` 的职责、边界和交互契约。

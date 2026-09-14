@@ -672,6 +672,8 @@ class BunshinManager:
                     str(params.get("delivery_id") or "")
                 )
             }
+        if method == "v2_validate_memory_proposal_source":
+            return {"valid": self._validate_memory_proposal_source(dict(params.get("source") or {}))}
         if method == "v2_list_task_delivery_parts":
             return {
                 "parts": list(
@@ -907,6 +909,18 @@ class BunshinManager:
             payload.pop("control_route", None)
             kind = str(item.get("event_kind") or "")
             binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
+            # Assignment identity is Manager-owned; worker output cannot change it.
+            payload.pop("source_dependencies", None)
+            if payload.get("memory_candidates"):
+                dependencies = {}
+                if str(binding.get("aggregate_type") or "") == AggregateType.DAG_NODE_RUN.value:
+                    dependencies = {"node_run_id": str(binding.get("aggregate_id") or "")}
+                    node = self.v2_service.repository.read_snapshot(
+                        AggregateType.DAG_NODE_RUN, str(binding.get("aggregate_id") or ""))
+                    if node is not None:
+                        dependencies = {"node_run_id": node.aggregate_id,
+                            "epoch_id": str(node.payload.get("epoch_id") or "")}
+                payload["source_dependencies"] = dependencies
             workflow_id = str(binding.get("workflow_id") or "")
             if workflow_id and not item.get("workflow_id"):
                 item["workflow_id"] = workflow_id
@@ -1004,6 +1018,28 @@ class BunshinManager:
         else:
             self.events.queue_event(item)
 
+    def _validate_memory_proposal_source(self, source):
+        dependency = source.get("source_dependencies")
+        if not isinstance(dependency, dict):
+            return False
+        repository = self.v2_service.repository
+        workflow = repository.read_snapshot(AggregateType.WORKFLOW, str(source.get("workflow_id") or ""))
+        if workflow is None or str(workflow.payload.get("task_id") or "") != str(source.get("task_id") or ""):
+            return False
+        epoch_id = str(dependency.get("epoch_id") or "")
+        if epoch_id and str(workflow.payload.get("execution_epoch_id") or "") != epoch_id:
+            return False
+        node_id = str(dependency.get("node_run_id") or "")
+        if node_id:
+            node = repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            if node is None or node.workflow_id != workflow.aggregate_id or node.state in {"STALE", "SUPERSEDED", "CANCELLED"}:
+                return False
+            if epoch_id and str(node.payload.get("epoch_id") or "") != epoch_id:
+                return False
+            if dependency.get("requires_accepted") and node.state != "ACCEPTED":
+                return False
+        return True
+
     def _queue_task_delivery_event(
         self,
         event: Mapping[str, Any],
@@ -1024,6 +1060,7 @@ class BunshinManager:
                 item.get("event_kind"),
             )
             return
+        item["task_id"] = task_id
         row = self.v2_service.repository.enqueue_task_delivery(
             task_id=task_id,
             workflow_id=workflow_id,

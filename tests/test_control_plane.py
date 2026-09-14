@@ -2313,6 +2313,38 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             bot_token="token",
         )
 
+    async def test_field_reply_survives_projection_restore_and_never_becomes_chat(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from pal.control.contracts import InteractionInputSpec
+        from pal.control.presentation import interaction_projection
+        # The provider initializes its durable store without needing network access.
+        store = self.endpoint._interaction_store
+        self.assertIsNotNone(store)
+        route = ControlRoute("telegram_main", "telegram", {"chat_id": "100", "user_id": "42"})
+        submit = InteractionButtonSpec("保存", "control.action.dispatch",
+            {"action_kind": "memory_candidate_decision", "args": {"revision": "1", "decision": "save"}})
+        spec = InteractionMessageSpec("mr_test", "memory_candidate_approval", route,
+            "edit", revision="1", inputs=(InteractionInputSpec("value", "正文", "old", submit),))
+        self.endpoint._remember_interaction(spec, {"chat_id": 100, "message_id": 10})
+        token = interaction_projection(spec)[0]["inputs"][0]["submit"]["token"]
+        store.put_input(100, 11, {"interaction_id": "mr_test", "token": token,
+            "input_id": "value", "owner_user_id": "42", "thread_id": None})
+        self.endpoint._interactive_messages.clear()
+        value = "def f():\n    return 1\n"
+        message = SimpleNamespace(chat=SimpleNamespace(id=100), from_user=SimpleNamespace(id=42),
+            message_id=12, message_thread_id=None, text=value, reply_to_message=SimpleNamespace(message_id=11))
+        update = SimpleNamespace(effective_message=message)
+        results = []
+        self.endpoint.emit_interaction_result = lambda result, **kwargs: results.append(result)
+        self.endpoint.application = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        self.assertTrue(await self.endpoint._accept_interaction_input(update))
+        self.assertEqual(results[0].action_args["args"]["input_values"], {"value": value})
+        self.endpoint.forget_interaction_message("mr_test")
+        store.set_state("mr_test", "resolved")
+        self.assertTrue(await self.endpoint._accept_interaction_input(update))
+        self.assertEqual(len(results), 1)
+
     async def test_callback_query_is_normalized_to_interaction_result(self) -> None:
         self.endpoint._interactive_messages["ctl_panel_1"] = {
             "chat_id": 100,

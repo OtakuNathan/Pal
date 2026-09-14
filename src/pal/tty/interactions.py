@@ -19,6 +19,8 @@ class TtyInteraction:
     state: str
     text: str
     options: tuple[TtyInteractionOption, ...]
+    inputs: tuple[dict[str, Any], ...] = ()
+    revision: str = ""
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> TtyInteraction | None:
@@ -37,7 +39,11 @@ class TtyInteraction:
         if not interaction_id:
             return None
         options: list[TtyInteractionOption] = []
-        for row in list(raw.get("buttons") or []):
+        items = [item for item in raw.get("items", []) if isinstance(item, dict)]
+        rows = [*list(raw.get("buttons") or []), *[row for item in items for row in item.get("buttons", [])]]
+        inputs = tuple(item for item in raw.get("inputs", []) if isinstance(item, dict))
+        rows.extend([[item["submit"]] for item in inputs if isinstance(item.get("submit"), dict)])
+        for row in rows:
             if not isinstance(row, list):
                 continue
             for item in row:
@@ -51,6 +57,8 @@ class TtyInteraction:
             interaction_id=interaction_id,
             interaction_kind=str(raw.get("interaction_kind") or ""),
             state=state,
-            text=str(raw.get("text") or ""),
+            text="\n\n".join([str(raw.get("text") or ""), *[f'{item.get("title", "")} [{item.get("state", "")}]\n{item.get("text", "")}' for item in items]]),
+            inputs=inputs,
+            revision=str(raw.get("revision") or ""),
             options=tuple(options),
         )

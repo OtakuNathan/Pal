@@ -95,28 +95,93 @@ def commit(provider, request):
     if (request.scope == "task") != bool(request.task_id):
         return L3MutationResult(status="invalid", document_id="", metadata={"reason": "task scope requires task_id"})
     with repo.write_transaction():
-        replayed = _replayed(repo, request, "remember")
-        if replayed is not None:
-            return replayed
-        model = repo.Fact if request.kind == "fact" else repo.Case
-        query = model.select().where((model.scope == request.scope) & (model.task_id == request.task_id) & (model.lifecycle == "active"))
-        fingerprint = content_hash(canonical_content(request))
-        # Cases without a stable event identity must remain separate even if
-        # their descriptions are identical. Retries use mutation_id instead.
-        event = request.payload.get("event_id") or request.payload.get("source_event_id")
-        exact_allowed = request.kind == "fact" or (isinstance(event, str) and bool(event.strip()))
-        exact = query.where(model.dedupe_fingerprint == fingerprint).first() if exact_allowed else None
-        existing = query.where(model.canonical_key == request.canonical_key).first() if request.canonical_key else None
-        if exact is not None:
-            result = _result(provider, f"{request.kind}:{exact.get_id()}", deduplicated=True)
-        elif existing is not None:
-            return L3MutationResult(status="conflict", document_id=f"{request.kind}:{existing.get_id()}",
-                                    metadata={"reason": "canonical identity exists; use explicit update"})
-        else:
-            result = _insert(provider, request)
-        _remember_result(repo, request, "remember", result)
+        result = _commit_in_transaction(provider, request)
     provider.service.project_mutation(result)
     return result
+
+
+def _commit_in_transaction(provider, request):
+    repo = provider.repository
+    replayed = _replayed(repo, request, "remember")
+    if replayed is not None:
+        return replayed
+    model = repo.Fact if request.kind == "fact" else repo.Case
+    query = model.select().where((model.scope == request.scope) & (model.task_id == request.task_id) & (model.lifecycle == "active"))
+    fingerprint = content_hash(canonical_content(request))
+    # Cases without a stable event identity must remain separate even if
+    # their descriptions are identical. Retries use mutation_id instead.
+    event = request.payload.get("event_id") or request.payload.get("source_event_id")
+    exact_allowed = request.kind == "fact" or (isinstance(event, str) and bool(event.strip()))
+    exact = query.where(model.dedupe_fingerprint == fingerprint).first() if exact_allowed else None
+    existing = query.where(model.canonical_key == request.canonical_key).first() if request.canonical_key else None
+    if exact is not None:
+        result = _result(provider, f"{request.kind}:{exact.get_id()}", deduplicated=True)
+    elif existing is not None:
+        return L3MutationResult(status="conflict", document_id=f"{request.kind}:{existing.get_id()}",
+                                metadata={"reason": "canonical identity exists; use explicit update"})
+    else:
+        result = _insert(provider, request)
+    _remember_result(repo, request, "remember", result)
+    return result
+
+
+def commit_batch(provider, request):
+    """Commit records and their replay receipt together; project only afterwards."""
+    from pal.memory.contracts import L3BatchCommitResult
+    import json
+    import logging
+
+    repo = provider.repository
+    if not provider.mounted or provider.read_only or repo.frozen:
+        return L3BatchCommitResult("unavailable")
+    if not request.batch_id or not request.items:
+        return L3BatchCommitResult("invalid")
+    for item in request.items:
+        if (item.kind not in {"fact", "case"} or item.scope not in {"system", "task"}
+                or (item.scope == "task") != bool(item.task_id)
+                or not all(isinstance(value, str) and value.strip() for value in (item.title, item.summary, item.search_text))):
+            return L3BatchCommitResult("invalid")
+        star = (item.situation_text, item.task_text, item.action_text, item.result_text)
+        if (item.kind == "case" and not all(value.strip() for value in star)) or (item.kind == "fact" and any(star)):
+            return L3BatchCommitResult("invalid")
+    digest = content_hash([asdict(item) for item in request.items])
+
+    class BatchRejected(Exception):
+        def __init__(self, result):
+            self.result = result
+
+    try:
+        with repo.write_transaction():
+            receipt = repo.database.execute_sql(
+                "SELECT request_hash,results_json FROM memory_batch_receipts WHERE batch_id=?", (request.batch_id,)
+            ).fetchone()
+            if receipt is not None:
+                if receipt[0] != digest:
+                    return L3BatchCommitResult("conflict", metadata={"reason": "batch content changed"})
+                # Receipts survive supersession and forgetting. A retry must never recreate their records.
+                results = tuple(L3MutationResult("ok", ref, metadata={"replayed": True}) for ref in json.loads(receipt[1]))
+                return L3BatchCommitResult("ok", results, {"replayed": True})
+            results = []
+            for item in request.items:
+                result = _commit_in_transaction(provider, item)
+                if result.status != "ok":
+                    raise BatchRejected(result)
+                results.append(result)
+            repo.database.execute_sql("INSERT INTO memory_batch_receipts VALUES (?,?,?)", (
+                request.batch_id, digest, json.dumps([item.document_id for item in results]),
+            ))
+    except BatchRejected as exc:
+        return L3BatchCommitResult(exc.result.status, metadata=dict(exc.result.metadata))
+    except PermissionError:
+        return L3BatchCommitResult("unavailable")
+    projection_failed = False
+    for result in results:
+        try:
+            provider.service.project_mutation(result)
+        except Exception:
+            projection_failed = True
+            logging.getLogger(__name__).warning("memory batch committed; L2 projection needs refresh")
+    return L3BatchCommitResult("ok", tuple(results), {"projection_failed": projection_failed})
 
 
 def document_request(document):

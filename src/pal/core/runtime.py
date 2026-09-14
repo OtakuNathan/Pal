@@ -48,8 +48,8 @@ from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import LLMGenerationResult
 from pal.llm.ir import LLMRequestIR
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
-from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result
-from pal.memory.interactions import memory_candidate_approval_delivery
+from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result, compact_normalization_diagnostics
+from pal.memory.mutations import content_hash
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.shared import ChannelEnvelope, EventKind, SourceKind, TurnDeliveryBinding
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
@@ -1686,6 +1686,9 @@ class PalCore(MemoryMaintenanceMixin):
         summary_count = getattr(result, "metadata", {}).get("compact_summary_count", 0) if result else 0
         retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
         storage_text = "L1 compact summary updated." if summary_count else "No compact summary was stored."
+        normalization_diagnostics = compact_normalization_diagnostics(result)
+        if normalization_diagnostics:
+            storage_text += f" {len(normalization_diagnostics)} optional format issues normalized or skipped."
         await self._complete_compact_reply_async(
             action,
             f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
@@ -1693,13 +1696,14 @@ class PalCore(MemoryMaintenanceMixin):
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:
             source_ref = f"compact_{uuid4().hex[:12]}"
-            delivery = memory_candidate_approval_delivery(
+            delivery = self.context.require_port("memory:memory").stage_memory_proposal(
                 {
                     "source_kind": "pal_compact",
                     "source_ref": source_ref,
                     "source_label": "Pal compact",
                     "candidate_batch_id": source_ref,
                     "memory_candidates": memory_candidates,
+                    "normalization_diagnostics": normalization_diagnostics,
                 },
                 action.route,
             )
@@ -2047,7 +2051,6 @@ class PalCore(MemoryMaintenanceMixin):
                 }
             )
             return
-        continuation.pending_compact_memory_candidate_batches.clear()
         route = ControlRoute(
             endpoint_id=binding.endpoint.endpoint_id,
             channel_kind=binding.endpoint.channel_kind,
@@ -2055,18 +2058,19 @@ class PalCore(MemoryMaintenanceMixin):
             control_scope_key=binding.control_scope_key,
             correlation_id=binding.correlation_id,
         )
-        for batch in batches:
+        for index, batch in enumerate(batches):
             candidates = coerce_memory_candidate_list(batch.get("memory_candidates") if isinstance(batch, dict) else None)
             if not candidates:
                 continue
-            source_ref = f"compact_{uuid4().hex[:12]}"
-            delivery = memory_candidate_approval_delivery(
+            source_ref = batch.get("candidate_batch_id") or "compact_" + content_hash({"turn": continuation.turn_id, "index": index, "batch": batch})[:24]
+            delivery = self.context.require_port("memory:memory").stage_memory_proposal(
                 {
                     "source_kind": str(batch.get("source_kind") or "pal_compact"),
                     "source_ref": source_ref,
                     "source_label": str(batch.get("source_label") or "Pal compact"),
                     "candidate_batch_id": source_ref,
                     "memory_candidates": candidates,
+                    "normalization_diagnostics": batch.get("normalization_diagnostics", []),
                 },
                 route,
             )
@@ -2080,6 +2084,7 @@ class PalCore(MemoryMaintenanceMixin):
                 )
                 continue
             await self._deliver_control_delivery_async(delivery, fallback_route=route)
+        continuation.pending_compact_memory_candidate_batches.clear()
 
     async def _call_port_async(self, port, async_name: str, sync_name: str, *args, **kwargs):
         async_method = getattr(port, async_name, None)

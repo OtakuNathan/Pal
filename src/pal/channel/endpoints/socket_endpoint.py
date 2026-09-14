@@ -526,38 +526,14 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     ) -> None:
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
-        rows: list[list[dict[str, str]]] = []
-        button_index = 0
-        for row in spec.buttons:
-            projected_row: list[dict[str, str]] = []
-            for button in row:
-                if not isinstance(button, InteractionButtonSpec):
-                    continue
-                token = self.interaction_button_token(button_index)
-                button_index += 1
-                label = str(button.label or "").strip()
-                if not label:
-                    continue
-                projected_row.append(
-                    {
-                        "label": label,
-                        "token": token,
-                    }
-                )
-            if projected_row:
-                rows.append(projected_row)
+        from pal.control.presentation import interaction_projection
+        projection, _ = interaction_projection(spec)
         self._enqueue_frames(
             session,
             ({
                 "type": kind,
                 "request_id": request_id,
-                "interaction": {
-                    "interaction_id": spec.interaction_id,
-                    "interaction_kind": spec.interaction_kind,
-                    "text": spec.text,
-                    "buttons": rows,
-                    "expires_at": spec.expires_at,
-                },
+                "interaction": projection,
             }, {
                 "type": "done",
                 "request_id": request_id,
@@ -590,6 +566,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             result = self.interaction_result_from_token(
                 interaction_id,
                 button_token,
+                input_values=incoming.get("input_values"),
             )
         if result is None:
             self._enqueue_frames(

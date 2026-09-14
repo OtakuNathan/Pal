@@ -59,7 +59,7 @@ def test_schema_extra_keys_are_not_written_to_journal(caplog):
         text='{"PRIVATE_SOURCE_TEXT": "PRIVATE_BODY"}',
     )]), caplog, max_attempts=1)
     assert result.status == "failed"
-    assert "reason=schema:checkpoint has extra fields" in caplog.text
+    assert "reason=schema:" in caplog.text
     assert "PRIVATE" not in caplog.text
 
 

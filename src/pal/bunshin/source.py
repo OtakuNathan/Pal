@@ -182,6 +182,21 @@ class BunshinControlEventHandler(EventHandler):
                     read_parts = getattr(self.provider, "delivered_event_parts", None)
                     if callable(read_parts):
                         completed_parts = set(read_parts(payload))
+                if event.event_kind == EventKind.BUNSHIN_TERMINAL and payload.get("memory_candidates") and "memory_proposals" not in completed_parts:
+                    memory = context.port_registry.get("memory:memory")
+                    if memory is None:
+                        raise RuntimeError("host memory review service is unavailable")
+                    from pal.memory.mutations import content_hash
+                    proposal = {**payload, "source_kind": "bunshin", "source_label": "Bunshin",
+                        "source_ref": str(payload.get("invocation_id") or payload.get("run_id") or payload.get("workflow_id")),
+                        "candidate_batch_id": "bunshin:" + content_hash({
+                            "invocation": payload.get("invocation_id") or payload.get("run_id"),
+                            "workflow": payload.get("workflow_id"),
+                            "candidates": payload["memory_candidates"]})}
+                    proposal_delivery = memory.stage_memory_proposal(proposal, route)
+                    deliveries.append(("memory_proposals", ControlAction(
+                        action_kind=proposal_delivery.delivery_kind, target_scope="interaction",
+                        route=route, delivery=proposal_delivery, notes="Bunshin memory proposal review")))
                 for part_key, action in deliveries:
                     if part_key in completed_parts:
                         continue
@@ -229,8 +244,10 @@ def _event_kind(kind: str) -> str:
 
 def _event_payload(item: dict) -> dict:
     payload = dict(item.get("payload") or {})
-    for key in ("delivery_id", "event_kind", "bunshin_id", "run_id", "invocation_id", "workflow_id", "bunshin_profile", "created_at"):
+    for key in ("task_id", "delivery_id", "event_kind", "bunshin_id", "run_id", "invocation_id", "workflow_id", "bunshin_profile", "created_at"):
         payload.setdefault(key, item.get(key) or "")
+    if item.get("task_id"):
+        payload["task_id"] = item["task_id"]
     route = payload.get("route")
     if route:
         payload["route"] = route

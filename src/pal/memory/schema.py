@@ -76,6 +76,7 @@ def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, table_name=table, column_name="content_revision", definition="INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, table_name="memory_cases", column_name="canonical_key", definition="TEXT")
     _ensure_column(connection, table_name="memory_embeddings", column_name="text_processing_version", definition="TEXT NOT NULL DEFAULT 'search_text_v1'")
+    connection.execute("CREATE TABLE IF NOT EXISTS memory_batch_receipts (batch_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, results_json TEXT NOT NULL)")
     connection.execute("CREATE TABLE IF NOT EXISTS memory_mutations (mutation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, document_id TEXT NOT NULL)")
     connection.execute("CREATE TABLE IF NOT EXISTS memory_revisions (document_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, document_json TEXT NOT NULL, successors_json TEXT NOT NULL, reason TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0)")
     _ensure_column(

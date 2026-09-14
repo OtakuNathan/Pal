@@ -137,6 +137,11 @@ requests, not a request already in flight. `/control` lists available controls;
 active turns, queued messages, and LLM statistics. `/reset` resets the conversation, not the host.
 `/log start` and `/log end` control diagnostic logging; `/compact` and `/interrupt`
 are conversation controls, not configuration activation mechanisms.
+/memory_review [batch_id] resumes compact/Bunshin memory proposals. Mark each item,
+optionally replace individual fields, then explicitly submit the accepted batch.
+All-marked is not authorization; only the final user submit authorizes
+commit_memory_candidates. Provider loss leaves a recoverable draft; never
+bypass review by issuing individual remember calls for the same proposals.
 
 ## Choose how a change becomes effective
 

@@ -666,7 +666,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             llm.generate_requests[0].messages[-1].text,
         )
 
-    def test_output_truncation_disables_continuation_and_shrinks_source(self) -> None:
+    def test_output_truncation_preserves_source_and_requests_shorter_complete_output(self) -> None:
         service = _memory_with_turns(6)
         llm = _ScriptedLLM(
             [
@@ -687,7 +687,9 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "compacted")
-        self.assertLess(result.source_sizes[1], result.source_sizes[0])
+        self.assertEqual(llm.generate_requests[0].messages[-1].text.count("### memory:"), llm.generate_requests[1].messages[-3].text.count("### memory:"))
+        self.assertEqual(llm.generate_requests[1].messages[-2].text, '{"schema":')
+        self.assertIn("complete", llm.generate_requests[1].messages[-1].text)
         self.assertTrue(
             all(
                 request.metadata["max_output_recovery_enabled"] is False
@@ -764,11 +766,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
             "20,000-token visible output limit",
             llm.generate_requests[1].messages[-1].text,
         )
-        self.assertTrue(
-            llm.generate_requests[1].messages[-1].text.endswith(
-                "must not exceed 20,000 tokens."
-            )
-        )
+        self.assertIn("complete", llm.generate_requests[1].messages[-1].text)
+        self.assertIn("20,000", llm.generate_requests[1].messages[-1].text)
 
     def test_three_failures_leave_memory_unchanged(self) -> None:
         service = _memory_with_turns()
@@ -1873,7 +1872,9 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(replies[-1].split(".")[0], "Context compacted")
         self.assertEqual(statuses[-1][0], "interactive_open")
         spec = statuses[-1][1]["spec"]
-        self.assertIn("Compact candidates need approval", spec.text)
+        self.assertIn("最后统一提交", spec.text)
+        self.assertEqual(len(spec.items), 1)
+        self.assertFalse(spec.buttons)
 
     def test_cache_reminder_compact_is_consumed_before_llm_and_runs_once(self) -> None:
         core = PalCore()

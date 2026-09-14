@@ -64,14 +64,7 @@ def l3_commit_args_from_memory_candidate(
         return {}
     scope = str(candidate.get("scope") or default_scope or "system").strip() or "system"
     title = " ".join(str(candidate.get("title") or "").split())
-    summary = " ".join(
-        str(
-            candidate.get("summary")
-            or candidate.get("search_text")
-            or candidate.get("source_excerpt")
-            or title
-        ).split()
-    )
+    summary = str(candidate.get("summary") or candidate.get("search_text") or candidate.get("source_excerpt") or title)
     search_text = str(candidate.get("search_text") or candidate.get("source_excerpt") or summary or title).strip()
     if not title:
         title = _preview_text(summary or search_text, limit=72)
@@ -126,8 +119,8 @@ def _normalize_star(value: dict[str, Any], *, label: str) -> tuple[dict[str, str
     star: dict[str, str] = {}
     missing: list[str] = []
     for field in STAR_MEMORY_FIELDS:
-        text = " ".join(str(value.get(field) or "").split())
-        if not text:
+        text = str(value.get(field) or "")
+        if not text.strip():
             missing.append(field)
         star[field] = text
     if missing:

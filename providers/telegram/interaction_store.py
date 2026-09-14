@@ -42,6 +42,9 @@ class TelegramInteractionStore:
                 )
                 """
             )
+            connection.execute("""CREATE TABLE IF NOT EXISTS interaction_inputs (
+                chat_id TEXT NOT NULL, message_id TEXT NOT NULL, binding_json TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id))""")
         os.chmod(self.database_path, 0o600)
 
     def put_open(
@@ -160,11 +163,22 @@ class TelegramInteractionStore:
             connection.execute(
                 """
                 UPDATE interactions
-                SET state = ?, updated_at = ?
+                SET state = ?, actions_json = '{}', updated_at = ?
                 WHERE interaction_id = ?
                 """,
                 (normalized, utc_now(), str(interaction_id)),
             )
+
+    def put_input(self, chat_id, message_id, binding):
+        with self._connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO interaction_inputs VALUES (?,?,?)",
+                (str(chat_id), str(message_id), _dump_json(binding)))
+
+    def get_input(self, chat_id, message_id):
+        with self._connect() as connection:
+            row = connection.execute("SELECT binding_json FROM interaction_inputs WHERE chat_id=? AND message_id=?",
+                (str(chat_id), str(message_id))).fetchone()
+        return _load_mapping(row[0]) if row else None
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)

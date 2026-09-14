@@ -342,6 +342,16 @@ Channel provider 负责将这些 intent 变成自己的平台 realization。
 - manager 不应该硬编码任何 interaction UI
 - channel provider 必须提供自己的 interaction rendering、status update 和 result normalization
 
+### 可修订的列表与字段输入
+
+InteractionMessageSpec 保留原有 text/buttons，另有可选 revision、items 和 inputs。
+InteractionItemSpec 包含 item ID、标题、完整正文、状态和按钮；
+InteractionInputSpec 包含 input ID、字段名、当前值、多行标记及提交按钮。
+
+共享 projection 生成仅含标签和不透明 token 的公开 JSON；action key、参数、用户身份检查和提交授权留在服务端。客户端回传 interaction_id/button_token，字段提交另带 input_values，其键必须与该 token 声明的 input ID 完全一致、值必须是字符串。普通按钮不可夹带字段值；revision 变化后旧 token 失效，业务服务也校验 revision。不得把浏览器或 Telegram 发来的任意 action 参数当成授权。
+
+Telegram 将 input 投影为持久绑定的 ForceReply，匹配聊天、线程和已知用户；过期输入被控制路径消费并提示恢复，不回落为普通聊天。TTY 和桌宠按完整文本提交，不能 trim 或压平数据。客户端发送失败应保留编辑内容并允许重试，服务端草稿通过 /memory_review 恢复。普通文本 provider 至少显示条目的完整文本。
+
 ## Tagged Message Contract
 
 正常的用户可见消息可以携带可选的语义标签和结构化 payload。`text` 始终是完整兜底；

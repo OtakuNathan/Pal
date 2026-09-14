@@ -51,7 +51,7 @@ from pal.llm.ir import (
     PromptRegionIR,
     TextPartIR,
 )
-from pal.memory.compact import memory_candidates_from_compact_result
+from pal.memory.compact import memory_candidates_from_compact_result, compact_normalization_diagnostics
 from pal.memory.contracts import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -244,13 +244,27 @@ class TurnExecutor:
             else []
         )
         if candidates:
-            continuation.pending_compact_memory_candidate_batches.append(
-                {
-                    "source_kind": "pal_compact",
-                    "source_label": "Pal compact",
-                    "memory_candidates": candidates,
-                }
-            )
+            from pal.control.contracts import ControlRoute
+            from pal.memory.mutations import content_hash
+            batch = {
+                "source_kind": "pal_compact", "source_label": "Pal compact",
+                "memory_candidates": candidates,
+                "normalization_diagnostics": compact_normalization_diagnostics(compact_result),
+                "candidate_batch_id": "compact_" + content_hash({
+                    "turn": continuation.turn_id, "candidates": candidates,
+                    "index": len(continuation.pending_compact_memory_candidate_batches)})[:24],
+            }
+            binding = continuation.delivery_binding
+            if binding is not None:
+                route = ControlRoute(
+                    endpoint_id=binding.endpoint.endpoint_id, channel_kind=binding.endpoint.channel_kind,
+                    reply_target=dict(binding.response_handle.reply_target),
+                    control_scope_key=binding.control_scope_key, correlation_id=binding.correlation_id)
+                batch["source_ref"] = batch["candidate_batch_id"]
+                # Persist before resuming the turn. Delivery can wait; a crash
+                # leaves the draft reachable through /memory_review.
+                memory_service.reviews.stage_payload(batch, route)
+            continuation.pending_compact_memory_candidate_batches.append(batch)
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
 
     @_dispatch_effect.register(LLMRequestEffect)

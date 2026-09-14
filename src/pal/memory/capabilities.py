@@ -18,12 +18,14 @@ from pal.execution.generated_tool_models import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pal.control.contracts import ControlAction
+from pal.control.contracts import ControlAction, InteractionMessageSpec
+from pal.control.interactions import delivery_for_interaction
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
 from pal.memory.mutations import mutation_id_from_call
+from pal.memory.review_models import CommitMemoryCandidatesInput
 from pal.memory.dreaming.tool_models import DreamingInput, MemoryHistoryInput
-from pal.memory.candidates import l3_commit_args_from_memory_candidate, memory_star_from_args, star_text_fields
+from pal.memory.candidates import memory_star_from_args, star_text_fields
 from pal.memory.contracts import L3CommitRequest, L3CorrectRequest, L3DeleteRequest, MemoryQuery
 from pal.memory.rendering import (
     build_mutation_structured_payload,
@@ -180,48 +182,64 @@ class MemoryIntrospectionProvider:
         return IntrospectionResult(status="ok", text="Historical memory originals", structured=payload,
             llm_text=render_titled_structured_for_llm("Historical memory originals", payload))
 
-    async def handle_memory_candidate_decision_async(self, action: ControlAction) -> str:
-        decision = str(action.args.get("decision") or "").strip().lower()
-        if decision == "reject":
-            return "Memory candidates discarded."
-        if decision == "edit":
-            return "Memory candidate absorption paused. Edit and resubmit the candidates when ready."
-        if decision != "accept":
-            return "Unknown memory candidate decision."
-        memory_candidates = _dict_list(action.args.get("memory_candidates"))
-        if not memory_candidates:
-            return "No memory candidates to commit."
-        runtime = getattr(self.context, "execution_runtime", None)
-        has_capability = getattr(runtime, "has_registered_capability", None)
-        if runtime is None or not callable(has_capability) or not has_capability("op_memory_write"):
-            return (
-                f"Memory candidates accepted ({len(memory_candidates)} reviewed; "
-                "0 committed; memory write unavailable)."
-            )
-        source_kind = str(action.args.get("source_kind") or "").strip()
-        source_ref = str(action.args.get("source_ref") or action.target_id or "").strip()
-        default_scope = "task" if source_kind == "bunshin" else "system"
-        fallback_task_id = source_ref if default_scope == "task" else ""
-        committed = 0
-        skipped = 0
-        for candidate in memory_candidates:
-            args = l3_commit_args_from_memory_candidate(
-                candidate,
-                default_scope=default_scope,
-                fallback_task_id=fallback_task_id,
-                source_kind=source_kind,
-                source_ref=source_ref,
-            )
-            if not args:
-                skipped += 1
-                continue
-            result = await runtime.execute_async(CapabilityCall(name="op_memory_write", args=args))
-            if str(getattr(result, "status", "") or "") == RuntimeStatus.OK:
-                committed += 1
-            else:
-                skipped += 1
-        suffix = f"; {skipped} skipped" if skipped else ""
-        return f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix})."
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="commit_candidates",
+        InputModel=CommitMemoryCandidatesInput, aliases=("commit_memory_candidates",),
+        execution=INDIRECT_EXTERNAL_WRITE,
+        guidance=ToolGuidance(purpose="Commit a memory batch already authorized by the user's final review action.",
+            use_when="Retrying a previously authorized memory candidate batch.",
+            do_not_use_when="Candidates have not received the user's final batch approval. Use the review UI.",
+            failure_next_steps="Open /memory_review with the batch ID. An unavailable provider leaves the draft intact."))
+    def commit_candidates(self, call: IntrospectionCall) -> IntrospectionResult:
+        try:
+            manager = self.context.port_registry.get("bunshin:bunshin")
+            result = self.service.reviews.commit(str(call.args.get("batch_id") or ""),
+                validate_source=getattr(manager, "validate_memory_proposal_source", None))
+        except ValueError as exc:
+            return IntrospectionResult(status="invalid", text=str(exc), llm_text=str(exc))
+        return IntrospectionResult(status=result["status"], text="Memory review batch commit", structured=result,
+            llm_text=render_titled_structured_for_llm("Memory review batch commit", result))
+
+    async def handle_memory_review_open_async(self, action: ControlAction):
+        try:
+            state = self.service.reviews.get(str(action.args.get("batch_id") or ""), action.route, resume=True)
+            return {"delivery": self.service.reviews.delivery(state, action.route, opening=True)}
+        except ValueError as exc:
+            return {"message": str(exc)}
+
+    async def handle_memory_candidate_decision_async(self, action: ControlAction):
+        reviews = self.service.reviews
+        # Old provider keyboards carried the entire proposal. Import it for review;
+        # their former all-at-once Accept must never grant new write authority.
+        if "memory_candidates" in action.args:
+            state = reviews.stage_payload({**action.args, "candidate_batch_id": action.target_id}, action.route, legacy=True)
+            core = self.context.port_registry.get("core:core")
+            if core is not None:
+                old = InteractionMessageSpec(f"memory_candidate_{action.target_id}",
+                    "memory_candidate_approval", action.route, "旧提案已转入逐项审核。")
+                await core.handle_control_action_async(ControlAction("interactive_resolve", "interaction",
+                    target_id=old.interaction_id, route=action.route,
+                    delivery=delivery_for_interaction(action.route, "interactive_resolve", old)))
+            return {"delivery": reviews.delivery(state, action.route, opening=True,
+                banner="旧提案已转为逐项审核；请标记各条后统一提交。")}
+        try:
+            state = reviews.apply(action.target_id, action.args, action.route)
+            banner = ""
+            if state["status"] == "authorized" and action.args.get("decision") in {"submit", "retry"}:
+                result = await self.context.execution_runtime.execute_async(CapabilityCall(
+                    name="op_memory_commit_candidates", args={"batch_id": state["batch_id"]}))
+                if str(getattr(result, "status", "")) != "ok":
+                    banner = "本次提交未完成；审核结果已保留，可重试。"
+                state = reviews.get(state["batch_id"], action.route)
+            operation = action.args.get("decision")
+            view = operation if operation in {"edit", "field", "view"} else "overview"
+            return {"delivery": reviews.delivery(state, action.route, view=view,
+                candidate_id=action.args.get("candidate_id", ""), field=action.args.get("field", ""), banner=banner)}
+        except ValueError as exc:
+            try:
+                state = reviews.get(action.target_id, action.route)
+                return {"delivery": reviews.delivery(state, action.route, banner=str(exc))}
+            except ValueError:
+                return {"message": str(exc)}
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
@@ -629,6 +647,7 @@ def register_with_core(
         prompt_fragment_providers=[prompt_provider],
         control_action_handlers={
             "memory_candidate_decision": provider.handle_memory_candidate_decision_async,
+            "memory_review_open": provider.handle_memory_review_open_async,
         },
         ports={"memory": service},
         runtime_state_port=MemoryRuntimeStatePort(service),

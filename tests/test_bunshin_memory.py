@@ -1160,3 +1160,23 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BunshinProposalCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_proposal_tool_replaces_batch_without_touching_shared_memory(self):
+        sink = MockL3Plugin(provider_id="candidate-only")
+        runtime = BunshinScopedExecutionRuntime(ExecutionRuntime(),
+            ["op_bunshin_memory_candidate_write"], workspace={"invocation_id": "proposal-test"}, memory_candidate_sink=sink)
+        contracts = runtime.build_llm_tool_contracts()
+        self.assertTrue(any(item["function"]["name"] == "propose_memories" for item in contracts))
+        from pal.bunshin.runner import _memory_candidates_from_sink
+        candidate = {"kind": "fact", "title": "explicit", "summary": "  exact\n",
+                     "source_excerpt": "source", "topics": ["api"]}
+        result = await runtime.execute_tool_async(new_tool_call(name="propose_memories",
+            args={"candidates": [candidate]}))
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(_memory_candidates_from_sink(sink)[0]["summary"], "  exact\n")
+        result = await runtime.execute_tool_async(new_tool_call(name="propose_memories",
+            args={"candidates": []}))
+        self.assertTrue(result.ok)
+        self.assertEqual(sink.records, [])

@@ -297,6 +297,10 @@ class BunshinManagerProvider:
                 self._locally_delivered_parts.pop(delivery_id, None)
         return True
 
+    def validate_memory_proposal_source(self, source: dict[str, Any]) -> bool:
+        result = self.client.request_sync("v2_validate_memory_proposal_source", {"source": source})
+        return bool(result.get("valid"))
+
     def delivered_event_parts(self, event: dict[str, Any]) -> set[str]:
         delivery_id = str(event.get("delivery_id") or "").strip()
         if not delivery_id:

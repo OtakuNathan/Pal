@@ -61,6 +61,7 @@ class SocketSession:
         *,
         interaction_id: str,
         button_token: str,
+        input_values: dict[str, str] | None = None,
     ) -> str:
         request_id = str(self.request_id_factory())
         await self._write(
@@ -69,6 +70,7 @@ class SocketSession:
                 "request_id": request_id,
                 "interaction_id": str(interaction_id),
                 "button_token": str(button_token),
+                **({"input_values": input_values} if input_values is not None else {}),
             }
         )
         return request_id

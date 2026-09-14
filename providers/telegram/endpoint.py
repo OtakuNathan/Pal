@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
+from pal.control.presentation import interaction_projection, interaction_text, interaction_button_rows
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import (
     ChannelDeliveryError,
@@ -855,6 +856,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         chat_id: int | str | None,
         message_id: int | str | None = None,
         thread_id: int | str | None = None,
+        user_id: int | str | None = None,
     ) -> dict[str, Any]:
         chat = str(chat_id or "").strip()
         thread = str(thread_id or "").strip()
@@ -863,6 +865,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "message_id": str(message_id or "").strip(),
             "thread_id": thread,
         }
+        if user_id is not None:
+            target["user_id"] = str(user_id)
         if chat:
             target["control_scope_key"] = f"telegram:{self.endpoint.endpoint_id}:{chat}:{thread or 'root'}"
         return target
@@ -1155,12 +1159,15 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 chat_id=_safe_int(getattr(getattr(message, "chat", None), "id", None)),
                 message_id=getattr(message, "message_id", "") or "",
                 thread_id=getattr(message, "message_thread_id", "") or "",
+                user_id=getattr(getattr(update.callback_query, "from_user", None), "id", None),
             )
             self.emit_interaction_result(
                 interaction_result,
                 correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
                 reply_target=reply_target,
             )
+            return
+        if await self._accept_interaction_input(update):
             return
         payload = await self._payload_from_update(update)
         if payload is None:
@@ -1173,6 +1180,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 chat_id=payload["chat_id"],
                 message_id=payload["message_id"],
                 thread_id=payload.get("thread_id") or "",
+                user_id=payload.get("from_user_id"),
             ),
         )
         if envelope is None:
@@ -1202,6 +1210,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return None
         metadata = self._restore_interaction(interaction_id)
         if not metadata:
+            return None
+        if metadata.get("owner_user_id") and str(metadata["owner_user_id"]) != str(user_id):
+            return None
+        if str(metadata.get("chat_id")) != str(chat_id):
             return None
         if self.is_interaction_metadata_expired(metadata):
             target = self._interactive_messages.pop(interaction_id, None)
@@ -1673,9 +1685,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         await self._prune_interactive_messages_async()
         existing = self._restore_interaction(spec.interaction_id)
         max_chars = max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1)
-        if allow_update and existing is not None and len(spec.text) <= max_chars:
+        if allow_update and existing is not None and len(interaction_text(spec)) <= max_chars:
             if await self._edit_interaction_message_async(existing, spec=spec):
                 self._remember_interaction(spec, existing)
+                await self._send_interaction_inputs(spec, existing)
                 return
             if not _telegram_interaction_target_is_stale(self.last_delivery_error):
                 # A transient edit failure must not create a second active
@@ -1683,13 +1696,22 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 # retry the same message.
                 return
             super().forget_interaction_message(spec.interaction_id)
+            existing = None
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
             return
+        if existing is not None:
+            try:
+                await self.application.bot.edit_message_reply_markup(
+                    chat_id=existing["chat_id"], message_id=existing["message_id"], reply_markup=None)
+            except Exception as exc:
+                if not _telegram_interaction_target_is_stale(exc):
+                    self.last_delivery_error = str(exc)
+                    return
         markup = self._build_interaction_markup(spec)
         sent = None
-        parts = _segment_text(spec.text, limit=max_chars)
+        parts = _segment_text(interaction_text(spec), limit=max_chars)
         for index, part in enumerate(parts):
             kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part}
             if thread_id is not None:
@@ -1708,8 +1730,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             {
                 "chat_id": chat_id,
                 "message_id": _safe_int(getattr(sent, "message_id", None)),
+                "thread_id": thread_id,
             },
         )
+        await self._send_interaction_inputs(spec, self._restore_interaction(spec.interaction_id))
 
     async def _resolve_interaction_async(self, spec: InteractionMessageSpec) -> None:
         if self.application is None:
@@ -1771,7 +1795,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         kwargs: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": spec.text,
+            "text": interaction_text(spec),
             "reply_markup": None if clear_keyboard else self._build_interaction_markup(spec),
         }
         try:
@@ -1875,6 +1899,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         spec: InteractionMessageSpec,
         target: dict[str, Any],
     ) -> None:
+        target = dict(target)
+        if spec.route is not None:
+            target["owner_user_id"] = spec.route.reply_target.get("user_id")
+            target["thread_id"] = spec.route.reply_target.get("thread_id")
         super().remember_interaction_message(spec, target)
         if self._interaction_store is None:
             return
@@ -1952,35 +1980,68 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             logger.exception("telegram command menu button update failed")
 
     def _build_interaction_markup(self, spec: InteractionMessageSpec):
-        if not spec.buttons:
+        rows = interaction_button_rows(spec)
+        if not rows:
             return None
         try:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        except Exception:
+        except ImportError:
             return None
-        rows = []
-        button_index = 0
-        for row_items in spec.buttons:
-            row = []
-            for item in row_items:
-                if not isinstance(item, InteractionButtonSpec):
-                    continue
-                label = str(item.label or "").strip()
-                if not label:
-                    continue
-                token = self.interaction_button_token(button_index)
-                button_index += 1
-                row.append(
-                    InlineKeyboardButton(
-                        text=label,
-                        callback_data=f"ix:{spec.interaction_id}:{token}",
-                    )
-                )
-            if row:
-                rows.append(row)
-        if not rows:
-            return None
-        return InlineKeyboardMarkup(rows)
+        return InlineKeyboardMarkup([[InlineKeyboardButton(text=item["label"],
+            callback_data=f'ix:{spec.interaction_id}:{item["token"]}') for item in row] for row in rows])
+
+    async def _send_interaction_inputs(self, spec, target):
+        if not spec.inputs or not target or self._interaction_store is None:
+            return
+        from telegram import ForceReply
+        projection, _ = interaction_projection(spec)
+        for item in projection["inputs"]:
+            kwargs = {"chat_id": target["chat_id"]}
+            if target.get("thread_id"):
+                kwargs["message_thread_id"] = target["thread_id"]
+            try:
+                for part in _segment_text(f'{item["label"]} 当前值：\n{item["value"]}', limit=4096):
+                    await self.application.bot.send_message(**kwargs, text=part)
+                message = await self.application.bot.send_message(**kwargs,
+                    text=f'回复这条消息，完整替换「{item["label"]}」。返回审核可用 /memory_review {spec.interaction_id}',
+                    reply_markup=ForceReply(selective=True))
+                self._interaction_store.put_input(target["chat_id"], message.message_id, {
+                    "interaction_id": spec.interaction_id, "token": item["submit"]["token"],
+                    "input_id": item["input_id"], "owner_user_id": target.get("owner_user_id"),
+                    "thread_id": target.get("thread_id"),
+                })
+            except Exception as exc:
+                self.last_delivery_error = str(exc)
+                return
+
+    async def _accept_interaction_input(self, update):
+        message = getattr(update, "effective_message", None)
+        replied = getattr(message, "reply_to_message", None)
+        if replied is None or self._interaction_store is None:
+            return False
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+        binding = self._interaction_store.get_input(chat_id, getattr(replied, "message_id", None))
+        if binding is None:
+            return False
+        user_id = getattr(getattr(message, "from_user", None), "id", None)
+        thread_id = getattr(message, "message_thread_id", None)
+        if (not self._matches_binding(chat_id=chat_id, user_id=user_id)
+            or (binding.get("owner_user_id") and str(binding["owner_user_id"]) != str(user_id))
+            or str(binding.get("thread_id") or "") != str(thread_id or "")):
+            return True
+        self._restore_interaction(binding["interaction_id"])
+        value = getattr(message, "text", None)
+        result = self.interaction_result_from_token(binding["interaction_id"], binding["token"],
+            input_values={binding["input_id"]: value}) if isinstance(value, str) else None
+        if result is None:
+            await self.application.bot.send_message(chat_id=chat_id,
+                text=f'输入已过期或不是文本，请用 /memory_review {binding["interaction_id"]} 重新打开。',
+                **({"message_thread_id": thread_id} if thread_id else {}))
+            return True
+        self.emit_interaction_result(result, correlation_id=str(message.message_id),
+            reply_target=self._build_reply_target(chat_id=chat_id, message_id=message.message_id,
+                thread_id=thread_id, user_id=user_id))
+        return True
 
 @dataclass(frozen=True)
 class TelegramChannelEndpointFactory:

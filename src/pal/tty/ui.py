@@ -30,6 +30,7 @@ class TtyRepl:
         interaction_selector: (
             Callable[[TtyInteraction], Awaitable[str | None]] | None
         ) = None,
+        interaction_editor: Callable[[dict], Awaitable[str | None]] | None = None,
         renderer: TtyRenderer | None = None,
         console: Console | None = None,
     ) -> None:
@@ -39,6 +40,7 @@ class TtyRepl:
         self._request_id_factory = request_id_factory
         self._prompt_session = prompt_session
         self._interaction_selector = interaction_selector
+        self._interaction_editor = interaction_editor or self._edit_interaction_field
         self._renderer = renderer
         self._console = console
         self._pending_interactions: deque[TtyInteraction] = deque()
@@ -209,9 +211,14 @@ class TtyRepl:
         if selected_index < 1 or selected_index > len(interaction.options):
             return None
         self._pending_interactions.popleft()
+        token = interaction.options[selected_index - 1].token
+        values = await self._interaction_values(interaction, token)
+        if values is None:
+            self._remember_pending_interaction(interaction)
+            return False
         request_id = await session.send_interaction_result(
-            interaction_id=interaction.interaction_id,
-            button_token=interaction.options[selected_index - 1].token,
+            interaction_id=interaction.interaction_id, button_token=token,
+            **({"input_values": values} if values else {}),
         )
         return await self._handle_response_loop(
             session,
@@ -295,9 +302,13 @@ class TtyRepl:
                     return True
                 if not selected:
                     return False
+                values = await self._interaction_values(interaction, selected)
+                if values is None:
+                    self._remember_pending_interaction(interaction)
+                    return False
                 request_id = await session.send_interaction_result(
-                    interaction_id=interaction.interaction_id,
-                    button_token=selected,
+                    interaction_id=interaction.interaction_id, button_token=selected,
+                    **({"input_values": values} if values else {}),
                 )
                 render_as_markdown = True
         except (SocketDisconnected, SocketProtocolError) as exc:
@@ -306,6 +317,33 @@ class TtyRepl:
         except KeyboardInterrupt:
             await renderer.error("connection", "interrupted")
             return False
+
+    async def _interaction_values(self, interaction, token):
+        for item in interaction.inputs:
+            if item.get("submit", {}).get("token") == token:
+                value = await self._interaction_editor(item)
+                return None if value is None else {item["input_id"]: value}
+        return {}
+
+    @staticmethod
+    async def _edit_interaction_field(item):
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.key_binding import KeyBindings
+
+        bindings = KeyBindings()
+
+        @bindings.add("c-s")
+        def save(event):
+            event.app.exit(result=event.app.current_buffer.text)
+
+        @bindings.add("escape", eager=True)
+        def cancel(event):
+            event.app.exit(result=None)
+
+        return await PromptSession().prompt_async(
+            f'{item["label"]} (Ctrl-S 保存 / Esc 返回)> ',
+            default=item.get("value", ""), multiline=True, key_bindings=bindings,
+        )
 
     async def _select_interaction(
         self,

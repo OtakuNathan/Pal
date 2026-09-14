@@ -247,3 +247,28 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BunshinMemoryProposalDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_proposal_uses_host_review_once_and_preserves_task_route(self):
+        from pal.memory.service import MemoryService
+        memory = MemoryService()
+        provider, core = _Provider(), _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry={"core:core": core, "memory:memory": memory})
+        payload = {"delivery_id": "d", "task_id": "t", "workflow_id": "w", "invocation_id": "i",
+            "status": "completed", "summary": "done",
+            "route": {"endpoint_id": "socket", "channel_kind": "socket", "reply_target": {"session_id": "task"}},
+            "memory_candidates": [{"kind": "fact", "title": "test", "summary": "test", "source_excerpt": "source"}]}
+        event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN, payload=payload)
+        handler = BunshinControlEventHandler(provider)
+        await handler.handle(event, context)
+        self.assertEqual(provider.settlements, [True])
+        self.assertIn("memory_proposals", provider.parts)
+        proposal = next(action for action in core.actions if action.delivery.delivery_kind == "interactive_open")
+        self.assertEqual(proposal.route.reply_target, {"session_id": "task"})
+        state = memory.reviews.get(proposal.delivery.interaction.interaction_id, proposal.route)
+        self.assertEqual(state["source"]["task_id"], "t")
+        self.assertEqual(state["drafts"][0]["decision"], "pending")
+        await handler.handle(event, context)
+        self.assertEqual(len(core.actions), 2)

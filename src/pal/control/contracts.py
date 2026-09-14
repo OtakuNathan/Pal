@@ -68,6 +68,24 @@ class InteractionButtonSpec:
 
 
 @dataclass(frozen=True)
+class InteractionInputSpec:
+    input_id: str
+    label: str
+    value: str
+    submit: InteractionButtonSpec
+    multiline: bool = True
+
+
+@dataclass(frozen=True)
+class InteractionItemSpec:
+    item_id: str
+    title: str
+    text: str
+    state: str = ""
+    buttons: tuple[tuple[InteractionButtonSpec, ...], ...] = ()
+
+
+@dataclass(frozen=True)
 class InteractionMessageSpec:
     interaction_id: str
     interaction_kind: str
@@ -75,6 +93,9 @@ class InteractionMessageSpec:
     text: str = ""
     buttons: tuple[tuple[InteractionButtonSpec, ...], ...] = ()
     expires_at: str | None = None
+    revision: str = ""
+    items: tuple[InteractionItemSpec, ...] = ()
+    inputs: tuple[InteractionInputSpec, ...] = ()
 
 
 @dataclass(frozen=True)

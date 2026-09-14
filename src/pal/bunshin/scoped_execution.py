@@ -104,6 +104,10 @@ from pal.shared import (
 )
 
 
+class BunshinMemoryCandidatesInput(StrictToolModel):
+    candidates: list[dict[str, Any]]
+
+
 class BunshinScopedExecutionOpBunshinArtifactEditInput(StrictToolModel):
     """Reloadable contract matching the Bunshin-owned artifact edit handler."""
 
@@ -132,6 +136,16 @@ class BunshinScopedExecutionShellInput(
 
 
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "op_bunshin_memory_candidate_write": {
+        "alias": "propose_memories",
+        "guidance": {
+            "purpose": "Replace this invocation's memory proposals with at most five most useful durable candidates; zero is allowed.",
+            "use_when": 'Submit the complete selected batch. Template: {"candidates":[{"kind":"fact","title":"...","summary":"...","source_excerpt":"...","topics":[],"why_durable":"..."}]}. Cases also require star with situation/task/action/result; preserve evidence and uncertainty.',
+            "do_not_use_when": "This is a proposal, not a memory write. The host will ask the user to review each item and explicitly submit the batch.",
+            "failure_next_steps": "Correct the reported fields and resubmit the complete batch; never invent missing evidence.",
+        },
+        "InputModel": BunshinMemoryCandidatesInput,
+    },
     "op_bunshin_artifact_write": {
         "alias": "artifact_write",
         "guidance": {
@@ -482,6 +496,7 @@ class BunshinScopedExecutionRuntime:
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     request_user_clarification: Any | None = None
+    memory_candidate_sink: Any | None = None
     _original_runtime: Any = field(default=None, init=False, repr=False)
     _direct_turn_id: str = field(default="", init=False, repr=False)
 
@@ -554,6 +569,8 @@ class BunshinScopedExecutionRuntime:
         return [dict(generation.provider_specs[alias]) for alias in sorted(generation.provider_specs)]
 
     def _handler(self, name: str) -> Any | None:
+        if name == "op_bunshin_memory_candidate_write":
+            return self._propose_memories
         if is_review_finding_capability(name):
             return lambda call, _ctx: add_finding_tool_result(call, self.workspace)
         if name == UPDATE_CHECKLIST_CAPABILITY:
@@ -596,6 +613,21 @@ class BunshinScopedExecutionRuntime:
         if name in {"op_bunshin_artifact_write", "op_bunshin_artifact_edit"}:
             return lambda call, _ctx: asyncio.to_thread(_workspace_tool_result, call, self.workspace)
         return None
+
+    def _propose_memories(self, call, _ctx):
+        from pal.memory.proposals import normalize_memory_candidates
+        if self.memory_candidate_sink is None:
+            return _error_result(call, "Proposal storage is unavailable.", "unavailable")
+        candidates, diagnostics = normalize_memory_candidates(call.args.get("candidates"))
+        self.memory_candidate_sink.records[:] = [
+            {**item, "payload": dict(item.get("star") or {}),
+             "search_text": item.get("search_text") or item["source_excerpt"]}
+            for item in candidates
+        ]
+        result = {"status": "proposed", "candidate_count": len(candidates),
+            "diagnostics": diagnostics, "requires_host_review": True}
+        return ToolExecutionResult(name=call.name, call_id=call.call_id, ok=True,
+            text=json.dumps(result), llm_text=json.dumps(result), structured=result)
 
     async def _execute_original(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
         execute = getattr(self._original_runtime, "execute_tool_async", None)

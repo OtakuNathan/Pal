@@ -147,6 +147,19 @@ class L3MutationResult:
 
 
 @dataclass(frozen=True)
+class L3BatchCommitRequest:
+    batch_id: str
+    items: tuple[L3CommitRequest, ...]
+
+
+@dataclass(frozen=True)
+class L3BatchCommitResult:
+    status: str
+    results: tuple[L3MutationResult, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class L3RetireResult:
     status: str
     document_ids: list[str] = field(default_factory=list)
@@ -220,6 +233,9 @@ class L3ProviderPort(Protocol):
         ...
 
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
+        ...
+
+    def commit_batch(self, request: L3BatchCommitRequest) -> L3BatchCommitResult:
         ...
 
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:

@@ -252,7 +252,7 @@ class MemoryStorage:
                     copied = destination.database.execute_sql(f'SELECT {quoted} FROM "{table}"').fetchall()
                     if sorted(map(repr, copied)) != sorted(map(repr, rows)):
                         raise RuntimeError(f"memory migration content mismatch: {table}")
-                for table in ("memory_mutations", "memory_revisions"):
+                for table in ("memory_mutations", "memory_revisions", "memory_batch_receipts"):
                     if source.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
                         rows = source.execute(f'SELECT * FROM "{table}"').fetchall()
                         destination.database.execute_sql(f'DELETE FROM "{table}"')
@@ -457,6 +457,14 @@ class MemoryStorage:
             for row in connection.execute("SELECT fingerprint,refs_json FROM dreaming_batches").fetchall():
                 if refs.intersection(json.loads(row[1])):
                     connection.execute("DELETE FROM dreaming_batches WHERE fingerprint=?", (row[0],))
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='memory_reviews'").fetchone():
+                for batch_id, raw in connection.execute("SELECT batch_id,state_json FROM memory_reviews").fetchall():
+                    review = json.loads(raw)
+                    if refs.intersection(review.get("source", {}).get("memory_refs", [])):
+                        review.update(status="completed", drafts=[], authorization="", source={},
+                            result={"invalidated": True}, error="", revision=review["revision"] + 1)
+                        connection.execute("UPDATE memory_reviews SET state_json=? WHERE batch_id=?",
+                            (json.dumps(review, ensure_ascii=False), batch_id))
             # LLM notes may quote originals without machine-readable references.
             # Preserve aggregate diagnostics, not potentially forgotten prose.
             safe_keys = {"outcome", "processed_groups", "merged_groups", "input_records", "groups",

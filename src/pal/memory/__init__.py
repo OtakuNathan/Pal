@@ -5,6 +5,8 @@ from pal.memory.contracts import (
     L2Entry,
     L2Store,
     L3CommitRequest,
+    L3BatchCommitRequest,
+    L3BatchCommitResult,
     L3CorrectRequest,
     L3DeleteRequest,
     L3MutationResult,
@@ -44,6 +46,8 @@ from pal.memory.models import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbed
 from pal.memory.repository import L3ProviderSelector, MemoryDurableRepository
 from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
 from pal.memory.service import MemoryService
+from pal.memory.proposals import MemoryProposalBatch
+from pal.memory.review import MemoryReviewService
 
 __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
@@ -63,6 +67,8 @@ __all__ = [
     "L2Entry",
     "L2Store",
     "L3CommitRequest",
+    "L3BatchCommitRequest",
+    "L3BatchCommitResult",
     "L3CorrectRequest",
     "L3DeleteRequest",
     "L3MutationResult",
@@ -85,6 +91,8 @@ __all__ = [
     "MemoryPack",
     "MemoryPackRequest",
     "MemoryQuery",
+    "MemoryProposalBatch",
+    "MemoryReviewService",
     "MemorySnapshot",
     "MemoryService",
     "MemoryServicePort",

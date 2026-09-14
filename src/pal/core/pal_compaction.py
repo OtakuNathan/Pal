@@ -11,6 +11,7 @@ from pal.core.compaction import (
     extract_json_object,
 )
 from pal.foundation import utc_now
+from pal.memory.proposals import normalize_memory_candidates
 from pal.memory.compact import (
     SUMMARY_ENTRY_ID,
     SUMMARY_TITLE,
@@ -120,8 +121,28 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "- Do not create memory_candidates for repair lessons, procedures, behavior rules, routing advice, or skill workflows unless the user explicitly asked to remember them as memory.\n"
     "- If nothing is worth extracting, return an empty memory_candidates list.\n"
     "- title, summary, and source_excerpt/search_text serve different purposes: title is a short label; summary is compressed prompt content; source_excerpt/search_text are retrieval/audit terms.\n"
+    "- Return at most FIVE MOST USEFUL candidates, ordered by durable value, not recency. Do not fill a quota.\n"
+    "- Use only the declared keys at every level. The examples below demonstrate shape, not facts to copy.\n"
     "The Pal compact tracks the user and current collaboration continuity."
 )
+
+
+_PAL_TEMPLATE = {
+    "schema": COMPACTION_SCHEMA_PAL_V2, "kind": "pal",
+    "continuity": {**{key: "" for key in _PAL_CONTINUITY_STRING_FIELDS},
+        **{key: [] for key in _PAL_CONTINUITY_LIST_FIELDS}},
+    "summary": {"summary": "The current collaboration and its unresolved requests.",
+        "search_text": "Exact identifiers and retrieval terms from the source."},
+    "memory_candidates": [],
+}
+COMPACT_PAL_STRUCTURED_SYSTEM += "\nComplete JSON template (empty candidates is valid):\n" + json.dumps(_PAL_TEMPLATE, ensure_ascii=False)
+COMPACT_PAL_STRUCTURED_SYSTEM += "\nCandidate shape examples (only use facts actually supported by the source):\n" + json.dumps([
+    {"kind": "fact", "title": "Explicit preference", "summary": "A preference explicitly confirmed in the source.",
+     "source_excerpt": "The actual supporting source wording.", "why_durable": "Relevant to future collaboration.", "topics": ["preference"]},
+    {"kind": "case", "title": "One verified incident", "summary": "One specific event and its outcome.",
+     "source_excerpt": "The event's actual evidence.", "star": {"situation": "Observed environment and symptom.",
+     "task": "The actual objective.", "action": "What was actually done.", "result": "Verified outcome, including uncertainty."}}
+], ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -187,8 +208,24 @@ class PalCompactionPolicy:
     ) -> L2Entry:
         _ = snapshot
         payload = extract_json_object(raw_text)
+        diagnostics = []
+        if set(payload) - _PAL_TOP_LEVEL_FIELDS:
+            diagnostics.append("checkpoint:extra_fields_removed")
+        payload = {key: value for key, value in payload.items() if key in _PAL_TOP_LEVEL_FIELDS}
+        for key, fields in (("continuity", set(_PAL_CONTINUITY_STRING_FIELDS + _PAL_CONTINUITY_LIST_FIELDS)),
+                            ("summary", {"summary", "search_text"})):
+            if isinstance(payload.get(key), dict):
+                if set(payload[key]) - fields:
+                    diagnostics.append(f"{key}:extra_fields_removed")
+                payload[key] = {name: value for name, value in payload[key].items() if name in fields}
+        candidates, warnings = normalize_memory_candidates(payload.get("memory_candidates"))
+        payload["memory_candidates"] = [{key: value for key, value in item.items() if key in _PAL_MEMORY_CANDIDATE_FIELDS} for item in candidates]
+        diagnostics.extend(warnings)
         _validate_pal_checkpoint_payload(payload, policy_id=self.policy_id)
-        return _make_pal_summary_entry(payload)
+        entry = _make_pal_summary_entry(payload)
+        if diagnostics:
+            entry.payload["compaction_diagnostics"] = diagnostics
+        return entry
 
 def _make_pal_summary_entry(payload: dict[str, Any]) -> L2Entry:
     summary_payload = dict(payload.get("summary") or {})
@@ -374,19 +411,6 @@ def _render_pal_compact_context(
     summary_text = str(summary or "").strip()
     if summary_text:
         lines.extend(["### Summary", summary_text])
-    candidates = payload.get("memory_candidates")
-    if isinstance(candidates, list) and candidates:
-        lines.extend(["", "### Durable Memory Candidates Pending Approval"])
-        for item in candidates[:8]:
-            if not isinstance(item, dict):
-                continue
-            title = str(
-                item.get("title")
-                or item.get("summary")
-                or "candidate"
-            ).strip()
-            kind = str(item.get("kind") or "candidate").strip()
-            lines.append(f"- {kind}: {title}")
     lines.append("</compact_context>")
     return "\n".join(lines).strip()
 

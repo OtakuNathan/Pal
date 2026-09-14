@@ -710,6 +710,7 @@ class BunshinRunner:
             self.pack.allowed_capabilities,
             workspace,
             produced_artifacts=self.produced_artifacts,
+            memory_candidate_sink=memory_candidate_sink,
             capability_guidance_overrides=dict(
                 dict(self.pack.resolved_profile or {}).get("capability_guidance_overrides") or {}
             ),
@@ -2917,12 +2918,14 @@ def _memory_candidates_from_sink(memory_candidate_sink: MockL3Plugin) -> list[di
             "dedupe_fingerprint": str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
             "topics": list(record.get("topics") or []),
             "payload": dict(record.get("payload") or {}),
+            "source_excerpt": str(record.get("source_excerpt") or record.get("search_text") or ""),
+            "why_durable": str(record.get("why_durable") or ""),
             "source_kind": "bunshin_candidate_sink",
             "candidate_state": "candidate",
         }
         payload = item["payload"]
         if item["kind"] == "case" and all(str(payload.get(field) or "").strip() for field in ("situation", "task", "action", "result")):
-            item["star"] = {field: str(payload.get(field) or "").strip() for field in ("situation", "task", "action", "result")}
+            item["star"] = {field: str(payload.get(field) or "") for field in ("situation", "task", "action", "result")}
         if item["summary"].strip() or item["title"].strip():
             result.append(item)
     return result

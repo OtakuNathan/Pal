@@ -168,6 +168,15 @@ def memory_candidates_from_compact_result(result: Any) -> list[dict[str, Any]]:
     return []
 
 
+def compact_normalization_diagnostics(result: Any) -> list[str]:
+    diagnostics = []
+    for entry in list(getattr(result, "projected_entries", []) or []):
+        payload = getattr(entry, "payload", {})
+        if isinstance(payload, dict):
+            diagnostics.extend(item for item in payload.get("compaction_diagnostics", []) if isinstance(item, str))
+    return diagnostics
+
+
 def coerce_memory_candidate_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         return []

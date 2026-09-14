@@ -33,7 +33,7 @@ from pal.memory import (
 )
 from pal.memory.mutations import mutation_id_from_call
 from pal.memory.candidates import memory_star_from_args, star_text_fields
-from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD
+from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD, L3BatchCommitRequest, L3BatchCommitResult
 from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
 from pal.memory.repository import (
     MemoryDurableRepository,
@@ -484,6 +484,10 @@ class SQLiteVecL3Plugin:
             structured=payload,
             llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
         )
+
+    def commit_batch(self, request: L3BatchCommitRequest) -> L3BatchCommitResult:
+        from pal.memory.mutations import commit_batch
+        return commit_batch(self, request)
 
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
         from pal.memory.mutations import commit

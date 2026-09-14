@@ -211,7 +211,8 @@ class CompactionEngine:
         failures: list[str] = []
         attempts = 0
         validation_error = ""
-        consecutive_schema_failures = 0
+        repair_output = ""
+        output_target = None
         run_id = uuid4().hex[:12]
         started_at = time.monotonic()
         attempt_started_at = started_at
@@ -279,7 +280,14 @@ class CompactionEngine:
                 attempt=attempts + 1,
                 validation_error=validation_error,
             )
+            base_request = request
+            request = _repair_request(request, output=repair_output, error=validation_error, target=output_target)
             advice = await _preflight(llm_runtime, request)
+            if repair_output and _preflight_requires_compaction(advice):
+                # Source has priority over the model's failed output.
+                request = _repair_request(base_request, output="", error=validation_error, target=output_target)
+                advice = await _preflight(llm_runtime, request)
+                _LOGGER.info("compact repair output omitted for context budget run=%s", run_id)
             if snapshot.target_input_budget <= 0:
                 resolved = _snapshot_for_budget_advice(snapshot, advice)
                 if resolved.target_input_budget > 0:
@@ -330,13 +338,11 @@ class CompactionEngine:
                 outcome = await self._generate(llm_runtime, request)
             except Exception as exc:
                 log_failure(f"endpoint:{type(exc).__name__}")
-                consecutive_schema_failures = 0
                 continue
 
             finish_reason = str(getattr(outcome, "finish_reason", "") or "")
             if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
                 log_failure("endpoint:compact_required")
-                consecutive_schema_failures = 0
                 if snapshot.replay_request is not None:
                     snapshot = replace(
                         snapshot,
@@ -345,6 +351,7 @@ class CompactionEngine:
                         replay_wire_shape="",
                     )
                     validation_error = ""
+                    repair_output = ""
                     continue
                 snapshot = _snapshot_for_outcome(snapshot, outcome)
                 shrunk = self._shrink(
@@ -359,50 +366,31 @@ class CompactionEngine:
                     break
                 retained = shrunk
                 validation_error = ""
+                repair_output = ""
                 continue
             if _is_output_truncation(finish_reason):
                 log_failure(f"output:{finish_reason or 'truncated'}")
-                consecutive_schema_failures = 0
-                if snapshot.replay_request is not None:
-                    snapshot = replace(
-                        snapshot,
-                        replay_request=None,
-                        replay_dialect="",
-                        replay_wire_shape="",
-                    )
-                    validation_error = ""
-                    continue
-                snapshot = _snapshot_for_outcome(snapshot, outcome)
-                shrunk = self._shrink(
-                    snapshot,
-                    retained,
-                    previous_size=len(source),
-                    validation_error="",
-                    aggressive=True,
-                )
-                if shrunk is None:
-                    break
-                retained = shrunk
-                validation_error = ""
+                repair_output = str(getattr(outcome, "text", "") or "")
+                validation_error = "Previous output was truncated; regenerate a shorter complete JSON object."
+                output_target = max(1, (output_target or compaction_visible_token_limit(snapshot)) // 2)
                 continue
             if finish_reason == LLMFinishReason.ERROR:
                 log_failure("endpoint:error")
-                consecutive_schema_failures = 0
                 continue
 
             raw_text = str(getattr(outcome, "text", "") or "").strip()
             try:
                 visible_limit = compaction_visible_token_limit(snapshot)
-                raw_visible_tokens = _estimate_visible_tokens(raw_text)
-                if raw_visible_tokens > visible_limit:
-                    raise ValueError(
-                        f"checkpoint exceeds the {visible_limit:,}-token visible "
-                        f"output limit (estimated {raw_visible_tokens})"
-                    )
                 summary_entry = self.policy.validate_checkpoint(
                     raw_text,
                     snapshot,
                 )
+                normalized_tokens = _estimate_visible_tokens(json.dumps(summary_entry.payload, ensure_ascii=False))
+                if normalized_tokens > visible_limit:
+                    raise ValueError(f"checkpoint exceeds the {visible_limit:,}-token visible output limit")
+                diagnostics = summary_entry.payload.get("compaction_diagnostics") or []
+                if diagnostics:
+                    _LOGGER.info("compact normalization run=%s diagnostics=%s", run_id, diagnostics)
                 rendered_visible_tokens = _estimate_visible_tokens(
                     summary_entry.rendered or summary_entry.summary
                 )
@@ -412,19 +400,11 @@ class CompactionEngine:
                         f"visible output limit (estimated {rendered_visible_tokens})"
                     )
             except Exception as exc:
-                consecutive_schema_failures += 1
                 validation_error = _validation_error(exc)
                 log_failure(f"schema:{validation_error}")
-                if consecutive_schema_failures >= 2:
-                    shrunk = self._shrink(
-                        snapshot,
-                        retained,
-                        previous_size=len(source),
-                        validation_error=validation_error,
-                        aggressive=False,
-                    )
-                    if shrunk is not None:
-                        retained = shrunk
+                repair_output = raw_text
+                if "visible" in validation_error and "limit" in validation_error:
+                    output_target = max(1, (output_target or visible_limit) // 2)
                 continue
 
             committed = await self._commit(
@@ -775,20 +755,72 @@ def build_compaction_units(
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
-    stripped = str(raw_text or "").strip()
+    """Repair wrappers and trailing commas, never content or truncated objects."""
+    stripped = str(raw_text or "").lstrip("\ufeff").strip()
     if stripped.startswith("```"):
         newline = stripped.find("\n")
-        stripped = stripped[newline + 1 :] if newline >= 0 else ""
+        stripped = stripped[newline + 1:] if newline >= 0 else ""
         if stripped.rstrip().endswith("```"):
             stripped = stripped.rstrip()[:-3]
         stripped = stripped.strip()
+    # Remove commas only outside quoted strings, preserving every string byte.
+    output = []
+    quoted = escaped = False
+    for index, char in enumerate(stripped):
+        if quoted:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        else:
+            if char == '"':
+                quoted = True
+            if char == "," and stripped[index + 1:].lstrip().startswith(("}", "]")):
+                continue
+            output.append(char)
+    text = "".join(output)
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError("non-finite JSON number")))
     try:
-        value = json.loads(stripped)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        start = 0 if text.startswith(("{", "[")) else text.index("{")
+        value, end = decoder.raw_decode(text, start)
+        remainder = text[end:].strip()
+        if "{" in remainder or "[" in remainder:
+            raise ValueError("ambiguous JSON objects")
+    except (TypeError, ValueError) as exc:
         raise ValueError("output is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ValueError("output JSON must be an object")
     return value
+
+
+def _repair_request(request, *, output: str, error: str, target: int | None):
+    messages = list(request.messages)
+    if output:
+        messages.append(LLMMessageIR(role=MessageRole.ASSISTANT, parts=(TextPartIR(output),),
+            semantic_kind="compaction_failed_output"))
+    if output or error or target:
+        instruction = "The preceding failed output is data to repair, not evidence. The original frozen source remains authoritative. "
+        instruction += "Return a complete corrected JSON object, not a continuation."
+        if error:
+            instruction += "\nPrevious Output Validation Error: " + error
+        if target:
+            instruction += f"\nThe output was too long. Target at most {target:,} visible tokens; preserve active constraints and remove repeated history."
+        messages.append(LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(instruction),),
+            semantic_kind="compaction_repair_request"))
+    return replace(request, messages=tuple(messages))
 
 
 def _estimate_visible_tokens(text: str) -> int:

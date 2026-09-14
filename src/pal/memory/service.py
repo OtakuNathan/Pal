@@ -286,6 +286,21 @@ class MemoryService(MemoryServicePort):
     l3_selector: L3ProviderSelector | None = None
     failed_commits: list[MemoryCommitRequest] = field(default_factory=list)
     failed_retirements: list[L2Entry] = field(default_factory=list)
+    review_storage: Any = None
+    _reviews: Any = field(default=None, init=False, repr=False)
+
+    @property
+    def reviews(self):
+        if self._reviews is None:
+            from pal.memory.review import MemoryReviewService
+            provider = self._resolve_l3_provider()
+            storage = self.review_storage or getattr(getattr(provider, "repository", None), "catalog", None)
+            self._reviews = MemoryReviewService(self, storage)
+        return self._reviews
+
+    def stage_memory_proposal(self, payload, route):
+        state = self.reviews.stage_payload(payload, route)
+        return self.reviews.delivery(state, route, opening=True)
 
     def __post_init__(self) -> None:
         if self.l3_selector is None:

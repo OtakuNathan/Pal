@@ -24,6 +24,7 @@ from pal.channel.contracts import (
     ResponseHandle,
 )
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
+from pal.control.presentation import interaction_projection, interaction_text
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
@@ -191,13 +192,15 @@ class ChannelEndpointQueueBase(ABC):
         _ = allow_update
         self.prune_interactive_messages()
         self.remember_interaction_message(spec, {"reply_target": dict(response_handle.reply_target)})
-        if spec.text:
-            self.send_reply(response_handle, spec.text)
+        text = interaction_text(spec)
+        if text:
+            self.send_reply(response_handle, text)
 
     def resolve_interaction(self, response_handle: ResponseHandle, *, spec: InteractionMessageSpec) -> None:
         self.forget_interaction_message(spec.interaction_id)
-        if spec.text:
-            self.send_reply(response_handle, spec.text)
+        text = interaction_text(spec)
+        if text:
+            self.send_reply(response_handle, text)
 
     def remember_interaction_message(self, spec: InteractionMessageSpec, target: dict[str, Any]) -> None:
         metadata = dict(target)
@@ -258,19 +261,7 @@ class ChannelEndpointQueueBase(ABC):
         return "This interaction expired."
 
     def build_interaction_action_map(self, spec: InteractionMessageSpec) -> dict[str, dict[str, Any]]:
-        actions: dict[str, dict[str, Any]] = {}
-        button_index = 0
-        for row in spec.buttons:
-            for button in row:
-                if not isinstance(button, InteractionButtonSpec):
-                    continue
-                token = self.interaction_button_token(button_index)
-                button_index += 1
-                actions[token] = {
-                    "action_key": button.action_key,
-                    "action_args": dict(button.action_args),
-                }
-        return actions
+        return interaction_projection(spec)[1]
 
     def interaction_button_token(self, button_index: int) -> str:
         return f"b{button_index}"
@@ -284,7 +275,7 @@ class ChannelEndpointQueueBase(ABC):
             return "", ""
         return parts[1].strip(), parts[2].strip()
 
-    def interaction_result_from_token(self, interaction_id: str, button_token: str) -> InteractionResult | None:
+    def interaction_result_from_token(self, interaction_id: str, button_token: str, *, input_values: dict | None = None) -> InteractionResult | None:
         interaction_id = str(interaction_id or "").strip()
         button_token = str(button_token or "").strip()
         if not interaction_id or not button_token:
@@ -299,11 +290,23 @@ class ChannelEndpointQueueBase(ABC):
         action_payload = actions.get(button_token) if isinstance(actions, dict) else None
         if not isinstance(action_payload, dict):
             return None
+        values = input_values if input_values is not None else {}
+        expected = set(action_payload.get("input_ids") or ())
+        if not isinstance(values, dict) or set(values) != expected:
+            return None
+        if any(not isinstance(value, str) for value in values.values()):
+            return None
+        args = dict(action_payload.get("action_args") or {})
+        if expected:
+            if action_payload.get("action_key") == "control.action.dispatch":
+                args["args"] = {**dict(args.get("args") or {}), "input_values": dict(values)}
+            else:
+                args["input_values"] = dict(values)
         return InteractionResult(
             interaction_id=interaction_id,
             interaction_kind=str(metadata.get("interaction_kind") or ""),
             action_key=str(action_payload.get("action_key") or "").strip(),
-            action_args=dict(action_payload.get("action_args") or {}),
+            action_args=args,
         )
 
     def emit_interaction_result(

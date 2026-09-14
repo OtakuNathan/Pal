@@ -351,3 +351,29 @@ class SocketInteractionProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InteractionInputProjectionTests(unittest.TestCase):
+    def test_input_values_are_exact_and_only_declared_token_can_submit_them(self):
+        from dataclasses import replace
+        from pal.control.contracts import InteractionInputSpec
+        from pal.control.presentation import interaction_projection
+        endpoint = SocketChannelEndpoint(endpoint=EndpointConfig(
+            endpoint_id="tty", channel_kind="socket", binding_key="test"))
+        submit = InteractionButtonSpec("Save", "control.action.dispatch",
+            {"action_kind": "memory_candidate_decision", "args": {"field": "summary", "revision": "1"}})
+        spec = InteractionMessageSpec("review", "memory_candidate_approval", text="Edit", revision="1",
+            buttons=((InteractionButtonSpec("Back", "back"),),),
+            inputs=(InteractionInputSpec("value", "Summary", "old", submit),))
+        endpoint.remember_interaction_message(spec, {})
+        wire, _ = interaction_projection(spec)
+        token = wire["inputs"][0]["submit"]["token"]
+        original = "def f():\n    return 1\n"
+        result = endpoint.interaction_result_from_token("review", token, input_values={"value": original})
+        self.assertEqual(result.action_args["args"]["input_values"], {"value": original})
+        self.assertIsNone(endpoint.interaction_result_from_token("review", token))
+        self.assertIsNone(endpoint.interaction_result_from_token("review", token, input_values={"other": original}))
+        back = wire["buttons"][0][0]["token"]
+        self.assertIsNone(endpoint.interaction_result_from_token("review", back, input_values={"value": original}))
+        endpoint.remember_interaction_message(replace(spec, revision="2"), {})
+        self.assertIsNone(endpoint.interaction_result_from_token("review", token, input_values={"value": original}))

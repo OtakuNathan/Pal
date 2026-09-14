@@ -144,6 +144,7 @@ def compose_runtime(
         config=config,
     )
     memory_service = MemoryService(
+        review_storage=memory_storage,
         l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
     )
     bunshin_harness_registry = BunshinHarnessRegistry()

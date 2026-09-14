@@ -764,6 +764,30 @@ host policy 区分两类结构化 compact：
 
 自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
+### Compact JSON 与纠错
+
+本体提示词包含完整 JSON 模板和 fact/case 示例。每轮最多提出 **5 条最有用**的候选，按长期价值排序，允许零条，不按最近发生顺序凑数。连续性摘要的必填结构仍需完整；候选是可选产物，单条不合法会被跳过并记录无正文诊断，不拖垮整个 compact。
+
+解析器容忍外围说明、Markdown fence、额外键和字符串外的尾逗号；拒绝重复 JSON 键、多个对象、截断对象和非有限数值。正文字符串的换行、缩进和标点不做紧凑化。case 缺少完整 STAR 时不编造补全。
+
+结构错误和输出截断的下一次请求携带最近一次失败的**可见输出**、具体错误及原始源材料，不携带推理内容；不累积所有失败版本。源材料优先于失败输出：若两者超过上下文预算，先省去失败输出。输出截断要求更短的完整 JSON，不接续残缺输出，不仅因 schema 错误删掉源历史。保留三次有限尝试、现有 endpoint 预算及最低思考档位。
+
+### 本体统一记忆提案审核
+
+MemoryReviewService 接收 compact 与 Bunshin 的 MemoryProposalBatch，将草稿、来源、路由、逐项决定及 revision 持久化到记忆管理库的 memory_reviews。自动 compact 在恢复对话前保存草稿，展示可等到该回合结束；/memory_review [batch_id] 可恢复未完成批次。
+
+每条候选可以接受、跳过、查看完整内容或修正。修正是选字段后提交完整替换文本，不调用 LLM 重写；正文、检索文本和 STAR 保留原始空白。修改过的条目回到待确认。所有候选决定完毕后，整批概览才出现“提交已接受项”；最后一次点击前不写 L3。旧的一键 Accept 投影只会导入逐项草稿，超过五条的旧草稿不被截掉。
+
+op_memory_commit_candidates(batch_id) 只接受已由最终用户操作授权且内容 hash 仍匹配的批次。普通候选标记不构成授权，模型调用该能力不能绕过审核。活跃 provider 改变或不支持原子批量提交时保留草稿并报错，不退回逐条写入。
+
+SQLite L3 在同一 generation 事务内保存所有接受项、topics、FTS、embedding 待处理状态和 memory_batch_receipts；任一项冲突则整批回滚。L2 只在事务成功后投影。收据与 generation 一起复制，跨重试、进程恢复、后续显式更新及遗忘仍保持提交幂等。提交后审核状态保存失败时按收据恢复，不重建已删除条目。完成的审核草稿清空正文，仅保留来源引用、计数和结果引用；跳过全部时不调用 L3。
+
+Bunshin 的 propose_memories（canonical op_bunshin_memory_candidate_write）只替换当前 invocation 的最多五条候选，候选随其 checkpoint 保存。本体通过 Manager 的 Task 持久化交付路径展示，使用同一审核服务；Task 身份由 Manager 绑定，不能由候选正文指定。保留 generation、引用及来源依赖，提交前拒绝已遗忘来源或失效/无法验证的依赖。已接受的工作产物不等于人类接受记忆；仅有引用的 AcceptedModuleMemoryCandidateArtifact 不被当作记忆正文自动导入。
+
+Telegram 用 inline keyboard 和绑定消息的 ForceReply 完成字段编辑；TTY 提供预填多行编辑器，Ctrl-S 保存、Esc 返回；desktop_avatar 用原生列表与表单。所有输入走控制路径，不进入 L1，不启动对话 LLM。审核绑定原 endpoint 与已知用户/聊天身份；Socket 重连通过恢复命令取得新 revision，过期按钮不可修改草稿。
+
+本次 resident Memory/Core/control/Socket 实现需外部完整重启后激活；仅复制文件、provider reload 或 endpoint restart 不等于整套功能生效。桌宠属于独立仓库，还需安装其 channel 文件、重载 provider 并刷新浏览器。数据库表按现有初始化路径增量创建，不改变用户 endpoint 配置。
+
 ## retire
 
 `retire` 表示：
