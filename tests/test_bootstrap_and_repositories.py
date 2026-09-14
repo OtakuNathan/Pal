@@ -4603,6 +4603,25 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ctl_panel_stale", self.endpoint._interactive_messages)
         self.assertEqual(self.endpoint._interactive_messages["ctl_panel_stale"]["message_id"], 10)
 
+    async def test_reopen_interaction_with_already_empty_keyboard_sends_new_card(self) -> None:
+        self.endpoint._interactive_messages["mr_reopen"] = {
+            "chat_id": 42, "message_id": 10,
+            "interaction_kind": "memory_candidate_approval",
+            "expires_at_monotonic": None, "actions": {},
+        }
+        async def already_cleared(**kwargs):
+            raise RuntimeError("Bad Request: Message is not modified")
+        self.fake_bot.edit_message_reply_markup = already_cleared
+        spec = InteractionMessageSpec("mr_reopen", "memory_candidate_approval",
+            text="Review candidate", buttons=((InteractionButtonSpec("Preview", "control.panel.back"),),))
+        await self.endpoint._open_or_update_interaction_async(
+            self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+            spec=spec, allow_update=False)
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertIsNotNone(messages[0]["reply_markup"])
+        self.assertNotEqual(self.endpoint._interactive_messages["mr_reopen"]["message_id"], 10)
+
     async def test_telegram_endpoint_stale_interaction_falls_back_to_new_message(self) -> None:
         self.endpoint._interactive_messages["ctl_panel_stale"] = {
             "chat_id": 42,

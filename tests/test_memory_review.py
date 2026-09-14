@@ -51,24 +51,43 @@ def test_replayed_proposal_checks_owner_before_returning_draft(setup_review):
     assert restored["drafts"] == state["drafts"]
 
 
+def test_review_entry_opens_preview_and_advances_to_next_pending_candidate(setup_review):
+    from pal.control import ControlPlane
+    reviews, _, _ = setup_review
+    state = stage(reviews, candidates=[FACT, {**FACT, "title": "Second"}])
+    spec = reviews.delivery(state, ROUTE, opening=True).interaction
+    assert f"/memory_review {state['batch_id']}" in spec.text
+    args = spec.buttons[0][0].action_args["args"]
+    state = reviews.apply(state["batch_id"], args, ROUTE)
+    preview = reviews.delivery(state, ROUTE, view="view", candidate_id=args["candidate_id"]).interaction
+    assert len(preview.items) == 1
+    assert FACT["source_excerpt"] in preview.items[0].text
+    assert FACT["summary"] in preview.items[0].text
+    state = decision(reviews, state, "accept", candidate_id="c1")
+    next_button = reviews.delivery(state, ROUTE).interaction.buttons[0][0]
+    assert next_button.action_args["args"]["candidate_id"] == "c2"
+    panel = ControlPlane().list_panel_commands()
+    assert any(item.name == "memory_review" and item.panel_button and item.panel_label == "Memory proposals" for item in panel)
+
+
 def test_completed_review_open_reports_result_without_requiring_existing_card(setup_review):
     reviews, _, _ = setup_review
     empty = stage(reviews, candidates=[{"kind": "fact"}], identity="invalid")
     delivery = reviews.delivery(empty, ROUTE, opening=True)
     assert delivery.delivery_kind == "reply"
-    assert "格式问题" in delivery.text
+    assert "format issues" in delivery.text
     state = decision(reviews, stage(reviews), "skip", candidate_id="c1")
     state = decision(reviews, state, "submit")
     assert reviews.delivery(state, ROUTE).delivery_kind == "interactive_resolve"
     reopened = reviews.delivery(reviews.get(state["batch_id"], ROUTE), ROUTE, opening=True)
     assert reopened.delivery_kind == "reply"
-    assert "跳过 1 条" in reopened.text
+    assert "1 skipped" in reopened.text
 
 
 def test_mark_edit_then_submit_is_the_only_write_authority(setup_review):
     reviews, provider, _ = setup_review
     state = stage(reviews)
-    with pytest.raises(ValueError, match="授权|确认|提交"):
+    with pytest.raises(ValueError, match="authorization"):
         reviews.commit(state["batch_id"])
     state = decision(reviews, state, "accept", candidate_id="c1")
     assert provider.repository.list_projection_rows() == []
@@ -129,7 +148,7 @@ def test_skip_all_stale_buttons_and_reconnect_owner(setup_review):
     reviews, provider, _ = setup_review
     initial = stage(reviews)
     state = decision(reviews, initial, "skip", candidate_id="c1")
-    with pytest.raises(ValueError, match="更新"):
+    with pytest.raises(ValueError, match="changed"):
         decision(reviews, initial, "accept", candidate_id="c1")
     wrong = replace(ROUTE, endpoint_id="other")
     with pytest.raises(ValueError):
@@ -146,13 +165,13 @@ def test_no_final_button_before_all_decisions_and_only_refs_in_wire(setup_review
     state = stage(reviews, candidates=[FACT, {**FACT, "title": "second"}])
     spec = reviews.delivery(state, ROUTE).interaction
     wire, actions = interaction_projection(spec)
-    assert wire["buttons"] == []
+    assert wire["buttons"][0][0]["label"] == "Review next candidate"
     assert len(wire["items"]) == 2
     assert all("action_args" not in item for row in wire["items"][0]["buttons"] for item in row)
     assert all("memory_candidates" not in action["action_args"] for action in actions.values())
     state = decision(reviews, state, "accept", candidate_id="c1")
     state = decision(reviews, state, "skip", candidate_id="c2")
-    assert reviews.delivery(state, ROUTE).interaction.buttons[0][0].label == "提交已接受项"
+    assert reviews.delivery(state, ROUTE).interaction.buttons[0][0].label == "Submit accepted items"
 
 
 def test_legacy_candidates_retained_but_require_new_decisions(setup_review):
@@ -243,9 +262,9 @@ def test_source_dependency_validation_failure_keeps_authorized_draft(setup_revie
                                   "source_dependencies": dependencies})
     state = decision(reviews, state, "accept", candidate_id="c1")
     state = decision(reviews, state, "submit")
-    with pytest.raises(ValueError, match="来源"):
+    with pytest.raises(ValueError, match="source"):
         reviews.commit(state["batch_id"])
-    with pytest.raises(ValueError, match="来源"):
+    with pytest.raises(ValueError, match="source"):
         reviews.commit(state["batch_id"], validate_source=lambda source: False)
     assert not provider.repository.list_projection_rows()
     assert reviews.get(state["batch_id"], ROUTE)["drafts"]

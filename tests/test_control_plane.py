@@ -2300,6 +2300,29 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_candidate_items_render_body_and_native_inline_keyboard(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from pal.control.contracts import InteractionItemSpec
+        route = ControlRoute("telegram_main", "telegram", {"chat_id": "100", "user_id": "42"})
+        preview = InteractionButtonSpec("Preview", "control.action.dispatch", {
+            "action_kind": "memory_candidate_decision", "target_scope": "memory",
+            "target_id": "mr_test", "args": {"decision": "view", "revision": "1", "candidate_id": "c1"}})
+        spec = InteractionMessageSpec("mr_test", "memory_candidate_approval", route,
+            "Memory proposals: 1 pending", revision="1", items=(InteractionItemSpec(
+                "c1", "API preference", "Prefer explicit APIs.", "Pending", ((preview,),)),))
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=10)))
+        self.endpoint.application = SimpleNamespace(bot=bot)
+        await self.endpoint._open_or_update_interaction_async(
+            ResponseHandle("telegram_main", route.reply_target), spec=spec, allow_update=False)
+        sent = bot.send_message.call_args.kwargs
+        self.assertIn("Prefer explicit APIs.", sent["text"])
+        button = sent["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(button.text, "Preview")
+        token = button.callback_data.rsplit(":", 1)[-1]
+        result = self.endpoint.interaction_result_from_token("mr_test", token)
+        self.assertEqual(result.action_args["args"]["candidate_id"], "c1")
+
     async def asyncSetUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_tg_control_test_"))
         self.endpoint = TelegramChannelEndpoint(

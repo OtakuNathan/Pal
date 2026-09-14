@@ -1706,7 +1706,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 await self.application.bot.edit_message_reply_markup(
                     chat_id=existing["chat_id"], message_id=existing["message_id"], reply_markup=None)
             except Exception as exc:
-                if not _telegram_interaction_target_is_stale(exc):
+                if not (_telegram_message_is_not_modified(exc) or _telegram_interaction_target_is_stale(exc)):
                     self.last_delivery_error = str(exc)
                     return
         markup = self._build_interaction_markup(spec)

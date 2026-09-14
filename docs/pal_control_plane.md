@@ -17,6 +17,8 @@ The optional `@BotName` suffix is stripped before command lookup.
 
 /memory_review [batch_id] restores a host-owned memory proposal batch on its bound endpoint. Each candidate is marked or edited separately; only the final batch-submit action authorizes writes. Editing, navigation, retries and field replies remain deterministic control traffic outside L1 and conversational LLM requests.
 
+The control panel includes **Memory proposals**. Review cards include **Review next candidate**, per-candidate preview/edit/accept/skip buttons, and the exact recovery command. Review interface labels and validation messages are English; candidate content retains its original language. Telegram providers must support interaction `items`, revision tokens and input forms; updating resident Pal alone leaves older installed providers unable to render candidate bodies and buttons. Update and reload the Telegram provider as well.
+
 Inline control buttons should use typed actions. Generic command buttons use `control.command.run` with `command_name`; arbitrary module-specific actions use `control.action.dispatch` and carry a typed `ControlAction` payload. Channel endpoints own platform-specific rendering such as Telegram inline keyboards and callback tokens.
 
 > 目标：定义 `control` 的职责、边界和交互契约。

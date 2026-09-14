@@ -215,12 +215,12 @@ class MemoryIntrospectionProvider:
             core = self.context.port_registry.get("core:core")
             if core is not None:
                 old = InteractionMessageSpec(f"memory_candidate_{action.target_id}",
-                    "memory_candidate_approval", action.route, "旧提案已转入逐项审核。")
+                    "memory_candidate_approval", action.route, "The legacy proposal has moved to per-candidate review.")
                 await core.handle_control_action_async(ControlAction("interactive_resolve", "interaction",
                     target_id=old.interaction_id, route=action.route,
                     delivery=delivery_for_interaction(action.route, "interactive_resolve", old)))
             return {"delivery": reviews.delivery(state, action.route, opening=True,
-                banner="旧提案已转为逐项审核；请标记各条后统一提交。")}
+                banner="Legacy proposal imported. Review each candidate, then submit the batch.")}
         try:
             state = reviews.apply(action.target_id, action.args, action.route)
             banner = ""
@@ -228,7 +228,7 @@ class MemoryIntrospectionProvider:
                 result = await self.context.execution_runtime.execute_async(CapabilityCall(
                     name="op_memory_commit_candidates", args={"batch_id": state["batch_id"]}))
                 if str(getattr(result, "status", "")) != "ok":
-                    banner = "本次提交未完成；审核结果已保留，可重试。"
+                    banner = "Submission did not complete. Your review decisions are saved; you can retry."
                 state = reviews.get(state["batch_id"], action.route)
             operation = action.args.get("decision")
             view = operation if operation in {"edit", "field", "view"} else "overview"

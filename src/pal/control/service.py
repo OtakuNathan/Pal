@@ -378,7 +378,8 @@ class ControlPlane(ControlPlanePort):
         self.register_command(ControlCommandSpec(name="memory_review",
             handler=lambda invocation: ControlAction(action_kind="memory_review_open", target_scope="memory",
                 route=invocation.route, args={"batch_id": invocation.argv[0] if invocation.argv else ""}),
-            description="Review or resume a memory proposal batch.", usage="/memory_review [batch_id]"))
+            description="Review or resume a memory proposal batch.", usage="/memory_review [batch_id]",
+            show_in_panel=True, panel_button=True, panel_label="Memory proposals"))
         self.register_command(
             ControlCommandSpec(
                 name="control",

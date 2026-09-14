@@ -20,8 +20,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS memory_reviews (
  batch_id TEXT PRIMARY KEY, source_hash TEXT NOT NULL, state_json TEXT NOT NULL,
  updated_at TEXT NOT NULL
 )"""
-FIELD_LABELS = {"title": "标题", "summary": "正文", "search_text": "检索文本", "topics": "Topics",
-    "situation": "情境", "task": "任务", "action": "操作", "result": "结果"}
+FIELD_LABELS = {"title": "Title", "summary": "Body", "search_text": "Search text", "topics": "Topics",
+    "situation": "Situation", "task": "Task", "action": "Action", "result": "Result"}
 
 
 class MemoryReviewService:
@@ -45,7 +45,7 @@ class MemoryReviewService:
     def _read(self, db, batch_id):
         row = db.execute("SELECT state_json FROM memory_reviews WHERE batch_id=?", (batch_id,)).fetchone()
         if row is None:
-            raise ValueError("审核批次不存在。")
+            raise ValueError("Memory review batch not found.")
         return json.loads(row[0])
 
     def _save(self, db, state):
@@ -54,7 +54,7 @@ class MemoryReviewService:
 
     def stage(self, proposal: MemoryProposalBatch, route: ControlRoute, *, legacy=False):
         if route is None:
-            raise ValueError("记忆提案缺少交付路由。")
+            raise ValueError("Memory proposal has no delivery route.")
         source = dict(proposal.source)
         digest = content_hash({"candidates": proposal.candidates, "source": source})
         batch_id = "mr_" + content_hash(proposal.batch_id)[:20]
@@ -64,7 +64,7 @@ class MemoryReviewService:
                 state = json.loads(row[1])
                 self._check_owner(state, route)
                 if row[0] != digest:
-                    raise ValueError("同一提案 ID 的内容发生变化；请使用新的提案版本。")
+                    raise ValueError("Proposal content changed under the same ID; use a new proposal version.")
                 return state
             candidates, diagnostics = normalize_memory_candidates(list(proposal.candidates), limit=None if legacy else 5)
             diagnostics.extend(source.get("normalization_diagnostics") or [])
@@ -89,13 +89,13 @@ class MemoryReviewService:
     def _check_owner(state, route):
         owner = state["route"]
         if route is None or route.endpoint_id != owner["endpoint_id"]:
-            raise ValueError("审核不属于当前 endpoint。")
+            raise ValueError("This review belongs to a different endpoint.")
         old = owner.get("reply_target") or {}
         for key in ("chat_id", "thread_id", "user_id"):
             if key == "user_id" and not old.get(key):
                 continue  # Legacy routes rely on the endpoint binding.
             if str(old.get(key) or "") != str(route.reply_target.get(key) or ""):
-                raise ValueError("审核不属于当前用户或会话。")
+                raise ValueError("This review belongs to a different user or conversation.")
 
     def get(self, batch_id, route, *, resume=False):
         with self.lock, self.connection() as db:
@@ -113,7 +113,7 @@ class MemoryReviewService:
                     state = item
                     break
                 if state is None:
-                    raise ValueError("没有待审核的记忆提案。")
+                    raise ValueError("No pending memory proposals.")
             else:
                 state = self._read(db, batch_id)
             self._check_owner(state, route)
@@ -128,7 +128,7 @@ class MemoryReviewService:
         source = state["source"]
         task_id = str(source.get("task_id") or "") or None
         if source.get("source_kind") == "bunshin" and not task_id:
-            raise ValueError("Bunshin 提案缺少真实 Task 绑定。")
+            raise ValueError("Bunshin proposal has no authoritative Task binding.")
         requests = []
         for draft in state["drafts"]:
             if draft["decision"] != "accepted":
@@ -155,7 +155,7 @@ class MemoryReviewService:
         receipt = repo.database.execute_sql("SELECT request_hash,results_json FROM memory_batch_receipts WHERE batch_id=?", (state["batch_id"],)).fetchone()
         if receipt is not None:
             if receipt[0] != content_hash([asdict(item) for item in self._requests(state)]):
-                raise ValueError("批次提交收据与草稿不一致。")
+                raise ValueError("The batch commit receipt does not match the draft.")
             self._finish(state, json.loads(receipt[1]))
 
     @staticmethod
@@ -177,11 +177,11 @@ class MemoryReviewService:
                 self._save(db, state)
                 return state
             if str(args.get("revision")) != str(state["revision"]):
-                raise ValueError("审核已更新；请重新打开当前批次。")
+                raise ValueError("This review has changed; reopen the current batch.")
             operation = args.get("decision")
             if operation in {"submit", "retry"}:
                 if any(item["decision"] == "pending" for item in state["drafts"]):
-                    raise ValueError("请先标记每条候选，再提交整批结果。")
+                    raise ValueError("Mark every candidate before submitting the batch.")
                 requests = self._requests(state)
                 if not requests:
                     self._finish(state, [])
@@ -191,15 +191,15 @@ class MemoryReviewService:
             elif operation in {"accept", "skip", "save"}:
                 draft = next((item for item in state["drafts"] if item["candidate_id"] == args.get("candidate_id")), None)
                 if draft is None:
-                    raise ValueError("候选不存在。")
+                    raise ValueError("Candidate not found.")
                 if operation == "save":
                     key = str(args.get("field") or "")
                     if key not in self.fields(draft):
-                        raise ValueError("字段不可编辑。")
+                        raise ValueError("This field cannot be edited.")
                     values = args.get("input_values")
                     value = values.get("value") if isinstance(values, dict) else None
                     if not isinstance(value, str) or (key != "topics" and not value.strip()):
-                        raise ValueError("请输入完整的字段内容。")
+                        raise ValueError("Enter the complete field value.")
                     if key in STAR_FIELDS:
                         draft["content"]["star"][key] = value
                     elif key == "topics":
@@ -213,7 +213,7 @@ class MemoryReviewService:
                 state["authorization"] = ""
                 state["status"] = "reviewing"
             elif operation not in {"view", "edit", "field", "overview"}:
-                raise ValueError("未知审核操作。")
+                raise ValueError("Unknown review action.")
             state["revision"] += 1
             self._save(db, state)
             return state
@@ -229,28 +229,28 @@ class MemoryReviewService:
                 requests = self._requests(state)
                 digest = content_hash([asdict(item) for item in requests])
                 if state["status"] != "authorized" or state["authorization"] != digest:
-                    raise ValueError("此批次尚未获得最终提交授权。")
+                    raise ValueError("This batch has not received final submission authorization.")
             provider = self.memory._resolve_l3_provider()
             commit = getattr(provider, "commit_batch", None)
             if not callable(commit) or getattr(provider, "provider_id", None) != state["provider_id"]:
-                raise ValueError("原记忆 provider 不可用或不支持原子批量提交。")
+                raise ValueError("The original memory provider is unavailable or does not support atomic batch commits.")
             repository = getattr(provider, "repository", None)
             if "source_dependencies" in state["source"]:
                 if not callable(validate_source) or not validate_source(state["source"]):
-                    raise ValueError("提案来源已失效或暂时无法验证；未提交。")
+                    raise ValueError("The proposal source is invalid or cannot currently be verified; nothing was submitted.")
             # Share the mutation boundary with explicit forgetting. A deletion
             # cannot slip between the tombstone check and the batch commit.
             with getattr(repository, "write_lock", nullcontext()):
                 catalog = getattr(repository, "catalog", None)
                 if catalog and any(catalog.is_deleted(ref) for ref in state["source"].get("memory_refs", [])):
-                    raise ValueError("提案引用了已遗忘内容，请重新审核来源。")
+                    raise ValueError("The proposal references forgotten content; review its source again.")
                 result = commit(L3BatchCommitRequest(batch_id, requests))
             with self.connection() as db:
                 if result.status == "ok":
                     self._finish(state, [item.document_id for item in result.results])
                 else:
                     state["status"] = "failed"
-                    state["error"] = f"整批未提交：{result.status}。可重试或修改候选。"
+                    state["error"] = f"Batch not committed: {result.status}. Retry or edit the candidates."
                     state["revision"] += 1
                 self._save(db, state)
             return {"status": result.status, **state["result"]}
@@ -270,9 +270,9 @@ class MemoryReviewService:
 
         if state["status"] == "completed":
             result = state["result"]
-            text = "提案因显式遗忘失效，未提交。" if result.get("invalidated") else f"记忆审核完成：接受 {result.get('accepted', 0)} 条，跳过 {result.get('skipped', 0)} 条。"
+            text = "This proposal was invalidated by explicit forgetting; it was not submitted." if result.get("invalidated") else f"Memory review complete: {result.get('accepted', 0)} accepted, {result.get('skipped', 0)} skipped."
             if state["diagnostics"]:
-                text += f"\n提取时已处理或跳过 {len(state['diagnostics'])} 项格式问题。"
+                text += f"\nExtraction normalized or skipped {len(state['diagnostics'])} format issues."
             if opening:
                 # A fresh client may have no card to resolve (including when
                 # every optional candidate was rejected during normalization).
@@ -281,12 +281,13 @@ class MemoryReviewService:
             return delivery_for_interaction(route, "interactive_resolve", spec)
         drafts = state["drafts"]
         counts = {key: sum(item["decision"] == key for item in drafts) for key in ("pending", "accepted", "skipped")}
-        text = f"记忆提案：待处理 {counts['pending']} · 接受 {counts['accepted']} · 跳过 {counts['skipped']}\n逐项标记后预览，最后统一提交。"
-        text += "\n批次：" + batch_id
+        text = f"Memory proposals: {counts['pending']} pending · {counts['accepted']} accepted · {counts['skipped']} skipped\nReview each candidate, then submit the accepted items together."
+        text += "\nBatch: " + batch_id
+        text += "\nReopen: /memory_review " + batch_id
         if state["source"].get("source_label"):
-            text += "\n来源：" + str(state["source"]["source_label"])
+            text += "\nSource: " + str(state["source"]["source_label"])
         if state["diagnostics"]:
-            text += f"\n提取时已处理或跳过 {len(state['diagnostics'])} 项格式问题。"
+            text += f"\nExtraction normalized or skipped {len(state['diagnostics'])} format issues."
         text += ("\n" + (banner or state["error"])) if banner or state["error"] else ""
         selected = next((item for item in drafts if item["candidate_id"] == candidate_id), None)
         inputs = ()
@@ -299,34 +300,37 @@ class MemoryReviewService:
                 if field == "topics":
                     value = "\n".join(value)
                 inputs = (InteractionInputSpec("value", FIELD_LABELS[field], value,
-                    button("保存修改", "save", candidate_id, field)),)
+                    button("Save changes", "save", candidate_id, field)),)
             else:
                 rows.extend((button(FIELD_LABELS[key], "field", candidate_id, key),) for key in self.fields(selected))
-            rows.append((button("返回", "view", candidate_id),))
-            text += "\n编辑：" + content["title"]
+            rows.append((button("Back", "view", candidate_id),))
+            text += "\nEditing: " + content["title"]
         else:
             visible = [selected] if view == "view" and selected else drafts
             for draft in visible:
                 item = draft["content"]
-                label = {"pending": "待确认", "accepted": "接受", "skipped": "跳过"}[draft["decision"]]
+                label = {"pending": "Pending", "accepted": "Accepted", "skipped": "Skipped"}[draft["decision"]]
                 if draft["edited"]:
-                    label += " · 已修正"
+                    label += " · Edited"
                 task_id = state["source"].get("task_id") or item.get("task_id")
-                detail = ("范围：task · " + str(task_id) if task_id else "范围：system") + "\n\n" + item["summary"]
-                detail += "\n\nTopics：" + ", ".join(item["topics"])
+                detail = ("Scope: task · " + str(task_id) if task_id else "Scope: system") + "\n\n" + item["summary"]
+                detail += "\n\nTopics: " + ", ".join(item["topics"])
                 if item.get("star"):
-                    detail += "\n\n" + "\n\n".join(f"{FIELD_LABELS[key]}：\n{value}" for key, value in item["star"].items())
+                    detail += "\n\n" + "\n\n".join(f"{FIELD_LABELS[key]}:\n{value}" for key, value in item["star"].items())
                 if item.get("why_durable"):
-                    detail += "\n\n保留理由：" + item["why_durable"]
+                    detail += "\n\nReason to retain: " + item["why_durable"]
                 if view == "view":
-                    detail += "\n\n检索文本：\n" + item["search_text"] + "\n\n来源片段／检索依据：\n" + item["source_excerpt"]
+                    detail += "\n\nSearch text:\n" + item["search_text"] + "\n\nSource excerpt / retrieval context:\n" + item["source_excerpt"]
                 cid = draft["candidate_id"]
                 items.append(InteractionItemSpec(cid, f"{cid} · {item['kind']} · {item['title']}", detail, label,
-                    ((button(f"{cid} 接受", "accept", cid), button(f"{cid} 跳过", "skip", cid), button(f"{cid} 修正", "edit", cid), button(f"{cid} 详情", "view", cid)),)))
+                    ((button(f"{cid} Accept", "accept", cid), button(f"{cid} Skip", "skip", cid), button(f"{cid} Edit", "edit", cid), button(f"{cid} Preview", "view", cid)),)))
             if view == "view":
-                rows.append((button("返回整批概览", "overview"),))
+                rows.append((button("Back to batch overview", "overview"),))
+            elif counts["pending"]:
+                next_candidate = next(item for item in drafts if item["decision"] == "pending")
+                rows.append((button("Review next candidate", "view", next_candidate["candidate_id"]),))
             elif not counts["pending"]:
-                rows.append((button("提交已接受项" if counts["accepted"] else "完成（不保存）", "submit"),))
+                rows.append((button("Submit accepted items" if counts["accepted"] else "Finish without saving", "submit"),))
         spec = InteractionMessageSpec(batch_id, "memory_candidate_approval", route, text,
             tuple(rows), revision=revision, items=tuple(items), inputs=inputs)
         return delivery_for_interaction(route, "interactive_open" if opening else "interactive_update", spec)
