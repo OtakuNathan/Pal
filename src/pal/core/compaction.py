@@ -280,6 +280,13 @@ class CompactionEngine:
                 validation_error=validation_error,
             )
             advice = await _preflight(llm_runtime, request)
+            if snapshot.target_input_budget <= 0:
+                resolved = _snapshot_for_budget_advice(snapshot, advice)
+                if resolved.target_input_budget > 0:
+                    snapshot = resolved
+                    # Rebuild output allowance as well as input checks for
+                    # small endpoints; do not send the provisional request.
+                    continue
             if _preflight_requires_compaction(advice):
                 if snapshot.replay_request is not None:
                     # The provider-identical replay is useful only while it

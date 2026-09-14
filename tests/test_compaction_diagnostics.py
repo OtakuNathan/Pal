@@ -94,3 +94,40 @@ def test_preflight_failure_does_not_reuse_previous_response_usage(caplog, monkey
     record = next(r.getMessage() for r in caplog.records
                   if "reason=input:base_context_over_budget" in r.getMessage())
     assert "input_tokens=0 output_tokens=0" in record
+
+
+def test_unknown_manual_budget_uses_endpoint_advice_before_generation():
+    from pal.llm import LLMPreflightAdvice
+    from pal.shared import LLMPreflightStatus
+
+    for target, expected_output in [(900_000, 25_000), (8_192, 6_144)]:
+        service = _memory_with_turns()
+        llm = _ScriptedLLM([generation_result_from_values(text=_valid_pal_payload())])
+        llm.preflight_hook = lambda request: LLMPreflightAdvice(
+            status=LLMPreflightStatus.READY, target_input_budget=target,
+        )
+        result = asyncio.run(CompactionEngine(PalCompactionPolicy()).run(
+            replace(_snapshot(service), target_input_budget=0),
+            llm_runtime=llm, memory_service=service,
+        ))
+        assert result.success
+        assert len(llm.preflight_requests) == 2
+        assert len(llm.generate_requests) == 1
+        assert llm.generate_requests[0].policy.max_output_tokens == expected_output
+
+
+def test_manual_command_no_longer_imposes_an_eight_k_budget():
+    from unittest.mock import AsyncMock
+    from pal.core.runtime import PalCore
+    from pal.control import ControlAction, ControlRoute
+    from pal.core.compaction import CompactionRunResult
+
+    core = PalCore()
+    core.context.port_registry['memory:memory'] = _memory_with_turns()
+    core.turn_executor.compact_memory_async = AsyncMock(return_value=CompactionRunResult(status='failed'))
+    core._complete_compact_reply_async = AsyncMock()
+    asyncio.run(core._handle_compact_memory_async(ControlAction(
+        action_kind='compact_memory', target_scope='memory',
+        route=ControlRoute(endpoint_id='memory', channel_kind='memory'),
+    )))
+    assert core.turn_executor.compact_memory_async.call_args.kwargs['target_input_budget'] == 0

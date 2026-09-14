@@ -1665,8 +1665,9 @@ class PalCore(MemoryMaintenanceMixin):
             return
         run_result = await self.turn_executor.compact_memory_async(
             memory_service,
-            target_input_budget=8192,
-            reserved_output_tokens=4096,
+            # Resolve the actual endpoint budget during compaction preflight.
+            target_input_budget=0,
+            reserved_output_tokens=0,
             max_attempts=3 if cache_epoch else None,
             cache_epoch=cache_epoch,
         )
