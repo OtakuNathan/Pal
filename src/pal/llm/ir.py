@@ -256,6 +256,7 @@ class LLMUsageIR:
     reasoning_tokens_reported: bool = False
     cost: float = 0.0
     reported: bool = False
+    usage_anomaly: str = ""
 
 
 @dataclass(frozen=True)

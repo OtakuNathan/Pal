@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -20,6 +21,8 @@ from pal.llm.ir import (
 from pal.llm.shapes.base import EncodedMessageSpan, EncodedRequest, ShapeContext
 from pal.shared.json_values import thaw_json
 
+logger = logging.getLogger(__name__)
+
 
 class PromptCacheDialect(StrEnum):
     NONE = "none"
@@ -31,6 +34,50 @@ class PromptCacheDialect(StrEnum):
     OPENROUTER_ANTHROPIC_AUTOMATIC = "openrouter_anthropic_automatic"
     OPENROUTER_ANTHROPIC_EXPLICIT = "openrouter_anthropic_explicit"
     ANTHROPIC_EXPLICIT = "anthropic_explicit"
+
+
+@dataclass(frozen=True)
+class CacheProfile:
+    """Narrow, immutable cache strategy selection for one provider family.
+
+    Selection only: a profile chooses a dialect and wire flags. It owns no
+    cache state, no secrets, and no planner internals. Endpoints without a
+    profile keep the default (legacy) resolution unchanged.
+    """
+
+    profile_id: str
+    strategy: str
+    dialect: PromptCacheDialect
+    allow_explicit_breakpoints: bool = True
+    allow_stable_anchor_marker: bool = False
+    stable_prompt_cache_key: bool = True
+    stable_session_id: bool = True
+    telemetry_usage_required: bool = True
+
+
+# Canary comparison groups from the same-turn cache plan. The default for a
+# matching endpoint stays legacy until a paid canary picks a winner; switching
+# is a configuration action, never an automatic behavior.
+CACHE_PROFILES: dict[str, CacheProfile] = {
+    "openrouter_astra_legacy_explicit": CacheProfile(
+        profile_id="openrouter_astra_legacy_explicit",
+        strategy="legacy_explicit",
+        dialect=PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
+    ),
+    "openrouter_astra_provider_implicit": CacheProfile(
+        profile_id="openrouter_astra_provider_implicit",
+        strategy="provider_implicit",
+        dialect=PromptCacheDialect.OPENROUTER_AUTOMATIC,
+        allow_explicit_breakpoints=False,
+    ),
+    "openrouter_astra_hybrid_anchor": CacheProfile(
+        profile_id="openrouter_astra_hybrid_anchor",
+        strategy="hybrid_anchor",
+        dialect=PromptCacheDialect.OPENROUTER_AUTOMATIC,
+        allow_explicit_breakpoints=False,
+        allow_stable_anchor_marker=True,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +115,9 @@ class PromptCachePlan:
     decision: str = "disabled"
     estimated_prefix_tokens: int = 0
     plan_sequence: int = 0
+    profile_id: str = ""
+    strategy: str = ""
+    allow_stable_anchor_marker: bool = False
     anchor: PromptCacheTrackPlan = field(
         default_factory=lambda: PromptCacheTrackPlan("anchor", "5m")
     )
@@ -132,6 +182,7 @@ class _TrackStats:
     last_used_at: float = 0.0
     accumulated_reprocessed_tokens: int = 0
     last_decision: str = ""
+    submitted_at: float = 0.0
 
     def clear(self) -> None:
         self.confirmed_message_id = ""
@@ -141,6 +192,7 @@ class _TrackStats:
         self.last_used_at = 0.0
         self.accumulated_reprocessed_tokens = 0
         self.last_decision = ""
+        self.submitted_at = 0.0
 
 
 @dataclass
@@ -155,6 +207,17 @@ class _ScopeStats:
     next_plan_sequence: int = 0
     last_decision: str = ""
     last_access_at: float = field(default_factory=time.monotonic)
+    # Request-level provider evidence, deliberately NOT attributed to a track:
+    # R>0 proves a read happened somewhere, never which boundary served it.
+    last_request_at: float = 0.0
+    usage_observed_at: float = 0.0
+    last_observed_read_at: float = 0.0
+    last_observation: str = "usage_missing"
+    stall_suspected: bool = False
+    stall_rounds: int = 0
+    recent_cache_observations: deque[tuple[int, int, int]] = field(
+        default_factory=lambda: deque(maxlen=8)
+    )
 
     @property
     def observed_requests(self) -> int:
@@ -209,7 +272,19 @@ class PromptCacheCoordinator:
             from pal.llm.shapes import codec_for_shape
 
             encoded = codec_for_shape(context.wire_shape).encode(request, context)
+        profile = _resolve_profile(context)
         dialect = _resolve_dialect(context)
+        if profile is not None:
+            if (
+                dialect != PromptCacheDialect.NONE
+                and dialect != profile.dialect
+            ):
+                logger.warning(
+                    "cache_profile %s overrides requested dialect %s",
+                    profile.profile_id,
+                    dialect.value,
+                )
+            dialect = profile.dialect
         scope_key = _scope_key(request, context, dialect)
         if dialect == PromptCacheDialect.NONE:
             plan = PromptCachePlan(scope_key=scope_key, cache_key="", dialect=dialect)
@@ -221,7 +296,40 @@ class PromptCacheCoordinator:
                 cache_key=_cache_key(request, context),
                 dialect=dialect,
                 decision="provider_automatic",
+                profile_id=profile.profile_id if profile is not None else "",
+                strategy=profile.strategy if profile is not None else "",
             )
+            if profile is not None and profile.allow_stable_anchor_marker:
+                spans = {span.message_id: span for span in encoded.message_spans}
+                stable_span = _last_cacheable_span(
+                    request,
+                    spans,
+                    regions={PromptRegionIR.STABLE_SYSTEM},
+                )
+                if (
+                    stable_span is not None
+                    and stable_span.estimated_cache_prefix_tokens
+                    >= _capability_int(
+                        context.capabilities,
+                        "minimum_tokens",
+                        self.minimum_prefix_tokens,
+                    )
+                ):
+                    plan = replace(
+                        plan,
+                        decision="hybrid_stable_anchor",
+                        allow_stable_anchor_marker=True,
+                        breakpoints=(
+                            PromptCacheBreakpoint(
+                                label="stable_anchor",
+                                message_id=stable_span.message_id,
+                                ttl="30m",
+                                prefix_tokens=(
+                                    stable_span.estimated_cache_prefix_tokens
+                                ),
+                            ),
+                        ),
+                    )
             self._remember(plan, request=request)
             return plan
 
@@ -409,6 +517,8 @@ class PromptCacheCoordinator:
             plan_sequence=plan_sequence,
             anchor=anchor_plan,
             frontier=frontier_plan,
+            profile_id=profile.profile_id if profile is not None else "",
+            strategy=profile.strategy if profile is not None else "",
         )
         self._remember(plan, request=request)
         return plan
@@ -442,6 +552,13 @@ class PromptCacheCoordinator:
             extra_body["session_id"] = plan.cache_key
             if plan.dialect == PromptCacheDialect.OPENROUTER_ANTHROPIC_AUTOMATIC:
                 extra_body["cache_control"] = {"type": "ephemeral"}
+        if (
+            plan.profile_id
+            and plan.dialect == PromptCacheDialect.OPENROUTER_AUTOMATIC
+        ):
+            # Profile-selected automatic mode keeps both stable routing keys:
+            # the OpenRouter session_id above and the cache accounting key.
+            extra_body["prompt_cache_key"] = plan.cache_key
         if plan.dialect in {
             PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT,
             PromptCacheDialect.OPENAI_CHAT_EXPLICIT,
@@ -466,6 +583,18 @@ class PromptCacheCoordinator:
                     targets.get(breakpoint.message_id, ()),
                     "cache_control",
                     marker,
+                ):
+                    applied_breakpoint_message_ids.append(breakpoint.message_id)
+        elif plan.allow_stable_anchor_marker and plan.breakpoints:
+            # Hybrid: provider implicit caching stays active; the verified
+            # stable anchor participates as an explicit breakpoint without
+            # forcing explicit-only mode. No prompt_cache_options is sent.
+            for breakpoint in plan.breakpoints:
+                if _mark_last_target(
+                    payload,
+                    targets.get(breakpoint.message_id, ()),
+                    "prompt_cache_breakpoint",
+                    {"mode": "explicit"},
                 ):
                     applied_breakpoint_message_ids.append(breakpoint.message_id)
         return EncodedRequest(
@@ -505,6 +634,14 @@ class PromptCacheCoordinator:
         cached = max(0, int(usage.cached_input_tokens)) if usage is not None else 0
         write = max(0, int(usage.cache_write_input_tokens)) if usage is not None else 0
         explicit = _supports_explicit_breakpoints(plan.dialect)
+        if usage is None or not usage.reported:
+            observation = "usage_missing"
+        elif cached > 0:
+            observation = "read_observed"
+        elif write > 0:
+            observation = "write_observed"
+        else:
+            observation = "reported_zero"
         record: dict[str, Any] = {
             "attempt_id": str(request_id or ""),
             "provider_generation_id": str(provider_generation_id or ""),
@@ -513,6 +650,8 @@ class PromptCacheCoordinator:
             "cache_key_hash": _short_hash(plan.cache_key),
             "dialect": plan.dialect.value,
             "cache_mode": "explicit" if explicit else "automatic",
+            "profile_id": str(plan.profile_id or ""),
+            "strategy": str(plan.strategy or ""),
             "endpoint_id": str(endpoint_id or ""),
             "model_id": str(model_id or ""),
             "provider_id": str(provider_id or ""),
@@ -548,6 +687,18 @@ class PromptCacheCoordinator:
             ),
             "read_observed": cached > 0,
             "write_observed": write > 0,
+            "observation": observation,
+            "usage_anomaly": (
+                str(getattr(usage, "usage_anomaly", "") or "")
+                if usage is not None
+                else ""
+            ),
+            "usage_invariant_violation": bool(
+                usage_reported
+                and usage is not None
+                and usage.input_tokens
+                != usage.uncached_input_tokens + cached + write
+            ),
             # Zero read+write with accepted-looking explicit markers is the
             # stall signature this record exists to expose. Evidence only;
             # confirmation semantics are unchanged.
@@ -635,6 +786,13 @@ class PromptCacheCoordinator:
                     applied_breakpoint_ids=applied_breakpoint_ids,
                     observed_at=now,
                 )
+            _record_scope_observation(
+                stats,
+                usage,
+                estimated_prefix_tokens=plan.estimated_prefix_tokens,
+                scope_hash=_short_hash(plan.scope_key),
+                observed_at=now,
+            )
         self.record_attempt(
             plan,
             status="success",
@@ -714,6 +872,24 @@ class PromptCacheCoordinator:
                 "recent_attempts": [
                     dict(item) for item in list(self._attempt_records)[-20:]
                 ],
+                "observation": {
+                    "state": (
+                        last_stats.last_observation if last_stats else "usage_missing"
+                    ),
+                    "usage_observed_at": (
+                        last_stats.usage_observed_at if last_stats else 0.0
+                    ),
+                    "last_observed_read_at": (
+                        last_stats.last_observed_read_at if last_stats else 0.0
+                    ),
+                    "last_request_at": (
+                        last_stats.last_request_at if last_stats else 0.0
+                    ),
+                    "stall_suspected": (
+                        bool(last_stats.stall_suspected) if last_stats else False
+                    ),
+                    "stall_rounds": last_stats.stall_rounds if last_stats else 0,
+                },
                 "anchor": _track_snapshot(
                     plan.anchor if plan is not None else None,
                     last_stats.anchor if last_stats else None,
@@ -1101,6 +1277,69 @@ def _short_hash(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
 
 
+def _record_scope_observation(
+    stats: _ScopeStats,
+    usage: LLMUsageIR,
+    *,
+    estimated_prefix_tokens: int,
+    scope_hash: str,
+    observed_at: float,
+) -> None:
+    """Record request-level provider evidence; never attributed to a track."""
+
+    stats.last_request_at = observed_at
+    if not usage.reported:
+        stats.last_observation = "usage_missing"
+        return
+    cached = max(0, int(usage.cached_input_tokens))
+    write = max(0, int(usage.cache_write_input_tokens))
+    stats.usage_observed_at = observed_at
+    if cached > 0:
+        stats.last_observation = "read_observed"
+        stats.last_observed_read_at = observed_at
+    elif write > 0:
+        stats.last_observation = "write_observed"
+    else:
+        stats.last_observation = "reported_zero"
+    stats.recent_cache_observations.append(
+        (int(estimated_prefix_tokens), cached, write)
+    )
+    stalled, rounds = _detect_frontier_stall(stats.recent_cache_observations)
+    if stalled and not stats.stall_suspected:
+        logger.warning(
+            "cache_frontier_stalled_suspected: reusable prefix keeps growing "
+            "while observed reads stay flat and writes stay zero "
+            "(scope_hash=%s, rounds=%d)",
+            scope_hash,
+            rounds,
+        )
+    stats.stall_suspected = stalled
+    stats.stall_rounds = rounds if stalled else 0
+
+
+def _detect_frontier_stall(
+    recent: "deque[tuple[int, int, int]]",
+) -> tuple[bool, int]:
+    """Diagnostic only: three consecutive reported rounds where the reusable
+    prefix clearly grows while observed reads stay flat and writes stay zero.
+    Never triggers side effects; missing usage never counts as evidence."""
+
+    window = list(recent)[-3:]
+    if len(window) < 3:
+        return False, 0
+    estimated = [item[0] for item in window]
+    cached = [item[1] for item in window]
+    write = [item[2] for item in window]
+    grew = all(
+        estimated[index + 1] - estimated[index] >= 1024
+        for index in range(len(estimated) - 1)
+    )
+    flat_reads = max(cached) - min(cached) <= 1024
+    zero_write = all(item == 0 for item in write)
+    stalled = bool(grew and flat_reads and zero_write)
+    return stalled, 3 if stalled else 0
+
+
 def _record_track_success(
     stats: _TrackStats,
     plan: PromptCacheTrackPlan,
@@ -1115,6 +1354,8 @@ def _record_track_success(
         plan.candidate_message_id
         and plan.candidate_message_id in applied_breakpoint_ids
     ):
+        if not stats.submitted_at:
+            stats.submitted_at = observed_at
         stats.confirmed_message_id = plan.candidate_message_id
         stats.confirmed_fingerprint = plan.target_fingerprint
         stats.confirmed_prefix_tokens = plan.target_prefix_tokens
@@ -1145,6 +1386,8 @@ def _track_snapshot(
     return {
         "decision": plan.decision if plan is not None else "not_planned",
         "ttl": plan.ttl if plan is not None else "",
+        "submitted": bool(stats and stats.submitted_at),
+        "submitted_at": stats.submitted_at if stats else 0.0,
         "confirmed": bool(stats and stats.confirmed_message_id),
         "candidate": bool(plan and plan.candidate_message_id),
         "confirmed_prefix_tokens": stats.confirmed_prefix_tokens if stats else 0,
@@ -1158,6 +1401,28 @@ def _track_snapshot(
         ),
         "estimated_net_tokens": plan.estimated_net_tokens if plan else 0.0,
     }
+
+
+def _resolve_profile(context: ShapeContext) -> CacheProfile | None:
+    """Resolve a named cache profile from trusted endpoint capabilities.
+
+    Precedence: endpoint capabilities cache_profile > default resolution. An
+    unknown name keeps the default policy and warns; a profile never silently
+    overrides an explicitly requested dialect without a diagnostic.
+    """
+
+    override = _prompt_cache_capabilities(context.capabilities)
+    name = str(override.get("cache_profile") or "").strip().lower()
+    if not name:
+        return None
+    profile = CACHE_PROFILES.get(name)
+    if profile is None:
+        logger.warning(
+            "unknown cache_profile %r; keeping default cache policy",
+            name,
+        )
+        return None
+    return profile
 
 
 def _resolve_dialect(context: ShapeContext) -> PromptCacheDialect:

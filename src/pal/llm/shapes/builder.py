@@ -214,12 +214,18 @@ def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
         key in source
         for key in ("cache_read_input_tokens", "cache_creation_input_tokens")
     )
+    anomaly = ""
     if anthropic_categories:
         uncached = raw_input_tokens
         input_tokens = raw_input_tokens + cached + cache_write
     else:
         input_tokens = raw_input_tokens
-        uncached = max(0, input_tokens - cached - cache_write)
+        uncached = input_tokens - cached - cache_write
+        if uncached < 0:
+            # Keep the raw counters and flag the impossibility; a derived
+            # split is a diagnostic, not truth to hide behind a clamp.
+            anomaly = "input_lt_read_write"
+            uncached = 0
     reasoning = _first_int(source, "reasoning_tokens", "thinking_tokens")
     reasoning_reported = any(
         key in source for key in ("reasoning_tokens", "thinking_tokens")
@@ -249,18 +255,32 @@ def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
         reasoning_tokens_reported=reasoning_reported,
         cost=_first_float(source, "cost", "total_cost"),
         reported=payload is not None,
+        usage_anomaly=anomaly,
     )
 
 
 def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
     if not right.reported:
         return left
+    input_tokens = max(left.input_tokens, right.input_tokens)
+    cached = max(left.cached_input_tokens, right.cached_input_tokens)
+    cache_write = max(left.cache_write_input_tokens, right.cache_write_input_tokens)
+    # Within one response, input/read/write are cumulative counters, so max
+    # is correct for them. The uncached split is derived: an earlier
+    # intermediate frame may predate cache classification, so max-merging it
+    # understates reuse. Recompute from the merged totals and flag impossible
+    # counts instead of silently hiding them.
+    uncached = input_tokens - cached - cache_write
+    anomaly = right.usage_anomaly or left.usage_anomaly
+    if uncached < 0:
+        anomaly = "input_lt_read_write"
+        uncached = 0
     return replace(
         right,
-        input_tokens=max(left.input_tokens, right.input_tokens),
-        uncached_input_tokens=max(left.uncached_input_tokens, right.uncached_input_tokens),
-        cached_input_tokens=max(left.cached_input_tokens, right.cached_input_tokens),
-        cache_write_input_tokens=max(left.cache_write_input_tokens, right.cache_write_input_tokens),
+        input_tokens=input_tokens,
+        uncached_input_tokens=uncached,
+        cached_input_tokens=cached,
+        cache_write_input_tokens=cache_write,
         output_tokens=max(left.output_tokens, right.output_tokens),
         reasoning_tokens=max(left.reasoning_tokens, right.reasoning_tokens),
         reasoning_tokens_reported=(
@@ -268,6 +288,7 @@ def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
             or right.reasoning_tokens_reported
         ),
         cost=max(left.cost, right.cost),
+        usage_anomaly=anomaly,
         reported=left.reported or right.reported,
     )
 
