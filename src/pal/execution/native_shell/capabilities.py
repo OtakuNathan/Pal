@@ -71,7 +71,9 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
                 " one second for a PTY), not process lifetime; timeout_ms sets an optional hard deadline."
                 " Use tty=true for interactive terminal input. A nonzero session_id means execution continues."
                 " Completion is delivered to this channel separately; finish the turn when nothing else is needed."
-                " Success requires status=exited and returncode=0."
+                " Success requires status=exited and returncode=0. On Linux remote targets, sudo=true supports only"
+                " apt/apt-get update or apt/apt-get install PACKAGE... without extra flags or shell operators;"
+                " each requires approval. Inspect list_remote for configured management support."
             ),
             do_not_use_when=(
                 "A dedicated file or Pal runtime/module/Bunshin introspection tool directly handles the task."

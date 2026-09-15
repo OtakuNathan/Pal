@@ -79,6 +79,43 @@ class RemoteRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def tool(self, tool_name, **args):
         return await self.runtime.execute_tool_async(new_tool_call(name=tool_name, args=args), turn_id='origin')
 
+    async def test_privileged_precommit_failure_does_not_leave_write_busy(self):
+        original = self.port.request
+        for stage in ('metadata', 'prepare_privileged', 'malformed_metadata'):
+            async def fail(target, method, params, epoch=None):
+                if stage == 'malformed_metadata' and method == 'metadata':
+                    return {}
+                if method == stage:
+                    raise RemoteFailure('transport_lost', 'lost before commit', effect='unknown')
+                return await original(target, method, params, epoch)
+            self.port.request = fail
+            response = await self.tool('run_shell', target=1, sudo=True, cmd='apt update')
+            self.assertFalse(response.ok)
+            self.assertFalse(self.owner.shell.operations)
+            self.assertFalse(self.owner.shell.operation_context)
+            self.assertTrue((await self.tool('run_shell', cmd='printf local')).ok)
+        self.port.request = original
+
+    async def test_privileged_commit_loss_is_retained(self):
+        from unittest.mock import AsyncMock
+        original = self.port.request
+        async def prepared(target, method, params, epoch=None):
+            if method == 'prepare_privileged':
+                return {'approval': {'operation_id': params['operation_id']}}
+            return await original(target, method, params, epoch)
+        self.port.request = prepared
+        self.owner.approvals.request = AsyncMock()
+        original_call = self.port.call
+        async def lose(method, params):
+            if method == 'approve':
+                raise RemoteFailure('transport_lost', 'lost commit', effect='unknown')
+            return await original_call(method, params)
+        self.port.call = lose
+        response = await self.tool('run_shell', target=1, sudo=True, cmd='apt update')
+        self.assertFalse(response.ok)
+        self.assertEqual(len(self.owner.shell.operations), 1)
+        self.assertTrue(next(iter(self.owner.shell.operations.values())).epoch)
+
     async def test_target_output_and_local_default(self):
         result = await self.tool('run_shell', cmd='printf remote', target=1)
         self.assertTrue(result.ok, result.text)

@@ -31,7 +31,7 @@ must not share ownership. Private keys never appear in tool parameters or result
 ## Tool contract
 
 - `run_shell(cmd, target=0, ...)`: existing shell arguments, plus execution location.
-  `sudo=True` requests one approved command/script on a remote target; privileged
+  `sudo=True` requests one approved privileged operation on a remote target; privileged
   PTYs are rejected. Ordinary remote PTYs remain supported.
 - `shell_session(session_id, ...)`: positive public ID already binds target and
   Runtime epoch; no target override. Controls use separate operation IDs.
@@ -44,7 +44,7 @@ must not share ownership. Private keys never appear in tool parameters or result
 - `remote_start(target, action)`: explicitly invokes a configured existing startup
   command. The action's exit code does not prove the machine or worker is ready.
 - `remote_power(target, action="shutdown")`: a separate management action; not
-  plugin detach, transport close or session termination. Requires one approval unless the machine owner preauthorized the fixed shutdown action.
+  plugin detach, transport close or session termination. Requires one trusted approval for each shutdown request.
 - `run_shell_desktop(...)`: fixed projection of the unique configured desktop
   target. It cannot accept an overriding target. Canonical action metadata, rather
   than exact public aliases, controls native handoff and write admission.
@@ -102,15 +102,23 @@ file-output behavior. The model's display budget is separate from these limits.
 ## Configuration and offline installation
 
 Install matching versions of Pal and the independently built native package on
-Pal's machine, then install the companion `plugin-remote-0.2.0.palpkg` into its
+Pal's machine, then install the companion `plugin-remote-0.3.0.palpkg` into its
 runtime. Hub/Slot and the plugin manifest are maintained in the native repository,
 not shipped inside Pal or the remote worker binary. Build and install with the
 existing package manager:
 
 ```sh
 pal package build ../pal-shell-native/pal_plugin --output ../pal-shell-native/dist
-pal package install ../pal-shell-native/dist/plugin-remote-0.2.0.palpkg --runtime-root <runtime-root>
+pal package install ../pal-shell-native/dist/plugin-remote-0.3.0.palpkg --runtime-root <runtime-root>
 ```
+
+If upgrading a runtime that previously provisioned the built-in `remote`, perform
+the first package installation while Pal is stopped. The installer recognizes the
+retired managed manifest and archives its entire directory under
+`packages/previous/builtin/remote/` before publishing the companion plugin. It
+restores the directory if publication fails. Other built-in identities and custom
+manifests remain protected against replacement. This migration does not change
+`config/remote.toml`, credentials, or remote workers; start Pal after installation.
 
 The palpkg uses the host interpreter because its adapter shares Pal's ports and
 native dependency. Its verify hook checks native Runtime/RPC and resident contract
@@ -282,58 +290,68 @@ user/account/session identity. Providers without this evidence cannot approve.
 External Telegram/other provider packages are not modified by this change.
 Bunshin scopes do not inherit the resident remote port or its identities.
 
-The user worker is not elevated. Optional `privilege_helper` is a separately
-installed root-owned, non-writable, **non-setuid** `pal-shell-privileged` executable.
-Actual sudo invokes it for one command. Its root monitor supervises the command's
-process group and cleans it when the caller disappears; it never exposes a root
-PTY. A root command is still root and can deliberately escape process-group
-supervision; password secrecy is not a root-command sandbox.
+The user worker is not elevated. Linux 0.3 uses signed, fixed management
+operations, without a stored sudo password or Secret Service session:
 
-Optional `askpass_helper` is a protected launcher that runs
-`pal-shell-worker --askpass-config /protected/auth.toml` (or the Python module
-`pal_shell_worker.askpass --config /protected/auth.toml`). It must be installed with
-protected interpreter/module dependencies and cannot be writable by shell jobs.
-The remote-only auth configuration selects `store="keychain"` on Mac or
-`store="secret-service"` on Linux, plus `service` and `account`. It also pins `client_public_key`, `client_id`,
-`worker_id`, `worker_socket`, `privilege_helper` and `shell`. The launcher verifies
-the signed command against its actual privileged sudo parent, and consumes a
-one-time authorization from the worker before touching the store. Direct invocation
-from an ordinary shell is refused. As elsewhere, an account able to replace the
-worker is trusted; this does not create isolation from that same Unix account.
-The implementation
-uses the remote OS store through the dedicated sudo askpass pipe. Secrets are not
-command arguments, environment values, PTY input, logs or Pal checkpoints. Missing,
-locked or denied credentials fail authentication; no plaintext fallback exists.
-Installation must arrange noninteractive access appropriate to that OS account.
-Keychain/Secret Service provisioning and real sudo execution need target E2E.
+- `run_shell(target=1, sudo=True, cmd="apt update")`
+- `run_shell(target=1, sudo=True, cmd="apt install cmake ninja-build")`
 
-For interactive enrollment on the remote machine, run as the ordinary worker user:
+`apt-get` is also accepted. Extra options, paths, package versions, repository
+changes, upgrades/removal, shell operators and arbitrary root commands are rejected
+before approval. The worker normalizes action/package names; Pal displays those
+same values for approval and signs the bound fingerprint. Installation uses fixed
+`apt-get --assume-yes --no-remove install -- ...` argv, sanitized environment,
+noninteractive stdin and process-group supervision. Distribution packages and their
+maintainer scripts remain trusted system software.
+
+Package names are literal: the protected helper escapes and anchors each operand
+before passing it to apt-get. A name such as `bash.` cannot expand to other packages;
+trailing `+`/`-` cannot become install/remove operators. Legitimate names such as
+`g++` and `python3.11` retain their spelling in the approval.
+
+The only NOPASSWD entry is a root-owned no-argument `/usr/local/libexec/pal-shell-manage`
+launcher, pointing at a fully protected matching worker bundle. Never grant
+NOPASSWD to apt, a shell, shutdown directly, or the old arbitrary-command helper.
+The helper independently verifies the signed grant and root-owned target/client
+policy, then durably reserves its operation ID before consuming the worker grant
+and attempting execution. Duplicate grants never create another process. A crash
+leaves an unknown record; querying is allowed, replay is not. The bounded root
+journal must survive upgrades. Worker `query` includes `management_journal` evidence
+for privileged operations; missing records do not prove absence of prior effects.
+Grant availability is independent of the initial RPC snapshot: `wait_ms=0` can
+return a running session while the helper still starts. Consumption is single-use;
+process termination, execution failure or worker shutdown revokes any unused grant.
+
+Run installation setup as the ordinary worker account in the user's own terminal:
 
 ```sh
 pal-shell-worker --config /absolute/worker.toml --setup-sudo
 ```
 
-The wizard asks for protected installation paths, prepares password-free auth and
-launcher templates, and asks for an explicit `STORE` confirmation before invoking
-the OS tool's hidden password prompt. Enter the password only in your own remote
-terminal, never through Pal's shell/PTY or conversation. Mac uses Keychain; Linux
-requires `secret-tool` and an unlocked user Secret Service/DBus session. Root and
-noninteractive invocation are rejected; Windows remains unsupported.
-Readability is checked with secret output discarded. Follow the generated
-`NEXT_STEPS.txt` to install the protected executables/configuration and merge the
-two helper fields into worker TOML. The wizard does not change the worker config,
-install root files, restart services, or claim sudo approval E2E has passed.
-Re-running the wizard explicitly updates the same worker/account credential.
+Linux asks for target number, optional shutdown (disabled by default), protected
+bundle path and output directory. It generates root policy, a fixed launcher,
+sudoers, worker fragments and `NEXT_STEPS.txt`; no password is requested.
+The final message prints the actual remote absolute path and quoted `cat` command.
+An administrator reviews and installs these files and runs `visudo -c`. Preserve
+identity/configuration and coordinate active sessions before activation. The wizard
+does not install root files, change services or claim sudo E2E passed. `list_remote`
+separates configured support from a timestamped helper/sudoers installation probe.
+Verify an actual approved `apt update` separately.
 
-For shutdown, configure `shutdown_argv` as a fixed machine-owner-installed action
-and a non-disabled policy. A trusted `preauthorized` worker policy permits this fixed management action without
-a new prompt; sudo commands still always require one approval. Fixed least-privilege shutdown authorization can avoid storing
-a sudo password. The worker enters draining and checks tasks, unresolved execution
-and retained output atomically. Busy rejects and reopens admission; it never queues
-a later shutdown. The client host's stable machine identity is protected across
-target aliases, as are configured `protected_machine_ids`. Accepted means the
-configured action started; it does not prove power-off. Expected offline suppresses
-background repair; it never causes implicit wake.
+macOS retains remote Keychain and protected askpass/privilege helpers. Its wizard
+uses explicit `STORE` consent and the OS hidden prompt. Secrets never enter Pal
+arguments, environment, PTY transcripts or checkpoints. Locked/denied Keychain fails
+explicitly. Windows has no privileged operations or power. Linux management no
+longer uses Secret Service; existing credentials are left untouched.
+
+`remote_power(action="shutdown")` is separate from session/transport close. Enable
+it only in the Ubuntu desktop's root policy and worker configuration; cloud,
+Windows and Mac targets retain disabled power. Every shutdown requires trusted
+approval. Worker draining and the busy check are atomic: active tasks, unresolved
+execution or retained output reject it and reopen admission, without a queued
+future shutdown. Protect the Pal host identity across aliases and configured
+`protected_machine_ids`. Accepted does not prove power-off; SSH disconnect alone
+cannot prove shutdown. No automatic wake follows.
 
 ## Acceptance and activation boundary
 
@@ -408,3 +426,37 @@ Pal plugin was enabled; sudo and machine power actions were not exercised. The r
 binary is a Debian 13 x86_64 validation bundle, not a manylinux portability claim.
 Logs, source archive checksum and the bundle are retained locally under the native
 repository's `build/remote-validation/cloud/` directory.
+
+## Protocol-v2 activation and transport acceptance
+
+Version 0.3.0 requires matching native wheel, remote palpkg and worker protocol 2.
+Hello/authentication retain Dynabridge framing for explicit version negotiation;
+authenticated messages wrap the unchanged Dynabridge payload in a 64-bit request ID.
+There is no fallback to a serial worker. Dynabridge and FF are unchanged.
+
+Each Hub and worker owns one persistent native libuv RPC loop and the existing FF
+uv_executor. Socket acceptance, connected reads/writes, pending requests and timers
+belong to that loop; Python callbacks enqueue events on their asyncio owner.
+The native process Runtime retains its own reactor. Each connection allows 32
+in-flight requests, 1 MiB frames and an 8 MiB send queue. Responses may arrive out
+of order. Timeout/cancellation does not retire unrelated requests or repeat effects.
+Slot admission asynchronously queues up to 128 additional requests, in FIFO order,
+for at most 30 seconds. No lease or socket request is acquired while queued. Queue
+cancellation/detach removes the request; overflow or waiting timeout returns
+NOT_STARTED. The Hub port deadline includes this queue wait. After transmission,
+the existing UNKNOWN/reconciliation contract still applies.
+A partially transmitted/unconfirmed mutation remains UNKNOWN. Handshake and partial
+frames have 30-second deadlines; authenticated idle connections have no 90-second
+expiry. Request IDs do not replace operation IDs or Runtime epochs. Slot locking
+covers connection admission/retirement, not round trips.
+
+Failure before privileged commit clears the local ticket as NOT_STARTED; loss
+after commit retains reconciliation state. Do not infer safety solely from an empty
+epoch. Reconcile existing UNKNOWN operations before replacing resident code;
+restarting just to erase evidence is not reconciliation.
+
+Source/build artifacts do not activate services. Upgrade worker and client together
+in a coordinated window, preserving sessions/output and root journals. Install
+reviewed Linux management files manually, then verify ordinary execution, approved
+apt update, denial and reconnect separately. Physical shutdown is a separate
+owner-authorized E2E, never an installation test.

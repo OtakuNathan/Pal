@@ -42,8 +42,10 @@ class ShellApprovals:
         def button(label, decision):
             return InteractionButtonSpec(label, 'control.action.dispatch', {'action_kind': 'shell_privilege_decision',
                 'target_scope': 'execution', 'target_id': identifier, 'args': {'decision': decision}})
+        management = args.get('management')
+        approved_command = (str(management['action']) + ' ' + ' '.join(management.get('packages', []))) if management else args.get('cmd', 'shutdown')
         text = (f"{request.title}\n{request.impact}\nRuntime: {approval['runtime_epoch']}\n"
-                f"Directory: {args.get('cwd') or '(worker default)'}\n\n{args.get('cmd', 'shutdown')}\n\n"
+                f"Directory: {args.get('cwd') or '(worker default)'}\n\n{approved_command}\n\n"
                 "Approval applies to this command/script only; it expires in ten minutes.")
         interaction = InteractionMessageSpec(identifier, 'approval_request', route, text,
             ((button('Approve once', 'accept'), button('Reject', 'reject')),),

@@ -38,7 +38,13 @@ package, execution:native_shell_targets port, and remote plugin discovery.
 The remote plugin is a companion palpkg maintained in pal-shell-native/pal_plugin;
 it is not built into Pal. Install the matching native wheel in the host interpreter,
 then use package_install (or pal package install for offline preparation) with
-plugin-remote-0.2.0.palpkg. Its verification hook checks prerequisites; it does not
+plugin-remote-0.3.0.palpkg. If the runtime still contains the retired managed
+plugins/_builtin/remote manifest, the first migration requires an offline CLI
+installation while Pal is stopped. The installer archives the old directory under
+packages/previous/builtin/remote and restores it on publication failure. Do not
+delete manifests or bypass the live-host lock; hand off this one-time stop/start
+to the user. Remote configuration, credentials, and workers remain in place.
+Its verification hook checks prerequisites; it does not
 install dependencies or activate resident code. Python
 shell does not support remote and must not silently fall back or change backend.
 Missing resident support requires a separately planned Pal activation; never
@@ -114,19 +120,35 @@ never substitute a shell shutdown command, sudo, reboot or another target.
 list_remote reports configured capabilities and timestamped probes separately.
 Unprobed is not unsupported, and offline does not make a configured target vanish.
 Shell readiness does not prove GUI/Automation permission or a logged-in desktop.
-Sudo setup is optional and separate: a stored password stays in the remote vault.
-The machine owner can run
+Sudo setup is optional and separate. Matching 0.3.0 worker/native/palpkg use
+protocol 2. Linux uses signed sudoers management without a stored password or
+unlocked Secret Service dependency. Only apt/apt-get update and apt/apt-get install
+PACKAGE... are accepted through run_shell(sudo=True), without extra flags, package
+files or root shell scripts. Each operation requires trusted approval of normalized
+action/packages. Shutdown remains remote_power, enabled only for a configured
+Ubuntu desktop; cloud, Windows and Mac power remain disabled.
+
+The machine owner runs
 `pal-shell-worker --config /absolute/worker.toml --setup-sudo`
-in their own remote terminal as the worker user. The OS credential
-tool prompts without echo; never run password enrollment via Pal's shell/PTY or
-ask for the password in conversation. Follow the generated NEXT_STEPS.txt for
-protected helper installation. The wizard neither restarts services nor verifies
-the full sudo approval path. Linux needs an unlocked user Secret Service session;
-macOS uses Keychain; Windows remains unsupported. After installation, verify an
-approved harmless command separately.
-Each permitted privileged command uses the trusted approval path, and ordinary
-PTY password prompts must never trigger credential injection. Do not add sudo or
-power capabilities just to prove a shell connection works.
+in their own remote terminal as the ordinary worker account. Linux selects target,
+optional shutdown (default disabled), protected bundle and output paths. It generates
+sudoers, a fixed no-argument root helper, policy and worker fragments. Never allow
+NOPASSWD for a shell, apt itself or the old arbitrary-command helper. An administrator
+reviews files, installs the complete protected bundle and runs visudo -c. The wizard
+does not restart services. Retain the root journal on upgrades/rollback; never remove
+it to retry an unknown operation.
+
+macOS retains Keychain and protected askpass: the OS tool prompts without echo.
+Never enroll passwords via Pal shell/PTY or conversation. Windows has neither sudo
+nor power management. Ordinary shell remains available without sudo setup.
+Always hand off the actual remote absolute path to NEXT_STEPS.txt and a shell-quoted
+cat command; do not merely say "follow NEXT_STEPS.txt". The default remote directory
+is ~/.local/share/pal-shell-sudo-setup/setup-*/. If lost, inspect filenames; do not
+repeat credential enrollment just to locate instructions. Distinguish generated
+templates, installed protected helpers, installation probe and an approved operation
+verified. On Mac also distinguish stored credentials from readable Keychain.
+Metadata supported/configured alone is not E2E. On Linux verify approved apt update;
+never enable power to test access. PTY prompts never authorize credential injection.
 
 When authorized to connect the live instance, discover the actual plugin controls.
 Rescan discovers a new manifest; enable attaches a disabled remote plugin; attach

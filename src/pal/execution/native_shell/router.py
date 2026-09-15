@@ -161,14 +161,14 @@ class ShellRouter(ShellRuntime):
             ticket.epoch = metadata['runtime_epoch']
             args = {'action': action, 'target': target}
             if action == 'sudo':
-                args.update(cmd=cmd, cwd=kwargs.get('cwd', ''), wait_ms=kwargs.get('wait_ms') or 0,
+                args.update(cmd=cmd, cwd=kwargs.get('cwd', ''), wait_ms=kwargs.get('wait_ms') if kwargs.get('wait_ms') is not None else 300000,
                             timeout_ms=kwargs.get('timeout_ms'))
             else:
                 identity = await port.call('identity', {})
                 args['protected_machine_id'] = identity['machine_identity']
             prepared = await self._rpc(ticket, 'prepare_privileged', {'operation_id': ticket.operation_id, **args})
-            if action != 'shutdown' or metadata.get('power', {}).get('policy') != 'preauthorized':
-                await self.owner.approvals.request(ticket.origin_turn, target, args, prepared['approval'])
+            args = prepared.get('normalized_args', args)
+            await self.owner.approvals.request(ticket.origin_turn, target, args, prepared['approval'])
             if port is not self.owner.remote_port:
                 raise RemoteFailure('backend_unavailable', 'Approval belongs to the detached plugin generation')
             submitted = True
@@ -187,10 +187,24 @@ class ShellRouter(ShellRuntime):
             return await self.materialize(result) if kwargs.get('load_output', True) else result
         except RemoteFailure as exc:
             exc.operation_id = ticket.operation_id
-            if not submitted and exc.effect == 'not_started':
+            if not submitted:
+                exc.effect = 'not_started'
+            if exc.effect == 'not_started':
                 self.operations.pop(ticket.operation_id, None)
                 self.operation_context.pop(ticket.operation_id, None)
                 exc.operation_id = ''
+            raise
+        except asyncio.CancelledError:
+            if not submitted:
+                self.operations.pop(ticket.operation_id, None)
+                self.operation_context.pop(ticket.operation_id, None)
+            raise
+        except Exception as exc:
+            if not submitted:
+                self.operations.pop(ticket.operation_id, None)
+                self.operation_context.pop(ticket.operation_id, None)
+                raise RemoteFailure('privilege_prepare_failed',
+                    'Privilege preparation failed before execution; inspect target compatibility and approval setup') from exc
             raise
         finally:
             self.remote_foreground.discard(task)
