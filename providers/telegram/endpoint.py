@@ -1232,7 +1232,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if self._interaction_store is not None:
                 self._interaction_store.set_state(interaction_id, "expired")
             return None
-        return self.interaction_result_from_token(interaction_id, button_token)
+        result = self.interaction_result_from_token(interaction_id, button_token)
+        # Telegram supplies this identity; neither callback data nor model input
+        # may choose the actor used by execution approval.
+        return replace(result, trusted_actor=str(user_id)) if result is not None else None
 
     async def _payload_from_update(self, update: Any) -> dict[str, Any] | None:
         message = getattr(update, "effective_message", None)

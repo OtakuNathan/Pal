@@ -116,6 +116,27 @@ class RemoteRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.owner.shell.operations), 1)
         self.assertTrue(next(iter(self.owner.shell.operations.values())).epoch)
 
+    async def test_approval_failure_returns_to_model_without_commit_or_write_busy(self):
+        from unittest.mock import AsyncMock
+        original = self.port.request
+        async def prepared(target, method, params, epoch=None):
+            if method == 'prepare_privileged':
+                return {'approval': {'operation_id': params['operation_id']}}
+            return await original(target, method, params, epoch)
+        self.port.request = prepared
+        self.port.call = AsyncMock(wraps=self.port.call)
+        for code, message in [('approval_rejected', 'Approval rejected by user'),
+                              ('approval_unavailable', 'Approval could not be completed')]:
+            with self.subTest(code=code):
+                self.owner.approvals.request = AsyncMock(side_effect=RemoteFailure(code, message))
+                response = await self.tool('run_shell', target=1, sudo=True, cmd='apt update')
+                self.assertFalse(response.ok)
+                self.assertIn(message, response.text)
+                self.assertFalse(self.owner.shell.operations)
+                self.assertFalse(self.owner.shell.operation_context)
+                self.assertFalse(any(call.args[0] == 'approve' for call in self.port.call.call_args_list))
+                self.assertTrue((await self.tool('run_shell', cmd='printf local')).ok)
+
     async def test_target_output_and_local_default(self):
         result = await self.tool('run_shell', cmd='printf remote', target=1)
         self.assertTrue(result.ok, result.text)
