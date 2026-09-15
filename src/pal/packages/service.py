@@ -92,10 +92,35 @@ class PackageService:
         if artifact.kind == "provider":
             return self.runtime_root / "channel" / "providers" / artifact.package_id
         from pal.plugins.host import _source_plugins_root
-        if ((self.runtime_root / "plugins" / "_builtin" / artifact.package_id).exists()
-                or (_source_plugins_root() / artifact.package_id / "plugin.toml").is_file()):
+        if (_source_plugins_root() / artifact.package_id / "plugin.toml").is_file():
             raise PackageError("Community package id conflicts with a built-in plugin")
+        if (self.runtime_root / "plugins" / "_builtin" / artifact.package_id).exists():
+            if not self._legacy_remote(artifact.package_id):
+                raise PackageError("Community package id conflicts with a built-in plugin")
+            if self.activation:
+                raise PackageError("Legacy built-in remote migration requires an offline install. Stop Pal, then run pal package install with the same runtime root.")
         return self.runtime_root / "plugins" / "community" / artifact.package_id
+
+    def _legacy_remote(self, name: str) -> Path | None:
+        # Only the retired, Pal-managed remote manifest may yield its identity.
+        # Preserve the entire directory outside discovery, including local files.
+        from pal.plugins.host import _source_plugins_root
+        root = self.runtime_root / "plugins" / "_builtin"
+        path = root / name
+        manifest = path / "plugin.toml"
+        if (name != "remote" or root.is_symlink() or path.is_symlink()
+                or manifest.is_symlink() or not (root / ".managed").is_file()
+                or (_source_plugins_root() / name / "plugin.toml").is_file()):
+            return None
+        try:
+            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (data.get("plugin_id") == "remote"
+                and data.get("entrypoint") == "pal.plugins_builtin.remote.runtime"
+                and data.get("module_id") == "remote"):
+            return path
+        return None
 
     def _install_artifact(self, artifact: PackageArtifact) -> dict:
         if artifact.kind == "plugin":
@@ -201,6 +226,8 @@ class PackageService:
         gate = self.activation.gate() if self.activation else runtime_lease(self.runtime_root)
         moved = False
         replaced = False
+        retired = None
+        retired_backup = self.root / "previous" / "builtin" / record["id"] / uuid.uuid4().hex
         try:
             shutil.copytree(source, staging, dirs_exist_ok=True)
             atomic_json(staging / RECEIPT, {key: record.get(key) for key in ("id", "kind", "version", "sha256", "environment")})
@@ -208,6 +235,11 @@ class PackageService:
                 check_cancelled()
                 state = self.activation.before(record["kind"], record["id"]) if self.activation else None
                 try:
+                    if record["kind"] == "plugin" and not self.activation:
+                        retired = self._legacy_remote(record["id"])
+                        if retired:
+                            retired_backup.parent.mkdir(parents=True, exist_ok=True)
+                            os.replace(retired, retired_backup)
                     if target.exists():
                         os.replace(target, old)
                         moved = True
@@ -226,6 +258,8 @@ class PackageService:
                         shutil.rmtree(target)
                     if moved:
                         os.replace(old, target)
+                    if retired and retired_backup.exists():
+                        os.replace(retired_backup, retired)
                     if self.activation:
                         try:
                             self.activation.restore(record["kind"], record["id"], state)

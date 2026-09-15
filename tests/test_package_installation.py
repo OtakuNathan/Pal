@@ -300,6 +300,73 @@ def test_community_cannot_shadow_builtin_before_setup(tmp_path):
         PackageService(tmp_path / "fresh-runtime").install(package(tmp_path, "checklist"))
 
 
+def legacy_remote(root):
+    path = root / "plugins/_builtin/remote"
+    path.mkdir(parents=True)
+    (path.parent / ".managed").touch()
+    (path / "plugin.toml").write_text('plugin_id="remote"\nmodule_id="remote"\nentrypoint="pal.plugins_builtin.remote.runtime"\n')
+    (path / "local-note").write_text("preserve")
+    return path
+
+
+def test_remote_migration_archives_managed_manifest(tmp_path):
+    root = tmp_path / "runtime"
+    stale = legacy_remote(root)
+    result = PackageService(root).install(package(tmp_path, "remote"))
+    assert result["status"] == "ready"
+    assert not stale.exists()
+    backups = list((root / "packages/previous/builtin/remote").iterdir())
+    assert len(backups) == 1
+    assert (backups[0] / "local-note").read_text() == "preserve"
+    assert (root / "plugins/community/remote/plugin.toml").is_file()
+
+
+def test_remote_migration_refuses_live_host_and_unknown_manifest(tmp_path):
+    from pal.packages.process import runtime_lease
+    root = tmp_path / "runtime"
+    stale = legacy_remote(root)
+    artifact = package(tmp_path, "remote")
+    with runtime_lease(root), pytest.raises(PackageError, match="Pal is running"):
+        PackageService(root).install(artifact)
+    assert (stale / "local-note").is_file()
+    with pytest.raises(PackageError, match="offline install"):
+        PackageService(root, activation=object()).install(artifact)
+    (stale.parent / ".managed").unlink()
+    with pytest.raises(PackageError, match="conflicts with a built-in"):
+        PackageService(root).install(artifact)
+    (stale.parent / ".managed").touch()
+    (stale / "plugin.toml").write_text('plugin_id="remote"\nentrypoint="custom.runtime"\n')
+    with pytest.raises(PackageError, match="conflicts with a built-in"):
+        PackageService(root).install(artifact)
+
+
+def test_remote_migration_keeps_manifest_when_verification_fails(tmp_path):
+    root = tmp_path / "runtime"
+    stale = legacy_remote(root)
+    artifact = package(tmp_path, "remote", hooks='def verify(context):\n    raise RuntimeError("missing native wheel")\n')
+    with pytest.raises(PackageError, match="missing native wheel"):
+        PackageService(root).install(artifact)
+    assert (stale / "local-note").read_text() == "preserve"
+    assert not (root / "plugins/community/remote").exists()
+
+
+def test_remote_migration_restores_manifest_when_publish_fails(tmp_path):
+    import os
+    root = tmp_path / "runtime"
+    stale = legacy_remote(root)
+    replace = os.replace
+
+    def fail_publish(source, destination):
+        if Path(destination) == root / "plugins/community/remote":
+            raise OSError("publish failed")
+        return replace(source, destination)
+
+    with patch("pal.packages.service.os.replace", side_effect=fail_publish):
+        with pytest.raises(OSError, match="publish failed"):
+            PackageService(root).install(package(tmp_path, "remote"))
+    assert (stale / "local-note").read_text() == "preserve"
+
+
 def test_cancellation_after_successful_switch_keeps_ready_status(tmp_path):
     from contextlib import nullcontext
     from pal.packages.process import CommandControl, command_control
