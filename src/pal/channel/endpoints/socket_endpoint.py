@@ -103,6 +103,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     _owns_socket_path: bool = field(default=False, init=False, repr=False)
     _unacknowledged_frames: deque[dict[str, Any]] = field(default_factory=deque, init=False, repr=False)
     delivery_quiesce_timeout_seconds: float = 3.0
+    # A live connection is not proof the peer is consuming or acknowledging.
+    delivery_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
@@ -421,22 +423,51 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                         waiter = asyncio.get_running_loop().create_future()
                         session.delivery_ack_waiters[delivery_id] = waiter
                     session.inflight_payload = wire_payload
-                    session.writer.write(pack_socket_message(wire_payload))
-                    await session.writer.drain()
-                    if waiter is not None:
-                        await waiter
+                    async with asyncio.timeout(max(self.delivery_timeout_seconds, 0.001)):
+                        session.writer.write(pack_socket_message(wire_payload))
+                        await session.writer.drain()
+                        if waiter is not None:
+                            await waiter
                     session.inflight_payload = None
                 finally:
                     if delivery_id:
                         session.delivery_ack_waiters.pop(delivery_id, None)
                     session.outbound.task_done()
-                    if not session.closed:
-                        self._drain_replay_frames_to(session)
-                    if self.on_ready is not None:
-                        self.on_ready()
-        except (asyncio.CancelledError, ConnectionError, OSError, SocketSessionClosed):
+                # Only a completed delivery makes the transport writable. Do
+                # not refill/notify during cancellation or failed delivery.
+                if not session.closed:
+                    self._on_session_writable(session)
+        except asyncio.CancelledError:
             session.closed = True
-            logger.debug("socket writer loop ended for session %s", session.session_id)
+        except (TimeoutError, ConnectionError, OSError, SocketSessionClosed) as exc:
+            session.closed = True
+            self.last_delivery_error = (
+                "socket delivery timed out waiting for drain/ACK"
+                if isinstance(exc, TimeoutError) else f"socket delivery failed: {exc}"
+            )
+            logger.warning("%s (session %s)", self.last_delivery_error, session.session_id)
+            # Retain outbox ownership across a single-client replacement, just
+            # as stop_async does. Otherwise closing a stalled peer would turn
+            # retryable pending updates into permanent session-closed failures.
+            if len(self.sessions) == 1 and self.sessions.get(session.session_id) is session:
+                self._retired_session_ids.add(session.session_id)
+                self._allow_single_session_rebind = True
+            # Wake the reader's EOF path, which owns pending-frame recovery.
+            # Keep inflight_payload (including its ACK id) for deduped replay.
+            # close() alone can keep waiting to flush a blocked transport.
+            session.writer.close()
+            transport = getattr(session.writer, "transport", None)
+            if transport is not None:
+                transport.abort()
+
+    def _on_session_writable(self, session: _SocketSession) -> None:
+        """Resume buffered delivery after a successful write/ACK.
+
+        Socket providers may extend this hook to retry coalesced observations.
+        """
+        self._drain_replay_frames_to(session)
+        if self.on_ready is not None:
+            self.on_ready()
 
     def _resolve_event_kind(self, payload_type: str, text: str) -> str:
         if payload_type == "slash_command":
@@ -680,7 +711,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         super().abort_stream(response_handle, reason=reason)
         self._streamed_text_handles.discard(id(response_handle))
         self._clear_stream_tracking(response_handle)
-        with contextlib.suppress(SocketSessionClosed):
+        try:
             session = self._require_session(response_handle)
             request_id = str(response_handle.reply_target.get("request_id") or "")
             self._enqueue_frames(
@@ -689,6 +720,24 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     {"type": "llm_error", "request_id": request_id, "error_text": str(reason)},
                     {"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)},
                 ),
+            )
+        except SocketSessionClosed:
+            return
+        except ChannelDeliveryError as exc:
+            if exc.permanent or exc.reason != "transport_backpressure":
+                raise
+            self.last_delivery_error = str(exc)
+            logger.warning("socket abort notification deferred by backpressure (endpoint %s)", self.endpoint.endpoint_id)
+            # Abort releases cancelled deltas immediately. Only the two new
+            # terminal notifications enter the existing ordered retry path.
+            # Bypass socket's text-tracking override: no stream is reopened.
+            super().queue_stream_update(
+                ChannelStreamUpdate(kind=ChannelStreamUpdateKind.ERROR, error_text=str(reason)),
+                response_handle=response_handle,
+            )
+            super().queue_stream_update(
+                ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason=str(reason)),
+                response_handle=response_handle,
             )
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:

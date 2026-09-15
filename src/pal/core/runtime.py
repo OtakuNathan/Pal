@@ -173,17 +173,28 @@ class TurnManager:
                 and isinstance(continuation, TurnContinuation)
                 and continuation.delivery_binding is not None
             ):
-                abort_result = output_port.abort_stream(continuation.delivery_binding.response_handle, reason=reason)
-                if inspect.isawaitable(abort_result):
-                    await abort_result
-            execution_runtime = getattr(self.context, "execution_runtime", None)
-            if execution_runtime is not None:
-                interrupt_turn = getattr(execution_runtime, "interrupt_turn", None)
-                if callable(interrupt_turn):
-                    await interrupt_turn(turn_id)
-            task = self.state.turn_tasks.get(turn_id)
-            if task is not None and not task.done():
-                task.cancel()
+                try:
+                    abort_result = output_port.abort_stream(continuation.delivery_binding.response_handle, reason=reason)
+                    if inspect.isawaitable(abort_result):
+                        await abort_result
+                except Exception as exc:
+                    # Presentation failure must not veto execution cancellation.
+                    # Do not catch BaseException/CancelledError here.
+                    self.state.diagnostics.append({
+                        "kind": "channel.abort_stream_failed",
+                        "turn_id": turn_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    })
+            try:
+                execution_runtime = getattr(self.context, "execution_runtime", None)
+                if execution_runtime is not None:
+                    interrupt_turn = getattr(execution_runtime, "interrupt_turn", None)
+                    if callable(interrupt_turn):
+                        await interrupt_turn(turn_id)
+            finally:
+                task = self.state.turn_tasks.get(turn_id)
+                if task is not None and not task.done():
+                    task.cancel()
             return True
         finally:
             async with self.state.resident_interrupt_lock:

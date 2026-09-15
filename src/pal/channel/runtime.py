@@ -1162,10 +1162,9 @@ class ChannelRuntime(ChannelRuntimePort):
         return attachment_id
 
     def abort_stream(self, response_handle, *, reason: str = "interrupted") -> None:
-        for endpoint in self.list_endpoints():
-            if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
-                endpoint.abort_stream(response_handle, reason=reason)
-                break
+        # Release channel-owned pending stream data before calling foreign
+        # transport code. A failed notification cannot retain cancelled work;
+        # an endpoint may enqueue terminal notifications for later retry.
         hub = self.endpoint_hubs.get(str(response_handle.endpoint_id or ""))
         if hub is not None and hub.buffer:
             retained: deque[BufferedChannelDelivery] = deque()
@@ -1181,8 +1180,6 @@ class ChannelRuntime(ChannelRuntimePort):
                 retained.append(delivery)
                 hub.buffered_text_bytes += delivery.text_bytes
             hub.buffer = retained
-        if not self.stream_update_outbox:
-            return
         remaining: deque[QueuedStreamUpdate] = deque()
         while self.stream_update_outbox:
             queued = self.stream_update_outbox.popleft()
@@ -1192,6 +1189,10 @@ class ChannelRuntime(ChannelRuntimePort):
                 continue
             remaining.append(queued)
         self.stream_update_outbox = remaining
+        for endpoint in self.list_endpoints():
+            if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
+                endpoint.abort_stream(response_handle, reason=reason)
+                break
 
     def queue_status(
         self,
