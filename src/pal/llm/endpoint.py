@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -88,6 +89,7 @@ class ShapeEndpointInvoker:
         plan = self.prompt_cache.plan(request, context, raw_encoded)
         encoded = self.prompt_cache.inject(raw_encoded, plan)
         request_id = f"llm_{uuid4().hex}"
+        started_at = time.monotonic()
         updates = tuple(
             self.response_hooks.normalize(
                 endpoint_id=str(endpoint.endpoint_id),
@@ -114,11 +116,32 @@ class ShapeEndpointInvoker:
         if not updates:
             raise RuntimeError("LLM codec completed without a response")
         response = updates[-1].response
+        attempt_diag = {
+            "request_id": request_id,
+            "endpoint_id": str(endpoint.endpoint_id),
+            "model_id": str(endpoint.model_id),
+            "provider_id": str(endpoint.provider),
+            "wire_shape": str(getattr(shape, "value", shape)),
+            "finish_reason": str(
+                getattr(response.finish_reason, "value", response.finish_reason)
+            ),
+            "elapsed_seconds": time.monotonic() - started_at,
+            "provider_generation_id": getattr(
+                response, "provider_generation_id", ""
+            ),
+        }
         if response.finish_reason != LLMFinishReason.ERROR:
             self.prompt_cache.record_success(
                 plan,
                 response.usage,
                 applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
+                **attempt_diag,
+            )
+        else:
+            self.prompt_cache.record_attempt_failure(
+                plan,
+                error="provider finish_reason=error",
+                **attempt_diag,
             )
         self._report_usage(endpoint, request_id, response)
         return response, updates
@@ -145,6 +168,7 @@ class ShapeEndpointInvoker:
         plan = self.prompt_cache.plan(request, context, raw_encoded)
         encoded = self.prompt_cache.inject(raw_encoded, plan)
         request_id = f"llm_{uuid4().hex}"
+        started_at = time.monotonic()
         last: LLMResponseUpdate | None = None
         decoded = codec.decode(
             self._transport().frames(
@@ -178,11 +202,36 @@ class ShapeEndpointInvoker:
             and last.response.finish_reason != LLMFinishReason.LENGTH
         ):
             raise RuntimeError("LLM stream completed without semantic output")
+        attempt_diag = {
+            "request_id": request_id,
+            "endpoint_id": str(endpoint.endpoint_id),
+            "model_id": str(endpoint.model_id),
+            "provider_id": str(endpoint.provider),
+            "wire_shape": str(getattr(shape, "value", shape)),
+            "finish_reason": str(
+                getattr(
+                    last.response.finish_reason,
+                    "value",
+                    last.response.finish_reason,
+                )
+            ),
+            "elapsed_seconds": time.monotonic() - started_at,
+            "provider_generation_id": getattr(
+                last.response, "provider_generation_id", ""
+            ),
+        }
         if last.response.finish_reason != LLMFinishReason.ERROR:
             self.prompt_cache.record_success(
                 plan,
                 last.response.usage,
                 applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
+                **attempt_diag,
+            )
+        else:
+            self.prompt_cache.record_attempt_failure(
+                plan,
+                error="provider finish_reason=error",
+                **attempt_diag,
             )
         self._report_usage(endpoint, request_id, last.response)
 

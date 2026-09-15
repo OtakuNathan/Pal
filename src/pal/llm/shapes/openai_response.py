@@ -157,11 +157,17 @@ class OpenAIResponseDecoder:
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
         payload = dict(frame.payload)
+        generation_id = str(payload.get("id") or "").strip()
+        if generation_id:
+            self.builder.set_generation_id(generation_id)
         if isinstance(payload.get("output"), (list, tuple)):
             return self._feed_complete_response(payload)
         event_type = str(payload.get("type") or "").strip()
         response = payload.get("response")
         if isinstance(response, Mapping):
+            nested_generation_id = str(response.get("id") or "").strip()
+            if nested_generation_id:
+                self.builder.set_generation_id(nested_generation_id)
             usage = response.get("usage")
             if isinstance(usage, Mapping):
                 self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(usage)))

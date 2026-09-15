@@ -177,6 +177,7 @@ class PromptCacheCoordinator:
     rolling_net_threshold_tokens: int = 1024
     observation_ttl_seconds: float = 30.0 * 60.0
     max_scope_count: int = 256
+    max_attempt_records: int = 128
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
     _last_plan: PromptCachePlan | None = field(default=None, init=False, repr=False)
     _last_plans_by_scope: dict[str, PromptCachePlan] = field(
@@ -186,6 +187,11 @@ class PromptCacheCoordinator:
     )
     _last_requests_by_scope: dict[str, LLMRequestIR] = field(
         default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _attempt_records: deque[dict[str, Any]] = field(
+        default_factory=deque,
         init=False,
         repr=False,
     )
@@ -469,12 +475,134 @@ class PromptCacheCoordinator:
             applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_message_ids),
         )
 
+    def record_attempt(
+        self,
+        plan: PromptCachePlan,
+        *,
+        status: str,
+        request_id: str = "",
+        endpoint_id: str = "",
+        model_id: str = "",
+        provider_id: str = "",
+        wire_shape: str = "",
+        finish_reason: str = "",
+        error: str = "",
+        elapsed_seconds: float = 0.0,
+        provider_generation_id: str = "",
+        usage: LLMUsageIR | None = None,
+        applied_cache_breakpoint_message_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Append one bounded, hash-only attempt record for cache diagnosis.
+
+        Diagnostic evidence only: this never changes planning, confirmation,
+        or retry semantics. Raw scope/cache keys never enter records.
+        """
+
+        if not plan.enabled:
+            return
+        applied = tuple(str(item) for item in applied_cache_breakpoint_message_ids)
+        usage_reported = usage is not None and usage.reported
+        cached = max(0, int(usage.cached_input_tokens)) if usage is not None else 0
+        write = max(0, int(usage.cache_write_input_tokens)) if usage is not None else 0
+        explicit = _supports_explicit_breakpoints(plan.dialect)
+        record: dict[str, Any] = {
+            "attempt_id": str(request_id or ""),
+            "provider_generation_id": str(provider_generation_id or ""),
+            "status": str(status or "unknown"),
+            "scope_key_hash": _short_hash(plan.scope_key),
+            "cache_key_hash": _short_hash(plan.cache_key),
+            "dialect": plan.dialect.value,
+            "cache_mode": "explicit" if explicit else "automatic",
+            "endpoint_id": str(endpoint_id or ""),
+            "model_id": str(model_id or ""),
+            "provider_id": str(provider_id or ""),
+            "wire_shape": str(wire_shape or ""),
+            "plan_decision": str(plan.decision or ""),
+            "plan_sequence": int(plan.plan_sequence),
+            "estimated_prefix_tokens": int(plan.estimated_prefix_tokens),
+            "planned_markers": [
+                {
+                    "label": item.label,
+                    "message_id": item.message_id,
+                    "ttl": item.ttl,
+                    "prefix_tokens": int(item.prefix_tokens),
+                }
+                for item in plan.breakpoints
+            ],
+            "applied_marker_ids": list(applied),
+            "anchor_decision": str(plan.anchor.decision or ""),
+            "frontier_decision": str(plan.frontier.decision or ""),
+            "anchor_candidate_message_id": str(plan.anchor.candidate_message_id or ""),
+            "frontier_candidate_message_id": str(
+                plan.frontier.candidate_message_id or ""
+            ),
+            "finish_reason": str(finish_reason or ""),
+            "error": str(error or "")[:200],
+            "elapsed_seconds": round(float(elapsed_seconds or 0.0), 6),
+            "usage_reported": bool(usage_reported),
+            "input_tokens": max(0, int(usage.input_tokens)) if usage is not None else 0,
+            "cached_input_tokens": cached,
+            "cache_write_input_tokens": write,
+            "uncached_input_tokens": (
+                max(0, int(usage.uncached_input_tokens)) if usage is not None else 0
+            ),
+            "read_observed": cached > 0,
+            "write_observed": write > 0,
+            # Zero read+write with accepted-looking explicit markers is the
+            # stall signature this record exists to expose. Evidence only;
+            # confirmation semantics are unchanged.
+            "zero_read_write_with_applied_markers": bool(
+                applied and usage_reported and cached == 0 and write == 0
+            ),
+            "recorded_at": time.time(),
+        }
+        with self._lock:
+            self._attempt_records.append(record)
+            while len(self._attempt_records) > max(1, int(self.max_attempt_records)):
+                self._attempt_records.popleft()
+
+    def record_attempt_failure(
+        self,
+        plan: PromptCachePlan,
+        *,
+        request_id: str = "",
+        endpoint_id: str = "",
+        model_id: str = "",
+        provider_id: str = "",
+        wire_shape: str = "",
+        finish_reason: str = "",
+        error: str = "",
+        elapsed_seconds: float = 0.0,
+        provider_generation_id: str = "",
+    ) -> None:
+        self.record_attempt(
+            plan,
+            status="failed",
+            request_id=request_id,
+            endpoint_id=endpoint_id,
+            model_id=model_id,
+            provider_id=provider_id,
+            wire_shape=wire_shape,
+            finish_reason=finish_reason,
+            error=error,
+            elapsed_seconds=elapsed_seconds,
+            provider_generation_id=provider_generation_id,
+        )
+
     def record_success(
         self,
         plan: PromptCachePlan,
         usage: LLMUsageIR,
         *,
         applied_cache_breakpoint_message_ids: tuple[str, ...] = (),
+        request_id: str = "",
+        endpoint_id: str = "",
+        model_id: str = "",
+        provider_id: str = "",
+        wire_shape: str = "",
+        finish_reason: str = "",
+        elapsed_seconds: float = 0.0,
+        provider_generation_id: str = "",
     ) -> None:
         if not plan.enabled:
             return
@@ -507,6 +635,20 @@ class PromptCacheCoordinator:
                     applied_breakpoint_ids=applied_breakpoint_ids,
                     observed_at=now,
                 )
+        self.record_attempt(
+            plan,
+            status="success",
+            request_id=request_id,
+            endpoint_id=endpoint_id,
+            model_id=model_id,
+            provider_id=provider_id,
+            wire_shape=wire_shape,
+            finish_reason=finish_reason,
+            elapsed_seconds=elapsed_seconds,
+            provider_generation_id=provider_generation_id,
+            usage=usage,
+            applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_ids),
+        )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -568,6 +710,10 @@ class PromptCacheCoordinator:
                 "request_hit_rate": hit_requests / observed if observed else 0.0,
                 "scope_count": len(self._stats),
                 "last_scope_key": plan.scope_key if plan is not None else "",
+                "attempt_record_count": len(self._attempt_records),
+                "recent_attempts": [
+                    dict(item) for item in list(self._attempt_records)[-20:]
+                ],
                 "anchor": _track_snapshot(
                     plan.anchor if plan is not None else None,
                     last_stats.anchor if last_stats else None,
@@ -949,6 +1095,10 @@ def _deduplicate_breakpoints(
         seen.add(breakpoint.message_id)
         deduplicated.append(breakpoint)
     return deduplicated
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
 
 
 def _record_track_success(

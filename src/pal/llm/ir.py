@@ -264,6 +264,7 @@ class LLMResponseIR:
     finish_reason: LLMFinishReason
     usage: LLMUsageIR = field(default_factory=LLMUsageIR)
     provider_response_count: int = 1
+    provider_generation_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(

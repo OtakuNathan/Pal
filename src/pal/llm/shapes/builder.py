@@ -33,6 +33,7 @@ class ResponseIRBuilder:
         self.replay_payload: dict[str, Any] = {}
         self.committed_items: dict[str, LLMResponseItemKind] = {}
         self.complete = False
+        self.provider_generation_id = ""
 
     def append_text(self, text: str) -> LLMResponseUpdate | None:
         value = str(text or "")
@@ -71,6 +72,11 @@ class ResponseIRBuilder:
 
     def set_usage(self, usage: LLMUsageIR) -> None:
         self.usage = usage
+
+    def set_generation_id(self, generation_id: str) -> None:
+        value = str(generation_id or "").strip()
+        if value:
+            self.provider_generation_id = value
 
     def mark_complete(self, finish_reason: LLMFinishReason | str | None = None) -> LLMResponseUpdate:
         if finish_reason is not None:
@@ -151,6 +157,7 @@ class ResponseIRBuilder:
             message=message,
             finish_reason=self.finish_reason,
             usage=self.usage,
+            provider_generation_id=self.provider_generation_id,
         )
 
     def update(
