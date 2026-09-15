@@ -1872,9 +1872,14 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(replies[-1].split(".")[0], "Context compacted")
         self.assertEqual(statuses[-1][0], "interactive_open")
         spec = statuses[-1][1]["spec"]
-        self.assertIn("最后统一提交", spec.text)
+        self.assertIn("Review each candidate, then submit the accepted items together", spec.text)
+        self.assertIn("Reopen: /memory_review", spec.text)
         self.assertEqual(len(spec.items), 1)
-        self.assertFalse(spec.buttons)
+        self.assertEqual(len(spec.buttons), 1)
+        button = spec.buttons[0][0]
+        self.assertEqual(button.label, "Review next candidate")
+        self.assertEqual(button.action_args["action_kind"], "memory_candidate_decision")
+        self.assertEqual(button.action_args["args"]["decision"], "view")
 
     def test_cache_reminder_compact_is_consumed_before_llm_and_runs_once(self) -> None:
         core = PalCore()
