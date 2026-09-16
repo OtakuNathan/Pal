@@ -664,9 +664,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         generation = core.context.execution_runtime.registry_generation
-        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "write_file"):
+        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "edit_file", "write_file"):
             self.assertIn(alias, generation.direct_aliases)
-        for alias in ("delete_path", "edit_file", "file_state"):
+        for alias in ("delete_path", "file_state"):
             self.assertIn(alias, generation.indirect_aliases)
 
     def test_shell_exec_builtin_tool_runs_commands(self) -> None:
@@ -1376,7 +1376,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("read_tool_result", exposed_names)
             self.assertIn("run_shell", exposed_names)
             self.assertIn("read_file", exposed_names)
-            self.assertNotIn("edit_file", exposed_names)
+            self.assertIn("edit_file", exposed_names)
             self.assertIn("write_file", exposed_names)
             self.assertNotIn("delete_path", exposed_names)
             self.assertIn("call_tool", exposed_names)

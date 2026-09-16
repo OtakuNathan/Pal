@@ -398,7 +398,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertFalse(grant.complete)
             self.assertTrue(grant.covered_ranges[0][0] <= 1)
 
-            edit = runtime.invoke_indirect_tool(
+            edit = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -845,7 +845,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-1",
             )
-            before_delivery = runtime.invoke_indirect_tool(
+            before_delivery = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -864,7 +864,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 context_delivery=dict(read.context_delivery or {}),
                 result_id="read-1",
             )
-            after_delivery = runtime.invoke_indirect_tool(
+            after_delivery = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -912,7 +912,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 result_id="read-partial",
             )
 
-            unseen = runtime.invoke_indirect_tool(
+            unseen = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -924,7 +924,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-partial-edit",
             )
-            visible = runtime.invoke_indirect_tool(
+            visible = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -1023,7 +1023,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertTrue(repeated_read.structured["unchanged"])
 
-            edit = runtime.invoke_indirect_tool(
+            edit = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -1295,7 +1295,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 context_delivery=dict(read.context_delivery or {}),
                 result_id="read-1",
             )
-            first = runtime.invoke_indirect_tool(
+            first = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={
@@ -1317,7 +1317,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 context_delivery=dict(first.context_delivery or {}),
                 result_id="edit-1",
             )
-            second = runtime.invoke_indirect_tool(
+            second = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
                     args={

@@ -23,6 +23,11 @@ the user has not chosen a connection method. `list_remote` resolves unknown targ
 `run_shell(target=...)` executes there. Configuring a remote never changes target 0's
 local meaning, and an explicit request for SSH takes precedence over the default route.
 
+`read_file`, `edit_file` and `write_file` are directly exposed file tools. Direct editing
+uses the existing read-delivery and stale-snapshot checks. `write_file` explicitly
+describes local files on the Pal host: shell target selection does not redirect it;
+remote writes use the shell on the required target.
+
 ## State, events and coverage
 
 The compiler exports context candidates with namespaced source keys. Runtime guidance

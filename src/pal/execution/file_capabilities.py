@@ -87,14 +87,15 @@ FILE_EDIT_GUIDANCE = ToolGuidance(
 )
 
 FILE_WRITE_GUIDANCE = ToolGuidance(
-    purpose="Write complete UTF-8 text content, creating a file or replacing all of an existing file.",
+    purpose="Write complete UTF-8 text content to a local file on the Pal host, creating it or replacing all of its contents.",
     use_when=(
         "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
-        "current version has been read. Missing parent directories are created."
+        "current version has been read. Missing parent directories are created. Paths are local to the Pal host; "
+        "run_shell(target=...) does not change this tool's target."
     ),
     do_not_use_when=(
         "Focused changes to an existing file (use edit_file). Do not overwrite an existing file from a partial, "
-        "retired, or stale read snapshot."
+        "retired, or stale read snapshot. Remote files: use run_shell on the required target."
     ),
     failure_next_steps=(
         "For NOT_READ, PARTIAL_READ, or STALE_FILE, read the complete current file with read_file before retrying. "
@@ -216,7 +217,7 @@ class FileCapabilityMixin:
         aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
-        execution=INDIRECT_LOCAL_WRITE,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
