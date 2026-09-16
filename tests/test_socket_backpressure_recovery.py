@@ -1,5 +1,7 @@
 """Exercise timeout/reconnect against real temporary Unix sockets, not Pal."""
 import asyncio
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,10 +11,10 @@ from pal.channel.endpoints.socket_protocol import pack_socket_message, read_sock
 from pal.shared import ChannelStreamUpdateKind
 
 
-def test_stalled_ack_reconnect_preserves_delivery_id_and_pending_outbox(tmp_path):
+def test_stalled_ack_reconnect_preserves_delivery_id_and_pending_outbox():
     async def run():
         endpoint = SocketChannelEndpoint(
-            endpoint=EndpointConfig("test", "socket", str(tmp_path / "test.sock")),
+            endpoint=EndpointConfig("test", "socket", str(socket_path)),
             delivery_timeout_seconds=0.05,
         )
         clients = []
@@ -70,4 +72,7 @@ def test_stalled_ack_reconnect_preserves_delivery_id_and_pending_outbox(tmp_path
                 writer.close()
             await endpoint.stop_async()
             await asyncio.gather(*(writer.wait_closed() for writer in clients), return_exceptions=True)
-    asyncio.run(run())
+    # macOS sun_path is only 104 bytes; pytest's nested temp path can exceed it.
+    with tempfile.TemporaryDirectory(prefix="pal-sock-", dir="/tmp") as directory:
+        socket_path = Path(directory) / "test.sock"
+        asyncio.run(run())
