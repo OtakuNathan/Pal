@@ -39,6 +39,7 @@ class EncodedMessageSpan:
     cache_targets: tuple[tuple[JSONPathPart, ...], ...] = ()
     cache_prefix_fingerprint: str = ""
     estimated_cache_prefix_tokens: int = 0
+    wire_item_paths: tuple[tuple[JSONPathPart, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,10 +56,11 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
     payload = thaw_json(encoded.payload)
     spans: list[EncodedMessageSpan] = []
     for span in encoded.message_spans:
-        if not span.cache_targets:
+        paths = span.cache_targets or span.wire_item_paths
+        if not paths:
             spans.append(span)
             continue
-        prefix = _provider_prefix(payload, span.cache_targets[-1])
+        prefix = _provider_prefix(payload, paths[-1])
         if prefix is None:
             spans.append(span)
             continue
@@ -71,6 +73,7 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
             EncodedMessageSpan(
                 message_id=span.message_id,
                 cache_targets=span.cache_targets,
+                wire_item_paths=span.wire_item_paths,
                 cache_prefix_fingerprint=hashlib.sha256(
                     serialized.encode("utf-8")
                 ).hexdigest(),

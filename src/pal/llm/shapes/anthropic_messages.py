@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from pal.llm.ir import (
@@ -30,7 +30,7 @@ from pal.llm.shapes.base import (
     finalize_cache_spans,
     request_parameter_supported,
 )
-from pal.llm.shapes.builder import ResponseIRBuilder, canonical_finish_reason, merge_usage, usage_from_mapping
+from pal.llm.shapes.builder import ResponseIRBuilder, canonical_finish_reason
 from pal.llm.shapes.common import anthropic_tool_definition, json_object, tool_results
 from pal.shared.json_values import thaw_json
 
@@ -44,29 +44,119 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         messages: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
-            if message.role == MessageRole.SYSTEM or (
-                message.role == MessageRole.DEVELOPER
-                and not messages
-                and message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
-            ):
-                text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
-                if text:
-                    system_parts.append({"type": "text", "text": text})
+            wire_start = len(messages)
+            system_start = len(system_parts)
+            try:
+                if message.role == MessageRole.SYSTEM or (
+                    message.role == MessageRole.DEVELOPER
+                    and not messages
+                    and message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+                ):
+                    text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
+                    if text:
+                        system_parts.append({"type": "text", "text": text})
+                        spans.append(
+                            EncodedMessageSpan(
+                                message.message_id,
+                                (("system", len(system_parts) - 1),),
+                            )
+                        )
+                    else:
+                        spans.append(EncodedMessageSpan(message.message_id))
+                    continue
+                if message.role == MessageRole.DEVELOPER:
+                    # Anthropic Messages has no generally available developer
+                    # role. Preserve chronological placement by degrading runtime
+                    # developer guidance to a distinct user content block. Keeping
+                    # it distinct lets a cache marker remain on the immutable user
+                    # block immediately before this dynamic suffix.
+                    blocks = _anthropic_user_content(message.parts)
+                    if blocks:
+                        _append_message(messages, "user", blocks)
                     spans.append(
                         EncodedMessageSpan(
                             message.message_id,
-                            (("system", len(system_parts) - 1),),
+                            _last_message_cache_targets(messages) if blocks else (),
                         )
                     )
-                else:
-                    spans.append(EncodedMessageSpan(message.message_id))
-                continue
-            if message.role == MessageRole.DEVELOPER:
-                # Anthropic Messages has no generally available developer
-                # role. Preserve chronological placement by degrading runtime
-                # developer guidance to a distinct user content block. Keeping
-                # it distinct lets a cache marker remain on the immutable user
-                # block immediately before this dynamic suffix.
+                    continue
+                if message.role == MessageRole.TOOL:
+                    blocks = [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.call_id,
+                            "content": result.content,
+                            "is_error": not result.ok,
+                        }
+                        for result in tool_results(message)
+                    ]
+                    if blocks:
+                        _append_message(messages, "user", blocks)
+                    spans.append(
+                        EncodedMessageSpan(
+                            message.message_id,
+                            _last_message_cache_targets(messages) if blocks else (),
+                        )
+                    )
+                    continue
+                if (
+                    message.role == MessageRole.ASSISTANT
+                    and message.replay is not None
+                    and message.replay.matches(
+                        wire_shape=self.wire_shape,
+                        endpoint_id=context.endpoint_id,
+                        model_id=context.model_id,
+                    )
+                ):
+                    content = message.replay.payload.get("content")
+                    if isinstance(content, (list, tuple)):
+                        _append_message(messages, "assistant", [thaw_json(item) for item in content if isinstance(item, Mapping)])
+                        spans.append(
+                            EncodedMessageSpan(
+                                message.message_id,
+                                _last_message_cache_targets(messages),
+                            )
+                        )
+                        continue
+                if message.role == MessageRole.ASSISTANT:
+                    blocks: list[dict[str, Any]] = []
+                    # Replay is the authoritative provider wire form.  Keep a
+                    # lossless semantic fallback for an active turn restored from
+                    # an older checkpoint (or after an endpoint/model switch)
+                    # where the envelope is unavailable but reasoning is still in
+                    # the IR.  Omitting this block while thinking mode is enabled
+                    # makes Anthropic reject the next request before it reaches
+                    # the model.
+                    for part in message.parts:
+                        if isinstance(part, ReasoningPartIR):
+                            blocks.append(
+                                {
+                                    "type": "redacted_thinking" if part.redacted else "thinking",
+                                    **({} if part.redacted else {"thinking": part.text}),
+                                }
+                            )
+                    text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
+                    if text:
+                        blocks.append({"type": "text", "text": text})
+                    for part in message.parts:
+                        if isinstance(part, ToolCallIR):
+                            blocks.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": part.call_id,
+                                    "name": part.name,
+                                    "input": thaw_json(part.arguments),
+                                }
+                            )
+                    if blocks:
+                        _append_message(messages, "assistant", blocks)
+                    spans.append(
+                        EncodedMessageSpan(
+                            message.message_id,
+                            _last_message_cache_targets(messages) if blocks else (),
+                        )
+                    )
+                    continue
                 blocks = _anthropic_user_content(message.parts)
                 if blocks:
                     _append_message(messages, "user", blocks)
@@ -76,93 +166,11 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                         _last_message_cache_targets(messages) if blocks else (),
                     )
                 )
-                continue
-            if message.role == MessageRole.TOOL:
-                blocks = [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": result.call_id,
-                        "content": result.content,
-                        "is_error": not result.ok,
-                    }
-                    for result in tool_results(message)
-                ]
-                if blocks:
-                    _append_message(messages, "user", blocks)
-                spans.append(
-                    EncodedMessageSpan(
-                        message.message_id,
-                        _last_message_cache_targets(messages) if blocks else (),
-                    )
-                )
-                continue
-            if (
-                message.role == MessageRole.ASSISTANT
-                and message.replay is not None
-                and message.replay.matches(
-                    wire_shape=self.wire_shape,
-                    endpoint_id=context.endpoint_id,
-                    model_id=context.model_id,
-                )
-            ):
-                content = message.replay.payload.get("content")
-                if isinstance(content, (list, tuple)):
-                    _append_message(messages, "assistant", [thaw_json(item) for item in content if isinstance(item, Mapping)])
-                    spans.append(
-                        EncodedMessageSpan(
-                            message.message_id,
-                            _last_message_cache_targets(messages),
-                        )
-                    )
-                    continue
-            if message.role == MessageRole.ASSISTANT:
-                blocks: list[dict[str, Any]] = []
-                # Replay is the authoritative provider wire form.  Keep a
-                # lossless semantic fallback for an active turn restored from
-                # an older checkpoint (or after an endpoint/model switch)
-                # where the envelope is unavailable but reasoning is still in
-                # the IR.  Omitting this block while thinking mode is enabled
-                # makes Anthropic reject the next request before it reaches
-                # the model.
-                for part in message.parts:
-                    if isinstance(part, ReasoningPartIR):
-                        blocks.append(
-                            {
-                                "type": "redacted_thinking" if part.redacted else "thinking",
-                                **({} if part.redacted else {"thinking": part.text}),
-                            }
-                        )
-                text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
-                if text:
-                    blocks.append({"type": "text", "text": text})
-                for part in message.parts:
-                    if isinstance(part, ToolCallIR):
-                        blocks.append(
-                            {
-                                "type": "tool_use",
-                                "id": part.call_id,
-                                "name": part.name,
-                                "input": thaw_json(part.arguments),
-                            }
-                        )
-                if blocks:
-                    _append_message(messages, "assistant", blocks)
-                spans.append(
-                    EncodedMessageSpan(
-                        message.message_id,
-                        _last_message_cache_targets(messages) if blocks else (),
-                    )
-                )
-                continue
-            blocks = _anthropic_user_content(message.parts)
-            if blocks:
-                _append_message(messages, "user", blocks)
-            spans.append(
-                EncodedMessageSpan(
-                    message.message_id,
-                    _last_message_cache_targets(messages) if blocks else (),
-                )
-            )
+            finally:
+                if spans and spans[-1].message_id == message.message_id:
+                    paths = tuple(("messages", i) for i in range(wire_start, len(messages)))
+                    paths += tuple(("system", i) for i in range(system_start, len(system_parts)))
+                    spans[-1] = replace(spans[-1], wire_item_paths=paths or spans[-1].cache_targets)
         if not messages:
             messages.append({"role": "user", "content": "Continue."})
 
@@ -219,17 +227,11 @@ class AnthropicMessagesDecoder:
         self.complete = False
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+        self.builder.observe_frame(frame)
         payload = dict(frame.payload)
         if isinstance(payload.get("content"), (list, tuple)):
             return self._feed_complete_message(payload)
         event_type = str(payload.get("type") or "")
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(usage)))
-        message = payload.get("message")
-        if isinstance(message, Mapping) and isinstance(message.get("usage"), Mapping):
-            self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(message["usage"])))
-
         updates: list[LLMResponseUpdate] = []
         if event_type == "content_block_start":
             self._start_block(payload)
@@ -322,9 +324,6 @@ class AnthropicMessagesDecoder:
                 )
                 if committed is not None:
                     updates.append(committed)
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            self.builder.set_usage(usage_from_mapping(usage))
         self._refresh_replay()
         updates.append(self.builder.mark_complete(canonical_finish_reason(reason, has_tools=self.builder.has_tools)))
         self.complete = True

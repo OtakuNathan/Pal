@@ -537,7 +537,13 @@ def render_llm_status(payload: dict[str, Any]) -> str:
         ),
         "",
         "💰 Billing",
-        f"Provider-reported cost: ${float(usage.get('cost') or 0.0):.6f}",
+        (
+            f"Provider-reported cost: ${float(usage.get('cost') or 0.0):.6f}"
+            if usage.get("cost_complete") else
+            f"Known cost subtotal: ${float(usage.get('cost') or 0.0):.6f}; "
+            f"{int(usage.get('cost_unknown_attempt_count') or 0)} attempts with unknown cost"
+        ),
+        f"Cache partition unknown for {int(usage.get('cache_partition_unknown_attempt_count') or 0)} attempts",
         f"Usage reporting coverage: {reporting_rate:.1%}",
     ]
     if endpoint_rows:

@@ -206,6 +206,33 @@ def _normalize_usage_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
     normalized["reasoning_tokens_reported"] = bool(
         value.get("reasoning_tokens_reported", False)
     )
+    fields = value.get("reported_fields", ())
+    allowed = {*integer_fields, "cost"}
+    if not isinstance(fields, (list, tuple)) or any(item not in allowed for item in fields):
+        raise ValueError("invalid usage field-presence map")
+    normalized["reported_fields"] = tuple(fields)
+    accounting = value.get("input_accounting", "unknown")
+    if accounting not in {"unknown", "inclusive_cache", "exclusive_cache", "aggregate"}:
+        raise ValueError("invalid input accounting")
+    normalized["input_accounting"] = accounting
+    normalized["final"] = bool(value.get("final", False))
+    normalized["usage_anomaly"] = str(value.get("usage_anomaly") or "")[:256]
+    raw_input = value.get("raw_input_tokens")
+    normalized["raw_input_tokens"] = int(raw_input) if raw_input is not None else None
+    raw = value.get("raw_counters", ())
+    from pal.llm.usage_normalization import USAGE_FIELD_PATHS
+    import math
+    paths = {path for entries in USAGE_FIELD_PATHS.values() for path in entries}
+    if not isinstance(raw, (list, tuple)) or len(raw) > len(paths):
+        raise ValueError("invalid raw usage counters")
+    counters = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2 or item[0] not in paths:
+            raise ValueError("invalid raw usage counter")
+        if not isinstance(item[1], (int, float)) or not math.isfinite(item[1]):
+            raise ValueError("raw usage counter must be finite")
+        counters.append(tuple(item))
+    normalized["raw_counters"] = tuple(counters)
     return normalized
 
 
@@ -1536,7 +1563,15 @@ class BunshinManager:
             raise ValueError(
                 "LLM usage receipt provider_response_count must be positive"
             )
+        status = str(params.get("status") or "success")
+        if status not in {"success", "failed", "cancelled"}:
+            raise ValueError("invalid attempt settlement status")
         receipt_payload = {
+            "status": status,
+            "provider_generation_id": str(params.get("provider_generation_id") or ""),
+            "returned_model": str(params.get("returned_model") or ""),
+            "actual_provider": str(params.get("actual_provider") or ""),
+            "service_tier": str(params.get("service_tier") or ""),
             "request_id": request_id,
             "endpoint_id": endpoint_id,
             "model_id": str(params.get("model_id") or ""),
@@ -1560,13 +1595,22 @@ class BunshinManager:
             raise ValueError("LLM usage receipt changed model identity")
         if receipt_payload["provider"] != record.provider:
             raise ValueError("LLM usage receipt changed provider identity")
-        self._llm_usage_ledger.record_success(
-            endpoint_id=record.endpoint_id,
-            model_id=record.model_id,
-            provider=record.provider,
-            usage=LLMUsageIR(**normalized_usage),
-            provider_response_count=receipt_payload["provider_response_count"],
-        )
+        from pal.llm.attempts import LLMAttemptResult
+        usage = LLMUsageIR(**normalized_usage)
+        if "status" in params:
+            self._llm_usage_ledger.record_attempt(LLMAttemptResult(
+                attempt_id=request_id, endpoint_id=record.endpoint_id,
+                model_id=record.model_id, provider=record.provider, status=status, usage=usage,
+                provider_generation_id=receipt_payload["provider_generation_id"],
+                returned_model=receipt_payload["returned_model"], actual_provider=receipt_payload["actual_provider"],
+                service_tier=receipt_payload["service_tier"],
+            ))
+        if status == "success":
+            self._llm_usage_ledger.record_success(
+                endpoint_id=record.endpoint_id, model_id=record.model_id, provider=record.provider,
+                usage=usage, provider_response_count=provider_response_count,
+                usage_accounted="status" in params,
+            )
         record.usage_received = True
         record.receipt_fingerprint = receipt_fingerprint
         return {"ok": True, "duplicate": False}

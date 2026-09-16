@@ -187,27 +187,8 @@ def merge_responses(
         or not isinstance(part, ToolCallIR)
     )
     usage_sources = (*discarded, *responses)
-    usage = LLMUsageIR(
-        input_tokens=sum(item.usage.input_tokens for item in usage_sources),
-        uncached_input_tokens=sum(
-            item.usage.uncached_input_tokens for item in usage_sources
-        ),
-        cached_input_tokens=sum(
-            item.usage.cached_input_tokens for item in usage_sources
-        ),
-        cache_write_input_tokens=sum(
-            item.usage.cache_write_input_tokens for item in usage_sources
-        ),
-        output_tokens=sum(item.usage.output_tokens for item in usage_sources),
-        reasoning_tokens=sum(
-            item.usage.reasoning_tokens for item in usage_sources
-        ),
-        reasoning_tokens_reported=all(
-            item.usage.reasoning_tokens_reported for item in usage_sources
-        ),
-        cost=sum(item.usage.cost for item in usage_sources),
-        reported=any(item.usage.reported for item in usage_sources),
-    )
+    from pal.llm.usage_normalization import sum_usage
+    usage = sum_usage([item.usage for item in usage_sources])
     final = responses[-1]
     return replace(
         final,
@@ -217,6 +198,7 @@ def merge_responses(
             parts=parts,
         ),
         usage=usage,
+        attempt_ids=tuple(dict.fromkeys(a for item in usage_sources for a in item.attempt_ids)),
         provider_response_count=sum(
             item.provider_response_count for item in usage_sources
         ),

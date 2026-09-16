@@ -20,6 +20,8 @@ from pal.llm.ir import (
     ReplayEnvelope,
     TextPartIR,
 )
+from pal.llm.response_evidence import WireResponseEvidence
+from pal.llm.usage_normalization import merge_usage, usage_from_mapping
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError
 
 
@@ -33,7 +35,13 @@ class ResponseIRBuilder:
         self.replay_payload: dict[str, Any] = {}
         self.committed_items: dict[str, LLMResponseItemKind] = {}
         self.complete = False
+        self.evidence = WireResponseEvidence(context.wire_shape)
         self.provider_generation_id = ""
+
+    def observe_frame(self, frame: Any) -> None:
+        self.evidence.observe(frame)
+        self.usage = self.evidence.usage
+        self.provider_generation_id = self.evidence.provider_generation_id
 
     def append_text(self, text: str) -> LLMResponseUpdate | None:
         value = str(text or "")
@@ -158,6 +166,9 @@ class ResponseIRBuilder:
             finish_reason=self.finish_reason,
             usage=self.usage,
             provider_generation_id=self.provider_generation_id,
+            returned_model=self.evidence.returned_model,
+            actual_provider=self.evidence.actual_provider,
+            service_tier=self.evidence.service_tier,
         )
 
     def update(
@@ -194,120 +205,3 @@ def canonical_finish_reason(value: LLMFinishReason | str, *, has_tools: bool = F
     if has_tools or raw in {"tool_calls", "tool_use", "function_call"}:
         return LLMFinishReason.TOOL_CALLS
     return LLMFinishReason.STOP
-
-
-def usage_from_mapping(payload: Mapping[str, Any] | None) -> LLMUsageIR:
-    source = dict(payload or {})
-    raw_input_tokens = _first_int(source, "input_tokens", "prompt_tokens")
-    output_tokens = _first_int(source, "output_tokens", "completion_tokens")
-    cached = _first_int(source, "cached_input_tokens", "cache_read_input_tokens")
-    cache_write = _first_int(source, "cache_creation_input_tokens", "cache_write_input_tokens")
-    details = source.get("prompt_tokens_details")
-    if isinstance(details, Mapping):
-        cached = max(cached, _first_int(details, "cached_tokens"))
-        cache_write = max(cache_write, _first_int(details, "cache_write_tokens"))
-    input_details = source.get("input_tokens_details")
-    if isinstance(input_details, Mapping):
-        cached = max(cached, _first_int(input_details, "cached_tokens"))
-        cache_write = max(cache_write, _first_int(input_details, "cache_write_tokens"))
-    anthropic_categories = any(
-        key in source
-        for key in ("cache_read_input_tokens", "cache_creation_input_tokens")
-    )
-    anomaly = ""
-    if anthropic_categories:
-        uncached = raw_input_tokens
-        input_tokens = raw_input_tokens + cached + cache_write
-    else:
-        input_tokens = raw_input_tokens
-        uncached = input_tokens - cached - cache_write
-        if uncached < 0:
-            # Keep the raw counters and flag the impossibility; a derived
-            # split is a diagnostic, not truth to hide behind a clamp.
-            anomaly = "input_lt_read_write"
-            uncached = 0
-    reasoning = _first_int(source, "reasoning_tokens", "thinking_tokens")
-    reasoning_reported = any(
-        key in source for key in ("reasoning_tokens", "thinking_tokens")
-    )
-    for detail_key in ("completion_tokens_details", "output_tokens_details"):
-        output_details = source.get(detail_key)
-        if isinstance(output_details, Mapping):
-            reasoning_reported = reasoning_reported or any(
-                key in output_details
-                for key in ("reasoning_tokens", "thinking_tokens")
-            )
-            reasoning = max(
-                reasoning,
-                _first_int(
-                    output_details,
-                    "reasoning_tokens",
-                    "thinking_tokens",
-                ),
-            )
-    return LLMUsageIR(
-        input_tokens=input_tokens,
-        uncached_input_tokens=uncached,
-        cached_input_tokens=cached,
-        cache_write_input_tokens=cache_write,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning,
-        reasoning_tokens_reported=reasoning_reported,
-        cost=_first_float(source, "cost", "total_cost"),
-        reported=payload is not None,
-        usage_anomaly=anomaly,
-    )
-
-
-def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
-    if not right.reported:
-        return left
-    input_tokens = max(left.input_tokens, right.input_tokens)
-    cached = max(left.cached_input_tokens, right.cached_input_tokens)
-    cache_write = max(left.cache_write_input_tokens, right.cache_write_input_tokens)
-    # Within one response, input/read/write are cumulative counters, so max
-    # is correct for them. The uncached split is derived: an earlier
-    # intermediate frame may predate cache classification, so max-merging it
-    # understates reuse. Recompute from the merged totals and flag impossible
-    # counts instead of silently hiding them.
-    uncached = input_tokens - cached - cache_write
-    anomaly = right.usage_anomaly or left.usage_anomaly
-    if uncached < 0:
-        anomaly = "input_lt_read_write"
-        uncached = 0
-    return replace(
-        right,
-        input_tokens=input_tokens,
-        uncached_input_tokens=uncached,
-        cached_input_tokens=cached,
-        cache_write_input_tokens=cache_write,
-        output_tokens=max(left.output_tokens, right.output_tokens),
-        reasoning_tokens=max(left.reasoning_tokens, right.reasoning_tokens),
-        reasoning_tokens_reported=(
-            left.reasoning_tokens_reported
-            or right.reasoning_tokens_reported
-        ),
-        cost=max(left.cost, right.cost),
-        usage_anomaly=anomaly,
-        reported=left.reported or right.reported,
-    )
-
-
-def _first_int(source: Mapping[str, Any], *names: str) -> int:
-    for name in names:
-        value = source.get(name)
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            continue
-    return 0
-
-
-def _first_float(source: Mapping[str, Any], *names: str) -> float:
-    for name in names:
-        value = source.get(name)
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            continue
-    return 0.0

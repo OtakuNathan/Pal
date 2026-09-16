@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from pal.llm.ir import (
@@ -31,8 +31,6 @@ from pal.llm.shapes.base import (
 from pal.llm.shapes.builder import (
     ResponseIRBuilder,
     canonical_finish_reason,
-    merge_usage,
-    usage_from_mapping,
 )
 from pal.llm.shapes.common import (
     json_object,
@@ -54,73 +52,79 @@ class OpenAICompletionCodec(ShapeCodecBase):
         messages: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
-            if (
-                message.role == MessageRole.ASSISTANT
-                and message.replay is not None
-                and message.replay.matches(
-                    wire_shape=self.wire_shape,
-                    endpoint_id=context.endpoint_id,
-                    model_id=context.model_id,
-                )
-            ):
-                replay_message = message.replay.payload.get("message")
-                if isinstance(replay_message, Mapping):
-                    messages.append(thaw_json(replay_message))
-                    spans.append(
-                        EncodedMessageSpan(
-                            message.message_id,
-                            _chat_message_cache_targets(
+            wire_start = len(messages)
+            try:
+                if (
+                    message.role == MessageRole.ASSISTANT
+                    and message.replay is not None
+                    and message.replay.matches(
+                        wire_shape=self.wire_shape,
+                        endpoint_id=context.endpoint_id,
+                        model_id=context.model_id,
+                    )
+                ):
+                    replay_message = message.replay.payload.get("message")
+                    if isinstance(replay_message, Mapping):
+                        messages.append(thaw_json(replay_message))
+                        spans.append(
+                            EncodedMessageSpan(
+                                message.message_id,
+                                _chat_message_cache_targets(
+                                    messages,
+                                    len(messages) - 1,
+                                ),
+                            )
+                        )
+                        continue
+                if message.role == MessageRole.TOOL:
+                    targets: list[tuple[str | int, ...]] = []
+                    for result in tool_results(message):
+                        targets.extend(
+                            _append_chat_message(
                                 messages,
-                                len(messages) - 1,
-                            ),
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": result.call_id,
+                                    "content": [
+                                        {"type": "text", "text": result.content}
+                                    ],
+                                },
+                            )
                         )
-                    )
+                    spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
                     continue
-            if message.role == MessageRole.TOOL:
-                targets: list[tuple[str | int, ...]] = []
-                for result in tool_results(message):
-                    targets.extend(
-                        _append_chat_message(
-                            messages,
-                            {
-                                "role": "tool",
-                                "tool_call_id": result.call_id,
-                                "content": [
-                                    {"type": "text", "text": result.content}
-                                ],
+                role = _completion_message_role(message, messages)
+                content = openai_content(message.parts)
+                if role == "user":
+                    content = _openai_user_blocks(content)
+                payload: dict[str, Any] = {
+                    "role": role,
+                    "content": content,
+                }
+                calls = tool_calls(message)
+                if calls:
+                    payload["tool_calls"] = [
+                        {
+                            "id": call.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(thaw_json(call.arguments), ensure_ascii=False),
                             },
-                        )
+                        }
+                        for call in calls
+                    ]
+                targets = _append_chat_message(messages, payload)
+                spans.append(
+                    EncodedMessageSpan(
+                        message.message_id,
+                        targets,
                     )
-                spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
-                continue
-            role = _completion_message_role(message, messages)
-            content = openai_content(message.parts)
-            if role == "user":
-                content = _openai_user_blocks(content)
-            payload: dict[str, Any] = {
-                "role": role,
-                "content": content,
-            }
-            calls = tool_calls(message)
-            if calls:
-                payload["tool_calls"] = [
-                    {
-                        "id": call.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": call.name,
-                            "arguments": json.dumps(thaw_json(call.arguments), ensure_ascii=False),
-                        },
-                    }
-                    for call in calls
-                ]
-            targets = _append_chat_message(messages, payload)
-            spans.append(
-                EncodedMessageSpan(
-                    message.message_id,
-                    targets,
                 )
-            )
+            finally:
+                if spans and spans[-1].message_id == message.message_id:
+                    paths = tuple(("messages", i) for i in range(wire_start, len(messages)))
+                    spans[-1] = replace(spans[-1], wire_item_paths=paths or spans[-1].cache_targets)
         if not messages:
             messages.append({"role": "user", "content": "Continue."})
 
@@ -240,10 +244,8 @@ class OpenAICompletionDecoder:
         self.tool_calls_finalized = False
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+        self.builder.observe_frame(frame)
         payload = dict(frame.payload)
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(usage)))
         choices = list(payload.get("choices") or [])
         if not choices:
             return ()

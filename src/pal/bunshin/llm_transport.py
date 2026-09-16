@@ -161,6 +161,13 @@ class ManagerProxyTransport:
             with self._lock:
                 self._active_connections.pop(owner.owner_id, None)
 
+    def report_attempt(self, endpoint, attempt) -> None:
+        self.report_usage(endpoint, request_id=attempt.attempt_id, usage=attempt.usage,
+                          provider_response_count=1, status=attempt.status,
+                          provider_generation_id=attempt.provider_generation_id,
+                          returned_model=attempt.returned_model, actual_provider=attempt.actual_provider,
+                          service_tier=attempt.service_tier)
+
     def report_usage(
         self,
         endpoint: LLMEndpointModel,
@@ -168,8 +175,16 @@ class ManagerProxyTransport:
         request_id: str,
         usage: LLMUsageIR,
         provider_response_count: int,
+        status: str = "success",
+        provider_generation_id: str = "",
+        returned_model: str = "",
+        actual_provider: str = "",
+        service_tier: str = "",
     ) -> None:
         payload = {
+            "status": status, "provider_generation_id": provider_generation_id,
+            "returned_model": returned_model, "actual_provider": actual_provider,
+            "service_tier": service_tier,
             "run_id": self.run_id,
             "request_id": str(request_id),
             "endpoint_id": str(endpoint.endpoint_id),

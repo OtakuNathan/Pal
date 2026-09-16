@@ -257,6 +257,32 @@ class LLMUsageIR:
     cost: float = 0.0
     reported: bool = False
     usage_anomaly: str = ""
+    reported_fields: tuple[str, ...] = ()
+    raw_counters: tuple[tuple[str, int | float], ...] = ()
+    raw_input_tokens: int | None = None
+    input_accounting: str = "unknown"
+    final: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reported_fields", tuple(self.reported_fields))
+        object.__setattr__(self, "raw_counters", tuple(tuple(item) for item in self.raw_counters))
+
+    def has(self, field_name: str) -> bool:
+        # Old serialized IR did not retain zero/missing distinctions. A
+        # nonzero counter is evidence; a legacy zero must remain unknown.
+        return field_name in self.reported_fields or bool(
+            self.reported and self.input_accounting == "unknown" and not self.reported_fields and getattr(self, field_name, 0)
+        )
+
+    @property
+    def cost_reported(self) -> bool:
+        return self.has("cost")
+
+    @property
+    def cache_partition_reported(self) -> bool:
+        return all(self.has(name) for name in (
+            "input_tokens", "cached_input_tokens", "cache_write_input_tokens"
+        ))
 
 
 @dataclass(frozen=True)
@@ -266,6 +292,10 @@ class LLMResponseIR:
     usage: LLMUsageIR = field(default_factory=LLMUsageIR)
     provider_response_count: int = 1
     provider_generation_id: str = ""
+    returned_model: str = ""
+    actual_provider: str = ""
+    service_tier: str = ""
+    attempt_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -273,6 +303,7 @@ class LLMResponseIR:
             "finish_reason",
             LLMFinishReason(self.finish_reason),
         )
+        object.__setattr__(self, "attempt_ids", tuple(self.attempt_ids))
         if self.message.role != MessageRole.ASSISTANT:
             raise ValueError("LLM response message must have the assistant role")
 

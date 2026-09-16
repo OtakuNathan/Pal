@@ -400,6 +400,53 @@ class BunshinLLMTransportTests(unittest.TestCase):
         with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOXED": "0"}, clear=False):
             asyncio.run(scenario())
 
+    def test_failed_and_cancelled_receipts_settle_cost_once(self) -> None:
+        async def scenario(status: str) -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal-bunshin-attempt-receipt-"))
+            database, manager = _manager(root)
+            endpoint = _register_endpoint()
+            manager.runs["run-1"] = BunshinRunState(
+                bunshin_id="bunshin-1", run_id="run-1",
+                pack=BunshinInvocationPack(invocation_id="bunshin-1",
+                    metadata={"preferred_endpoint_id": endpoint.endpoint_id}),
+            )
+            manager._llm_json_transport = _CapturingTransport()
+            server, _ = await start_manager_server(root, manager._handle_client)
+            try:
+                from pal.llm.attempts import LLMAttemptResult
+                from pal.llm.usage_normalization import usage_from_mapping
+                proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
+                request = EncodedTransportRequest(
+                    request_id="failed-receipt", wire_shape=WireShape.OPENAI_COMPLETION,
+                    timeout_seconds=30, payload={"model": endpoint.model_id}, stream=True,
+                )
+                await asyncio.to_thread(lambda: list(proxy.frames(endpoint, request)))
+                attempt = LLMAttemptResult(
+                    attempt_id=request.request_id, endpoint_id=endpoint.endpoint_id,
+                    model_id=endpoint.model_id, provider=endpoint.provider, status=status,
+                    usage=usage_from_mapping({"prompt_tokens": 7, "cost": 0.125}),
+                    provider_generation_id="failed-generation", actual_provider="fixture",
+                )
+                await asyncio.to_thread(proxy.report_attempt, endpoint, attempt)
+                await asyncio.to_thread(proxy.report_attempt, endpoint, attempt)
+                snapshot = manager._llm_usage_ledger.snapshot()
+                self.assertEqual(snapshot["cost"], 0.125)
+                self.assertTrue(snapshot["cost_complete"])
+                self.assertEqual(snapshot["cache_partition_unknown_attempt_count"], 1)
+                self.assertEqual(snapshot["failed_attempt_count"], 1)
+                self.assertEqual(snapshot["successful_request_count"], 0)
+                self.assertTrue(manager._llm_transport_requests[request.request_id].usage_received)
+            finally:
+                server.close()
+                await server.wait_closed()
+                await cleanup_manager_endpoint(root)
+                database.close()
+
+        with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOXED": "0"}, clear=False):
+            for status in ("failed", "cancelled"):
+                with self.subTest(status=status):
+                    asyncio.run(scenario(status))
+
     def test_stale_endpoint_is_rejected_before_provider_invocation(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal-bunshin-stale-endpoint-"))

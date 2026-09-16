@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from pal.llm.ir import (
@@ -33,8 +33,6 @@ from pal.llm.shapes.base import (
 from pal.llm.shapes.builder import (
     ResponseIRBuilder,
     canonical_finish_reason,
-    merge_usage,
-    usage_from_mapping,
 )
 from pal.llm.shapes.common import json_object, responses_tool_definition, tool_results
 from pal.shared.json_values import thaw_json
@@ -48,82 +46,87 @@ class OpenAIResponseCodec(ShapeCodecBase):
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
-            targets: list[tuple[str | int, ...]] = []
-            if (
-                message.role == MessageRole.ASSISTANT
-                and message.replay is not None
-                and message.replay.matches(
-                    wire_shape=self.wire_shape,
-                    endpoint_id=context.endpoint_id,
-                    model_id=context.model_id,
-                )
-            ):
-                output = message.replay.payload.get("output")
-                if isinstance(output, (list, tuple)):
-                    input_items.extend(thaw_json(item) for item in output if isinstance(item, Mapping))
-                    spans.append(EncodedMessageSpan(message.message_id))
-                    continue
-            if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
-                text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
-                if text:
-                    input_items.append(
-                        {
-                            "role": message.role.value,
-                            "content": [{"type": "input_text", "text": text}],
-                        }
+            wire_start = len(input_items)
+            try:
+                targets: list[tuple[str | int, ...]] = []
+                if (
+                    message.role == MessageRole.ASSISTANT
+                    and message.replay is not None
+                    and message.replay.matches(
+                        wire_shape=self.wire_shape,
+                        endpoint_id=context.endpoint_id,
+                        model_id=context.model_id,
                     )
-                    targets.append(("input", len(input_items) - 1, "content", 0))
-                spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
-                continue
-            if message.role == MessageRole.TOOL:
-                for result in tool_results(message):
-                    input_items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": result.call_id,
-                            "output": [
-                                {"type": "input_text", "text": result.content}
-                            ],
-                        }
-                    )
-                    targets.append(
-                        ("input", len(input_items) - 1, "output", 0)
-                    )
-                spans.append(
-                    EncodedMessageSpan(message.message_id, tuple(targets))
-                )
-                continue
-            if message.role == MessageRole.ASSISTANT:
-                text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
-                if text:
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": text}],
-                        }
-                    )
-                for part in message.parts:
-                    if isinstance(part, ToolCallIR):
+                ):
+                    output = message.replay.payload.get("output")
+                    if isinstance(output, (list, tuple)):
+                        input_items.extend(thaw_json(item) for item in output if isinstance(item, Mapping))
+                        spans.append(EncodedMessageSpan(message.message_id))
+                        continue
+                if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
+                    text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
+                    if text:
                         input_items.append(
                             {
-                                "type": "function_call",
-                                "call_id": part.call_id,
-                                "name": part.name,
-                                "arguments": json.dumps(thaw_json(part.arguments), ensure_ascii=False),
+                                "role": message.role.value,
+                                "content": [{"type": "input_text", "text": text}],
                             }
                         )
+                        targets.append(("input", len(input_items) - 1, "content", 0))
+                    spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
+                    continue
+                if message.role == MessageRole.TOOL:
+                    for result in tool_results(message):
+                        input_items.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": result.call_id,
+                                "output": [
+                                    {"type": "input_text", "text": result.content}
+                                ],
+                            }
+                        )
+                        targets.append(
+                            ("input", len(input_items) - 1, "output", 0)
+                        )
+                    spans.append(
+                        EncodedMessageSpan(message.message_id, tuple(targets))
+                    )
+                    continue
+                if message.role == MessageRole.ASSISTANT:
+                    text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
+                    if text:
+                        input_items.append(
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": text}],
+                            }
+                        )
+                    for part in message.parts:
+                        if isinstance(part, ToolCallIR):
+                            input_items.append(
+                                {
+                                    "type": "function_call",
+                                    "call_id": part.call_id,
+                                    "name": part.name,
+                                    "arguments": json.dumps(thaw_json(part.arguments), ensure_ascii=False),
+                                }
+                            )
+                    spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
+                    continue
+                content = _responses_user_content(message.parts)
+                if content:
+                    input_items.append({"role": "user", "content": content})
+                    if isinstance(content[-1], Mapping):
+                        targets.append(("input", len(input_items) - 1, "content", len(content) - 1))
                 spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
-                continue
-            content = _responses_user_content(message.parts)
-            if content:
-                input_items.append({"role": "user", "content": content})
-                if isinstance(content[-1], Mapping):
-                    targets.append(("input", len(input_items) - 1, "content", len(content) - 1))
-            spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
+            finally:
+                if spans and spans[-1].message_id == message.message_id:
+                    paths = tuple(("input", i) for i in range(wire_start, len(input_items)))
+                    spans[-1] = replace(spans[-1], wire_item_paths=paths or spans[-1].cache_targets)
         if not input_items:
             input_items.append({"role": "user", "content": "Continue."})
-
         policy = request.policy
         payload: dict[str, Any] = {
             "model": context.model_id,
@@ -156,25 +159,12 @@ class OpenAIResponseDecoder:
         self.complete = False
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+        self.builder.observe_frame(frame)
         payload = dict(frame.payload)
-        generation_id = str(payload.get("id") or "").strip()
-        if generation_id:
-            self.builder.set_generation_id(generation_id)
         if isinstance(payload.get("output"), (list, tuple)):
             return self._feed_complete_response(payload)
         event_type = str(payload.get("type") or "").strip()
         response = payload.get("response")
-        if isinstance(response, Mapping):
-            nested_generation_id = str(response.get("id") or "").strip()
-            if nested_generation_id:
-                self.builder.set_generation_id(nested_generation_id)
-            usage = response.get("usage")
-            if isinstance(usage, Mapping):
-                self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(usage)))
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            self.builder.set_usage(merge_usage(self.builder.usage, usage_from_mapping(usage)))
-
         updates: list[LLMResponseUpdate] = []
         if event_type in {"response.output_text.delta", "response.refusal.delta"}:
             text = str(payload.get("delta") or "")
@@ -294,9 +284,6 @@ class OpenAIResponseDecoder:
                 )
                 if committed is not None:
                     updates.append(committed)
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            self.builder.set_usage(usage_from_mapping(usage))
         self._refresh_replay()
         finish = (
             "error"

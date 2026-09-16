@@ -63,6 +63,11 @@ def response_to_payload(response: LLMResponseIR) -> dict[str, Any]:
         "finish_reason": response.finish_reason.value,
         "usage": dict(response.usage.__dict__),
         "provider_response_count": response.provider_response_count,
+        "provider_generation_id": response.provider_generation_id,
+        "returned_model": response.returned_model,
+        "actual_provider": response.actual_provider,
+        "service_tier": response.service_tier,
+        "attempt_ids": list(response.attempt_ids),
     }
 
 
@@ -73,6 +78,11 @@ def response_from_payload(payload: Mapping[str, Any]) -> LLMResponseIR:
         message=message_from_payload(dict(payload.get("message") or {})),
         finish_reason=LLMFinishReason(str(payload.get("finish_reason") or "error")),
         usage=LLMUsageIR(**{key: usage[key] for key in LLMUsageIR.__dataclass_fields__ if key in usage}),
+        provider_generation_id=str(payload.get("provider_generation_id") or ""),
+        returned_model=str(payload.get("returned_model") or ""),
+        actual_provider=str(payload.get("actual_provider") or ""),
+        service_tier=str(payload.get("service_tier") or ""),
+        attempt_ids=tuple(payload.get("attempt_ids") or ()),
         provider_response_count=(
             1
             if raw_provider_response_count is None
