@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from pal.llm.ir import (
     GenerationPolicyIR,
     LLMMessageIR,
@@ -148,6 +150,8 @@ def _record_round(
     codec = OpenAIResponseCodec()
     plan = coordinator.plan(request, context)
     encoded = coordinator.inject(codec.encode(request, context), plan)
+    diagnostics = coordinator.start_attempt(plan, request=request, context=context,
+        raw_encoded=codec.encode(request, context), encoded=encoded, request_id=request_id)
     coordinator.record_success(
         plan,
         usage,
@@ -159,7 +163,8 @@ def _record_round(
         wire_shape="openai_response",
         finish_reason="tool_calls",
         elapsed_seconds=0.5,
-        provider_generation_id=f"resp-{request_id}",
+        provider_generation_id=f"resp-{request_id}", actual_provider="fixture-provider",
+        **diagnostics,
     )
     return plan, encoded
 
@@ -247,7 +252,7 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
         base,
         context_b,
         request_id="llm-b",
-        usage=LLMUsageIR(reported=True, input_tokens=1000, uncached_input_tokens=1000),
+        usage=usage_from_mapping({"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}),
     )
     record_b = coordinator_b.snapshot()["recent_attempts"][-1]
     assert record_b["profile_id"] == "openrouter_astra_provider_implicit"
@@ -275,12 +280,11 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     )
 
 
-def test_unknown_profile_falls_back_to_default_policy() -> None:
+def test_unknown_profile_fails_before_provider_invocation() -> None:
+    from pal.llm.prompt_cache import CacheProfileError
     context = _astra_context({"prompt_cache": {"cache_profile": "bogus_profile"}})
-    coordinator = PromptCacheCoordinator()
-    plan = coordinator.plan(_request(), context)
-    assert plan.dialect.value == "openrouter_openai_explicit"
-    assert plan.profile_id == ""
+    with pytest.raises(CacheProfileError, match="unknown cache_profile"):
+        PromptCacheCoordinator().plan(_request(), context)
 
 
 def test_usage_missing_and_reported_zero_are_distinct_observations() -> None:
@@ -305,7 +309,7 @@ def test_usage_missing_and_reported_zero_are_distinct_observations() -> None:
         request,
         context,
         request_id="llm-zero",
-        usage=LLMUsageIR(reported=True, input_tokens=1000, uncached_input_tokens=1000),
+        usage=usage_from_mapping({"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}),
     )
     snapshot = coordinator.snapshot()
     assert snapshot["observation"]["state"] == "reported_zero"
@@ -322,6 +326,7 @@ def test_stall_suspected_after_three_flat_rounds_and_clears_on_recovery() -> Non
         rounds.append(_extend_active_tool_request(rounds[-1], suffix=suffix))
     flat_usage = LLMUsageIR(
         reported=True,
+        reported_fields=("input_tokens", "cached_input_tokens", "cache_write_input_tokens"),
         input_tokens=90_000,
         cached_input_tokens=8_000,
         uncached_input_tokens=82_000,
@@ -370,6 +375,7 @@ def test_frontier_marker_submitted_without_observed_read() -> None:
         request_id="llm-zw",
         usage=LLMUsageIR(
             reported=True,
+            reported_fields=("input_tokens", "cached_input_tokens", "cache_write_input_tokens"),
             input_tokens=50_000,
             uncached_input_tokens=50_000,
         ),
@@ -382,5 +388,6 @@ def test_frontier_marker_submitted_without_observed_read() -> None:
     record = snapshot["recent_attempts"][-1]
     assert record["zero_read_write_with_applied_markers"] is True
     assert record["usage_invariant_violation"] is False
-    # PR2 is evidence exposure only: confirmation stays as-is.
-    assert snapshot["confirmed_checkpoint"] is True
+    # Submitted candidates survive, without claiming observed readability.
+    assert snapshot["confirmed_checkpoint"] is False
+    assert snapshot["submitted_checkpoint"] is True

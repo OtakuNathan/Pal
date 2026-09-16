@@ -280,6 +280,7 @@ class TurnExecutor:
                     response_mode=LLMResponseMode.CHAT,
                 ),
             )
+        continuation.llm_round_index = getattr(continuation, "llm_round_index", 0) + 1
         llm_runtime = self.context.require_port("llm:llm")
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
@@ -993,6 +994,11 @@ class TurnExecutor:
         ).strip()
         metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["turn_id"] = continuation.turn_id
+        metadata["task_id"] = str(assembly_context.task_id or "")
+        metadata["llm_round_index"] = getattr(continuation, "llm_round_index", 0)
+        if "cache_policy_snapshot" in continuation.turn_settings_snapshot:
+            metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         memory_service = self.context.port_registry.get("memory:memory")
@@ -1131,6 +1137,11 @@ class TurnExecutor:
         # silently fall back to the resident Pal scope.
         metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["turn_id"] = continuation.turn_id
+        metadata["task_id"] = str(assembly_context.task_id or "")
+        metadata["llm_round_index"] = getattr(continuation, "llm_round_index", 0)
+        if "cache_policy_snapshot" in continuation.turn_settings_snapshot:
+            metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(

@@ -37,6 +37,7 @@ from pal.llm.ir import (
     ThinkingLevel,
     WireShape,
 )
+from pal.llm.prompt_cache import CacheProfileError
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.models import LLMEndpointModel
 from pal.llm.output_recovery import (
@@ -209,6 +210,7 @@ class LLMRuntime(LLMRuntimePort):
     active_endpoint_id: str | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
+    cache_profile_generation: int = field(default=1, init=False)
     model_hooks: ModelHookRegistry = field(init=False)
     provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
     _detached_stream_tasks: set[asyncio.Task[Any]] = field(
@@ -230,6 +232,8 @@ class LLMRuntime(LLMRuntimePort):
             # Initial decoding and post-continuation normalization are two
             # passes through one immutable provider-response pipeline.
             self.provider_response_hooks = self.endpoint_invoker.response_hooks
+        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
+            self.endpoint_invoker.attempt_sink = self.usage_ledger.record_attempt
         self.endpoint_retry_attempts = max(
             1,
             int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
@@ -261,6 +265,7 @@ class LLMRuntime(LLMRuntimePort):
             refresh_settings()
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
         self.model_hooks = ModelHookRegistry.load(runtime_root)
+        self.cache_profile_generation += 1
         refresh_credentials = getattr(
             self.endpoint_invoker,
             "refresh_credentials",
@@ -463,9 +468,12 @@ class LLMRuntime(LLMRuntimePort):
         for endpoint_index, endpoint in enumerate(endpoints):
             try:
                 prepared = self._compile_request(endpoint, request)
+            except CacheProfileError as exc:
+                self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
+                return _failure_result(str(exc), exc=exc)
             except Exception as exc:
                 last_error = exc
-                error_kind = self._record_failure(endpoint, exc, 0)
+                error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
                 self._emit(
                     "llm_endpoint_exhausted",
                     endpoint=endpoint,
@@ -498,9 +506,7 @@ class LLMRuntime(LLMRuntimePort):
                             response,
                         )
                     if response.finish_reason == LLMFinishReason.ERROR:
-                        raise LLMEndpointResponseError(
-                            f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
-                        )
+                        raise _accounted_response_error(endpoint, response)
                     if requested_preferred is None and endpoint.endpoint_id != self.active_endpoint_id:
                         self.set_active_endpoint(endpoint.endpoint_id)
                     if endpoint_index > 0:
@@ -576,9 +582,13 @@ class LLMRuntime(LLMRuntimePort):
         for endpoint in endpoints:
             try:
                 prepared = self._compile_request(endpoint, request)
+            except CacheProfileError as exc:
+                self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
+                yield LLMResponseUpdate(_failure_result(str(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
+                return
             except Exception as exc:
                 last_error = exc
-                error_kind = self._record_failure(endpoint, exc, 0)
+                error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
                 self._emit(
                     "llm_endpoint_exhausted",
                     endpoint=endpoint,
@@ -630,16 +640,12 @@ class LLMRuntime(LLMRuntimePort):
                             recovered,
                         )
                         if recovered.finish_reason == LLMFinishReason.ERROR:
-                            raise LLMEndpointResponseError(
-                                f"endpoint {endpoint.endpoint_id} output recovery returned finish_reason=error"
-                            )
+                            raise _accounted_response_error(endpoint, recovered)
                         recovery_updates = tuple(stream_recovery_updates(completed, recovered))
                         yield from recovery_updates
                         completed = recovered
                     if completed.finish_reason == LLMFinishReason.ERROR:
-                        raise LLMEndpointResponseError(
-                            f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
-                        )
+                        raise _accounted_response_error(endpoint, completed)
                     self._record_success(endpoint, completed)
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
@@ -867,6 +873,25 @@ class LLMRuntime(LLMRuntimePort):
             else {}
         )
 
+    def cache_policy_snapshot(self) -> dict[str, Any]:
+        from pal.shared.json_values import thaw_json
+        snapshots = {}
+        for endpoint in self.endpoint_resolver.endpoints:
+            policy = thaw_json((getattr(endpoint, "capabilities_blob", None) or {}).get("prompt_cache") or {})
+            hook = self.model_hooks.hooks.get(str(endpoint.model_id))
+            explicit = "cache_profile" in policy or "dialect" in policy
+            if not explicit and hook is not None and hook.cache_profile_ref:
+                policy["cache_profile"] = hook.cache_profile_ref
+                policy["origin"] = "model_hook"
+            else:
+                policy["origin"] = "endpoint" if policy else "default"
+            policy["generation"] = str(self.cache_profile_generation)
+            snapshots[str(endpoint.endpoint_id)] = {
+                "model_id": str(endpoint.model_id), "provider": str(endpoint.provider),
+                "wire_shape": str(endpoint.wire_shape), "policy": policy,
+            }
+        return snapshots
+
     def _compile_request(
         self,
         endpoint: LLMEndpointModel,
@@ -879,6 +904,21 @@ class LLMRuntime(LLMRuntimePort):
             if bool(request.metadata.get("model_hooks_already_applied"))
             else self.model_hooks.apply(endpoint.model_id, endpoint_request)
         )
+        from pal.llm.prompt_cache import CacheProfileError, validate_cache_policy
+        from pal.llm.shapes.base import ShapeContext
+        snapshot = request.metadata.get("cache_policy_snapshot")
+        if snapshot is None:
+            snapshot = self.cache_policy_snapshot()
+        selection = snapshot.get(str(endpoint.endpoint_id))
+        if selection is None or any(selection.get(key) != str(getattr(endpoint, key)) for key in ("model_id", "provider", "wire_shape")):
+            raise CacheProfileError("endpoint identity changed after turn cache-policy snapshot")
+        policy = dict(selection["policy"])
+        validate_cache_policy(ShapeContext(
+            wire_shape=WireShape(endpoint.wire_shape), endpoint_id=endpoint.endpoint_id,
+            model_id=endpoint.model_id, provider_id=endpoint.provider,
+            capabilities={"prompt_cache": policy},
+        ))
+        hooked = replace(hooked, metadata={**dict(hooked.metadata), "cache_policy_selection": policy})
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)
         budget = hooked.policy.thinking_budget_tokens
@@ -1193,15 +1233,17 @@ class LLMRuntime(LLMRuntimePort):
             provider=endpoint.provider,
             usage=response.usage,
             provider_response_count=response.provider_response_count,
+            usage_accounted=bool(response.attempt_ids) and isinstance(self._invoker(), ShapeEndpointInvoker),
         )
 
-    def _record_failure(self, endpoint: LLMEndpointModel, exc: Exception, attempt: int) -> str:
+    def _record_failure(self, endpoint: LLMEndpointModel, exc: Exception, attempt: int, *, provider_attempt: bool = True) -> str:
         error_kind = _classify_retry_error(exc)
-        self.usage_ledger.record_failed_attempt(
-            endpoint_id=endpoint.endpoint_id,
-            model_id=endpoint.model_id,
-            provider=endpoint.provider,
-        )
+        if provider_attempt and not getattr(exc, "llm_attempt_recorded", False):
+            self.usage_ledger.record_failed_attempt(
+                endpoint_id=endpoint.endpoint_id,
+                model_id=endpoint.model_id,
+                provider=endpoint.provider,
+            )
         self._emit(
             "llm_endpoint_attempt_failed",
             endpoint=endpoint,
@@ -1424,3 +1466,9 @@ def _is_stub_endpoint(endpoint: LLMEndpointModel) -> bool:
         capabilities.get("stub")
         or str(endpoint.base_url).startswith("stub://")
     )
+
+
+def _accounted_response_error(endpoint: Any, response: LLMResponseIR) -> LLMEndpointResponseError:
+    error = LLMEndpointResponseError(f"endpoint {endpoint.endpoint_id} returned finish_reason=error")
+    error.llm_attempt_recorded = bool(response.attempt_ids)
+    return error

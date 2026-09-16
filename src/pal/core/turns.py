@@ -148,6 +148,7 @@ class TurnContinuation:
     interrupted: bool = False
     interrupt_reason: str = ""
     tool_batch_count: int = 0
+    llm_round_index: int = 0
     last_response_mode: str = "chat"
     preferred_llm_endpoint_id: str | None = None
     preferred_llm_model_id: str | None = None

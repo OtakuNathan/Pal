@@ -8,6 +8,8 @@ All fixtures are local; no paid calls are made.
 from __future__ import annotations
 
 import json
+
+import pytest
 from dataclasses import replace
 
 from pal.llm.ir import (
@@ -132,10 +134,16 @@ def _record_round(
     *,
     request_id: str,
     usage: LLMUsageIR,
+    actual_provider: str = "fixture-provider",
+    previous_gap: float | None = None,
 ) -> None:
     codec = OpenAIResponseCodec()
     plan = coordinator.plan(request, context)
     encoded = coordinator.inject(codec.encode(request, context), plan)
+    diagnostics = coordinator.start_attempt(plan, request=request, context=context,
+        raw_encoded=codec.encode(request, context), encoded=encoded, request_id=request_id)
+    if previous_gap is not None:
+        diagnostics["previous_request_gap"] = previous_gap
     coordinator.record_success(
         plan,
         usage,
@@ -147,7 +155,8 @@ def _record_round(
         wire_shape="openai_response",
         finish_reason="tool_calls",
         elapsed_seconds=0.5,
-        provider_generation_id=f"resp-{request_id}",
+        provider_generation_id=f"resp-{request_id}", actual_provider=actual_provider,
+        **diagnostics,
     )
 
 
@@ -165,6 +174,7 @@ def test_zero_write_counterexample_is_exposed_without_semantics_change() -> None
         plan,
         LLMUsageIR(
             reported=True,
+            reported_fields=("input_tokens", "cached_input_tokens", "cache_write_input_tokens"),
             input_tokens=50_000,
             uncached_input_tokens=50_000,
             cached_input_tokens=0,
@@ -195,8 +205,9 @@ def test_zero_write_counterexample_is_exposed_without_semantics_change() -> None
     # The counterexample the plan demands: markers were applied, the provider
     # reported usage, and nothing was read or written. The diagnostic says so.
     assert record["zero_read_write_with_applied_markers"] is True
-    # PR1 is diagnostics-only: confirmation semantics stay exactly as before.
-    assert snapshot["confirmed_checkpoint"] is True
+    # Receipt success is not evidence of a readable boundary.
+    assert snapshot["confirmed_checkpoint"] is False
+    assert snapshot["submitted_checkpoint"] is True
 
 
 def test_multi_round_records_keep_stable_key_and_bound_the_ring() -> None:
@@ -336,3 +347,35 @@ def test_attempt_records_never_contain_raw_keys() -> None:
     assert record["cache_key_hash"] != plan.cache_key
     assert len(record["scope_key_hash"]) == 16
     assert len(record["cache_key_hash"]) == 16
+
+
+@pytest.mark.parametrize("interruption", ["missing", "provider_unknown", "provider_changed", "long_gap"])
+def test_uncertain_round_breaks_consecutive_stall_evidence(interruption):
+    from pal.llm.usage_normalization import usage_from_mapping
+    coordinator = PromptCacheCoordinator()
+    context = _astra_context()
+    request = _base_request()
+    usage = usage_from_mapping({"input_tokens": 100000,
+        "input_tokens_details": {"cached_tokens": 2000, "cache_write_tokens": 0}})
+    for index in range(3):
+        _record_round(coordinator, request, context, request_id=f"before-{index}", usage=usage)
+        request = _extend_active_tool_request(request, suffix=f"before-{index}")
+    assert coordinator.snapshot()["observation"]["stall_suspected"]
+    kwargs = {}
+    if interruption == "missing":
+        interrupted_usage = usage_from_mapping({"input_tokens": 100000})
+    else:
+        interrupted_usage = usage
+    if interruption.startswith("provider_"):
+        kwargs["actual_provider"] = "" if interruption == "provider_unknown" else "other-provider"
+    if interruption == "long_gap":
+        kwargs["previous_gap"] = 301
+    _record_round(coordinator, request, context, request_id="interrupted", usage=interrupted_usage, **kwargs)
+    observation = coordinator.snapshot()["observation"]
+    assert not observation["stall_suspected"]
+    assert observation["stall_reason"] == ("cache_fields_missing" if interruption == "missing" else interruption)
+    provider = "other-provider" if interruption == "provider_changed" else "fixture-provider"
+    for index in range(3):
+        request = _extend_active_tool_request(request, suffix=f"after-{index}")
+        _record_round(coordinator, request, context, request_id=f"after-{index}", usage=usage, actual_provider=provider)
+        assert coordinator.snapshot()["observation"]["stall_suspected"] == (index == 2)

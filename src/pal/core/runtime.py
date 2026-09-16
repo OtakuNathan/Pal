@@ -279,7 +279,9 @@ class TurnManager:
                     think_levels = dict(snapshot())
                 except Exception:
                     think_levels = {}
+        cache_snapshot = getattr(llm_runtime, "cache_policy_snapshot", None)
         return {
+            **({"cache_policy_snapshot": cache_snapshot()} if callable(cache_snapshot) else {}),
             "think_levels": think_levels,
             "prompt_log_enabled": bool(self.state.prompt_log_enabled),
         }

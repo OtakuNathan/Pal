@@ -9,6 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from threading import RLock
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from pal.llm.ir import (
@@ -18,6 +19,7 @@ from pal.llm.ir import (
     PromptRegionIR,
     WireShape,
 )
+from pal.llm.cache_diagnostics import describe_request, compare_requests
 from pal.llm.shapes.base import EncodedMessageSpan, EncodedRequest, ShapeContext
 from pal.shared.json_values import thaw_json
 
@@ -53,12 +55,13 @@ class CacheProfile:
     stable_prompt_cache_key: bool = True
     stable_session_id: bool = True
     telemetry_usage_required: bool = True
+    version: str = "2"
 
 
 # Canary comparison groups from the same-turn cache plan. The default for a
 # matching endpoint stays legacy until a paid canary picks a winner; switching
 # is a configuration action, never an automatic behavior.
-CACHE_PROFILES: dict[str, CacheProfile] = {
+CACHE_PROFILES: Mapping[str, CacheProfile] = MappingProxyType({
     "openrouter_astra_legacy_explicit": CacheProfile(
         profile_id="openrouter_astra_legacy_explicit",
         strategy="legacy_explicit",
@@ -77,7 +80,7 @@ CACHE_PROFILES: dict[str, CacheProfile] = {
         allow_explicit_breakpoints=False,
         allow_stable_anchor_marker=True,
     ),
-}
+})
 
 
 @dataclass(frozen=True)
@@ -94,9 +97,9 @@ class PromptCacheTrackPlan:
     ttl: str
     decision: str = "unavailable"
     epoch_key: str = ""
-    confirmed_message_id: str = ""
-    confirmed_fingerprint: str = ""
-    confirmed_prefix_tokens: int = 0
+    submitted_message_id: str = ""
+    submitted_fingerprint: str = ""
+    submitted_prefix_tokens: int = 0
     target_message_id: str = ""
     target_fingerprint: str = ""
     target_prefix_tokens: int = 0
@@ -104,6 +107,15 @@ class PromptCacheTrackPlan:
     reprocessed_delta_tokens: int = 0
     projected_reprocessed_tokens: int = 0
     estimated_net_tokens: float = 0.0
+
+
+    @property
+    def confirmed_message_id(self) -> str:
+        return ""
+
+    @property
+    def confirmed_prefix_tokens(self) -> int:
+        return 0
 
 
 @dataclass(frozen=True)
@@ -117,6 +129,9 @@ class PromptCachePlan:
     plan_sequence: int = 0
     profile_id: str = ""
     strategy: str = ""
+    profile_version: str = ""
+    profile_origin: str = "default"
+    profile_generation: str = ""
     allow_stable_anchor_marker: bool = False
     anchor: PromptCacheTrackPlan = field(
         default_factory=lambda: PromptCacheTrackPlan("anchor", "5m")
@@ -130,18 +145,18 @@ class PromptCachePlan:
         return self.dialect != PromptCacheDialect.NONE
 
     @property
-    def confirmed_message_id(self) -> str:
-        return self.frontier.confirmed_message_id or self.anchor.confirmed_message_id
+    def submitted_message_id(self) -> str:
+        return self.frontier.submitted_message_id or self.anchor.submitted_message_id
 
     @property
     def candidate_message_id(self) -> str:
         return self.anchor.candidate_message_id or self.frontier.candidate_message_id
 
     @property
-    def confirmed_prefix_tokens(self) -> int:
+    def submitted_prefix_tokens(self) -> int:
         return max(
-            self.anchor.confirmed_prefix_tokens,
-            self.frontier.confirmed_prefix_tokens,
+            self.anchor.submitted_prefix_tokens,
+            self.frontier.submitted_prefix_tokens,
         )
 
     @property
@@ -173,23 +188,32 @@ class PromptCachePlan:
         )
 
 
+    @property
+    def confirmed_message_id(self) -> str:
+        return ""
+
+    @property
+    def confirmed_prefix_tokens(self) -> int:
+        return 0
+
+
 @dataclass
 class _TrackStats:
-    confirmed_message_id: str = ""
-    confirmed_fingerprint: str = ""
-    confirmed_prefix_tokens: int = 0
-    confirmed_sequence: int = 0
-    last_used_at: float = 0.0
+    submitted_message_id: str = ""
+    submitted_fingerprint: str = ""
+    submitted_prefix_tokens: int = 0
+    submitted_sequence: int = 0
+    last_recorded_sequence: int = 0
     accumulated_reprocessed_tokens: int = 0
     last_decision: str = ""
     submitted_at: float = 0.0
 
     def clear(self) -> None:
-        self.confirmed_message_id = ""
-        self.confirmed_fingerprint = ""
-        self.confirmed_prefix_tokens = 0
-        self.confirmed_sequence = 0
-        self.last_used_at = 0.0
+        self.submitted_message_id = ""
+        self.submitted_fingerprint = ""
+        self.submitted_prefix_tokens = 0
+        self.submitted_sequence = 0
+        self.last_recorded_sequence = 0
         self.accumulated_reprocessed_tokens = 0
         self.last_decision = ""
         self.submitted_at = 0.0
@@ -213,8 +237,14 @@ class _ScopeStats:
     usage_observed_at: float = 0.0
     last_observed_read_at: float = 0.0
     last_observation: str = "usage_missing"
+    observed_sequence: int = -1
+    actual_provider: str = ""
+    wire_description: dict[str, Any] | None = None
+    last_round_index: int = -1
+    round_attempt_count: int = 0
     stall_suspected: bool = False
     stall_rounds: int = 0
+    stall_reason: str = "insufficient_observations"
     recent_cache_observations: deque[tuple[int, int, int]] = field(
         default_factory=lambda: deque(maxlen=8)
     )
@@ -243,16 +273,6 @@ class PromptCacheCoordinator:
     max_attempt_records: int = 128
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
     _last_plan: PromptCachePlan | None = field(default=None, init=False, repr=False)
-    _last_plans_by_scope: dict[str, PromptCachePlan] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
-    _last_requests_by_scope: dict[str, LLMRequestIR] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
     _attempt_records: deque[dict[str, Any]] = field(
         default_factory=deque,
         init=False,
@@ -273,31 +293,33 @@ class PromptCacheCoordinator:
 
             encoded = codec_for_shape(context.wire_shape).encode(request, context)
         profile = _resolve_profile(context)
-        dialect = _resolve_dialect(context)
-        if profile is not None:
-            if (
-                dialect != PromptCacheDialect.NONE
-                and dialect != profile.dialect
-            ):
-                logger.warning(
-                    "cache_profile %s overrides requested dialect %s",
-                    profile.profile_id,
-                    dialect.value,
-                )
-            dialect = profile.dialect
+        dialect = profile.dialect if profile else _resolve_dialect(context)
+        profile_fields = {
+            "profile_id": profile.profile_id if profile else "",
+            "strategy": profile.strategy if profile else "",
+            "profile_version": profile.version if profile else "",
+            "profile_origin": str(_prompt_cache_capabilities(context.capabilities).get("origin") or ("endpoint" if profile else "default")),
+            "profile_generation": str(_prompt_cache_capabilities(context.capabilities).get("generation") or "0"),
+        }
         scope_key = _scope_key(request, context, dialect)
         if dialect == PromptCacheDialect.NONE:
             plan = PromptCachePlan(scope_key=scope_key, cache_key="", dialect=dialect)
             self._remember(plan, request=request)
             return plan
         if not _supports_explicit_breakpoints(dialect):
+            with self._lock:
+                stats = self._stats.setdefault(scope_key, _ScopeStats())
+                stats.next_plan_sequence += 1
+                sequence = stats.next_plan_sequence
+            reusable_ids = {m.message_id for m in request.messages if m.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC}
             plan = PromptCachePlan(
                 scope_key=scope_key,
                 cache_key=_cache_key(request, context),
                 dialect=dialect,
                 decision="provider_automatic",
-                profile_id=profile.profile_id if profile is not None else "",
-                strategy=profile.strategy if profile is not None else "",
+                **profile_fields,
+                plan_sequence=sequence,
+                estimated_prefix_tokens=max((span.estimated_cache_prefix_tokens for span in encoded.message_spans if span.message_id in reusable_ids), default=0),
             )
             if profile is not None and profile.allow_stable_anchor_marker:
                 spans = {span.message_id: span for span in encoded.message_spans}
@@ -379,7 +401,7 @@ class PromptCacheCoordinator:
             stable_fingerprint = (
                 stable_span.cache_prefix_fingerprint if stable_span else ""
             )
-            if not stats.anchor.confirmed_message_id:
+            if not stats.anchor.submitted_message_id:
                 if (
                     stats.anchor_base_fingerprint
                     and stats.anchor_base_fingerprint != stable_fingerprint
@@ -390,7 +412,7 @@ class PromptCacheCoordinator:
                 stats.anchor_base_fingerprint = stable_fingerprint
 
             frontier_epoch = (
-                f"{anchor_span.message_id}:{anchor_span.cache_prefix_fingerprint}"
+                f"{request.metadata.get("turn_id", "")}:{anchor_span.cache_prefix_fingerprint}"
                 if anchor_span is not None
                 else ""
             )
@@ -449,7 +471,7 @@ class PromptCacheCoordinator:
                 target=frontier_span,
                 fallback_prefix_tokens=max(
                     stable_base_tokens,
-                    stats.anchor.confirmed_prefix_tokens,
+                    stats.anchor.submitted_prefix_tokens,
                 ),
                 minimum_prefix_tokens=minimum,
                 read_multiplier=read_multiplier,
@@ -467,21 +489,21 @@ class PromptCacheCoordinator:
             breakpoints.append(
                 _breakpoint_from_span("stable", stable_span, stable_ttl)
             )
-        anchor_confirmed = spans.get(anchor_plan.confirmed_message_id)
-        if anchor_confirmed is not None:
+        anchor_submitted = spans.get(anchor_plan.submitted_message_id)
+        if anchor_submitted is not None:
             breakpoints.append(
                 _breakpoint_from_span(
-                    "anchor_confirmed",
-                    anchor_confirmed,
+                    "anchor_submitted",
+                    anchor_submitted,
                     anchor_ttl,
                 )
             )
-        frontier_confirmed = spans.get(frontier_plan.confirmed_message_id)
-        if frontier_confirmed is not None:
+        frontier_submitted = spans.get(frontier_plan.submitted_message_id)
+        if frontier_submitted is not None:
             breakpoints.append(
                 _breakpoint_from_span(
-                    "frontier_confirmed",
-                    frontier_confirmed,
+                    "frontier_submitted",
+                    frontier_submitted,
                     frontier_ttl,
                 )
             )
@@ -517,8 +539,7 @@ class PromptCacheCoordinator:
             plan_sequence=plan_sequence,
             anchor=anchor_plan,
             frontier=frontier_plan,
-            profile_id=profile.profile_id if profile is not None else "",
-            strategy=profile.strategy if profile is not None else "",
+            **profile_fields,
         )
         self._remember(plan, request=request)
         return plan
@@ -586,7 +607,7 @@ class PromptCacheCoordinator:
                 ):
                     applied_breakpoint_message_ids.append(breakpoint.message_id)
         elif plan.allow_stable_anchor_marker and plan.breakpoints:
-            # Hybrid: provider implicit caching stays active; the verified
+            # Hybrid: provider implicit caching stays active; the selected
             # stable anchor participates as an explicit breakpoint without
             # forcing explicit-only mode. No prompt_cache_options is sent.
             for breakpoint in plan.breakpoints:
@@ -604,6 +625,37 @@ class PromptCacheCoordinator:
             applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_message_ids),
         )
 
+    def start_attempt(self, plan: PromptCachePlan, *, request: LLMRequestIR,
+                      context: ShapeContext, encoded: EncodedRequest,
+                      raw_encoded: EncodedRequest, request_id: str) -> dict[str, Any]:
+        description = describe_request(request, raw_encoded, encoded)
+        now = time.monotonic()
+        with self._lock:
+            stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
+            changes = compare_requests(stats.wire_description, description)
+            gap = now - stats.last_request_at if stats.last_request_at else None
+            round_index = int(request.metadata.get("llm_round_index") or 0)
+            stats.round_attempt_count = stats.round_attempt_count + 1 if stats.last_round_index == round_index else 1
+            stats.last_round_index = round_index
+            stats.wire_description = description
+            stats.last_request_at = now
+            stats.last_access_at = now
+            for track, track_plan in ((stats.anchor, plan.anchor), (stats.frontier, plan.frontier)):
+                _record_track_success(track, track_plan, plan_sequence=plan.plan_sequence,
+                    applied_breakpoint_ids=frozenset(encoded.applied_cache_breakpoint_message_ids), observed_at=now)
+            self._prune_scopes_locked(now=now, keep=plan.scope_key)
+            diagnostics = {
+                **{k: v for k, v in description.items() if not k.startswith("_")}, **changes,
+                "task_id": str(request.metadata.get("task_id") or ""),
+                "turn_id": str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or ""),
+                "round_index": round_index, "attempt_index": stats.round_attempt_count,
+                "previous_request_gap": gap, "started_at": time.time(),
+                "retry_recovery_cause": str(request.metadata.get("max_output_recovery_stage") or request.metadata.get("retry_cause") or ""),
+                "session_key_hash": _short_hash(str(encoded.extra_body.get("session_id") or "")),
+            }
+        self.record_attempt(plan, status="submitted", request_id=request_id, **diagnostics)
+        return diagnostics
+
     def record_attempt(
         self,
         plan: PromptCachePlan,
@@ -620,6 +672,7 @@ class PromptCacheCoordinator:
         provider_generation_id: str = "",
         usage: LLMUsageIR | None = None,
         applied_cache_breakpoint_message_ids: tuple[str, ...] = (),
+        **diagnostics: Any,
     ) -> None:
         """Append one bounded, hash-only attempt record for cache diagnosis.
 
@@ -627,8 +680,6 @@ class PromptCacheCoordinator:
         or retry semantics. Raw scope/cache keys never enter records.
         """
 
-        if not plan.enabled:
-            return
         applied = tuple(str(item) for item in applied_cache_breakpoint_message_ids)
         usage_reported = usage is not None and usage.reported
         cached = max(0, int(usage.cached_input_tokens)) if usage is not None else 0
@@ -640,9 +691,12 @@ class PromptCacheCoordinator:
             observation = "read_observed"
         elif write > 0:
             observation = "write_observed"
-        else:
+        elif usage.has("cached_input_tokens") and usage.has("cache_write_input_tokens"):
             observation = "reported_zero"
+        else:
+            observation = "usage_missing"
         record: dict[str, Any] = {
+            **diagnostics,
             "attempt_id": str(request_id or ""),
             "provider_generation_id": str(provider_generation_id or ""),
             "status": str(status or "unknown"),
@@ -651,6 +705,9 @@ class PromptCacheCoordinator:
             "dialect": plan.dialect.value,
             "cache_mode": "explicit" if explicit else "automatic",
             "profile_id": str(plan.profile_id or ""),
+            "profile_version": plan.profile_version,
+            "profile_origin": plan.profile_origin,
+            "profile_generation": plan.profile_generation,
             "strategy": str(plan.strategy or ""),
             "endpoint_id": str(endpoint_id or ""),
             "model_id": str(model_id or ""),
@@ -679,14 +736,22 @@ class PromptCacheCoordinator:
             "error": str(error or "")[:200],
             "elapsed_seconds": round(float(elapsed_seconds or 0.0), 6),
             "usage_reported": bool(usage_reported),
+            "reported_fields": list(usage.reported_fields) if usage else [],
+            "raw_usage_counters": dict(usage.raw_counters) if usage else {},
+            "input_accounting": usage.input_accounting if usage else "unknown",
+            "usage_final": bool(usage and usage.final),
+            "actual_cost": usage.cost if usage and usage.cost_reported else None,
+            "cost_status": "reported" if usage and usage.cost_reported else "unknown",
+            "output_tokens": usage.output_tokens if usage else 0,
+            "reasoning_tokens": usage.reasoning_tokens if usage else 0,
             "input_tokens": max(0, int(usage.input_tokens)) if usage is not None else 0,
             "cached_input_tokens": cached,
             "cache_write_input_tokens": write,
             "uncached_input_tokens": (
                 max(0, int(usage.uncached_input_tokens)) if usage is not None else 0
             ),
-            "read_observed": cached > 0,
-            "write_observed": write > 0,
+            "read_observed": bool(usage and usage.has("cached_input_tokens") and cached > 0),
+            "write_observed": bool(usage and usage.has("cache_write_input_tokens") and write > 0),
             "observation": observation,
             "usage_anomaly": (
                 str(getattr(usage, "usage_anomaly", "") or "")
@@ -696,6 +761,7 @@ class PromptCacheCoordinator:
             "usage_invariant_violation": bool(
                 usage_reported
                 and usage is not None
+                and usage.cache_partition_reported
                 and usage.input_tokens
                 != usage.uncached_input_tokens + cached + write
             ),
@@ -703,12 +769,26 @@ class PromptCacheCoordinator:
             # stall signature this record exists to expose. Evidence only;
             # confirmation semantics are unchanged.
             "zero_read_write_with_applied_markers": bool(
-                applied and usage_reported and cached == 0 and write == 0
+                applied and observation == "reported_zero"
             ),
             "recorded_at": time.time(),
         }
         with self._lock:
-            self._attempt_records.append(record)
+            previous = next((item for item in self._attempt_records if request_id and item["attempt_id"] == request_id), None)
+            if previous is not None:
+                if previous["status"] != "submitted":
+                    return
+                previous.update(record)
+            else:
+                self._attempt_records.append(record)
+            if status in {"failed", "cancelled"}:
+                stats = self._stats.get(plan.scope_key)
+                if stats is not None and plan.plan_sequence >= stats.observed_sequence:
+                    stats.observed_sequence = plan.plan_sequence
+                    stats.stall_suspected = False
+                    stats.stall_rounds = 0
+                    stats.stall_reason = "attempt_failed"
+                    stats.recent_cache_observations.clear()
             while len(self._attempt_records) > max(1, int(self.max_attempt_records)):
                 self._attempt_records.popleft()
 
@@ -754,45 +834,50 @@ class PromptCacheCoordinator:
         finish_reason: str = "",
         elapsed_seconds: float = 0.0,
         provider_generation_id: str = "",
+        **diagnostics: Any,
     ) -> None:
-        if not plan.enabled:
-            return
         applied_breakpoint_ids = frozenset(applied_cache_breakpoint_message_ids)
         with self._lock:
             stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
             now = time.monotonic()
             stats.last_access_at = now
             self._prune_scopes_locked(now=now, keep=plan.scope_key)
-            if usage.reported:
-                stats.observations.append(
-                    (
-                        now,
-                        max(0, int(usage.cached_input_tokens)),
-                        max(0, int(usage.cache_write_input_tokens)),
+            if plan.plan_sequence == stats.next_plan_sequence and plan.plan_sequence > stats.observed_sequence:
+                if usage.has("cached_input_tokens"):
+                    stats.observations.append(
+                        (
+                            now,
+                            max(0, int(usage.cached_input_tokens)),
+                            max(0, int(usage.cache_write_input_tokens)),
+                        )
                     )
-                )
-            _record_track_success(
-                stats.anchor,
-                plan.anchor,
-                plan_sequence=plan.plan_sequence,
-                applied_breakpoint_ids=applied_breakpoint_ids,
-                observed_at=now,
-            )
-            if plan.frontier.epoch_key == stats.frontier_epoch:
                 _record_track_success(
-                    stats.frontier,
-                    plan.frontier,
+                    stats.anchor,
+                    plan.anchor,
                     plan_sequence=plan.plan_sequence,
                     applied_breakpoint_ids=applied_breakpoint_ids,
                     observed_at=now,
                 )
-            _record_scope_observation(
-                stats,
-                usage,
-                estimated_prefix_tokens=plan.estimated_prefix_tokens,
-                scope_hash=_short_hash(plan.scope_key),
-                observed_at=now,
-            )
+                if plan.frontier.epoch_key == stats.frontier_epoch:
+                    _record_track_success(
+                        stats.frontier,
+                        plan.frontier,
+                        plan_sequence=plan.plan_sequence,
+                        applied_breakpoint_ids=applied_breakpoint_ids,
+                        observed_at=now,
+                    )
+                _record_scope_observation(
+                    stats,
+                    usage,
+                    estimated_prefix_tokens=plan.estimated_prefix_tokens,
+                    scope_hash=_short_hash(plan.scope_key),
+                    observed_at=now,
+                    sequence=plan.plan_sequence,
+                    actual_provider=str(diagnostics.get("actual_provider") or ""),
+                    comparable=bool(diagnostics.get("prefix_preserved") or diagnostics.get("change_reason") == "first_request"),
+                    dynamic_unchanged=bool(diagnostics.get("dynamic_unchanged", True)),
+                    previous_gap=diagnostics.get("previous_request_gap"),
+                )
         self.record_attempt(
             plan,
             status="success",
@@ -806,6 +891,7 @@ class PromptCacheCoordinator:
             provider_generation_id=provider_generation_id,
             usage=usage,
             applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_ids),
+            **diagnostics,
         )
 
     def snapshot(self) -> dict[str, Any]:
@@ -829,20 +915,22 @@ class PromptCacheCoordinator:
                 "breakpoints": (
                     [item.label for item in plan.breakpoints] if plan is not None else []
                 ),
-                "confirmed_checkpoint": bool(
+                "confirmed_checkpoint": False,
+                "confirmed_prefix_tokens": 0,
+                "submitted_checkpoint": bool(
                     last_stats
                     and (
-                        last_stats.anchor.confirmed_message_id
-                        or last_stats.frontier.confirmed_message_id
+                        last_stats.anchor.submitted_message_id
+                        or last_stats.frontier.submitted_message_id
                     )
                 ),
                 "candidate_checkpoint": bool(
                     plan and plan.candidate_message_id
                 ),
-                "confirmed_prefix_tokens": (
+                "submitted_prefix_tokens": (
                     max(
-                        last_stats.anchor.confirmed_prefix_tokens,
-                        last_stats.frontier.confirmed_prefix_tokens,
+                        last_stats.anchor.submitted_prefix_tokens,
+                        last_stats.frontier.submitted_prefix_tokens,
                     )
                     if last_stats
                     else 0
@@ -870,7 +958,7 @@ class PromptCacheCoordinator:
                 "last_scope_key": plan.scope_key if plan is not None else "",
                 "attempt_record_count": len(self._attempt_records),
                 "recent_attempts": [
-                    dict(item) for item in list(self._attempt_records)[-20:]
+                    thaw_json(item) for item in list(self._attempt_records)[-20:]
                 ],
                 "observation": {
                     "state": (
@@ -882,6 +970,7 @@ class PromptCacheCoordinator:
                     "last_observed_read_at": (
                         last_stats.last_observed_read_at if last_stats else 0.0
                     ),
+                    "last_observed_sequence": last_stats.observed_sequence if last_stats else -1,
                     "last_request_at": (
                         last_stats.last_request_at if last_stats else 0.0
                     ),
@@ -889,6 +978,7 @@ class PromptCacheCoordinator:
                         bool(last_stats.stall_suspected) if last_stats else False
                     ),
                     "stall_rounds": last_stats.stall_rounds if last_stats else 0,
+                    "stall_reason": last_stats.stall_reason if last_stats else "no_requests",
                 },
                 "anchor": _track_snapshot(
                     plan.anchor if plan is not None else None,
@@ -900,175 +990,14 @@ class PromptCacheCoordinator:
                 ),
             }
 
-    def warm_deadline_snapshot(
-        self,
-        *,
-        logical_scope_id: str = "",
-        endpoint_id: str = "",
-    ) -> dict[str, Any]:
-        """Expose the current confirmed A lifetime without leaking its prefix."""
+    def warm_deadline_snapshot(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
+        return {"eligible": False, "reason": "boundary_evidence_unavailable",
+                "anchor_epoch": "", "anchor_ttl_seconds": 0, "prefix_tokens": 0}
 
-        with self._lock:
-            matching = [
-                (self._stats.get(scope_key), plan)
-                for scope_key, plan in self._last_plans_by_scope.items()
-                if _scope_key_matches(
-                    scope_key,
-                    logical_scope_id=logical_scope_id,
-                    endpoint_id=endpoint_id,
-                )
-            ]
-            matching = [item for item in matching if item[0] is not None]
-            if not matching:
-                return {
-                    "eligible": False,
-                    "anchor_epoch": "",
-                    "anchor_ttl_seconds": 0,
-                    "prefix_tokens": 0,
-                }
-            stats, plan = max(
-                matching,
-                key=lambda item: item[0].last_access_at,
-            )
-            anchor = stats.anchor if stats is not None else None
-            confirmed_fingerprint = (
-                anchor.confirmed_fingerprint if anchor is not None else ""
-            )
-            confirmed_message_id = (
-                anchor.confirmed_message_id if anchor is not None else ""
-            )
-            ttl_seconds = _ttl_seconds(plan.anchor.ttl)
-            remaining_ttl_seconds = max(
-                0,
-                int(
-                    ttl_seconds
-                    - max(
-                        0.0,
-                        time.monotonic()
-                        - (anchor.last_used_at if anchor is not None else 0.0),
-                    )
-                ),
-            )
-            # The reminder is specifically about confirmed A.  Candidate A
-            # and the same-turn B frontier may be larger, but neither is a
-            # durable prefix that the idle compact request can rely on.
-            prefix_tokens = (
-                anchor.confirmed_prefix_tokens if anchor is not None else 0
-            )
-            eligible = bool(
-                _supports_explicit_breakpoints(plan.dialect)
-                and confirmed_message_id
-                and confirmed_fingerprint
-                and ttl_seconds > 0
-            )
-            epoch_material = "|".join(
-                (
-                    plan.scope_key,
-                    confirmed_message_id,
-                    confirmed_fingerprint,
-                    str(anchor.confirmed_sequence if anchor is not None else 0),
-                )
-            )
-            return {
-                "eligible": eligible,
-                "anchor_epoch": (
-                    hashlib.sha256(epoch_material.encode("utf-8")).hexdigest()[:24]
-                    if eligible
-                    else ""
-                ),
-                "context_tokens": max(prefix_tokens, plan.estimated_prefix_tokens),
-                "anchor_ttl": plan.anchor.ttl,
-                "anchor_ttl_seconds": ttl_seconds,
-                "anchor_remaining_ttl_seconds": remaining_ttl_seconds,
-                "prefix_tokens": prefix_tokens,
-                "dialect": plan.dialect.value,
-            }
-
-    def confirmed_anchor_request(
-        self,
-        *,
-        logical_scope_id: str = "",
-        endpoint_id: str = "",
-    ) -> dict[str, Any]:
-        """Return the exact in-memory request prefix through confirmed A.
-
-        This is deliberately ephemeral.  It is used by resident compaction to
-        replay provider-identical bytes without persisting prompt material.
-        """
-
-        with self._lock:
-            candidates = [
-                (self._stats.get(scope_key), plan)
-                for scope_key, plan in self._last_plans_by_scope.items()
-                if _scope_key_matches(
-                    scope_key,
-                    logical_scope_id=logical_scope_id,
-                    endpoint_id=endpoint_id,
-                )
-            ]
-            candidates = [
-                (stats, plan)
-                for stats, plan in candidates
-                if stats is not None
-                and stats.anchor.confirmed_message_id
-                and stats.anchor.confirmed_fingerprint
-            ]
-            if not candidates:
-                return {}
-            stats, plan = max(
-                candidates,
-                key=lambda item: item[0].last_access_at,
-            )
-            ttl_seconds = _ttl_seconds(plan.anchor.ttl)
-            if (
-                stats.anchor.last_used_at <= 0
-                or ttl_seconds <= 0
-                or time.monotonic() - stats.anchor.last_used_at
-                >= ttl_seconds
-            ):
-                return {}
-            request = self._last_requests_by_scope.get(plan.scope_key)
-            if request is None:
-                return {}
-            anchor_id = stats.anchor.confirmed_message_id
-            anchor_index = next(
-                (
-                    index
-                    for index, message in enumerate(request.messages)
-                    if message.message_id == anchor_id
-                ),
-                None,
-            )
-            if anchor_index is None:
-                return {}
-            scope_parts = plan.scope_key.split("|")
-            return {
-                "request": replace(
-                    request,
-                    messages=request.messages[: anchor_index + 1],
-                    metadata={
-                        **dict(request.metadata),
-                        "preferred_endpoint_id": (
-                            scope_parts[1] if len(scope_parts) > 1 else ""
-                        ),
-                        "preferred_model_id": (
-                            scope_parts[2] if len(scope_parts) > 2 else ""
-                        ),
-                        "preferred_endpoint_source": "prompt_cache_replay",
-                        "endpoint_fallback_policy": "strict_preferred",
-                    },
-                ),
-                "anchor_message_id": anchor_id,
-                "anchor_fingerprint": stats.anchor.confirmed_fingerprint,
-                "prefix_tokens": stats.anchor.confirmed_prefix_tokens,
-                "dialect": plan.dialect.value,
-                "wire_shape": (
-                    scope_parts[3]
-                    if len(scope_parts) > 3
-                    else ""
-                ),
-                "scope_key": plan.scope_key,
-            }
+    def confirmed_anchor_request(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
+        # Submitted marker bytes remain in the planner, but must not authorize
+        # a cache-dependent compaction request or an expiry assertion.
+        return {}
 
     def _remember(
         self,
@@ -1078,13 +1007,6 @@ class PromptCacheCoordinator:
     ) -> None:
         with self._lock:
             self._last_plan = plan
-            self._last_plans_by_scope[plan.scope_key] = plan
-            # Raw prompt replay is useful only for the singleton resident
-            # conversation.  Retaining full Bunshin requests for every scope
-            # would turn this small policy index into an accidental prompt
-            # archive with O(scope * context) memory use.
-            if plan.scope_key.split("|", 1)[0] == "pal:resident":
-                self._last_requests_by_scope[plan.scope_key] = request
 
     def _prune_scopes_locked(self, *, now: float, keep: str = "") -> None:
         for scope_key, stats in tuple(self._stats.items()):
@@ -1095,8 +1017,6 @@ class PromptCacheCoordinator:
                 and now - stats.last_access_at > self.observation_ttl_seconds
             ):
                 self._stats.pop(scope_key, None)
-                self._last_plans_by_scope.pop(scope_key, None)
-                self._last_requests_by_scope.pop(scope_key, None)
         maximum = max(1, int(self.max_scope_count))
         if len(self._stats) <= maximum:
             return
@@ -1109,8 +1029,6 @@ class PromptCacheCoordinator:
         )
         for _, scope_key in candidates[: max(0, len(self._stats) - maximum)]:
             self._stats.pop(scope_key, None)
-            self._last_plans_by_scope.pop(scope_key, None)
-            self._last_requests_by_scope.pop(scope_key, None)
 
 
 def _last_cacheable_span(
@@ -1140,17 +1058,21 @@ def _invalidate_missing_confirmation(
     stats: _TrackStats,
     spans: Mapping[str, EncodedMessageSpan],
 ) -> bool:
-    if not stats.confirmed_message_id:
+    if not stats.submitted_message_id:
         return False
-    span = spans.get(stats.confirmed_message_id)
+    span = spans.get(stats.submitted_message_id)
+    if span is None:
+        span = next((item for item in spans.values() if item.cache_prefix_fingerprint == stats.submitted_fingerprint), None)
+        if span is not None:
+            stats.submitted_message_id = span.message_id
     if (
         span is None
         or not span.cache_prefix_fingerprint
-        or span.cache_prefix_fingerprint != stats.confirmed_fingerprint
+        or span.cache_prefix_fingerprint != stats.submitted_fingerprint
     ):
         stats.clear()
         return True
-    stats.confirmed_prefix_tokens = span.estimated_cache_prefix_tokens
+    stats.submitted_prefix_tokens = span.estimated_cache_prefix_tokens
     return False
 
 
@@ -1171,9 +1093,9 @@ def _evaluate_track(
         "name": name,
         "ttl": ttl,
         "epoch_key": epoch_key,
-        "confirmed_message_id": stats.confirmed_message_id,
-        "confirmed_fingerprint": stats.confirmed_fingerprint,
-        "confirmed_prefix_tokens": stats.confirmed_prefix_tokens,
+        "submitted_message_id": stats.submitted_message_id,
+        "submitted_fingerprint": stats.submitted_fingerprint,
+        "submitted_prefix_tokens": stats.submitted_prefix_tokens,
     }
     if target is None:
         return PromptCacheTrackPlan(**common)
@@ -1185,15 +1107,15 @@ def _evaluate_track(
         "target_prefix_tokens": target_tokens,
     }
     if (
-        stats.confirmed_message_id == target.message_id
-        and stats.confirmed_fingerprint == target.cache_prefix_fingerprint
+        stats.submitted_message_id == target.message_id
+        and stats.submitted_fingerprint == target.cache_prefix_fingerprint
     ):
         return PromptCacheTrackPlan(
             **target_fields,
-            decision="confirmed_reuse",
+            decision="submitted_reuse",
         )
 
-    base_tokens = max(stats.confirmed_prefix_tokens, fallback_prefix_tokens)
+    base_tokens = 0  # Submitted/estimated bytes are not confirmed readable coverage.
     delta = max(0, target_tokens - base_tokens)
     projected = stats.accumulated_reprocessed_tokens + delta
     estimated_net = (
@@ -1278,43 +1200,42 @@ def _short_hash(value: str) -> str:
 
 
 def _record_scope_observation(
-    stats: _ScopeStats,
-    usage: LLMUsageIR,
-    *,
-    estimated_prefix_tokens: int,
-    scope_hash: str,
-    observed_at: float,
+    stats: _ScopeStats, usage: LLMUsageIR, *, estimated_prefix_tokens: int,
+    scope_hash: str, observed_at: float, sequence: int, actual_provider: str,
+    comparable: bool, dynamic_unchanged: bool, previous_gap: float | None,
 ) -> None:
-    """Record request-level provider evidence; never attributed to a track."""
-
-    stats.last_request_at = observed_at
-    if not usage.reported:
-        stats.last_observation = "usage_missing"
+    if sequence <= stats.observed_sequence:
         return
-    cached = max(0, int(usage.cached_input_tokens))
-    write = max(0, int(usage.cache_write_input_tokens))
-    stats.usage_observed_at = observed_at
-    if cached > 0:
-        stats.last_observation = "read_observed"
+    stats.observed_sequence = sequence
+    cached, write = usage.cached_input_tokens, usage.cache_write_input_tokens
+    complete = usage.has("cached_input_tokens") and usage.has("cache_write_input_tokens")
+    stats.last_observation = ("read_observed" if usage.has("cached_input_tokens") and cached > 0 else
+                             "write_observed" if usage.has("cache_write_input_tokens") and write > 0 else
+                             "reported_zero" if complete else "usage_missing")
+    if stats.last_observation != "usage_missing":
+        stats.usage_observed_at = observed_at
+    if usage.has("cached_input_tokens") and cached > 0:
         stats.last_observed_read_at = observed_at
-    elif write > 0:
-        stats.last_observation = "write_observed"
-    else:
-        stats.last_observation = "reported_zero"
-    stats.recent_cache_observations.append(
-        (int(estimated_prefix_tokens), cached, write)
+    same_provider = bool(actual_provider) and (not stats.actual_provider or actual_provider == stats.actual_provider)
+    stats.actual_provider = actual_provider
+    stats.stall_reason = (
+        "cache_fields_missing" if not complete else "usage_anomaly" if usage.usage_anomaly else
+        "provider_unknown" if not actual_provider else "provider_changed" if not same_provider else
+        "prefix_changed_or_unknown" if not comparable else "dynamic_changed" if not dynamic_unchanged else
+        "long_gap" if previous_gap is not None and previous_gap > 300 else ""
     )
+    if stats.stall_reason:
+        stats.recent_cache_observations.clear()
+        stats.stall_suspected = False
+        stats.stall_rounds = 0
+        return
+    stats.recent_cache_observations.append((int(estimated_prefix_tokens), cached, write))
     stalled, rounds = _detect_frontier_stall(stats.recent_cache_observations)
     if stalled and not stats.stall_suspected:
-        logger.warning(
-            "cache_frontier_stalled_suspected: reusable prefix keeps growing "
-            "while observed reads stay flat and writes stay zero "
-            "(scope_hash=%s, rounds=%d)",
-            scope_hash,
-            rounds,
-        )
+        logger.warning("cache_frontier_stalled_suspected (scope_hash=%s, rounds=%d)", scope_hash, rounds)
     stats.stall_suspected = stalled
     stats.stall_rounds = rounds if stalled else 0
+    stats.stall_reason = "suspected" if stalled else "insufficient_stall_evidence"
 
 
 def _detect_frontier_stall(
@@ -1348,32 +1269,26 @@ def _record_track_success(
     applied_breakpoint_ids: frozenset[str],
     observed_at: float,
 ) -> None:
-    if plan_sequence < stats.confirmed_sequence:
+    if plan_sequence <= stats.last_recorded_sequence:
         return
+    stats.last_recorded_sequence = plan_sequence
     if (
         plan.candidate_message_id
         and plan.candidate_message_id in applied_breakpoint_ids
     ):
-        if not stats.submitted_at:
+        if stats.submitted_message_id != plan.candidate_message_id:
             stats.submitted_at = observed_at
-        stats.confirmed_message_id = plan.candidate_message_id
-        stats.confirmed_fingerprint = plan.target_fingerprint
-        stats.confirmed_prefix_tokens = plan.target_prefix_tokens
-        stats.confirmed_sequence = plan_sequence
-        stats.last_used_at = observed_at
+        stats.submitted_message_id = plan.candidate_message_id
+        stats.submitted_fingerprint = plan.target_fingerprint
+        stats.submitted_prefix_tokens = plan.target_prefix_tokens
+        stats.submitted_sequence = plan_sequence
         stats.accumulated_reprocessed_tokens = 0
         return
-    if (
-        plan.confirmed_message_id
-        and plan.confirmed_message_id == stats.confirmed_message_id
-        and plan.confirmed_fingerprint == stats.confirmed_fingerprint
-    ):
-        stats.last_used_at = observed_at
     if plan.reprocessed_delta_tokens <= 0:
         return
     if (
-        plan.confirmed_message_id != stats.confirmed_message_id
-        or plan.confirmed_fingerprint != stats.confirmed_fingerprint
+        plan.submitted_message_id != stats.submitted_message_id
+        or plan.submitted_fingerprint != stats.submitted_fingerprint
     ):
         return
     stats.accumulated_reprocessed_tokens += plan.reprocessed_delta_tokens
@@ -1386,11 +1301,12 @@ def _track_snapshot(
     return {
         "decision": plan.decision if plan is not None else "not_planned",
         "ttl": plan.ttl if plan is not None else "",
-        "submitted": bool(stats and stats.submitted_at),
         "submitted_at": stats.submitted_at if stats else 0.0,
-        "confirmed": bool(stats and stats.confirmed_message_id),
+        "confirmed": False,
+        "confirmed_prefix_tokens": 0,
+        "submitted": bool(stats and stats.submitted_message_id),
         "candidate": bool(plan and plan.candidate_message_id),
-        "confirmed_prefix_tokens": stats.confirmed_prefix_tokens if stats else 0,
+        "submitted_prefix_tokens": stats.submitted_prefix_tokens if stats else 0,
         "target_prefix_tokens": plan.target_prefix_tokens if plan else 0,
         "candidate_delta_tokens": plan.reprocessed_delta_tokens if plan else 0,
         "accumulated_reprocessed_tokens": (
@@ -1403,26 +1319,33 @@ def _track_snapshot(
     }
 
 
+class CacheProfileError(ValueError):
+    """Invalid trusted cache configuration; reject before provider invocation."""
+
+
 def _resolve_profile(context: ShapeContext) -> CacheProfile | None:
-    """Resolve a named cache profile from trusted endpoint capabilities.
-
-    Precedence: endpoint capabilities cache_profile > default resolution. An
-    unknown name keeps the default policy and warns; a profile never silently
-    overrides an explicitly requested dialect without a diagnostic.
-    """
-
     override = _prompt_cache_capabilities(context.capabilities)
-    name = str(override.get("cache_profile") or "").strip().lower()
+    if override.get("enabled") is False:
+        return None
+    name = str(override.get("cache_profile") or "").strip()
     if not name:
         return None
     profile = CACHE_PROFILES.get(name)
     if profile is None:
-        logger.warning(
-            "unknown cache_profile %r; keeping default cache policy",
-            name,
-        )
-        return None
+        raise CacheProfileError(f"unknown cache_profile: {name}")
+    if (context.provider_id.strip().lower() != "openrouter"
+            or context.model_id != "openai/gpt-6-astra"
+            or context.wire_shape != WireShape.OPENAI_RESPONSE):
+        raise CacheProfileError(f"cache_profile {name} requires OpenRouter openai/gpt-6-astra Responses")
+    requested = override.get("dialect")
+    if requested and requested != profile.dialect.value:
+        raise CacheProfileError("cache_profile conflicts with explicit dialect")
     return profile
+
+
+def validate_cache_policy(context: ShapeContext) -> None:
+    _resolve_profile(context)
+    _resolve_dialect(context)
 
 
 def _resolve_dialect(context: ShapeContext) -> PromptCacheDialect:
@@ -1433,8 +1356,8 @@ def _resolve_dialect(context: ShapeContext) -> PromptCacheDialect:
     if requested:
         try:
             return PromptCacheDialect(requested)
-        except ValueError:
-            return PromptCacheDialect.NONE
+        except ValueError as exc:
+            raise CacheProfileError(f"unknown cache dialect: {requested}") from exc
 
     provider = str(context.provider_id or "").strip().lower()
     base_url = str(context.base_url or "").strip().lower()
@@ -1509,20 +1432,11 @@ def _scope_key(
             context.model_id,
             context.wire_shape.value,
             dialect.value,
+            _short_hash(context.provider_id + "|" + context.base_url),
+            str(_prompt_cache_capabilities(context.capabilities).get("cache_profile") or "legacy"),
+            str(_prompt_cache_capabilities(context.capabilities).get("generation") or "0"),
+            str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or ""),
         )
-    )
-
-
-def _scope_key_matches(
-    scope_key: str,
-    *,
-    logical_scope_id: str = "",
-    endpoint_id: str = "",
-) -> bool:
-    parts = str(scope_key or "").split("|", 2)
-    return not (
-        (logical_scope_id and (not parts or parts[0] != logical_scope_id))
-        or (endpoint_id and (len(parts) < 2 or parts[1] != endpoint_id))
     )
 
 
@@ -1533,6 +1447,8 @@ def _cache_key(request: LLMRequestIR, context: ShapeContext) -> str:
             "endpoint": context.endpoint_id,
             "model": context.model_id,
             "shape": context.wire_shape.value,
+            **({"cache_profile": _prompt_cache_capabilities(context.capabilities)["cache_profile"]}
+               if _prompt_cache_capabilities(context.capabilities).get("cache_profile") else {}),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1599,13 +1515,3 @@ def _capability_float(
         return max(0.0, float(value)) if value is not None else float(default)
     except (TypeError, ValueError):
         return float(default)
-
-
-def _ttl_seconds(value: str) -> int:
-    normalized = str(value or "").strip().lower()
-    match = re.fullmatch(r"(\d+)([smh])", normalized)
-    if match is None:
-        return 0
-    amount = int(match.group(1))
-    multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
-    return max(0, amount * multiplier)

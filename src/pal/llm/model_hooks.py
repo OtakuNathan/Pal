@@ -30,6 +30,7 @@ class ModelHook:
     developer_instructions: tuple[str, ...] = ()
     adjust_messages: MessageHook | None = None
     adjust_tools: ToolHook | None = None
+    cache_profile_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.model_id or "").strip():
@@ -126,6 +127,7 @@ def _hook_from_module(module: ModuleType, path: Path) -> ModelHook:
         developer_instructions=tuple(instructions or ()),
         adjust_messages=adjust_messages,
         adjust_tools=adjust_tools,
+        cache_profile_ref=getattr(module, "CACHE_PROFILE_REF", None),
     )
 
 

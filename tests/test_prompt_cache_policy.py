@@ -525,17 +525,17 @@ def test_openai_responses_frontier_marks_tool_output_and_rolls_within_turn() -> 
     _record_success(coordinator, first, LLMUsageIR(reported=True))
 
     reused = coordinator.plan(request, context)
-    assert reused.anchor.decision == "confirmed_reuse"
-    assert reused.frontier.decision == "confirmed_reuse"
+    assert reused.anchor.decision == "submitted_reuse"
+    assert reused.frontier.decision == "submitted_reuse"
 
     extended = _extend_active_tool_request(request, suffix="two")
     advanced = coordinator.plan(extended, context)
-    assert advanced.anchor.decision == "confirmed_reuse"
+    assert advanced.anchor.decision == "submitted_reuse"
     assert advanced.frontier.decision == "economic_advance"
     assert [item.label for item in advanced.breakpoints] == [
         "stable",
-        "anchor_confirmed",
-        "frontier_confirmed",
+        "anchor_submitted",
+        "frontier_submitted",
         "frontier_candidate",
     ]
 
@@ -579,10 +579,10 @@ def test_frontier_resets_when_active_input_changes_but_anchor_survives() -> None
     )
     next_plan = coordinator.plan(next_request, context)
 
-    assert next_plan.anchor.confirmed_message_id == request.messages[2].message_id
-    assert next_plan.frontier.confirmed_message_id == ""
+    assert next_plan.anchor.submitted_message_id == request.messages[2].message_id
+    assert next_plan.frontier.submitted_message_id == ""
     assert next_plan.frontier.decision == "unavailable"
-    assert "frontier_confirmed" not in {
+    assert "frontier_submitted" not in {
         item.label for item in next_plan.breakpoints
     }
 
@@ -636,9 +636,9 @@ def test_anthropic_four_slots_prioritize_anchor_before_frontier_candidate() -> N
     assert both_economic.frontier.decision == "slot_deferred"
     assert [item.label for item in both_economic.breakpoints] == [
         "stable",
-        "anchor_confirmed",
+        "anchor_submitted",
         "anchor_candidate",
-        "frontier_confirmed",
+        "frontier_submitted",
     ]
     assert [item.ttl for item in both_economic.breakpoints] == [
         "1h",
@@ -675,9 +675,9 @@ def test_anthropic_anchor_is_gated_then_survives_the_turn_boundary() -> None:
 
     assert [item.label for item in third.breakpoints] == [
         "stable",
-        "anchor_confirmed",
+        "anchor_submitted",
     ]
-    assert third.anchor.confirmed_message_id == request.messages[2].message_id
+    assert third.anchor.submitted_message_id == request.messages[2].message_id
     assert third.anchor.decision == "economic_batching"
     assert sum(
         "cache_control" in block
@@ -692,61 +692,19 @@ def test_anthropic_anchor_is_gated_then_survives_the_turn_boundary() -> None:
     assert "cache_control" not in payload["messages"][-1]["content"][-1]
 
 
-def test_rolling_batching_keeps_confirmed_until_accumulated_tail_is_economic() -> None:
+def test_unverified_submitted_prefix_does_not_discount_the_economic_base() -> None:
     request = _request()
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-sol",
-        provider_id="OpenAI",
-    )
-    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=2_000)
+    context = ShapeContext(wire_shape=WireShape.OPENAI_RESPONSE, endpoint_id="openai",
+                           model_id="gpt-5.6-sol", provider_id="OpenAI")
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=2000)
     first = coordinator.plan(request, context)
-    _record_success(
-        coordinator,
-        first,
-        LLMUsageIR(
-            input_tokens=10_000,
-            cache_write_input_tokens=5_000,
-            reported=True,
-        ),
-    )
-    next_request = _next_request(request)
-
-    second = coordinator.plan(next_request, context)
-    assert second.anchor.decision == "economic_batching"
-    assert [item.label for item in second.breakpoints] == [
-        "stable",
-        "anchor_confirmed",
-    ]
-    _record_success(coordinator, second, LLMUsageIR(input_tokens=1_000, reported=True))
-
-    advanced = None
-    for _ in range(20):
-        candidate = coordinator.plan(next_request, context)
-        if candidate.candidate_message_id:
-            advanced = candidate
-            break
-        _record_success(
-            coordinator,
-            candidate,
-            LLMUsageIR(input_tokens=1_000, reported=True),
-        )
-
-    assert advanced is not None
-    assert advanced.anchor.decision == "economic_advance"
-    assert [item.label for item in advanced.breakpoints] == [
-        "stable",
-        "anchor_confirmed",
-        "anchor_candidate",
-    ]
-    _record_success(coordinator, advanced, LLMUsageIR(input_tokens=1_000, reported=True))
-    reused = coordinator.plan(next_request, context)
-    assert reused.anchor.decision == "confirmed_reuse"
-    assert [item.label for item in reused.breakpoints] == [
-        "stable",
-        "anchor_confirmed",
-    ]
+    _record_success(coordinator, first, LLMUsageIR(input_tokens=10000, cache_write_input_tokens=5000, reported=True))
+    second = coordinator.plan(_next_request(request), context)
+    assert second.anchor.submitted_message_id == first.anchor.target_message_id
+    assert second.anchor.confirmed_prefix_tokens == 0
+    assert second.anchor.reprocessed_delta_tokens == second.anchor.target_prefix_tokens
+    assert second.anchor.decision == "economic_advance"
+    assert [item.label for item in second.breakpoints] == ["stable", "anchor_submitted", "anchor_candidate"]
 
 
 def test_failed_candidate_is_not_promoted() -> None:
@@ -807,10 +765,10 @@ def test_success_without_applied_candidate_marker_is_not_promoted() -> None:
 
     retry = coordinator.plan(request, context)
     assert retry.anchor.decision == "economic_advance"
-    assert retry.confirmed_message_id == ""
+    assert retry.submitted_message_id == ""
 
 
-def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
+def test_stale_success_cannot_regress_submitted_checkpoint() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
@@ -826,11 +784,11 @@ def test_stale_success_cannot_regress_confirmed_checkpoint() -> None:
     _record_success(coordinator, older, LLMUsageIR(reported=True))
 
     reused = coordinator.plan(request, context)
-    assert reused.anchor.decision == "confirmed_reuse"
-    assert reused.confirmed_message_id == request.messages[2].message_id
+    assert reused.anchor.decision == "submitted_reuse"
+    assert reused.submitted_message_id == request.messages[2].message_id
 
 
-def test_missing_confirmed_message_bootstraps_a_new_cache_epoch() -> None:
+def test_missing_submitted_message_bootstraps_a_new_cache_epoch() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
@@ -862,7 +820,7 @@ def test_missing_confirmed_message_bootstraps_a_new_cache_epoch() -> None:
     reset = coordinator.plan(compacted, context)
 
     assert reset.anchor.decision == "economic_advance"
-    assert reset.confirmed_message_id == ""
+    assert reset.submitted_message_id == ""
     assert [item.label for item in reset.breakpoints] == [
         "stable",
         "anchor_candidate",
@@ -895,8 +853,8 @@ def test_cache_economics_use_only_the_latest_eight_observations() -> None:
         provider_id="OpenAI",
     )
     coordinator = PromptCacheCoordinator()
-    plan = coordinator.plan(request, context)
     for _ in range(10):
+        plan = coordinator.plan(request, context)
         _record_success(
             coordinator,
             plan,
@@ -923,68 +881,15 @@ def test_prompt_cache_scope_accounting_is_lru_bounded() -> None:
     assert coordinator.snapshot()["scope_count"] == 8
 
 
-def test_warm_deadline_snapshot_uses_confirmed_anchor_provider_ttl() -> None:
+def test_warm_deadline_requires_boundary_evidence_not_submission_or_aggregate_reads() -> None:
     request = _request()
-    openai_context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-luna",
-        provider_id="OpenAI",
-    )
-    openai = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    openai_plan = openai.plan(request, openai_context)
-    _record_success(openai, openai_plan, LLMUsageIR(reported=True))
-
-    openai_snapshot = openai.warm_deadline_snapshot()
-    assert openai_snapshot["eligible"] is True
-    assert openai_snapshot["anchor_ttl"] == "30m"
-    assert openai_snapshot["anchor_ttl_seconds"] == 1_800
-    assert 1_798 <= openai_snapshot["anchor_remaining_ttl_seconds"] <= 1_800
-    assert openai_snapshot["anchor_epoch"]
-    assert openai_snapshot["prefix_tokens"] == (
-        openai_plan.anchor.target_prefix_tokens
-    )
-    replay = openai.confirmed_anchor_request(
-        logical_scope_id=request.logical_scope_id,
-        endpoint_id=openai_context.endpoint_id,
-    )
-    assert replay["anchor_message_id"] == request.messages[2].message_id
-    assert replay["request"].messages == request.messages[:3]
-    assert replay["wire_shape"] == WireShape.OPENAI_RESPONSE.value
-
-    # A large mutable same-turn frontier must not inflate an A-based reminder.
-    frontier_request = _active_tool_request(request)
-    openai.plan(frontier_request, openai_context)
-    assert openai.warm_deadline_snapshot()["prefix_tokens"] == (
-        openai_plan.anchor.target_prefix_tokens
-    )
-    assert openai.warm_deadline_snapshot(
-        logical_scope_id=request.logical_scope_id,
-        endpoint_id=openai_context.endpoint_id,
-    )["eligible"] is True
-    assert openai.warm_deadline_snapshot(
-        logical_scope_id=f"{request.logical_scope_id}:compaction",
-        endpoint_id=openai_context.endpoint_id,
-    )["eligible"] is False
-    assert openai.warm_deadline_snapshot(
-        logical_scope_id=request.logical_scope_id,
-        endpoint_id="another-endpoint",
-    )["eligible"] is False
-
-    anthropic_context = ShapeContext(
-        wire_shape=WireShape.ANTHROPIC_MESSAGES,
-        endpoint_id="anthropic",
-        model_id="claude-sonnet",
-        provider_id="Anthropic",
-    )
-    anthropic = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    first = anthropic.plan(request, anthropic_context)
-    _record_success(anthropic, first, LLMUsageIR(reported=True))
-    second = anthropic.plan(request, anthropic_context)
-    _record_success(anthropic, second, LLMUsageIR(reported=True))
-
-    anthropic_snapshot = anthropic.warm_deadline_snapshot()
-    assert anthropic_snapshot["eligible"] is True
-    assert anthropic_snapshot["anchor_ttl"] == "1h"
-    assert anthropic_snapshot["anchor_ttl_seconds"] == 3_600
-    assert 3_598 <= anthropic_snapshot["anchor_remaining_ttl_seconds"] <= 3_600
+    context = ShapeContext(wire_shape=WireShape.OPENAI_RESPONSE, endpoint_id="openai",
+                           model_id="gpt-5.6-sol", provider_id="OpenAI")
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    for usage in (LLMUsageIR(reported=True), LLMUsageIR(reported=True, cached_input_tokens=8000)):
+        plan = coordinator.plan(request, context)
+        _record_success(coordinator, plan, usage)
+        assert coordinator.snapshot()["submitted_checkpoint"]
+        assert not coordinator.snapshot()["confirmed_checkpoint"]
+        assert not coordinator.warm_deadline_snapshot()["eligible"]
+        assert coordinator.confirmed_anchor_request() == {}

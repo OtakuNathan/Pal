@@ -3166,6 +3166,9 @@ def _bunshin_turn_settings_snapshot(pack: BunshinInvocationPack, llm_runtime: An
     if callable(thinking_levels_snapshot):
         with contextlib.suppress(Exception):
             snapshot["think_levels"] = dict(thinking_levels_snapshot())
+    cache_policy_snapshot = getattr(llm_runtime, "cache_policy_snapshot", None)
+    if callable(cache_policy_snapshot):
+        snapshot["cache_policy_snapshot"] = cache_policy_snapshot()
     temperature = _bunshin_temperature(pack)
     if temperature is not None:
         snapshot["temperature"] = temperature
