@@ -257,3 +257,13 @@ replayed messages are unchanged. Cache usage must be measured from responses.
 References: [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort),
 [Anthropic manual thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking),
 [DeepSeek Anthropic compatibility](https://api-docs.deepseek.com/guides/anthropic_api/).
+
+## Cache evidence and attempt settlement
+
+Cache marker submission does not establish confirmed cache coverage. Usage carries
+field presence, raw numeric evidence, and protocol-specific input accounting;
+missing cost is distinct from zero. Every started provider attempt settles once,
+including failures and output recovery, separately from logical request success.
+Cache profile selection is frozen at turn start. See
+[prompt-cache v2 offline repair](prompt_cache_v2_offline_repair.md) for selection
+precedence, diagnostics, conservative compaction behavior, and offline validation.
