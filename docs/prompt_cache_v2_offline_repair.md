@@ -11,7 +11,7 @@ v2 plan; offline tests cannot establish provider acceptance or cache hit rates.
 A submitted breakpoint is a local placement decision, not proof of provider cache
 coverage. Track state now says `submitted`; compatibility `confirmed` fields stay
 false/zero. Aggregate read/write usage never confirms a particular anchor or
-frontier, and estimated prefix sizes never reduce costs as confirmed coverage.
+frontier, and estimated prefix sizes never reduce billed costs as confirmed coverage.
 
 All current adapters lack evidence attributing cached tokens to an exact local
 boundary. Cache warm-deadline reminders and hot-cache compaction are consequently
@@ -120,3 +120,26 @@ fixture creates distinct request plans and passed both the policy suite and the
 final failed-test rerun. No unresolved test failures remain.
 The three 50-round profile cases passed in the Core-a batch before the final
 partial-usage anomaly fix, which received its own focused regression test.
+
+
+### Incremental planning correction
+
+The follow-up restores incremental economics for the legacy explicit planner.
+The stable prefix, unchanged user input, and previously submitted frontier supply
+`planning_base_tokens`; only growth beyond that baseline contributes to the next
+checkpoint decision. Large frozen history cannot make a tiny new suffix appear
+profitable. `economics_assumption = incremental_reuse_estimate` labels this planning
+estimate separately from observed usage and billing. Submitted coverage remains
+unconfirmed, and unknown actual cost remains unknown.
+
+The existing accumulated-reprocessing heuristic, configured read/write multipliers,
+minimum prefix length, and net-benefit threshold are preserved. This heuristic is
+not a guarantee of future reuse or provider savings. Higher write premiums or no
+read discount can defer a new checkpoint even when the prefix is large. Actual
+cache writes, reads, and total costs remain the acceptance criteria; high hit rate
+alone is insufficient. This correction does not switch the selected profile.
+
+Validation of this correction: 67 cache policy/evidence/diagnostic/runtime tests
+passed, including all three 50-round profiles. A final policy and usage run passed
+38 tests, including the new incremental-cost regressions. No paid calls or runtime
+activation were performed.

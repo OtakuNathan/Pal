@@ -104,6 +104,7 @@ class PromptCacheTrackPlan:
     target_fingerprint: str = ""
     target_prefix_tokens: int = 0
     candidate_message_id: str = ""
+    planning_base_tokens: int = 0
     reprocessed_delta_tokens: int = 0
     projected_reprocessed_tokens: int = 0
     estimated_net_tokens: float = 0.0
@@ -1113,9 +1114,13 @@ def _evaluate_track(
         return PromptCacheTrackPlan(
             **target_fields,
             decision="submitted_reuse",
+            planning_base_tokens=target_tokens,
         )
 
-    base_tokens = 0  # Submitted/estimated bytes are not confirmed readable coverage.
+    # This is the baseline for deciding how much NEW input warrants another
+    # breakpoint, not evidence of a provider cache hit or a billing discount.
+    # The caller validates submitted fingerprints before passing these spans.
+    base_tokens = min(target_tokens, max(0, stats.submitted_prefix_tokens, fallback_prefix_tokens))
     delta = max(0, target_tokens - base_tokens)
     projected = stats.accumulated_reprocessed_tokens + delta
     estimated_net = (
@@ -1135,6 +1140,7 @@ def _evaluate_track(
         **target_fields,
         decision=decision,
         candidate_message_id=candidate,
+        planning_base_tokens=base_tokens,
         reprocessed_delta_tokens=delta,
         projected_reprocessed_tokens=projected,
         estimated_net_tokens=estimated_net,
@@ -1308,6 +1314,8 @@ def _track_snapshot(
         "candidate": bool(plan and plan.candidate_message_id),
         "submitted_prefix_tokens": stats.submitted_prefix_tokens if stats else 0,
         "target_prefix_tokens": plan.target_prefix_tokens if plan else 0,
+        "economics_assumption": "incremental_reuse_estimate",
+        "planning_base_tokens": plan.planning_base_tokens if plan else 0,
         "candidate_delta_tokens": plan.reprocessed_delta_tokens if plan else 0,
         "accumulated_reprocessed_tokens": (
             stats.accumulated_reprocessed_tokens if stats else 0

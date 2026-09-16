@@ -692,7 +692,7 @@ def test_anthropic_anchor_is_gated_then_survives_the_turn_boundary() -> None:
     assert "cache_control" not in payload["messages"][-1]["content"][-1]
 
 
-def test_unverified_submitted_prefix_does_not_discount_the_economic_base() -> None:
+def test_submitted_prefix_guides_incremental_planning_without_confirming_a_hit() -> None:
     request = _request()
     context = ShapeContext(wire_shape=WireShape.OPENAI_RESPONSE, endpoint_id="openai",
                            model_id="gpt-5.6-sol", provider_id="OpenAI")
@@ -702,9 +702,11 @@ def test_unverified_submitted_prefix_does_not_discount_the_economic_base() -> No
     second = coordinator.plan(_next_request(request), context)
     assert second.anchor.submitted_message_id == first.anchor.target_message_id
     assert second.anchor.confirmed_prefix_tokens == 0
-    assert second.anchor.reprocessed_delta_tokens == second.anchor.target_prefix_tokens
-    assert second.anchor.decision == "economic_advance"
-    assert [item.label for item in second.breakpoints] == ["stable", "anchor_submitted", "anchor_candidate"]
+    assert second.anchor.planning_base_tokens == first.anchor.target_prefix_tokens
+    assert second.anchor.reprocessed_delta_tokens == second.anchor.target_prefix_tokens - first.anchor.target_prefix_tokens
+    assert second.anchor.decision == "economic_batching"
+    assert [item.label for item in second.breakpoints] == ["stable", "anchor_submitted"]
+    assert not coordinator.snapshot()["confirmed_checkpoint"]
 
 
 def test_failed_candidate_is_not_promoted() -> None:
@@ -893,3 +895,41 @@ def test_warm_deadline_requires_boundary_evidence_not_submission_or_aggregate_re
         assert not coordinator.snapshot()["confirmed_checkpoint"]
         assert not coordinator.warm_deadline_snapshot()["eligible"]
         assert coordinator.confirmed_anchor_request() == {}
+
+
+def test_large_frozen_prefix_does_not_subsidize_a_tiny_new_checkpoint() -> None:
+    from pal.llm.prompt_cache import _TrackStats, _evaluate_track
+    from pal.llm.shapes.base import EncodedMessageSpan
+    for base in (44_000, 440_000):
+        plan = _evaluate_track(
+            name="frontier", ttl="30m", epoch_key="turn",
+            stats=_TrackStats(submitted_prefix_tokens=base),
+            target=EncodedMessageSpan("new-tool-result", estimated_cache_prefix_tokens=base + 1024),
+            fallback_prefix_tokens=base, minimum_prefix_tokens=1024,
+            read_multiplier=0.1, write_multiplier=1.25, net_threshold_tokens=1024,
+        )
+        assert plan.reprocessed_delta_tokens == 1024
+        assert plan.estimated_net_tokens == 1024 * (0.9 - 0.25)
+        assert plan.decision == "economic_batching"
+        assert not plan.candidate_message_id
+        assert plan.confirmed_prefix_tokens == 0
+
+
+def test_checkpoint_requires_enough_incremental_benefit_for_its_write_price() -> None:
+    from pal.llm.prompt_cache import _TrackStats, _evaluate_track
+    from pal.llm.shapes.base import EncodedMessageSpan
+    for write_price, read_price, expected in (
+        (1.25, 0.1, "economic_advance"),
+        (3.0, 0.1, "economic_batching"),
+        (1.25, 1.0, "economic_batching"),
+    ):
+        plan = _evaluate_track(
+            name="frontier", ttl="30m", epoch_key="turn",
+            stats=_TrackStats(submitted_prefix_tokens=44_000),
+            target=EncodedMessageSpan("new-tool-result", estimated_cache_prefix_tokens=52_192),
+            fallback_prefix_tokens=44_000, minimum_prefix_tokens=1024,
+            read_multiplier=read_price, write_multiplier=write_price, net_threshold_tokens=1024,
+        )
+        assert plan.reprocessed_delta_tokens == 8192
+        assert plan.decision == expected
+        assert bool(plan.candidate_message_id) == (expected == "economic_advance")
