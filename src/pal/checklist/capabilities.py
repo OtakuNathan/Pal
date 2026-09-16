@@ -106,8 +106,8 @@ class ChecklistIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Create or replace Pal's active execution-cursor checklist.",
             use_when=(
-                "Required before the first mutation when a task has at least two concrete execution steps "
-                "and any planned step can produce side effects; also use when the active steps materially change."
+                "Unless the user specifies otherwise, use before the first mutation in work with multiple delivery phases, long execution, or resumption needs"
+                "; update when phases materially change. Routine edit-and-test work needs no checklist."
             ),
             do_not_use_when="The active checklist already matches the work.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
@@ -167,7 +167,7 @@ class ChecklistIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="checklist_clear",
-                    use_when="Every step is complete and the work has been re-verified.",
+                    use_when="Every phase is complete and verification within the requested scope is settled; reuse passing results.",
                 ),
             ),
         ),
@@ -267,7 +267,7 @@ class ChecklistIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Retire Pal's terminal checklist and return its final snapshot for user-facing settlement.",
             use_when=(
-                "Either all steps are complete and the task has been verified, or the task was cancelled, "
+                "Either all steps are complete and the requested verification scope is settled, or the task was cancelled, "
                 "replaced, or made stale and only the work actually performed has been reviewed."
             ),
             do_not_use_when="The active task is still expected to continue and checklist work remains in progress.",

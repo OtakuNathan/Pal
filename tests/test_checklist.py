@@ -151,7 +151,7 @@ class TestChecklistCapabilities:
         assert blueprint.guidance is not None
         assert blueprint.guidance.purpose == "Create or replace Pal's active execution-cursor checklist."
         assert "before the first mutation" in blueprint.guidance.use_when
-        assert "at least two concrete execution steps" in blueprint.guidance.use_when
+        assert "multiple delivery phases" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when
         assert "bunshin_start_workflow" not in blueprint.guidance.use_when
         assert "remember_memory" not in blueprint.guidance.do_not_use_when
@@ -243,8 +243,8 @@ class TestChecklistPrompt:
         operating_rule, task_flow = fragments
         assert operating_rule.section == "operating_guidance"
         assert operating_rule.metadata["prompt_target"] == "developer"
-        assert "you must use your checklist as the work cursor" in operating_rule.content
-        assert "before the first mutating action" in operating_rule.content
+        assert "multiple independent" in operating_rule.content
+        assert "before the first mutation" in operating_rule.content
         assert task_flow.section == "task_flow"
         assert "checklist_check" in task_flow.content
         assert "checklist_clear" in task_flow.content
@@ -276,8 +276,8 @@ class TestChecklistPrompt:
         assert "⬜ apply <the change>" not in reminder.content
         assert 'authority="execution_cursor"' in reminder.content
         assert 'trusted_as_evidence="false"' in reminder.content
-        assert "On cancellation, replacement, or staleness" in reminder.content
-        assert "retired checklist" in reminder.content
+        assert "execution cursor" in reminder.content
+        assert "checklist_clear" not in reminder.content
 
     def test_clear_retires_checklist_from_next_prompt_tail(self):
         core = PalCore()
@@ -299,8 +299,8 @@ class TestChecklistPrompt:
 
         assert active_prompt.messages[0].text == retired_prompt.messages[0].text
         assert active_prompt.messages[1].text == retired_prompt.messages[1].text
-        assert "Checklist work cursor" in active_prompt.messages[1].text
-        assert "before the first mutating action" in active_prompt.messages[1].text
+        assert "routine edit plus tests" in active_prompt.messages[1].text
+        assert "before the first mutation" in active_prompt.messages[1].text
         assert retired_prompt.metadata["reminder_sections"] == ()
         assert retired_prompt.metadata["runtime_reminder_text"] == ""
 

@@ -125,7 +125,7 @@ def test_dynamic_section_cannot_explicitly_target_system() -> None:
 
     with pytest.raises(
         ValueError,
-        match="must target runtime_reminder",
+        match="must target developer",
     ):
         compiler.build_prompt_ir(
             PromptAssemblyContext(metadata={"memory_pack": None})

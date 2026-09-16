@@ -128,7 +128,7 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="read",
         guidance=ToolGuidance(
             purpose="Read the full capability contract for an execution capability by exact alias.",
-            use_when="Before invoking an indirect capability via call_tool — inspect its input schema, usage guidance, and execution semantics.",
+            use_when="When the capability contract is absent, changed, or insufficient for correct arguments and execution semantics. Reuse a valid contract already in context; do not read it before every call.",
             do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use exec_tools).",
             failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
             next_tool_hints=(

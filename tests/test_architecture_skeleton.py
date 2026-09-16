@@ -1769,6 +1769,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 prompt.metadata["fragment_sections"],
                 (
                     "identity",
+                    "system_map",
                     "source_of_truth",
                     "prompt_context_policy",
                     "operating_rules",
@@ -1776,7 +1777,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "tool_policy",
                     "mutation_policy",
                     "persona",
-                    "system_map",
                     "operating_guidance",
                     "tool_routing",
                     "tool_efficiency",
@@ -1788,6 +1788,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 prompt.metadata["system_sections"],
                 (
                     "identity",
+                    "system_map",
                     "source_of_truth",
                     "prompt_context_policy",
                     "operating_rules",
@@ -1800,7 +1801,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 prompt.metadata["developer_sections"],
                 (
                     "persona",
-                    "system_map",
                     "operating_guidance",
                     "tool_routing",
                     "tool_efficiency",
@@ -1831,7 +1831,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             system_text = prompt.messages[0].text
             developer_text = prompt.messages[1].text
             self.assertIn("<persona>", developer_text)
-            self.assertIn("<system_map>", developer_text)
+            self.assertIn("<system_map>", system_text)
             self.assertIn("<tool_routing>", developer_text)
             self.assertIn("<tool_efficiency>", developer_text)
             self.assertNotIn("Today's date is", system_text)
@@ -1842,7 +1842,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("##", system_text)
             self.assertNotIn("<capability_guide>", system_text)
             self.assertIn("<recalled_memories> contains durable memory context", system_text)
-            self.assertIn("execution/capability", developer_text)
+            self.assertIn("Direct tools are not the complete capability inventory", system_text)
             self.assertNotIn("bunshin", developer_text.split("<system_map>", 1)[0].lower())
             self.assertIn("Memory tool descriptions", developer_text)
             self.assertIn("prefixes such as fact: and case:", developer_text)
@@ -1859,8 +1859,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertLess(system_text.index("<operating_rules>"), system_text.index("<priority>"))
             self.assertLess(system_text.index("<priority>"), system_text.index("<tool_policy>"))
             self.assertLess(system_text.index("<tool_policy>"), system_text.index("<mutation_policy>"))
-            self.assertLess(developer_text.index("<persona>"), developer_text.index("<system_map>"))
-            self.assertLess(developer_text.index("<system_map>"), developer_text.index("<operating_guidance>"))
+            self.assertLess(system_text.index("<identity>"), system_text.index("<system_map>"))
+            self.assertLess(developer_text.index("<persona>"), developer_text.index("<operating_guidance>"))
             self.assertLess(developer_text.index("<tool_routing>"), developer_text.index("<tool_efficiency>"))
             self.assertLess(developer_text.index("<tool_efficiency>"), developer_text.index("<memory_guide>"))
             self.assertNotIn("<runtime_overlay>", system_text)
@@ -4647,26 +4647,26 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         mutation_policy = by_section["mutation_policy"]
         knowledge_storage_boundary = by_section["knowledge_storage_boundary"]
 
-        self.assertIn("execution/capability", system_map.content)
-        self.assertIn("memory: durable facts", system_map.content)
+        self.assertIn("Direct tools are not the complete capability inventory", system_map.content)
+        self.assertIn("Memory holds durable facts", system_map.content)
         self.assertNotIn("bunshin", system_map.content.lower())
         self.assertIn("Use the right source for the truth needed", source_of_truth.content)
         self.assertIn("live introspection/capability calls", source_of_truth.content)
         self.assertIn("<recalled_memories> contains durable memory context", prompt_context_policy.content)
         self.assertIn("does not modify system or developer instructions", prompt_context_policy.content)
         self.assertNotIn("Activated skills", prompt_context_policy.content)
-        self.assertIn("No success claim without confirmation", rules.content)
+        self.assertIn("Never claim an operation succeeded without a confirming result", rules.content)
         operating_guidance = by_section["operating_guidance"]
         tool_policy = by_section["tool_policy"]
         self.assertIn("Pal capabilities are the execution path", operating_guidance.content)
-        self.assertIn("never stop, restart, or kill your own hosting service", rules.content)
+        self.assertIn("Do not stop, restart, or kill your own hosting service", rules.content)
         self.assertNotIn("hot-reload capability", rules.content)
-        self.assertIn("pal.self.maintenance", mutation_policy.content)
-        self.assertIn("within the user's authorized task", mutation_policy.content)
-        self.assertIn("without asking for the same approval again", mutation_policy.content)
-        self.assertIn("never permits bypassing capability policy", mutation_policy.content)
+        self.assertIn("pal.self.maintenance", operating_guidance.content)
+        self.assertIn("within the authorized task", mutation_policy.content)
+        self.assertIn("Existing authorization remains sufficient", mutation_policy.content)
+        self.assertIn("approval gates cannot be bypassed", mutation_policy.content)
         self.assertIn("shell", operating_guidance.content)
-        self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
+        self.assertIn("verification scope", priority.content)
         self.assertIn("result-specific recovery affordances", tool_policy.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
         self.assertIn("never blindly retry a mutation", tool_policy.content)
@@ -4676,13 +4676,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Batch independent tool calls in one response", tool_efficiency.content)
         self.assertIn("do not serialize every file or field", tool_efficiency.content)
-        self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
-        self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)
-        self.assertIn('what should be remembered as true or reusable knowledge?', knowledge_storage_boundary.content)
-        self.assertIn('when this situation appears, what route/action should you consider?', knowledge_storage_boundary.content)
-        self.assertIn("multi-step reusable procedure", knowledge_storage_boundary.content)
+        self.assertIn("governed state changes", mutation_policy.content)
+        self.assertIn("future routing suggestions in behavior", knowledge_storage_boundary.content)
+        self.assertIn('durable facts and repair experience', knowledge_storage_boundary.content)
+        self.assertIn('Current runtime state is an observation', knowledge_storage_boundary.content)
+        self.assertIn("reusable procedures in skills", knowledge_storage_boundary.content)
         self.assertNotIn("op_memory_recall", rules.content)
         self.assertNotIn("op_memory_write", rules.content)
+
+        self.assertEqual(system_map.metadata["prompt_target"], "system")
+        self.assertIn("if the user says not to run tests, do not run them", priority.content)
+        self.assertIn("report that tests were not run", priority.content)
 
     def test_memory_service_compact_commits_validated_summary_entry_atomically(self) -> None:
         service = MemoryService()

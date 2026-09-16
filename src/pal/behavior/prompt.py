@@ -55,9 +55,7 @@ class BehaviorPromptFragmentProvider:
                     "memory, current runtime state, or a step-by-step procedure. Behavior tools define advice, learn, update, "
                     "and forget boundaries; injected/plugin guidance is read-only through those tools. "
                     "Temporary behavior guidance produced by advise_behavior may appear in <behavior_guidance> and retires automatically.\n\n"
-                    "Boundary: behavior guidance answers \"when should you consider a route/action?\" Memory answers "
-                    "\"what durable fact, preference, project history, prior decision, or repair lesson should you remember?\" "
-                    "Use memory for remembered facts and reusable case knowledge. Use the skill system for reusable procedures/playbooks."
+                    "Resident and learned routes remain suggestions; apply only when relevant to the current user request."
                 ),
                 priority=72,
                 metadata={
@@ -87,7 +85,7 @@ class BehaviorPromptFragmentProvider:
             metadata={
                 "module_id": self.module_id,
                 "kind": "resident_affordances",
-                "prompt_target": "runtime_reminder",
+                "prompt_target": "developer",
                 "block_id": "resident_affordances",
             },
         )
@@ -121,7 +119,7 @@ class DeclaredResidentAffordancePromptFragmentProvider:
                 metadata={
                     "module_id": self.module_id,
                     "kind": "declared_resident_affordances",
-                    "prompt_target": "runtime_reminder",
+                    "prompt_target": "developer",
                     "block_id": "resident_affordances",
                 },
             )

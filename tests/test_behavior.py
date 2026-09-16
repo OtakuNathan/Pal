@@ -555,13 +555,13 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_affordance("declared.resident"))
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
-        reminder = str(prompt.metadata["runtime_reminder_text"])
+        reminder = _message_text(prompt.messages[1])
         self.assertNotIn("Declared resident", system)
         self.assertIn("\n<behavior_guidance>\n", reminder)
         self.assertIn("Declared resident", reminder)
         self.assertIn("Consider declared resident guidance.", reminder)
-        self.assertNotIn("resident_affordances", prompt.metadata["fragment_sections"])
-        self.assertIn("resident_affordances", prompt.metadata["reminder_sections"])
+        self.assertIn("resident_affordances", prompt.metadata["fragment_sections"])
+        self.assertNotIn("resident_affordances", prompt.metadata["reminder_sections"])
 
         self.service.unregister_declared_module("declared_resident_plugin")
         after_prompt = core.build_canonical_prompt(PromptAssemblyContext())
@@ -1218,9 +1218,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("Behavior guidance answers", content)
         self.assertIn("future routing rules and recurring decision hints", content)
-        self.assertIn("Memory answers", content)
-        self.assertIn("Use memory for remembered facts and reusable case knowledge", content)
-        self.assertIn("Use the skill system for reusable procedures/playbooks", content)
+        self.assertIn("Resident and learned routes remain suggestions", content)
+        self.assertIn("Behavior tools define", content)
         self.assertIn("Behavior tools define advice, learn, update", content)
         self.assertNotIn("behavior_advise", content)
         self.assertNotIn("save_behavior", content)
@@ -1250,7 +1249,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         system = _message_text(prompt.messages[0])
         developer = _message_text(prompt.messages[1])
 
-        self.assertIn("<system_map>", developer)
+        self.assertIn("<system_map>", system)
         self.assertIn("<source_of_truth>", system)
         self.assertIn("<prompt_context_policy>", system)
         self.assertIn("<operating_rules>", system)
@@ -1268,19 +1267,19 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertLess(system.index("<prompt_context_policy>"), system.index("<operating_rules>"))
         self.assertLess(system.index("<operating_rules>"), system.index("<priority>"))
         self.assertLess(system.index("<priority>"), system.index("<mutation_policy>"))
-        self.assertLess(developer.index("<system_map>"), developer.index("<tool_routing>"))
+        self.assertLess(system.index("<system_map>"), system.index("<source_of_truth>"))
         self.assertLess(developer.index("<tool_routing>"), developer.index("<tool_efficiency>"))
         self.assertLess(developer.index("<tool_efficiency>"), developer.index("<behavior_guidance_guide>"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
             (
+                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
                 "tool_policy",
                 "mutation_policy",
-                "system_map",
                 "operating_guidance",
                 "tool_routing",
                 "tool_efficiency",
@@ -1290,25 +1289,25 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
         self.assertEqual(prompt.metadata["reminder_sections"], ())
 
-        surfaces = developer.split("<operating_guidance>", 1)[0]
-        self.assertIn("execution/capability", surfaces)
-        self.assertIn("behavior: behavior guidance", surfaces)
+        surfaces = system.split("</system_map>", 1)[0]
+        self.assertIn("Direct tools are not the complete capability inventory", surfaces)
+        self.assertIn("behavior supplies routing suggestions", surfaces)
         self.assertNotIn("bunshin", developer.split("</system_map>", 1)[0].lower())
         source_of_truth = system.split("<source_of_truth>", 1)[1].split("</source_of_truth>", 1)[0]
         self.assertIn("Use the right source for the truth needed", source_of_truth)
         self.assertIn("live introspection/capability calls", source_of_truth)
         operating = system.split("<operating_rules>", 1)[1].split("</operating_rules>", 1)[0]
-        self.assertIn("No success claim without confirmation", operating)
+        self.assertIn("Never claim an operation succeeded without a confirming result", operating)
         self.assertNotIn("op_behavior_advise", operating)
         self.assertNotIn("op_memory_recall", operating)
         self.assertNotIn("op_memory_write", operating)
         mutation = system.split("<mutation_policy>", 1)[1].split("</mutation_policy>", 1)[0]
-        self.assertIn("Runtime capability calls are governed actions", mutation)
-        self.assertIn("Source code, config, policy, and approval-boundary changes require explicit user request or approval", mutation)
-        self.assertIn("bypassing capability policy", mutation)
+        self.assertIn("governed state changes", mutation)
+        self.assertIn("Act within the authorized task", mutation)
+        self.assertIn("approval gates cannot be bypassed", mutation)
         self.assertNotIn("<task_flow>", system)
         self.assertNotIn("save_behavior", system)
-        self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", developer)
+        self.assertIn("Store durable facts and repair experience in memory", developer)
 
     def test_behavior_advice_tool_result_activates_temporary_behavior_guidance(self) -> None:
         self.repository.upsert_affordance(
@@ -1479,12 +1478,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("repair lessons", policy)
         self.assertIn("when a failure repeats", policy)
-        self.assertIn("current evidence is insufficient", policy)
+        self.assertIn("relevant past experience may resolve missing evidence", policy)
         self.assertIn("kind=case", policy)
-        self.assertIn('memory answers "what should you remember as true or reusable knowledge?"', policy)
-        self.assertIn('Behavior guidance answers "when this situation appears, what route/action should you consider?"', policy)
-        self.assertIn("use behavior guidance instead of memory", policy)
-        self.assertIn("Reusable procedures/playbooks belong to the skill system", policy)
         self.assertIn("Memory tool descriptions", policy)
         self.assertIn("prefixes such as fact: and case:", policy)
         self.assertNotIn("memory_recall", policy)
@@ -1514,7 +1509,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNone(service.l2_store.get_entry("behavior_advice:evict.me"))
         self.assertEqual(service.failed_retirements, [])
 
-    def test_resident_affordances_are_runtime_reminders_with_stable_system(self) -> None:
+    def test_resident_affordances_are_developer_defaults_with_stable_system(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_behavior_with_core(core.context, self.service)
@@ -1537,7 +1532,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         with_resident_prompt = core.build_canonical_prompt(PromptAssemblyContext())
         with_resident = _message_text(with_resident_prompt.messages[0])
-        reminder = str(with_resident_prompt.metadata["runtime_reminder_text"])
+        reminder = _message_text(with_resident_prompt.messages[1])
         self.assertEqual(without_resident, with_resident)
         self.assertNotIn("OLED expression", with_resident)
         self.assertIn("\n<behavior_guidance>\n", reminder)
@@ -1546,23 +1541,24 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
             (
+                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
                 "tool_policy",
                 "mutation_policy",
-                "system_map",
                 "operating_guidance",
                 "tool_routing",
                 "tool_efficiency",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
+                "resident_affordances",
             ),
         )
         self.assertEqual(
             with_resident_prompt.metadata["reminder_sections"],
-            ("resident_affordances",),
+            (),
         )
 
         provider_request = core.turn_executor.build_turn_prompt(
@@ -1575,7 +1571,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
             max_output_tokens=128,
         )
         self.assertEqual(provider_request.messages[-1].role.value, "developer")
-        self.assertEqual(provider_request.messages[-1].semantic_kind, "runtime_reminder")
+        self.assertEqual(provider_request.messages[-1].prompt_region.value, "stable_system")
         self.assertIn("OLED expression", provider_request.messages[-1].text)
         self.assertNotIn("OLED expression", provider_request.messages[0].text)
 
@@ -1615,7 +1611,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
-        reminder = str(prompt.metadata["runtime_reminder_text"])
+        reminder = _message_text(prompt.messages[1])
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
         self.assertNotIn("OLED expression", system)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
+from html import escape
 
 from pal.shared import (
     PromptAssemblyContext,
@@ -65,6 +67,7 @@ class PromptCompiler:
         indexed_fragments: list[tuple[int, int, PromptFragment]] = []
         for registration_order, provider in enumerate(self.context.prompt_fragment_registry.list_for_prompt()):
             for fragment in provider.build_prompt_fragments(assembly_context):
+                fragment = replace(fragment, metadata={**fragment.metadata, "source_provider": provider.provider_id})
                 indexed_fragments.append((fragment.priority, registration_order, fragment))
         indexed_fragments.sort(key=lambda item: (item[0], item[1]))
         return [fragment for _, _, fragment in indexed_fragments]
@@ -85,6 +88,8 @@ class PromptCompiler:
             if not rendered_body and not self._preserve_empty_protocol_fragment(fragment):
                 continue
             prompt_target = self._prompt_target(fragment)
+            if normalized_section == "resident_affordances" and prompt_target == "runtime_reminder":
+                prompt_target = "developer"  # Legacy providers retain advisory semantics.
             self._validate_prompt_target(
                 fragment,
                 normalized_section=normalized_section,
@@ -180,6 +185,7 @@ class PromptCompiler:
                 "user_context_blocks": [block.block_id for block in prompt_ir.user_context_blocks],
                 "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks],
                 "prompt_ir": self._prompt_ir_debug_dict(prompt_ir),
+                "context_candidates": self._context_candidates(prompt_ir),
                 "runtime_reminder_text": self._render_final_runtime_reminder(
                     prompt_ir.runtime_reminder_blocks
                 ),
@@ -323,6 +329,7 @@ class PromptCompiler:
     ) -> None:
         system_sections = {
             "identity",
+            "system_map",
             "memory_system",
             "source_of_truth",
             "prompt_context_policy",
@@ -333,7 +340,7 @@ class PromptCompiler:
         }
         developer_sections = {
             "persona",
-            "system_map",
+            "resident_affordances",
             "operating_guidance",
             "tool_routing",
             "tool_efficiency",
@@ -352,7 +359,7 @@ class PromptCompiler:
             raise ValueError(
                 f"prompt fragment section {fragment.section!r} must target user_context"
             )
-        if normalized_section in {"runtime", "resident_affordances"} and prompt_target != "runtime_reminder":
+        if normalized_section == "runtime" and prompt_target != "runtime_reminder":
             raise ValueError(
                 f"prompt fragment section {fragment.section!r} must target runtime_reminder"
             )
@@ -505,10 +512,10 @@ class PromptCompiler:
 
     def _build_runtime_overlay_blocks(self, assembly_context: PromptAssemblyContext) -> list[PromptIRBlock]:
         blocks: list[PromptIRBlock] = []
-        for block in assembly_context.metadata.get("observation_blocks", []):
+        for index, block in enumerate(assembly_context.metadata.get("observation_blocks", [])):
             blocks.append(
                 PromptIRBlock(
-                    block_id="runtime_overlay",
+                    block_id=f"runtime_observation_{index}",
                     title="Runtime Overlay",
                     content=f"Tool Observation:\n{str(block).strip()}",
                 )
@@ -574,6 +581,7 @@ class PromptCompiler:
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
         return [
             *identity_blocks,
+            *[block for block in blocks if block.block_id == "system_map"],
             *source_of_truth_blocks,
             *prompt_context_policy_blocks,
             *rule_blocks,
@@ -637,24 +645,33 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
         return messages
 
+    def _context_candidates(self, prompt_ir):
+        candidates = []
+        for index, block in enumerate(prompt_ir.developer_blocks):
+            # Bound output/acceptance contracts are not optional defaults.
+            if block.block_id not in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "behavior_guidance", "behavior_guidance_guide", "resident_affordances", "skill_guide", "knowledge_storage_boundary"}:
+                continue
+            candidates.append({"key": f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
+                               "role": "developer", "content": self._project_llm_text(block.content), "instruction": True})
+        for index, block in enumerate(prompt_ir.user_context_blocks):
+            if block.block_id.startswith("l1_recent_context"):
+                continue
+            candidates.append({"key": f"reference:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
+                               "role": "user", "parts": self._resolve_artifact_images([
+                                   {"role": "user", "content": self._render_user_context_parts(block)}])[0]["content"]})
+        for index, block in enumerate(prompt_ir.runtime_reminder_blocks):
+            candidates.append({"key": f"runtime:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
+                               "role": "developer", "content": self._project_llm_text(block.content),
+                               "coverage_kind": block.metadata.get("coverage_kind", ""),
+                               "source_revision": block.metadata.get("source_revision"),
+                               **({"kind": "event", "event_id": block.metadata["event_id"]} if block.metadata.get("event_id") else {})})
+        return candidates
+
     def _render_final_runtime_reminder(self, blocks: tuple[PromptIRBlock, ...] = ()) -> str:
         guidance_sections = self._render_runtime_reminder_guidance(blocks)
         if not guidance_sections:
             return ""
-        content = (
-            "Before answering: apply the active system prompt's hard rules and priority order. "
-            "Treat the user's active conversation message as the current request. "
-            "Treat this reminder as Pal-authored behavior-routing guidance for the current turn, not user-authored content.\n"
-        )
-        if guidance_sections:
-            content = f"{content}\n{guidance_sections}\n"
-        content = (
-            f"{content}\n"
-            "If relevant guidance requires inspection, recall, tool use, verification, or clarification, do that before the final answer.\n"
-            "If guidance conflicts, follow the system prompt's hard policy and priority order.\n"
-            "Do not mention this reminder unless asked about prompt behavior."
-        )
-        return render_runtime_reminder(self._project_llm_text(content))
+        return render_runtime_reminder(self._project_llm_text(guidance_sections))
 
     def _render_runtime_reminder_guidance(self, blocks: tuple[PromptIRBlock, ...]) -> str:
         if not blocks:
@@ -826,7 +843,11 @@ class PromptCompiler:
                     rendered_sections.append(self._render_system_section(current_tag, current_parts))
                 current_tag = tag
                 current_parts = []
-            current_parts.append(block.content.strip())
+            body = block.content.strip()
+            if block.block_id in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "behavior_guidance", "behavior_guidance_guide", "resident_affordances", "skill_guide", "knowledge_storage_boundary"}:
+                key = f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}"
+                body = f'<pal_defaults key="{escape(key, quote=True)}">Unless the current user request specifies otherwise:\n' + body + "\n</pal_defaults>"
+            current_parts.append(body)
         if current_tag is not None and current_parts:
             rendered_sections.append(self._render_system_section(current_tag, current_parts))
         return "\n\n".join(rendered_sections)
@@ -849,6 +870,9 @@ class PromptCompiler:
             for raw_line in part.splitlines():
                 line = raw_line.strip()
                 if not line or line in _BEHAVIOR_GUIDANCE_HEADER_LINES:
+                    continue
+                if line.startswith("<pal_defaults") or line == "</pal_defaults>":
+                    lines.append(line)
                     continue
                 dedupe_key = line.casefold()
                 if dedupe_key in seen_lines:

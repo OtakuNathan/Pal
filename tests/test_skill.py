@@ -484,7 +484,7 @@ Run the workflow.
         self.assertEqual(injected.structured["manual_text"], skill.manual_text)
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         self.assertNotIn(skill.manual_text, prompt.messages[0].text)
-        self.assertIn(skill_id, prompt.messages[0].text)
+        self.assertIn(skill_id, prompt.messages[1].text)
 
         core.withdraw_module_capabilities("skill")
         self.assertIsNone(self.skill_repository.get_skill(skill_id))

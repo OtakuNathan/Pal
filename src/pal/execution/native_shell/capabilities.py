@@ -14,7 +14,7 @@ from .tools import RunInput, SessionInput
 
 
 class NativeRunInput(RunInput):
-    target: int = Field(default=0, ge=0, strict=True, description="Execution target; 0 is always local. Paths belong to this target.")
+    target: int = Field(default=0, ge=0, strict=True, description="Execution target; 0 is local. Discover configured remote target IDs with list_remote when needed; reuse a known target. Paths belong to this target.")
     sudo: bool = False
 
 
@@ -63,9 +63,12 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
         namespace="operation", scope="module", family="exec", action_name="shell", aliases=("run_shell",),
         InputModel=NativeRunInput, OutputModel=StructuredToolOutput, execution=DIRECT_CONTROL,
         async_handler_name="shell_async", metadata={"native_shell_action": "run"}, guidance=ToolGuidance(
-            purpose="Run a shell command; return its result or a live session for continued execution.",
+            purpose="Run a shell command locally or on a configured remote target; return its result or a live session.",
             use_when=(
-                "Execute commands, builds or tests. Prefer rg for repository text search and rg --files for file"
+                "When the task already requires remote execution and the user has not specified a connection method, "
+                "prefer run_shell(target=...) for configured targets. Use list_remote if the target mapping is unknown. "
+                "The task determines the execution location; configured remotes do not change the local default. "
+                "Honor an explicit request for SSH. Execute commands, builds or tests. Prefer rg for repository text search and rg --files for file"
                 " enumeration; use alternatives only when rg is unavailable or unsuitable. Run tests and builds"
                 " directly to preserve full output. wait_ms controls response waiting (default five minutes,"
                 " one second for a PTY), not process lifetime; timeout_ms sets an optional hard deadline."
@@ -93,6 +96,7 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
                 " never repeat a command to retrieve output. A missing session does not prove it never ran."
             ),
             next_tool_hints=(
+                NextToolHint(name="list_remote", use_when="The task needs remote execution and the configured target ID is unknown."),
                 NextToolHint(name="shell_session", use_when="Inspect progress, send PTY input, resize or terminate a returned session."),
                 NextToolHint(name="shell_status", use_when="A shell is blocked or retained output/completion needs diagnosis."),
             ),
