@@ -362,3 +362,15 @@ def test_output_recovery_costs_are_not_added_again_at_logical_completion(tmp_pat
     assert len(result.response.attempt_ids) == 2
     assert llm.usage_ledger.snapshot()["provider_request_count"] == 2
     assert llm.usage_ledger.snapshot()["cost"] == pytest.approx(0.02)
+
+
+def test_partial_usage_preserves_uncorrected_counter_anomalies():
+    initial = usage_from_mapping({"input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": -20, "cache_write_tokens": 0}})
+    partial = merge_usage(initial, usage_from_mapping({"output_tokens": 5}, final=True))
+    assert "negative:input_tokens_details.cached_tokens" in partial.usage_anomaly
+    assert dict(partial.raw_counters)["input_tokens_details.cached_tokens"] == -20
+    corrected = merge_usage(partial, usage_from_mapping({
+        "input_tokens_details": {"cached_tokens": 20}}, final=True))
+    assert not corrected.usage_anomaly
+    assert corrected.cached_input_tokens == 20

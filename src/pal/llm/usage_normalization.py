@@ -107,6 +107,13 @@ def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
         if owner.input_accounting == "exclusive_cache":
             raw_input -= owner.cached_input_tokens + owner.cache_write_input_tokens
     raw = {**dict(left.raw_counters), **dict(right.raw_counters)}
+    # A partial settlement must not erase an anomaly in an untouched field.
+    # Explicit correction of that field may clear its earlier anomaly.
+    path_fields = {path: name for name, paths in USAGE_FIELD_PATHS.items() for path in paths}
+    anomalies = [item for item in left.usage_anomaly.split(",") if item
+                 and item != "input_lt_read_write"
+                 and not right.has(path_fields.get(item.partition(":")[2], ""))]
+    anomalies.extend(item for item in right.usage_anomaly.split(",") if item)
     return _normalize(LLMUsageIR(
         **values, reported=True, reported_fields=present,
         raw_counters=tuple(raw.items()), raw_input_tokens=raw_input,
@@ -114,7 +121,7 @@ def merge_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
                           else left.input_accounting),
         final=left.final or right.final,
         reasoning_tokens_reported=left.reasoning_tokens_reported or right.reasoning_tokens_reported,
-        usage_anomaly=right.usage_anomaly,
+        usage_anomaly=",".join(dict.fromkeys(anomalies)),
     ))
 
 
