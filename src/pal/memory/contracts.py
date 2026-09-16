@@ -282,6 +282,10 @@ class MemoryServicePort(Protocol):
     ) -> "L1TurnIR":
         ...
 
+    def append_l1_prompt_contexts(self, turn_id: str, messages: tuple["LLMMessageIR", ...],
+                                  state: dict[str, Any], *, expected_revision: int) -> "L1TurnIR":
+        ...
+
     def contains_l1_message(self, turn_id: str, message_id: str) -> bool:
         ...
 
@@ -316,6 +320,7 @@ class MemoryServicePort(Protocol):
         turn_id: str,
         *,
         reason: str = "",
+        context_messages: tuple["LLMMessageIR", ...] = (),
         after_commit: Callable[[], None] | None = None,
     ) -> "L1TurnIR":
         ...
@@ -325,6 +330,7 @@ class MemoryServicePort(Protocol):
         turn_id: str,
         *,
         reason: str = "",
+        context_messages: tuple["LLMMessageIR", ...] = (),
         after_commit: Callable[[], None] | None = None,
     ) -> "L1TurnIR":
         ...

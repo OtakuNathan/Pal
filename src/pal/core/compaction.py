@@ -185,6 +185,21 @@ class CompactionRunResult:
         return self.status == "compacted"
 
 
+def _scope_safe_snapshot(snapshot: CompactionSnapshot) -> CompactionSnapshot:
+    """Compaction is a new instruction scope, including when using a warm anchor."""
+    from pal.core.prompt_context import CONTEXT_KIND, applicable_context
+    items = tuple(tuple(message for message in transcript if not (
+        message.role == "developer" and message.kind == CONTEXT_KIND
+        and message.payload.get("pal_authored")
+    )) for transcript in snapshot.memory_items)
+    replay = snapshot.replay_request
+    if replay is not None and len(applicable_context(replay.messages, active_turn_id="")) != len(replay.messages):
+        replay = None  # Do not preserve a checkpoint at the cost of an expired instruction.
+    return replace(snapshot, memory_items=items, replay_request=replay,
+                   replay_dialect=snapshot.replay_dialect if replay else "",
+                   replay_wire_shape=snapshot.replay_wire_shape if replay else "")
+
+
 @dataclass
 class CompactionEngine:
     """Shared compaction orchestration with its own bounded retry budget."""
@@ -205,6 +220,7 @@ class CompactionEngine:
         after_commit: Callable[[], None] | None = None,
         replay_guard: Callable[[], bool] | None = None,
     ) -> CompactionRunResult:
+        snapshot = _scope_safe_snapshot(snapshot)
         units = list(build_compaction_units(snapshot))
         retained = list(units)
         source_sizes: list[int] = []
@@ -448,6 +464,7 @@ class CompactionEngine:
         attempt: int,
         validation_error: str = "",
     ) -> LLMRequestIR:
+        snapshot = _scope_safe_snapshot(snapshot)
         visible_limit = compaction_visible_token_limit(snapshot)
         user_prompt = (
             f"{source.rstrip()}\n\n"

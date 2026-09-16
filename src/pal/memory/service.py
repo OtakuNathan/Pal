@@ -398,6 +398,18 @@ class MemoryService(MemoryServicePort):
         self.l1_store.replace(updated)
         return updated
 
+    def append_l1_prompt_contexts(
+        self, turn_id: str, messages: tuple[LLMMessageIR, ...], state: dict[str, Any],
+        *, expected_revision: int,
+    ) -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        if current.revision != expected_revision:
+            raise L1TurnProtocolError("prompt context source snapshot changed")
+        updated = current.append_prompt_contexts(tuple(messages), state)
+        if updated is not current:
+            self.l1_store.replace(updated)
+        return updated
+
     def rollback_l1_tool_result(
         self,
         turn_id: str,
@@ -447,11 +459,12 @@ class MemoryService(MemoryServicePort):
         turn_id: str,
         *,
         reason: str = "",
+        context_messages: tuple[LLMMessageIR, ...] = (),
         after_commit: Callable[[], None] | None = None,
     ) -> L1TurnIR:
         return self._close_l1_turn_transactionally(
             turn_id,
-            close=lambda current: current.interrupt(reason=reason),
+            close=lambda current: current.append_user_contexts(context_messages).interrupt(reason=reason),
             after_commit=after_commit,
         )
 
@@ -460,11 +473,12 @@ class MemoryService(MemoryServicePort):
         turn_id: str,
         *,
         reason: str = "",
+        context_messages: tuple[LLMMessageIR, ...] = (),
         after_commit: Callable[[], None] | None = None,
     ) -> L1TurnIR:
         return self._close_l1_turn_transactionally(
             turn_id,
-            close=lambda current: current.abort(reason=reason),
+            close=lambda current: current.append_user_contexts(context_messages).abort(reason=reason),
             after_commit=after_commit,
         )
 

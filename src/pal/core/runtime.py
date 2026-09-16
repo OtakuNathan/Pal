@@ -248,9 +248,14 @@ class TurnManager:
         if not callable(method):
             return
         try:
+            from pal.core.prompt_context import completed_tool_contexts
+            reader = getattr(memory_service, "active_l1_turn", None)
+            active = reader(continuation.turn_id) if callable(reader) else None
+            contexts = completed_tool_contexts(continuation, active) if active is not None else ()
             value = method(
                 continuation.turn_id,
                 reason=reason,
+                **({"context_messages": contexts} if contexts else {}),
             )
             if inspect.isawaitable(value):
                 await value

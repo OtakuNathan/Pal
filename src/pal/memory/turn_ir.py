@@ -120,6 +120,30 @@ class L1TurnIR:
             updated = updated.append_user_once(message)
         return updated
 
+    def append_prompt_contexts(self, messages: tuple[LLMMessageIR, ...], state: dict[str, Any]) -> "L1TurnIR":
+        """Commit immutable context records and coverage in one L1 revision."""
+        self._require_active()
+        STATE_KEY, CONTEXT_KIND = "prompt_context_state", "pal_prompt_context"
+        existing = {m.message_id: m for m in self.messages}
+        additions = []
+        for message in messages:
+            if message.semantic_kind != CONTEXT_KIND or message.role not in {MessageRole.USER, MessageRole.DEVELOPER}:
+                raise L1TurnProtocolError("invalid prompt context record")
+            old = existing.get(message.message_id)
+            if old is not None:
+                if old != message:
+                    raise L1TurnProtocolError("context identity reused with different content")
+                continue
+            existing[message.message_id] = message
+            additions.append(message)
+        metadata = {**thaw_json(self.metadata), STATE_KEY: state}
+        if not additions and metadata == thaw_json(self.metadata):
+            return self
+        if self.pending_call_ids:
+            raise L1TurnProtocolError("context requires a closed tool batch")
+        return replace(self, messages=(*self.messages, *additions), metadata=metadata,
+                       revision=self.revision + 1)
+
     def upsert_assistant(self, message: LLMMessageIR) -> "L1TurnIR":
         self._require_active()
         if message.role != MessageRole.ASSISTANT:

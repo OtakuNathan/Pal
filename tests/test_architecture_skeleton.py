@@ -3778,7 +3778,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Finalization Directive", generate_requests[-1].messages[-1].text)
         self.assertEqual(
             generate_requests[-1].messages[-1].prompt_region.value,
-            "active_dynamic",
+            "active_history",
         )
         self.assertIn("stopped the tool loop", outcome.final_reply.lower())
 

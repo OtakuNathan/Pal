@@ -240,7 +240,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 "settled_history",
                 "settled_history",
                 "active_input",
-                "active_dynamic",
+                "active_history",
             ],
         )
         self.assertEqual(
@@ -250,9 +250,11 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 "prior assignment step",
                 "prior step completed",
                 "inspect the assigned module",
-                "dynamic role working state",
+                request.messages[-1].text,
             ],
         )
+        self.assertIn("dynamic role working state", request.messages[-1].text)
+        self.assertIn('<pal_context kind="state"', request.messages[-1].text)
 
     def test_bunshin_prompt_reconciles_settled_and_active_tool_results_together(
         self,

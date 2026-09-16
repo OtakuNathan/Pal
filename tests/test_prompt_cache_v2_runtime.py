@@ -269,16 +269,18 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
             if mutation in {"tools", "compaction"}:
                 assert records[4]["change_reason"] == ("tools_changed" if mutation == "tools" else "prefix_changed")
             if mutation == "dynamic":
-                assert all(r["change_reason"] == "dynamic_changed" for r in records[4:])
+                assert all(r["prefix_preserved"] for r in records[4:])
             if mutation == "profile":
                 assert all(r["profile_id"] == profile for r in records)
             assert records[-1]["estimated_prefix_tokens"] > records[0]["estimated_prefix_tokens"]
-            assert llm.endpoint_invoker.prompt_cache.snapshot()["observation"]["stall_suspected"] is (mutation != "dynamic")
+            assert llm.endpoint_invoker.prompt_cache.snapshot()["observation"]["stall_suspected"] is True
             assert not llm.endpoint_invoker.prompt_cache.snapshot()["confirmed_checkpoint"]
             for index, request in enumerate(transport.requests):
                 payload = thaw_json(request.payload)
-                assert payload["input"][-1]["role"] == "developer"
-                assert "runtime_reminder" in str(payload["input"][-1])
+                assert "<pal_context" in str(payload["input"])
+                if mutation is None:
+                    assert str(payload["input"]).count("stable-runtime") == 1
+                    assert str(payload["input"]).count("reference-only fixture context") == 1
                 assert "reference-only fixture context" in str(payload["input"])
                 for old in range(1, index + 1):
                     assert next(item for item in payload["input"] if item.get("id") == f"reason-{old}")["encrypted_content"] == f"opaque-{old}"

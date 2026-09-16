@@ -423,6 +423,7 @@ class TurnExecutor:
 
     @_dispatch_effect.register(ToolCallEffect)
     async def _handle_tool_call(self, effect, continuation):
+        self._ensure_not_interrupted(continuation)
         execution_call = effect.tool_call
         if not str(getattr(execution_call, "call_id", "") or "").strip() and continuation.pending_tool_call_batch:
             pending_index = len(continuation.pending_tool_results)
@@ -1070,10 +1071,33 @@ class TurnExecutor:
                 contextual_messages[-1],
                 prompt_region=PromptRegionIR.ACTIVE_INPUT,
             )
+        context_committed = False
+        if active_turn is not None:
+            from pal.core.prompt_context import prepare_context, projected_context
+            commit_context = getattr(memory_service, "append_l1_prompt_contexts", None)
+            if callable(commit_context):
+                candidates = prompt.metadata.get("context_candidates")
+                if candidates is None:
+                    from pal.llm.serde import message_to_payload
+                    candidates = [{"key": f"legacy-context:{index}", "role": m.role.value,
+                                   "ir_message": message_to_payload(m)} for index, m in enumerate(contextual_messages)]
+                    reminder_text = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
+                    if reminder_text:
+                        candidates.append({"key": "legacy-reminder", "role": "developer", "content": reminder_text})
+                frozen, additions, context_state = prepare_context(
+                    active_turn, stable_messages, list(candidates),
+                    boundary=json.dumps([getattr(getattr(metadata.get("memory_pack"), "current_summary", None), "summary", ""),
+                                         continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]))
+                active_turn = commit_context(continuation.turn_id, additions, context_state,
+                                             expected_revision=active_turn.revision)
+                stable_messages = list(frozen)
+                contextual_messages = []
+                context_committed = True
         settled_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
         for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
-            original = list(getattr(settled_turn, "messages", ()) or ())
+            from pal.core.prompt_context import applicable_context
+            original = applicable_context(list(getattr(settled_turn, "messages", ()) or ()), active_turn_id=continuation.turn_id)
             projected = self._project_messages_for_prompt(
                 original,
                 turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
@@ -1086,7 +1110,8 @@ class TurnExecutor:
             )
         active_messages: list[LLMMessageIR] = []
         if active_turn is not None:
-            active_messages = list(active_turn.messages)
+            from pal.core.prompt_context import projected_context
+            active_messages = projected_context(active_turn)
             active_messages = self._project_messages_for_prompt(
                 active_messages,
                 turn_id=continuation.turn_id,
@@ -1104,7 +1129,7 @@ class TurnExecutor:
                 )
                 for index, message in enumerate(active_messages)
             ]
-        runtime_reminder = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
+        runtime_reminder = "" if context_committed else str(prompt.metadata.get("runtime_reminder_text") or "").strip()
         tail_messages = (
             [
                 LLMMessageIR(
