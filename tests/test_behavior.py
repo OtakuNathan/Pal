@@ -1478,7 +1478,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         policy = fragments[0].content
 
         self.assertIn("repair lessons", policy)
-        self.assertIn("When work hits an error", policy)
+        self.assertIn("when a failure repeats", policy)
+        self.assertIn("current evidence is insufficient", policy)
         self.assertIn("kind=case", policy)
         self.assertIn('memory answers "what should you remember as true or reusable knowledge?"', policy)
         self.assertIn('Behavior guidance answers "when this situation appears, what route/action should you consider?"', policy)

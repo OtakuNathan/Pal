@@ -26,10 +26,9 @@ class SkillPromptFragmentProvider:
                     "context, call `skill_search` with a concise scenario. Search results are metadata, not activation: evaluate the "
                     "match, then call `skill_inject` only for a useful manual. The injected <skill> block arrives as separate user-role "
                     "reference context after the tool-result batch. Do not inject a skill merely because its name was mentioned, and "
-                    "do not inject the same manual twice. When an applicable manual is already loaded in conversation "
-                    "context, reuse it; search again only when the context lacks an applicable manual or the task enters "
-                    "territory the loaded manuals do not cover. A missing manual never excuses skipping genuinely "
-                    "unfamiliar runtime, deployment, or platform constraints — surface them instead. Skill tools define "
+                    "do not inject the same manual twice. Reuse applicable loaded manuals; search again when the task enters "
+                    "territory they do not cover. Resolve unfamiliar runtime, deployment, or platform constraints before "
+                    "acting, and surface a concrete blocker if the required guidance is unavailable. Skill tools define "
                     "learning and persistence procedures separately."
                 ),
                 priority=72,
