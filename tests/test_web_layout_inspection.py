@@ -77,7 +77,9 @@ def test_layout_script_json_encodes_untrusted_selector() -> None:
     assert 'const args = {"selector":' in script
 
 
-def test_ui_layout_verification_is_stable_system_guidance() -> None:
-    assert "normalized page text/HTML" in TOOL_ROUTING_SYSTEM_GUIDANCE
-    assert "computed styles" in TOOL_ROUTING_SYSTEM_GUIDANCE
-    assert "rendered-layout inspection capability" in TOOL_ROUTING_SYSTEM_GUIDANCE
+def test_layout_principle_is_stable_and_detailed_method_belongs_to_tool() -> None:
+    assert "relevant rendered evidence" in TOOL_ROUTING_SYSTEM_GUIDANCE
+    assert "computed styles" not in TOOL_ROUTING_SYSTEM_GUIDANCE
+    guidance = WebFetchIntrospectionProvider.inspect_layout.__capability_action_blueprints__[0].guidance
+    assert "computed styles" in guidance.use_when
+    assert "when the affected behavior requires it" in guidance.use_when
