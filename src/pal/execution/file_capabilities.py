@@ -70,18 +70,22 @@ FILE_READ_GUIDANCE = ToolGuidance(
 )
 
 FILE_EDIT_GUIDANCE = ToolGuidance(
-    purpose="Replace an exact string in a UTF-8 text file after reading every affected line.",
+    purpose="Apply valid exact replacements to one local UTF-8 file and report any failed items.",
     use_when=(
         "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
-        "context. The match must be unique unless replace_all=true is intentionally requested."
+        "context. Supply edits=[{old_string, new_string, replace_all?}]. All items match the original read snapshot; "
+        "Overlapping items fail together; other valid items are applied. Each match must be unique unless that item requests replace_all=true. "
+        "Results identify applied indices and failed items; only failed items need further attention. "
+        "Use separate calls for separate files."
     ),
     do_not_use_when=(
-        "Creating a file or replacing its complete contents (use write_file). Do not edit from an unread, partial, "
-        "retired, or stale snapshot."
+        "Creating a file or replacing its complete contents (use write_file). Every affected range must have been "
+        "delivered and remain valid; reading the entire file is not required."
     ),
     failure_next_steps=(
-        "For NOT_READ, PARTIAL_READ, or STALE_FILE, call read_file for the missing/current affected range and then "
-        "retry the exact edit. For NOT_FOUND_MATCH, copy old_string from the current read. For MULTIPLE_MATCHES, add "
+        "For NOT_READ or PARTIAL_READ, read the missing affected ranges. For STALE_FILE, read the current affected "
+        "ranges and reassess the edits against the changed content. Do not resubmit applied items. "
+        "For NOT_FOUND_MATCH, copy old_string from the current read. For MULTIPLE_MATCHES, add "
         "enough surrounding context to make the match unique; use replace_all only when every match should change."
     ),
 )

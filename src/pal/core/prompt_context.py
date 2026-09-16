@@ -47,6 +47,9 @@ def prepare_context(
     if len(current) != len(states):
         raise ValueError("duplicate prompt context state key")
     sources = state["sources"]
+    # Compact continuity is now projected once, outside turn-scoped updates.
+    from pal.memory.continuity import SUMMARY_CONTEXT_KEY
+    sources.pop(SUMMARY_CONTEXT_KEY, None)
     if any(item["key"] in sources or item["key"] in current for item in events):
         raise ValueError("context source cannot change from state to event within a turn")
     # Absence from a complete source snapshot explicitly withdraws a previous state.
@@ -155,8 +158,8 @@ def applicable_context(messages: Sequence[LLMMessageIR], *, active_turn_id: str)
 
 
 def projected_context(turn: "L1TurnIR") -> list[LLMMessageIR]:
-    excluded = set(turn.metadata.get(STATE_KEY, {}).get("excluded", ()))
-    return [m for m in turn.messages if m.message_id not in excluded]
+    from pal.memory.context_view import projected_messages
+    return list(projected_messages(turn))
 
 
 def completed_tool_contexts(continuation: Any, turn: "L1TurnIR") -> tuple[LLMMessageIR, ...]:

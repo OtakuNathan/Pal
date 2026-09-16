@@ -629,11 +629,10 @@ class PromptCompiler:
         if developer_content:
             messages.append({"role": "developer", "content": developer_content})
         final_user_parts: list[dict[str, Any]] = []
+        summary_parts: list[dict[str, Any]] = []
         for block in prompt_ir.user_context_blocks:
             if block.block_id == "memory_current_summary":
-                parts = self._render_user_context_parts(block)
-                if parts:
-                    messages.append({"role": "user", "content": self._coerce_message_content(parts)})
+                summary_parts.extend(self._render_user_context_parts(block))
                 continue
             if block.block_id.startswith("l1_recent_context"):
                 messages.append(self._render_l1_context_message(block))
@@ -643,6 +642,14 @@ class PromptCompiler:
             final_user_parts.append({"type": "text", "text": prompt_ir.primary_input.strip()})
         if final_user_parts:
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
+        if summary_parts:
+            first_user = next((m for m in messages if m["role"] == "user"), None)
+            if first_user is not None:
+                first_user["content"] = self._coerce_message_content([
+                    *summary_parts, *_message_content_parts(first_user["content"])])
+            else:
+                index = next((i for i, m in enumerate(messages) if m["role"] not in {"system", "developer"}), len(messages))
+                messages.insert(index, {"role": "user", "content": self._coerce_message_content(summary_parts)})
         return messages
 
     def _context_candidates(self, prompt_ir):
@@ -654,7 +661,7 @@ class PromptCompiler:
             candidates.append({"key": f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
                                "role": "developer", "content": self._project_llm_text(block.content), "instruction": True})
         for index, block in enumerate(prompt_ir.user_context_blocks):
-            if block.block_id.startswith("l1_recent_context"):
+            if block.block_id.startswith("l1_recent_context") or block.block_id == "memory_current_summary":
                 continue
             candidates.append({"key": f"reference:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
                                "role": "user", "parts": self._resolve_artifact_images([
@@ -938,6 +945,7 @@ class PromptCompiler:
             pack = memory_service.build_pack(
                 MemoryPackRequest(
                     turn_kind=assembly_context.turn_kind,
+                    include_l1_recent_context=not bool(assembly_context.metadata.get("typed_l1_projection")),
                     task_id=assembly_context.task_id,
                     work_order_id=assembly_context.work_order_id,
                     active_input_id=str(

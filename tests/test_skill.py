@@ -493,28 +493,9 @@ Run the workflow.
         self.assertEqual(restored.status, "ok")
         self.assertEqual(restored.structured["manual_text"], skill.manual_text)
 
-    def test_remote_setup_is_discoverable_without_remote_plugin(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
-        register_execution_with_core(core.context)
-        register_skill_with_core(core.context, self.service)
-        behavior = BehaviorService(repository=self.behavior_repository)
-        register_behavior_with_core(core.context, behavior)
-        core.publish_module_capabilities("skill")
-        skill_id = "pal.remote.setup"
-        for query in ("远端接入", "安装remote端", "remote worker"):
-            with self.subTest(query=query):
-                search = SkillSearchTool(service=self.service).invoke({"query": query, "top_k": 3})
-                self.assertEqual(search.structured["hits"][0]["skill_id"], skill_id)
-                self.assertTrue(search.structured["hits"][0]["injectable"])
-                advice = asyncio.run(behavior.advise_async(BehaviorAdviceRequest(scenario=query, top_k=5)))
-                self.assertTrue(any(skill_id in candidate.skill_refs for candidate in advice.candidates))
-        injected = SkillInjectTool(service=self.service).invoke({"skill_id": skill_id})
-        self.assertEqual(injected.status, "ok")
-        prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        self.assertNotIn(injected.structured["manual_text"], prompt.messages[0].text)
-        core.withdraw_module_capabilities("skill")
-        self.assertIsNone(self.skill_repository.get_skill(skill_id))
+    def test_optional_remote_setup_is_not_a_builtin_skill(self) -> None:
+        from pal.skill.builtin_skills import builtin_declared_skills
+        self.assertNotIn("pal.remote.setup", {skill.skill_id for skill in builtin_declared_skills()})
 
     def test_self_maintenance_cli_examples_parse_without_executing(self) -> None:
         import re

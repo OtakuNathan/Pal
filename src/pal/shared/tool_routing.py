@@ -31,8 +31,9 @@ TOOL_ROUTING_DEVELOPER_GUIDANCE = (
 
 
 TOOL_EFFICIENCY_DEVELOPER_GUIDANCE = (
-    "- Semantic work order, role scope, checklist phases, and depth- or breadth-first strategy "
-    "govern which work to do, not whether independent tool RPCs may share one assistant response.\n"
+    "- Use depth-first reading to trace a relevant code path and breadth-first reading to compare "
+    "related surfaces, as the investigation requires. Reading strategy and checklist order do not "
+    "require separate model rounds for independent reads.\n"
     "- Batch independent tool calls in one response, including independent reads, searches, "
     "checks, and already-decided edits to distinct surfaces. Sequence only when a later call's "
     "arguments, authority, safety, or correctness depend on an earlier result; do not serialize "

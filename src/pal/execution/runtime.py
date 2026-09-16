@@ -170,6 +170,53 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 thread_name_prefix="pal-exec",
             )
 
+    def build_introspection_provider(self):
+        from .capabilities import ExecutionIntrospectionProvider
+        return ExecutionIntrospectionProvider(runtime=self)
+
+    def build_runtime_state_port(self):
+        from .runtime_state import ExecutionRuntimeStatePort
+        return ExecutionRuntimeStatePort(self)
+
+    def project_execution_view(self, view):
+        return view
+
+    def role_capabilities(self, allowed):
+        return allowed
+
+    def project_role_descriptor(self, descriptor):
+        return descriptor
+
+    def create_role_session_driver(self):
+        return None
+
+    def prepare_model_context(self, memory, continuation, *, context_view=None):
+        """Project already prepared observations; never wait for execution or network."""
+
+    def model_response_received(self, continuation):
+        """Allow an optional execution owner to refresh outside request assembly."""
+
+    def observe_tool_delivery(self, call, result):
+        """Record coverage proven by a durably committed tool result."""
+
+    def stagnation_payload(self, call, result):
+        return {"ok": result.ok, "text": result.text, "structured": result.structured}
+
+    async def close_role_work(self):
+        pass
+
+    async def complete_evidence(self, call, result, **kwargs):
+        return result
+
+    def execution_diagnostics(self):
+        return {"backend": "python", "sessions": 0}
+
+    async def shutdown_async(self):
+        self.shutdown()
+
+    async def prepare_shutdown_async(self):
+        pass
+
     def shutdown(self) -> None:
         with self._interrupt_state_lock:
             handles = {
@@ -721,7 +768,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     ToolAffordance(
                         tool="read_tool",
                         arguments={"name": record.alias},
-                        reason="Read the bound input schema and valid example before correcting the call.",
+                        reason="Use the returned validation errors to correct the call. The input schema and example are available here if the argument requirements remain unclear.",
                     )
                 ],
                 details=details,
@@ -1200,7 +1247,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         context_delivery: dict[str, Any] | None = None
         context_messages: tuple[ToolContextMessageIR, ...] = ()
         from pal.execution.activity import capture_activity_output
-        capture_activity_output(record.alias, raw, native_shell=bool(record.binding.descriptor.metadata.get("native_shell_action")))
+        capture_activity_output(record.alias, raw, background_execution=bool(record.binding.descriptor.metadata.get("background_execution")))
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt

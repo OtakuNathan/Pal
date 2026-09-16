@@ -49,21 +49,13 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
 
     def test_edit_without_read_returns_not_read(self) -> None:
         path = self._write_tmp("sample.txt", "hello world")
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "hello",
-            "new_string": "goodbye",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]})
         self.assertNotEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(result.structured.get("error_code"), ERR_NOT_READ)
 
     def test_not_read_error_text_mentions_reading_first(self) -> None:
         path = self._write_tmp("sample.txt", "hello world")
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "hello",
-            "new_string": "goodbye",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]})
         self.assertIn("not been read", result.text.lower())
 
     def test_sandboxed_continuation_retry_does_not_bypass_missing_read_snapshot(self) -> None:
@@ -78,11 +70,7 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
             clear=False,
         ):
             result = self.tool.invoke(
-                {
-                    "file_path": str(path),
-                    "old_string": "hello",
-                    "new_string": "goodbye",
-                }
+                {"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]}
             )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -102,11 +90,7 @@ class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):
         time.sleep(0.05)
         path.write_text("modified externally")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "original",
-            "new_string": "patched",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "original", "new_string": "patched"}]})
         self.assertNotEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(result.structured.get("error_code"), ERR_STALE_FILE)
         self.assertEqual(path.read_text(), "modified externally")
@@ -128,11 +112,7 @@ class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "alpha",
-                "new_string": "ALPHA",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "ALPHA"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -152,11 +132,7 @@ class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):
             side_effect=competing_write,
         ):
             result = self.tool.invoke(
-                {
-                    "file_path": str(path),
-                    "old_string": "alpha",
-                    "new_string": "omega",
-                }
+                {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]}
             )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -171,11 +147,7 @@ class NotFoundMatchErrorTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("miss.txt", "line one\nline two\n")
         self.cache.mark_read(path, "line one\nline two\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "line three",
-            "new_string": "line drei",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "line three", "new_string": "line drei"}]})
         self.assertNotEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(result.structured.get("error_code"), ERR_NOT_FOUND_MATCH)
 
@@ -187,11 +159,7 @@ class MultipleMatchesErrorTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("multi.txt", "aaa\nbbb\naaa\n")
         self.cache.mark_read(path, "aaa\nbbb\naaa\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "aaa",
-            "new_string": "zzz",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "aaa", "new_string": "zzz"}]})
         self.assertNotEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(result.structured.get("error_code"), ERR_MULTIPLE_MATCHES)
         self.assertEqual(result.structured.get("match_count"), 2)
@@ -202,33 +170,23 @@ class MultipleMatchesErrorTests(_TempFileMixin, unittest.TestCase):
         self.cache.mark_read(path, "aaa\nbbb\naaa\n")
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "aaa",
-                "new_string": "zzz",
-                "replace_all": True,
-            }
+            {"file_path": str(path), "edits": [{"old_string": "aaa", "new_string": "zzz", "replace_all": True}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(result.structured["match_count"], 2)
         self.assertEqual(path.read_text(), "zzz\nbbb\nzzz\n")
 
-    def test_replace_all_tolerates_string_boolean(self) -> None:
+    def test_replace_all_rejects_string_boolean(self) -> None:
         path = self._write_tmp("string_bool.txt", "aaa aaa\n")
         self.cache.mark_read(path, "aaa aaa\n")
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "aaa",
-                "new_string": "zzz",
-                "replace_all": "true",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "aaa", "new_string": "zzz", "replace_all": "true"}]}
         )
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual(path.read_text(), "zzz zzz\n")
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(path.read_text(), "aaa aaa\n")
 
 
 class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
@@ -237,11 +195,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         self.cache.mark_read(path, "alpha\nbeta\n", full_view=False)
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "alpha",
-                "new_string": "gamma",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "gamma"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -257,11 +211,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "beta",
-                "new_string": "BETA",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "beta", "new_string": "BETA"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.OK)
@@ -277,11 +227,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "gamma",
-                "new_string": "GAMMA",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "gamma", "new_string": "GAMMA"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -299,11 +245,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "alpha\nbeta",
-                "new_string": "combined",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "alpha\nbeta", "new_string": "combined"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -320,11 +262,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "alpha\r",
-                "new_string": "ALPHA\r",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "alpha\r", "new_string": "ALPHA\r"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -340,12 +278,7 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
         )
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "target",
-                "new_string": "changed",
-                "replace_all": True,
-            }
+            {"file_path": str(path), "edits": [{"old_string": "target", "new_string": "changed", "replace_all": True}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
@@ -360,11 +293,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("edit.txt", "hello world\n")
         self.cache.mark_read(path, "hello world\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "hello",
-            "new_string": "goodbye",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]})
         self.assertEqual(result.status, RuntimeStatus.OK)
         # File on disk should be updated
         self.assertEqual(path.read_text(), "goodbye world\n")
@@ -373,11 +302,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("diff.txt", "line one\nline two\nline three\n")
         self.cache.mark_read(path, "line one\nline two\nline three\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "line two",
-            "new_string": "line zwei",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "line two", "new_string": "line zwei"}]})
         self.assertEqual(result.status, RuntimeStatus.OK)
         patch = result.structured.get("patch", "")
         self.assertIn("---", patch)
@@ -389,11 +314,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("llm.txt", "alpha\nbeta\n")
         self.cache.mark_read(path, "alpha\nbeta\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "alpha",
-            "new_string": "gamma",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "gamma"}]})
         self.assertIn("-", result.llm_text)
         self.assertIn("+", result.llm_text)
 
@@ -401,33 +322,21 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("cnt.txt", "unique_line\n")
         self.cache.mark_read(path, "unique_line\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "unique_line",
-            "new_string": "replaced_line",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "unique_line", "new_string": "replaced_line"}]})
         self.assertEqual(result.structured.get("match_count"), 1)
 
     def test_cache_updated_after_edit(self) -> None:
         path = self._write_tmp("chain.txt", "step1\n")
         self.cache.mark_read(path, "step1\n")
 
-        self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "step1",
-            "new_string": "step2",
-        })
+        self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "step1", "new_string": "step2"}]})
 
         # Cache should now have "step2\n" as valid content
         cached = self.cache.get_valid(path)
         self.assertEqual(cached, "step2\n")
 
         # Second edit should succeed using the updated cache
-        result2 = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "step2",
-            "new_string": "step3",
-        })
+        result2 = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "step2", "new_string": "step3"}]})
         self.assertEqual(result2.status, RuntimeStatus.OK)
         self.assertEqual(path.read_text(), "step3\n")
 
@@ -436,11 +345,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("multi_edit.py", content)
         self.cache.mark_read(path, content)
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "    return 1\n",
-            "new_string": "    return 42\n",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "    return 1\n", "new_string": "    return 42\n"}]})
         self.assertEqual(result.status, RuntimeStatus.OK)
         self.assertIn("return 42", path.read_text())
         self.assertNotIn("return 1", path.read_text())
@@ -451,11 +356,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         self.cache.mark_read(path, content)
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": 'message = "hello"',
-                "new_string": 'message = "goodbye"',
-            }
+            {"file_path": str(path), "edits": [{"old_string": 'message = "hello"', "new_string": 'message = "goodbye"'}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.ERROR)
@@ -468,11 +369,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         self.cache.mark_read(path, content)
 
         result = self.tool.invoke(
-            {
-                "file_path": str(path),
-                "old_string": "message = “hello”",
-                "new_string": 'message = "goodbye"',
-            }
+            {"file_path": str(path), "edits": [{"old_string": "message = “hello”", "new_string": 'message = "goodbye"'}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.OK)
@@ -491,29 +388,16 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("file_path", result.text)
 
     def test_empty_file_path(self) -> None:
-        result = self.tool.invoke({
-            "file_path": "",
-            "old_string": "a",
-            "new_string": "b",
-        })
+        result = self.tool.invoke({"file_path": "", "edits": [{"old_string": "a", "new_string": "b"}]})
         self.assertEqual(result.status, RuntimeStatus.INVALID)
 
     def test_non_string_old_string(self) -> None:
-        result = self.tool.invoke({
-            "file_path": "any.txt",
-            "old_string": 123,
-            "new_string": "b",
-        })
+        result = self.tool.invoke({"file_path": "any.txt", "edits": [{"old_string": 123, "new_string": "b"}]})
         self.assertEqual(result.status, RuntimeStatus.INVALID)
 
     def test_non_boolean_replace_all_is_invalid(self) -> None:
         result = self.tool.invoke(
-            {
-                "file_path": "any.txt",
-                "old_string": "a",
-                "new_string": "b",
-                "replace_all": "yes",
-            }
+            {"file_path": "any.txt", "edits": [{"old_string": "a", "new_string": "b", "replace_all": "yes"}]}
         )
         self.assertEqual(result.status, RuntimeStatus.INVALID)
 
@@ -521,11 +405,7 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("empty_old.txt", "abc\n")
         self.cache.mark_read(path, "abc\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "",
-            "new_string": "x",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "", "new_string": "x"}]})
 
         self.assertEqual(result.status, RuntimeStatus.INVALID)
         self.assertEqual(result.structured.get("error_code"), ERR_EMPTY_OLD_STRING)
@@ -535,11 +415,7 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
         path = self._write_tmp("same.txt", "abc\n")
         self.cache.mark_read(path, "abc\n")
 
-        result = self.tool.invoke({
-            "file_path": str(path),
-            "old_string": "abc",
-            "new_string": "abc",
-        })
+        result = self.tool.invoke({"file_path": str(path), "edits": [{"old_string": "abc", "new_string": "abc"}]})
 
         self.assertEqual(result.status, RuntimeStatus.INVALID)
         self.assertEqual(result.structured.get("error_code"), ERR_NO_CHANGE)
@@ -554,9 +430,9 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertTrue(callable(tool.invoke))
         properties = ExecutionFileCapabilitiesFileCapabilityMixinEditInput.model_json_schema(mode="validation")["properties"]
         self.assertIn("file_path", properties)
-        self.assertIn("old_string", properties)
-        self.assertIn("new_string", properties)
-        self.assertIn("replace_all", properties)
+        self.assertIn("edits", properties)
+        self.assertNotIn("old_string", properties)
+        self.assertNotIn("replace_all", properties)
 
     def test_ainvoke_delegates_to_invoke(self) -> None:
         import asyncio
@@ -564,7 +440,7 @@ class ToolProtocolTests(unittest.TestCase):
         tool = FileEditTool()
         # No file read — should get NOT_READ error
         result = asyncio.run(
-            tool.ainvoke({"file_path": "/tmp/nope.txt", "old_string": "x", "new_string": "y"})
+            tool.ainvoke({"file_path": "/tmp/nope.txt", "edits": [{"old_string": "x", "new_string": "y"}]})
         )
         self.assertEqual(result.structured.get("error_code"), ERR_NOT_READ)
 

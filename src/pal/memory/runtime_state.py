@@ -10,6 +10,7 @@ from pal.memory.contracts import L2Entry
 from pal.memory.service import MemoryService
 from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.json_values import thaw_json
 
 
 MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "1"
@@ -37,7 +38,7 @@ class MemoryRuntimeStatePort:
                     "turn_id": turn.turn_id,
                     "state": turn.state.value,
                     "revision": turn.revision,
-                    "metadata": dict(turn.metadata),
+                    "metadata": thaw_json(turn.metadata),
                     "messages": [message_to_payload(message) for message in turn.messages],
                 }
                 for turn in self.service.l1_store.turns.turns
@@ -79,7 +80,7 @@ class MemoryRuntimeStatePort:
                     "memory runtime snapshot contains a duplicate/empty L1 turn"
                 )
             turn_ids.add(turn.turn_id)
-            turns.turns.append(turn)
+            turns.append(turn)
         entries: dict[str, L2Entry] = {}
         for raw in list(value.get("l2_entries") or ()):
             if not isinstance(raw, Mapping):

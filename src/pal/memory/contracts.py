@@ -10,6 +10,7 @@ from typing import Any, Protocol
 if False:  # pragma: no cover - typing-only names without runtime import cycles
     from pal.llm.ir import LLMMessageIR
     from pal.memory.turn_ir import L1TurnIR
+    from pal.memory.context_view import L1ContextView
 
 from pal.foundation import (
     DEFAULT_GHOST_TTL,
@@ -173,6 +174,7 @@ class MemoryPackRequest:
     task_id: str | None = None
     work_order_id: str | None = None
     active_input_id: str | None = None
+    include_l1_recent_context: bool = True
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,8 @@ class MemoryServicePort(Protocol):
         self,
         turn_id: str,
         messages: tuple["LLMMessageIR", ...],
+        *, coverage_namespace: str = "", coverage: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> "L1TurnIR":
         ...
 
@@ -286,7 +290,16 @@ class MemoryServicePort(Protocol):
                                   state: dict[str, Any], *, expected_revision: int) -> "L1TurnIR":
         ...
 
+    def l1_context_view(self, active_turn_id: str, settled_turns=None) -> "L1ContextView":
+        ...
+
+    def project_continuity(self, messages: list["LLMMessageIR"]) -> list["LLMMessageIR"]:
+        ...
+
     def contains_l1_message(self, turn_id: str, message_id: str) -> bool:
+        ...
+
+    def stream_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> None:
         ...
 
     def upsert_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> "L1TurnIR":

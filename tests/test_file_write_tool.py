@@ -67,11 +67,7 @@ class CreateTests(_TempFileMixin, unittest.TestCase):
         create = self.tool.invoke({"file_path": str(path), "content": "step1\n"})
 
         edit = FileEditTool(cache=self.cache).invoke(
-            {
-                "file_path": str(path),
-                "old_string": "step1",
-                "new_string": "step2",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "step1", "new_string": "step2"}]}
         )
 
         self.assertEqual(create.status, RuntimeStatus.OK)

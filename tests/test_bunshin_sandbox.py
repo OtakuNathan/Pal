@@ -1154,7 +1154,9 @@ class BunshinSandboxTests(unittest.TestCase):
             bunshin_db = root / "data" / "bunshin" / "bunshin.sqlite3"
             bunshin_db.write_text("private", encoding="utf-8")
             pal_db = root / "pal.sqlite3"
-            pal_db.write_text("memory", encoding="utf-8")
+            import sqlite3
+            with sqlite3.connect(pal_db) as db:
+                db.execute("CREATE TABLE sandbox_fixture (value TEXT)")
             role_socket = root / "data" / "bunshin-role" / "role.sock"
             role_socket.parent.mkdir(parents=True)
             role_socket.write_text("endpoint", encoding="utf-8")
@@ -1203,7 +1205,9 @@ class BunshinSandboxTests(unittest.TestCase):
             run_dir = root / "data" / "bunshin" / "runtime" / "invocations" / "attempt-1"
             run_dir.mkdir(parents=True)
             custom_db = root / "pal-custom.sqlite3"
-            custom_db.write_text("database", encoding="utf-8")
+            import sqlite3
+            with sqlite3.connect(custom_db) as db:
+                db.execute("CREATE TABLE sandbox_fixture (value TEXT)")
             role_socket = root / "data" / "bunshin-role" / "role.sock"
             role_socket.parent.mkdir(parents=True)
             role_socket.write_text("endpoint", encoding="utf-8")

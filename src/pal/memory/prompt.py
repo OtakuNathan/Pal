@@ -21,8 +21,8 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         if not isinstance(pack, MemoryPack):
             return fragments
 
-        summary_text = _current_summary_text(pack)
-        summary_context = _render_current_summary_context(pack)
+        legacy = not bool(context.metadata.get("typed_l1_projection"))
+        summary_context = _render_current_summary_context(pack) if legacy else ""
         messages = []
         if (
             not bool(context.metadata.get("typed_l1_projection"))
@@ -31,7 +31,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             messages = [
                 message
                 for message in list(pack.l1_recent_context)
-                if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
+                if not _is_synthetic_compaction_summary(message)
             ]
         block_index = 0
         i = 0
@@ -99,7 +99,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 block_index += 1
             i += 1
 
-        if summary_context:
+        if summary_context and not context.metadata.get("typed_l1_projection"):
             fragments.append(
                 PromptFragment(
                     section="memory",
@@ -178,16 +178,14 @@ def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
             section="memory_guide",
             title="Memory Guide",
             content=(
-                "Memory is the source of truth for durable user facts, preferences, your prior decisions, project history, "
-                "repair lessons, and reusable case knowledge. Use memory tools for durable records only; current runtime "
-                "state and current external facts require live inspection or external verification.\n\n"
-                "Recall repair cases with recall_memory kind=case when a failure repeats, a decision depends on prior "
-                "project decisions, or relevant past experience may resolve missing evidence. Use concrete error/symptom/fix terms. "
-                "A first error with sufficient current evidence does not require a memory search. "
-                "Recalled cases are leads, not proof: verify them against current source and live state, and never treat "
-                "a historical experience as the current source truth.\n\n"
-                "Memory tool descriptions define the recall, de-duplication, update, and delete procedures. Recalled "
-                "mem_ref values are opaque; prefixes such as fact: and case: are part of the ref."
+                (
+                    "Recall relevant durable records when the task depends on information missing from the current "
+                    "context. For recurring failures or past repair decisions, use recall_memory kind=case with "
+                    "concrete error, symptom, or fix terms. A first error with sufficient evidence needs no memory "
+                    "search. Treat recalled cases as leads and check their applicability before acting.\n"
+                    "Memory tools define record maintenance. Preserve returned mem_ref values exactly, including "
+                    "prefixes such as fact: and case:."
+                )
             ),
             priority=71,
             metadata={
@@ -197,12 +195,6 @@ def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
             },
         ),
     )
-
-
-def _current_summary_text(pack: MemoryPack) -> str:
-    if pack.current_summary is None:
-        return ""
-    return pack.current_summary.summary.strip()
 
 
 def _render_current_summary_context(pack: MemoryPack) -> str:
@@ -216,14 +208,13 @@ def _render_current_summary_context(pack: MemoryPack) -> str:
     return _render_conversation_summary_context(text)
 
 
-def _is_synthetic_compaction_summary(message, *summary_texts: str) -> bool:
-    candidates = {str(item or "").strip() for item in summary_texts if str(item or "").strip()}
-    if not candidates:
-        return False
-    if str(getattr(message, "role", "") or "").strip() != "assistant":
-        return False
-    content = str(getattr(message, "content", "") or "").strip()
-    return content in candidates
+def _is_synthetic_compaction_summary(message) -> bool:
+    from pal.memory.continuity import SUMMARY_CONTEXT_KEY
+    payload = dict(getattr(message, "payload", {}) or {})
+    return str(getattr(message, "kind", "")) == "runtime_context_summary" or (
+        str(getattr(message, "kind", "")) == "pal_prompt_context"
+        and payload.get("pal_authored") and payload.get("context_key") == SUMMARY_CONTEXT_KEY
+    )
 
 
 def _render_memory_entry_lines(entries) -> list[str]:

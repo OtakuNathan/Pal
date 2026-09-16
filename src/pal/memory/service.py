@@ -41,12 +41,12 @@ from pal.memory.contracts import (
 )
 from pal.memory.compact import (
     SUMMARY_ENTRY_ID,
-    current_summary_from_l1,
     flatten_l1_context,
     normalize_l1_transcript,
 )
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
+from pal.memory.context_view import L1ContextView
 from pal.memory.turn_ir import L1TurnIR, L1TurnProtocolError, L1TurnState, L1TurnStore
 from pal.llm.ir import (
     ArtifactRefPartIR,
@@ -112,7 +112,7 @@ class InMemoryL1Store(L1Store):
         for index, transcript in enumerate(value):
             turn_id = _transcript_turn_id(transcript) or f"legacy-{index}"
             turn = _turn_from_transcript(turn_id, normalize_l1_transcript(transcript))
-            replacement.turns.append(turn)
+            replacement.append(turn)
         self.turns = replacement
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
@@ -124,7 +124,7 @@ class InMemoryL1Store(L1Store):
             turn_id = _transcript_turn_id(normalized) or f"legacy-{len(self.turns.turns)}"
             if self.turns.get(turn_id) is not None:
                 raise L1TurnProtocolError(f"L1 turn already exists: {turn_id}")
-            self.turns.turns.append(_turn_from_transcript(turn_id, normalized))
+            self.turns.append(_turn_from_transcript(turn_id, normalized))
 
     def begin(
         self,
@@ -346,11 +346,19 @@ class MemoryService(MemoryServicePort):
         normalized = str(message_id or "").strip()
         if not normalized:
             return False
-        turn = self.l1_store.turns.get(str(turn_id))
-        return bool(
-            turn is not None
-            and any(message.message_id == normalized for message in turn.messages)
-        )
+        return self.l1_store.turns.message(str(turn_id), normalized) is not None
+
+    def l1_context_view(self, active_turn_id: str, settled_turns=None) -> L1ContextView:
+        if settled_turns is None:
+            settled_turns = tuple(t for t in self.l1_store.turns.turns if t.state != L1TurnState.ACTIVE)
+        return self.l1_store.turns.context_view(active_turn_id, settled_turns)
+
+    def project_continuity(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
+        return self.l1_store.turns.project_continuity(messages)
+
+    def stream_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> None:
+        """Record a streaming update without materializing an entire turn snapshot."""
+        self.l1_store.turns.stream_assistant(turn_id, message)
 
     def upsert_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
@@ -388,11 +396,15 @@ class MemoryService(MemoryServicePort):
         self,
         turn_id: str,
         messages: tuple[LLMMessageIR, ...],
+        *, coverage_namespace: str = "", coverage: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> L1TurnIR:
         """Append one tool batch's user-context sidecars in a single store write."""
 
         current = self.l1_store.active(turn_id)
-        updated = current.append_user_contexts(tuple(messages))
+        if expected_revision is not None and current.revision != expected_revision:
+            raise L1TurnProtocolError("observation source snapshot changed")
+        updated = current.append_user_contexts(tuple(messages), coverage_namespace=coverage_namespace, coverage=coverage)
         if updated is current:
             return current
         self.l1_store.replace(updated)
@@ -436,11 +448,8 @@ class MemoryService(MemoryServicePort):
             raise L1TurnProtocolError(
                 "cannot roll back a tool result after unrelated L1 progress"
             )
-        for index, item in enumerate(self.l1_store.turns.turns):
-            if item.turn_id == str(turn_id):
-                self.l1_store.turns.turns[index] = previous
-                return previous
-        raise L1TurnProtocolError(f"unknown L1 turn: {turn_id}")
+        self.l1_store.turns.restore_turn(previous, expected=current)
+        return previous
 
     def settle_l1_turn(
         self,
@@ -496,10 +505,7 @@ class MemoryService(MemoryServicePort):
             if after_commit is not None:
                 after_commit()
         except Exception:
-            for index, item in enumerate(self.l1_store.turns.turns):
-                if item.turn_id == current.turn_id:
-                    self.l1_store.turns.turns[index] = current
-                    break
+            self.l1_store.turns.restore_turn(current, expected=updated)
             raise
         return updated
 
@@ -534,10 +540,10 @@ class MemoryService(MemoryServicePort):
                 ]
             )
             summary_turn = _turn_from_transcript("compact-summary", summary_transcript)
-            self.l1_store.turns.turns = [summary_turn, *active_turns]
+            self.l1_store.turns.replace_all([summary_turn, *active_turns])
             self.remove_projected_entries([SUMMARY_ENTRY_ID])
         except Exception:
-            self.l1_store.turns.turns = previous_l1_turns
+            self.l1_store.turns.replace_all(previous_l1_turns)
             self.l2_store.items = previous_l2_items
             self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
             self.l2_store.heat_registry = previous_heat_registry
@@ -571,7 +577,7 @@ class MemoryService(MemoryServicePort):
             after_commit()
             return result
         except Exception:
-            self.l1_store.turns.turns = previous_l1_turns
+            self.l1_store.turns.replace_all(previous_l1_turns)
             self.l2_store.items = previous_l2_items
             self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
             self.l2_store.heat_registry = previous_heat_registry
@@ -634,17 +640,19 @@ class MemoryService(MemoryServicePort):
                                            if key in deleted or entry.source_ref in deleted])
         if request.turn_kind == "proactive_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
-        current_summary = current_summary_from_l1(self.l1_store.items)
+        continuity = self.l1_store.turns.continuity
+        current_summary = continuity.entry if continuity is not None else None
         hot_entries = self.l2_store.list_hot_entries()
         active_input_id = str(request.active_input_id or "").strip()
+        turns = self.l1_store.turns.turns
         valid_l1_items = [
             _transcript_from_turn(turn)
-            for turn in self.l1_store.turns.turns
+            for turn in turns
             if turn.state != L1TurnState.ACTIVE
-        ]
+        ] if request.include_l1_recent_context else []
         settled_turns = [
             turn
-            for turn in self.l1_store.turns.turns
+            for turn in turns
             if turn.state != L1TurnState.ACTIVE
             and not (
                 active_input_id
@@ -672,6 +680,7 @@ class MemoryService(MemoryServicePort):
             current_summary=current_summary,
             l2_working_memory=hot_entries,
             metadata={
+                "continuity_id": continuity.source_id if continuity is not None else "",
                 "turn_kind": request.turn_kind,
                 "task_id": request.task_id,
                 "work_order_id": request.work_order_id,

@@ -346,13 +346,17 @@ ExecutionFileCapabilitiesFileCapabilityMixinReadOutput = _strict_model(
     },
 )
 
+class FileEditItem(StrictToolModel):
+    old_string: str = Field(..., description="Exact text in the original read snapshot.")
+    new_string: str = Field(..., description="Replacement text; empty deletes the match.")
+    replace_all: bool = Field(False, description="Replace every occurrence of this item's old_string.")
+
+
 ExecutionFileCapabilitiesFileCapabilityMixinEditInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinEditInput',
     {
-        'file_path': (str, Field(..., description='Path to the file to edit.')),
-        'old_string': (str, Field(..., description='Exact text to find and replace.')),
-        'new_string': (str, Field(..., description='Replacement text.')),
-        'replace_all': (bool, Field(False, description='Replace every exact occurrence. Leave false to require one unique match.')),
+        'file_path': (str, Field(..., description='Local UTF-8 file to edit.')),
+        'edits': (list[FileEditItem], Field(..., min_length=1, description='Replacements matched against one original read snapshot. Valid items apply; failed or overlapping items are reported without applying them.')),
     },
 )
 
@@ -363,6 +367,11 @@ ExecutionFileCapabilitiesFileCapabilityMixinEditOutput = _strict_model(
         'error_code': (str, Field(None)),
         'patch': (str, Field(None)),
         'match_count': (int, Field(None)),
+        'edit_count': (int, Field(None)),
+        'edit_index': (int, Field(None)),
+        'conflicting_edit_index': (int, Field(None)),
+        'applied_edit_indices': (list[int], Field(None)),
+        'failed_edits': (list[dict[str, Any]], Field(None)),
     },
 )
 

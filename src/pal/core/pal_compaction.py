@@ -385,7 +385,6 @@ def _render_pal_compact_context(
         "Discuss compaction only when the user asks about it or a concrete continuity limitation needs explaining.",
         "Use it to resume the current collaboration thread. Treat task state as temporary, not durable memory.",
         "Retire completed, superseded, or user-cancelled tasks when newer context contradicts them.",
-        "Right after compaction, first check your checklist: if it has pending items, resume them before starting anything new.",
         "",
     ]
     sections = (

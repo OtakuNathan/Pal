@@ -401,11 +401,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             edit = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]},
                     call_id="edit-large",
                 ),
                 turn_id=turn_id,
@@ -553,11 +549,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 wraps=read_utf8_text_exact,
             ) as exact_read:
                 result = FileEditTool(cache=cache).invoke(
-                    {
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    }
+                    {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]}
                 )
 
             self.assertEqual(result.status, "ok")
@@ -848,11 +840,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             before_delivery = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]},
                     call_id="edit-before",
                 ),
                 turn_id="turn-1",
@@ -867,11 +855,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             after_delivery = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]},
                     call_id="edit-after",
                 ),
                 turn_id="turn-1",
@@ -915,11 +899,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             unseen = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "ALPHA",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "ALPHA"}]},
                     call_id="edit-unseen",
                 ),
                 turn_id="turn-partial-edit",
@@ -927,11 +907,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             visible = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "beta",
-                        "new_string": "BETA",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "beta", "new_string": "BETA"}]},
                     call_id="edit-visible",
                 ),
                 turn_id="turn-partial-edit",
@@ -1026,11 +1002,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             edit = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]},
                     call_id="edit-after-l1",
                 ),
                 turn_id=turn_id,
@@ -1298,11 +1270,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             first = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "alpha",
-                        "new_string": "omega",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "omega"}]},
                     call_id="edit-1",
                 ),
                 turn_id="turn-self-mutation",
@@ -1320,11 +1288,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             second = runtime.invoke_direct_tool(
                 new_tool_call(
                     name="edit_file",
-                    args={
-                        "file_path": str(path),
-                        "old_string": "beta",
-                        "new_string": "gamma",
-                    },
+                    args={"file_path": str(path), "edits": [{"old_string": "beta", "new_string": "gamma"}]},
                     call_id="edit-2",
                 ),
                 turn_id="turn-self-mutation",

@@ -17,19 +17,13 @@ class SkillPromptFragmentProvider:
                 section="skill_guide",
                 title="Skill Guide",
                 content=(
-                    "Skills answer: \"What reference manual or reusable procedure may help this task?\"\n\n"
-                    "Skills are optional operation manuals, review methods, debugging methods, platform procedures, or task playbooks. "
-                    "They are not durable facts, ordinary preferences, current runtime state, behavior guidance, or a replacement "
-                    "for bunshin/profile-based delegation. Activated skills guide execution only for the matched task; they do not "
-                    "override the user's current request, hard policy, source-of-truth requirements, capability policy, or mutation "
-                    "boundaries. When an unfamiliar procedure or a relevant runtime/platform constraint needs a manual and no matching manual is already in conversation "
-                    "context, call `skill_search` with a concise scenario. Search results are metadata, not activation: evaluate the "
-                    "match, then call `skill_inject` only for a useful manual. The injected <skill> block arrives as separate user-role "
-                    "reference context after the tool-result batch. Do not inject a skill merely because its name was mentioned, and "
-                    "do not inject the same manual twice. Reuse applicable loaded manuals; search again when the task enters "
-                    "territory they do not cover. Resolve unfamiliar runtime, deployment, or platform constraints before "
-                    "acting, and surface a concrete blocker if the required guidance is unavailable. Skill tools define "
-                    "learning and persistence procedures separately."
+                    "Skills are reference manuals for reusable procedures, debugging, review, and platform "
+                    "operations. When an unfamiliar procedure needs a manual and no applicable one is already loaded, "
+                    "use skill_search with a concise scenario, then skill_inject for a useful match. Search results "
+                    "describe manuals; injection loads their contents.\n"
+                    "Reuse applicable loaded manuals. A name mention alone does not require injection. Resolve "
+                    "relevant runtime or platform constraints before acting; report a concrete blocker if required "
+                    "guidance is unavailable."
                 ),
                 priority=72,
                 metadata={

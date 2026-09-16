@@ -757,6 +757,9 @@ class PluginHost:
             handle.mounted = True
             handle.degraded = False
             self.context.register_module(handle)
+            if handle.execution_extension is not None:
+                self.context.execution_runtime.install(handle.execution_extension, self.context, handle)
+                scope.defer(lambda: self.context.execution_runtime.uninstall(self.context, handle))
             scope.published = True
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
@@ -831,6 +834,11 @@ class PluginHost:
                 return RuntimeStatus.OK
             return RuntimeStatus.NOT_FOUND
         handle = generation.handle
+        try:
+            self.context.execution_runtime.check_detach(handle)
+        except Exception as exc:
+            self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=str(exc))
+            return RuntimeStatus.ERROR
         errors: list[str] = []
         try:
             self._withdraw_generation_surface(handle)

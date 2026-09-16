@@ -314,6 +314,9 @@ class TurnExecutor:
             if outcome.response.finish_reason != LLMFinishReason.ERROR:
                 await self._upsert_l1_assistant_async(continuation, outcome.response.message)
         self._debug_log_outcome(continuation, outcome)
+        refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
+        if refresh is not None:
+            refresh(continuation)
         preferred_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", "") or "").strip() or None
         preferred_model_id = str(getattr(outcome, "preferred_model_id", "") or "").strip() or None
         if preferred_endpoint_id is None:
@@ -534,7 +537,9 @@ class TurnExecutor:
             sequence=continuation.tool_batch_count,
             tool_signature_hash=canonical_tool_signature_hash(execution_call.name, execution_call.args),
             result_fingerprint=canonical_result_fingerprint(
-                {"ok": tool_result.ok, "text": tool_result.text, "structured": tool_result.structured}
+                self.context.execution_runtime.stagnation_payload(execution_call, tool_result)
+                if callable(getattr(self.context.execution_runtime, "stagnation_payload", None))
+                else {"ok": tool_result.ok, "text": tool_result.text, "structured": tool_result.structured}
             ),
         )
         continuation.tool_batch_count += 1
@@ -562,6 +567,9 @@ class TurnExecutor:
                 continuation.pending_tool_results = []
                 if self._after_tool_batch is not None:
                     await self._after_tool_batch(continuation)
+                refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
+                if refresh is not None:
+                    refresh(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -1022,6 +1030,7 @@ class TurnExecutor:
                     metadata["memory_pack"] = memory_service.build_pack(
                         MemoryPackRequest(
                             turn_kind=assembly_context.turn_kind,
+                            include_l1_recent_context=False,
                             task_id=assembly_context.task_id,
                             work_order_id=assembly_context.work_order_id,
                             active_input_id=str(
@@ -1086,7 +1095,7 @@ class TurnExecutor:
                         candidates.append({"key": "legacy-reminder", "role": "developer", "content": reminder_text})
                 frozen, additions, context_state = prepare_context(
                     active_turn, stable_messages, list(candidates),
-                    boundary=json.dumps([getattr(getattr(metadata.get("memory_pack"), "current_summary", None), "summary", ""),
+                    boundary=json.dumps([getattr(metadata.get("memory_pack"), "metadata", {}).get("continuity_id", ""),
                                          continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]))
                 active_turn = commit_context(continuation.turn_id, additions, context_state,
                                              expected_revision=active_turn.revision)
@@ -1095,9 +1104,22 @@ class TurnExecutor:
                 context_committed = True
         settled_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
+        context_view = None
+        view_builder = getattr(memory_service, "l1_context_view", None)
+        if callable(view_builder):
+            selected_turns = tuple(getattr(memory_pack, "l1_turns", ()) or ())
+            context_view = view_builder(continuation.turn_id, selected_turns)
+            prepare = getattr(getattr(self.context, "execution_runtime", None), "prepare_model_context", None)
+            if prepare is not None:
+                prepare(memory_service, continuation, context_view=context_view)
+                active_turn = memory_service.active_l1_turn(continuation.turn_id)
+                context_view = view_builder(continuation.turn_id, selected_turns)
         for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
-            from pal.core.prompt_context import applicable_context
-            original = applicable_context(list(getattr(settled_turn, "messages", ()) or ()), active_turn_id=continuation.turn_id)
+            from pal.memory.context_view import projected_messages
+            if context_view is not None:
+                original = list(context_view.turns[settled_turn.turn_id].messages.values())
+            else:
+                original = list(projected_messages(settled_turn, settled=True))
             projected = self._project_messages_for_prompt(
                 original,
                 turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
@@ -1111,7 +1133,8 @@ class TurnExecutor:
         active_messages: list[LLMMessageIR] = []
         if active_turn is not None:
             from pal.core.prompt_context import projected_context
-            active_messages = projected_context(active_turn)
+            active_messages = (list(context_view.turns[active_turn.turn_id].messages.values())
+                               if context_view is not None else projected_context(active_turn))
             active_messages = self._project_messages_for_prompt(
                 active_messages,
                 turn_id=continuation.turn_id,
@@ -1152,7 +1175,12 @@ class TurnExecutor:
             *contextual_messages,
             *tail_messages,
         ]
+        project_continuity = getattr(memory_service, "project_continuity", None)
+        continuity_id = getattr(memory_pack, "metadata", {}).get("continuity_id", "")
+        if callable(project_continuity) and continuity_id:
+            prompt_messages = project_continuity(prompt_messages)
         metadata = dict(prompt.metadata)
+        metadata["continuity_id"] = continuity_id
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
@@ -1171,12 +1199,10 @@ class TurnExecutor:
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
-            base_messages=[
-                *stable_messages,
-                *settled_messages,
-                *contextual_messages,
-            ],
-            active_messages=[*active_messages, *tail_messages],
+            base_messages=[m for m in prompt_messages if m.prompt_region not in {
+                PromptRegionIR.ACTIVE_INPUT, PromptRegionIR.ACTIVE_HISTORY, PromptRegionIR.ACTIVE_DYNAMIC}],
+            active_messages=[m for m in prompt_messages if m.prompt_region in {
+                PromptRegionIR.ACTIVE_INPUT, PromptRegionIR.ACTIVE_HISTORY, PromptRegionIR.ACTIVE_DYNAMIC}],
             tools=list(tools or []),
         )
         prompt = replace(
@@ -1537,7 +1563,9 @@ class TurnExecutor:
         message: LLMMessageIR,
     ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
-        method = getattr(memory_service, "upsert_l1_assistant", None)
+        method = getattr(memory_service, "stream_l1_assistant", None)
+        if not callable(method):
+            method = getattr(memory_service, "upsert_l1_assistant", None)
         if not callable(method):
             return
         if not message.semantic_kind:
@@ -1679,6 +1707,9 @@ class TurnExecutor:
                 )
                 raise
 
+        observe = getattr(self.context.execution_runtime, "observe_tool_delivery", None)
+        if callable(observe):
+            observe(call, result)
         acknowledge = getattr(self.context.execution_runtime, "acknowledge_tool_result_async", None)
         if callable(acknowledge):
             await acknowledge(call.call_id, turn_id)
@@ -2038,9 +2069,11 @@ class TurnExecutor:
 
         try:
             memory_pack = memory_service.build_pack(
-                MemoryPackRequest(turn_kind="chat")
+                MemoryPackRequest(turn_kind="chat", include_l1_recent_context=False)
             )
         except Exception:
+            return None, "", ""
+        if anchor_request.metadata.get("continuity_id", "") != memory_pack.metadata.get("continuity_id", ""):
             return None, "", ""
         capabilities = self._resolve_llm_capabilities_for_endpoint(
             preferred_endpoint_id
@@ -2048,8 +2081,9 @@ class TurnExecutor:
         suffix: list[LLMMessageIR] = []
         anchor_found = False
         for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            from pal.memory.context_view import projected_messages
             projected = self._project_messages_for_prompt(
-                list(getattr(settled_turn, "messages", ()) or ()),
+                list(projected_messages(settled_turn, settled=True)),
                 turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
                 artifact_scope_key=logical_scope_id,
                 capabilities=capabilities,

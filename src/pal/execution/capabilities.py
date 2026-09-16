@@ -102,34 +102,23 @@ def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnap
 
 
 def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = None) -> ModuleHandle:
-    from pal.execution.runtime_state import ExecutionRuntimeStatePort
-
     resolved_runtime = runtime or context.execution_runtime
     existing = context.module_registry.get("execution")
     if existing is not None:
         if existing.ports.get("execution") is not resolved_runtime:
             raise ValueError("execution module is already bound to a different runtime")
         return existing
-    native = getattr(resolved_runtime, "shell_owner", None) is not None
-    if native:
-        from pal.execution.native_shell.capabilities import NativeExecutionProvider
-        from pal.execution.native_shell.state import NativeExecutionStatePort
-        provider = NativeExecutionProvider(runtime=resolved_runtime)
-        state_port = NativeExecutionStatePort(resolved_runtime)
-    else:
-        provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
-        state_port = ExecutionRuntimeStatePort(resolved_runtime)
+    provider = resolved_runtime.build_introspection_provider()
+    state_port = resolved_runtime.build_runtime_state_port()
     handle = ModuleHandle(
         module_id="execution",
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
-        ports={"execution": resolved_runtime, **({"native_shell_targets": resolved_runtime.shell_owner}
-               if hasattr(resolved_runtime, "shell_owner") else {})},
+        ports={"execution": resolved_runtime, "extensions": context.execution_runtime},
         shutdown_sync=resolved_runtime.shutdown,
-        shutdown_async=resolved_runtime.shutdown_async if native else None,
+        shutdown_async=resolved_runtime.shutdown_async,
         runtime_state_port=state_port,
-        control_action_handlers={"shell_privilege_decision": resolved_runtime.shell_owner.approvals.decide} if native else {},
     )
     context.register_module(handle)
     return handle

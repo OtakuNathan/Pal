@@ -57,15 +57,20 @@ def test_review_entry_opens_preview_and_advances_to_next_pending_candidate(setup
     state = stage(reviews, candidates=[FACT, {**FACT, "title": "Second"}])
     spec = reviews.delivery(state, ROUTE, opening=True).interaction
     assert f"/memory_review {state['batch_id']}" in spec.text
-    args = spec.buttons[0][0].action_args["args"]
-    state = reviews.apply(state["batch_id"], args, ROUTE)
-    preview = reviews.delivery(state, ROUTE, view="view", candidate_id=args["candidate_id"]).interaction
+    preview = spec
     assert len(preview.items) == 1
+    assert preview.items[0].item_id == "c1"
+    assert [button.label for button in preview.items[0].buttons[0]] == ["Accept", "Reject", "Edit"]
+    assert "Candidate 1 of 2" in spec.text
     assert FACT["source_excerpt"] in preview.items[0].text
     assert FACT["summary"] in preview.items[0].text
     state = decision(reviews, state, "accept", candidate_id="c1")
-    next_button = reviews.delivery(state, ROUTE).interaction.buttons[0][0]
+    next_spec = reviews.delivery(state, ROUTE).interaction
+    assert len(next_spec.items) == 1
+    next_button = next_spec.items[0].buttons[0][0]
     assert next_button.action_args["args"]["candidate_id"] == "c2"
+    resumed = reviews.get(state["batch_id"], ROUTE, resume=True)
+    assert reviews.delivery(resumed, ROUTE).interaction.items[0].item_id == "c2"
     panel = ControlPlane().list_panel_commands()
     assert any(item.name == "memory_review" and item.panel_button and item.panel_label == "Memory proposals" for item in panel)
 
@@ -165,13 +170,14 @@ def test_no_final_button_before_all_decisions_and_only_refs_in_wire(setup_review
     state = stage(reviews, candidates=[FACT, {**FACT, "title": "second"}])
     spec = reviews.delivery(state, ROUTE).interaction
     wire, actions = interaction_projection(spec)
-    assert wire["buttons"][0][0]["label"] == "Review next candidate"
-    assert len(wire["items"]) == 2
+    assert wire["buttons"] == []
+    assert len(wire["items"]) == 1
     assert all("action_args" not in item for row in wire["items"][0]["buttons"] for item in row)
     assert all("memory_candidates" not in action["action_args"] for action in actions.values())
     state = decision(reviews, state, "accept", candidate_id="c1")
     state = decision(reviews, state, "skip", candidate_id="c2")
     assert reviews.delivery(state, ROUTE).interaction.buttons[0][0].label == "Submit accepted items"
+    assert reviews.delivery(state, ROUTE).interaction.items == ()
 
 
 def test_legacy_candidates_retained_but_require_new_decisions(setup_review):
@@ -252,6 +258,48 @@ def test_registered_commit_capability_is_reached_only_after_final_action(setup_r
             target_id=state["batch_id"], route=ROUTE, args=args))
         assert result["delivery"].delivery_kind == "interactive_resolve"
         assert len(provider.repository.list_projection_rows()) == 1
+    asyncio.run(run())
+
+
+def test_sequential_handler_edits_only_current_candidate_then_returns_to_it(setup_review):
+    import asyncio
+    from pal.control.contracts import ControlAction
+    from pal.core import MainContext
+    from pal.memory.capabilities import register_with_core
+    reviews, provider, _ = setup_review
+    context = MainContext()
+    handle = register_with_core(context, service=reviews.memory)
+    context.execution_runtime.mount_subtree(handle)
+    handler = handle.control_action_handlers["memory_candidate_decision"]
+    state = stage(reviews, candidates=[FACT, {**FACT, "title": "Second"}])
+
+    async def click(button, **extra):
+        args = {**button.action_args["args"], **extra}
+        result = await handler(ControlAction("memory_candidate_decision", "memory",
+            target_id=state["batch_id"], route=ROUTE, args=args))
+        return result["delivery"].interaction
+
+    async def run():
+        card = reviews.delivery(state, ROUTE).interaction
+        fields = await click(card.items[0].buttons[0][2])
+        body = next(row[0] for row in fields.buttons if row[0].label == "Body")
+        editor = await click(body)
+        assert editor.inputs[0].value == TEXT
+        edited = TEXT + "# revised\n"
+        card = await click(editor.inputs[0].submit, input_values={"value": edited})
+        assert len(card.items) == 1 and card.items[0].item_id == "c1"
+        assert edited in card.items[0].text
+        persisted = reviews.get(state["batch_id"], ROUTE)
+        assert persisted["drafts"][0]["decision"] == "pending"
+        assert persisted["drafts"][1]["content"]["summary"] == TEXT
+        card = await click(card.items[0].buttons[0][0])
+        assert len(card.items) == 1 and card.items[0].item_id == "c2"
+        final = await click(card.items[0].buttons[0][1])
+        assert final.items == () and "Final review" in final.text
+        assert final.buttons[0][0].label == "Submit accepted items"
+        assert provider.repository.list_projection_rows() == []
+        revisited = await click(final.buttons[1][0])
+        assert len(revisited.items) == 1 and revisited.items[0].item_id == "c1"
     asyncio.run(run())
 
 

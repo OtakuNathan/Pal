@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import freeze_json_mapping, thaw_json
+from pal.memory.continuity import ANCHOR_KEY, Continuity
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pal.memory.context_view import L1ContextView
 
 from pal.llm.ir import (
     LLMMessageIR,
@@ -111,13 +115,22 @@ class L1TurnIR:
             return self
         return replace(self, messages=(*self.messages, message), revision=self.revision + 1)
 
-    def append_user_contexts(self, messages: tuple[LLMMessageIR, ...]) -> "L1TurnIR":
+    def append_user_contexts(self, messages: tuple[LLMMessageIR, ...], *,
+                             coverage_namespace: str = "", coverage: dict[str, Any] | None = None) -> "L1TurnIR":
         """Atomically append idempotent user-role context messages."""
 
         self._require_active()
+        if coverage_namespace and self.pending_call_ids:
+            raise L1TurnProtocolError("context requires a closed tool batch")
         updated = self
         for message in tuple(messages):
             updated = updated.append_user_once(message)
+        if coverage_namespace:
+            metadata = thaw_json(updated.metadata)
+            namespaces = metadata.setdefault("observation_coverage", {})
+            if namespaces.get(coverage_namespace) != coverage:
+                namespaces[coverage_namespace] = coverage
+                updated = replace(updated, metadata=metadata, revision=updated.revision + 1)
         return updated
 
     def append_prompt_contexts(self, messages: tuple[LLMMessageIR, ...], state: dict[str, Any]) -> "L1TurnIR":
@@ -279,33 +292,114 @@ class L1TurnIR:
             )
 
 
-@dataclass
-class L1TurnStore:
-    turns: list[L1TurnIR] = field(default_factory=list)
+class _ActiveRound:
+    """L1-owned streaming record; frozen predecessors are never visited by update()."""
 
-    def begin(
-        self,
-        turn_id: str,
-        *,
-        user_text: str = "",
-        user_message: LLMMessageIR | None = None,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> L1TurnIR:
-        normalized = str(turn_id or "").strip()
-        if any(turn.turn_id == normalized for turn in self.turns):
-            raise L1TurnProtocolError(f"L1 turn already exists: {normalized}")
-        turn = L1TurnIR.begin(
-            normalized,
-            user_text=user_text,
-            user_message=user_message,
-            metadata=metadata,
-        )
-        self.turns.append(turn)
+    def __init__(self, base: L1TurnIR, message: LLMMessageIR) -> None:
+        base._require_active()
+        matches = [i for i, item in enumerate(base.messages) if item.message_id == message.message_id]
+        if matches and (len(matches) != 1 or matches[0] != len(base.messages) - 1
+                        or base.messages[-1].role != MessageRole.ASSISTANT):
+            raise L1TurnProtocolError("cannot stream into a frozen round or non-assistant record")
+        self.base = base
+        self.prefix = base.messages[:-1] if matches else base.messages
+        self.calls, results = _protocol_ids(self.prefix)
+        if self.calls != results:
+            raise L1TurnProtocolError("cannot start a round with unresolved tool calls")
+        self.message = None
+        self.revision = base.revision
+        self.cached = None
+        self.update(message)
+
+    def update(self, message: LLMMessageIR) -> None:
+        if message.role != MessageRole.ASSISTANT:
+            raise L1TurnProtocolError("only assistant messages can be streamed into L1")
+        if self.message is not None and message.message_id != self.message.message_id:
+            raise L1TurnProtocolError("stream changed round identity")
+        calls, results = _protocol_ids((message,))
+        if calls & self.calls or results:
+            raise L1TurnProtocolError("duplicate tool call or tool result inside assistant stream")
+        self.message = message
+        self.revision += 1
+        self.cached = None
+
+    def snapshot(self) -> L1TurnIR:
+        if self.cached is None:
+            self.cached = replace(self.base, messages=(*self.prefix, self.message), revision=self.revision)
+        return self.cached
+
+
+class L1TurnStore:
+    """L1 owns streaming rounds; immutable history is indexed only for a request."""
+
+    def __init__(self, turns: Iterable[L1TurnIR] = ()) -> None:
+        self._turns = []
+        self._positions = {}
+        self._rounds: dict[str, _ActiveRound] = {}
+        self._view_sources = None
+        self._view = None
+        self.continuity: Continuity | None = None
+        self._summary_turn_id = ""
+        self.replace_all(turns)
+
+    def _invalidate_view(self) -> None:
+        self._view_sources = None
+        self._view = None
+
+    @property
+    def turns(self) -> tuple[L1TurnIR, ...]:
+        return tuple(self.get(turn.turn_id) for turn in self._turns)
+
+    def append(self, turn: L1TurnIR) -> None:
+        if turn.turn_id in self._positions:
+            raise L1TurnProtocolError(f"L1 turn already exists: {turn.turn_id}")
+        continuity = self.continuity or self._read_continuity(turn)
+        self._positions[turn.turn_id] = len(self._turns)
+        self._turns.append(turn)
+        if self.continuity is None:
+            self.continuity = continuity
+            if self.continuity is not None:
+                self._summary_turn_id = turn.turn_id
+        self._invalidate_view()
+
+    @staticmethod
+    def _read_continuity(turn: L1TurnIR) -> Continuity | None:
+        message = next((m for m in turn.messages
+                        if m.semantic_kind == "runtime_context_summary" and m.text.strip()), None)
+        return Continuity.from_message(message, turn.metadata) if message is not None else None
+
+    def project_continuity(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
+        continuity = self.continuity
+        if continuity is None:
+            return messages
+        if not continuity.anchor:
+            from pal.memory.continuity import is_summary_projection
+            visible = {m.message_id for m in messages}
+            # Bind once to durable input, never to a transient compiler message.
+            anchor = next((m.message_id for turn in self.turns for m in turn.messages
+                           if m.message_id in visible and m.role == MessageRole.USER
+                           and m.semantic_kind != "pal_prompt_context" and not is_summary_projection(m)),
+                          continuity.standalone_id)
+            source = self.get(self._summary_turn_id)
+            self.replace(replace(source, revision=source.revision + 1,
+                                 metadata={**source.metadata, ANCHOR_KEY: anchor}))
+            continuity = self.continuity
+        return continuity.project(messages)
+
+    def begin(self, turn_id: str, *, user_text: str = "", user_message: LLMMessageIR | None = None,
+              metadata: Mapping[str, Any] | None = None) -> L1TurnIR:
+        turn = L1TurnIR.begin(str(turn_id or "").strip(), user_text=user_text,
+                              user_message=user_message, metadata=metadata)
+        self.append(turn)
         return turn
 
     def get(self, turn_id: str) -> L1TurnIR | None:
-        normalized = str(turn_id or "").strip()
-        return next((turn for turn in reversed(self.turns) if turn.turn_id == normalized), None)
+        key = str(turn_id or "").strip()
+        current = self._rounds.get(key)
+        if current is not None:
+            return current.snapshot()
+        position = self._positions.get(key)
+        return self._turns[position] if position is not None else None
 
     def require_active(self, turn_id: str) -> L1TurnIR:
         turn = self.get(turn_id)
@@ -314,17 +408,85 @@ class L1TurnStore:
         turn._require_active()
         return turn
 
+    def stream_assistant(self, turn_id: str, message: LLMMessageIR) -> None:
+        key = str(turn_id or "").strip()
+        current = self._rounds.get(key)
+        if current is not None and current.message.message_id == message.message_id:
+            current.update(message)
+        else:
+            # Starting a new round is a snapshot boundary, not a per-fragment operation.
+            base = self.require_active(key)
+            replacement = _ActiveRound(base, message)
+            self._turns[self._positions[key]] = base
+            self._rounds[key] = replacement
+        self._invalidate_view()
+
+    def message(self, turn_id: str, message_id: str) -> LLMMessageIR | None:
+        current = self._rounds.get(turn_id)
+        if current is not None and current.message.message_id == message_id:
+            return current.message
+        turn = self.get(turn_id)
+        return next((m for m in turn.messages if m.message_id == message_id), None) if turn else None
+
     def replace(self, turn: L1TurnIR) -> None:
-        for index, current in enumerate(self.turns):
-            if current.turn_id == turn.turn_id:
-                if turn.revision <= current.revision:
-                    raise L1TurnProtocolError("L1 replacement did not advance revision")
-                self.turns[index] = turn
-                return
-        raise L1TurnProtocolError(f"unknown L1 turn: {turn.turn_id}")
+        current = self.get(turn.turn_id)
+        if current is None:
+            raise L1TurnProtocolError(f"unknown L1 turn: {turn.turn_id}")
+        if turn.revision <= current.revision:
+            raise L1TurnProtocolError("L1 replacement did not advance revision")
+        self.restore_turn(turn, expected=current)
+
+    def restore_turn(self, turn: L1TurnIR, *, expected: L1TurnIR) -> None:
+        """Snapshot/rollback boundary: install records and discard derived live state together."""
+        if self.get(turn.turn_id) is not expected:
+            raise L1TurnProtocolError("L1 changed during rollback")
+        continuity = self._read_continuity(turn) if turn.turn_id == self._summary_turn_id else self.continuity
+        self._turns[self._positions[turn.turn_id]] = turn
+        self.continuity = continuity
+        self._rounds.pop(turn.turn_id, None)
+        self._invalidate_view()
+
+    def replace_all(self, turns: Iterable[L1TurnIR]) -> None:
+        values = list(turns)
+        positions = {turn.turn_id: i for i, turn in enumerate(values)}
+        if len(positions) != len(values):
+            raise L1TurnProtocolError("duplicate L1 turn id")
+        summary_turn_id, continuity = "", None
+        for turn in values:
+            continuity = self._read_continuity(turn)
+            if continuity is not None:
+                summary_turn_id = turn.turn_id
+                break
+        self._turns, self._positions = values, positions
+        self._summary_turn_id, self.continuity = summary_turn_id, continuity
+        self._rounds.clear()
+        self._invalidate_view()
+
+    def context_view(self, active_turn_id: str, settled_turns: Iterable[L1TurnIR] = ()) -> "L1ContextView":
+        from pal.memory.context_view import L1ContextView, TurnView, projected_messages
+        selected = tuple(settled_turns)
+        active = self.get(active_turn_id)
+        sources = (*selected, *((active,) if active is not None else ()))
+        old = self._view_sources
+        if old is not None and old[0] == active_turn_id and len(old[1]) == len(sources) and all(
+            left is right for left, right in zip(old[1], sources)
+        ):
+            return self._view
+        views, coverage = {}, {}
+        for turn in sources:
+            messages = projected_messages(turn, settled=turn is not active)
+            calls = {part.call_id: m.message_id for m in messages for part in m.parts
+                     if isinstance(part, ToolResultIR)}
+            views[turn.turn_id] = TurnView.build(messages, calls)
+            for namespace, value in turn.metadata.get("observation_coverage", {}).items():
+                for key, proof in value.get("states", {}).items():
+                    coverage.setdefault((namespace, key), []).append((turn.turn_id, proof))
+        self._view = L1ContextView(views, {key: tuple(proofs) for key, proofs in coverage.items()})
+        self._view_sources = (active_turn_id, sources)
+        return self._view
 
     def clear(self) -> None:
-        self.turns.clear()
+        self.replace_all(())
 
 
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:

@@ -90,11 +90,7 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
 
         result = self.tool.invoke({"file_path": str(path)})
         edit = FileEditTool(cache=self.cache).invoke(
-            {
-                "file_path": str(path),
-                "old_string": "alpha",
-                "new_string": "ALPHA",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "ALPHA"}]}
         )
 
         self.assertEqual(result.status, RuntimeStatus.OK)
@@ -226,11 +222,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(read_result.status, RuntimeStatus.OK)
 
         edit_tool = FileEditTool(cache=self.cache)
-        edit_result = edit_tool.invoke({
-            "file_path": str(path),
-            "old_string": "hello",
-            "new_string": "goodbye",
-        })
+        edit_result = edit_tool.invoke({"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]})
         self.assertEqual(edit_result.status, RuntimeStatus.OK)
         self.assertIn("patch", edit_result.structured)
         self.assertEqual(path.read_text(), "goodbye world\n")
@@ -241,11 +233,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         with mock.patch.dict("os.environ", {"HOME": self._tmpdir}):
             read_result = self.tool.invoke({"file_path": "~/tilde_flow.txt"})
             edit_result = FileEditTool(cache=self.cache).invoke(
-                {
-                    "file_path": "~/tilde_flow.txt",
-                    "old_string": "hello",
-                    "new_string": "goodbye",
-                }
+                {"file_path": "~/tilde_flow.txt", "edits": [{"old_string": "hello", "new_string": "goodbye"}]}
             )
 
         self.assertEqual(read_result.status, RuntimeStatus.OK)
@@ -259,11 +247,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         with mock.patch.dict("os.environ", {"HOME": self._tmpdir}):
             self.tool.invoke({"file_path": "~/mixed_path_flow.txt"})
             edit_result = FileEditTool(cache=self.cache).invoke(
-                {
-                    "file_path": str(path),
-                    "old_string": "alpha",
-                    "new_string": "gamma",
-                }
+                {"file_path": str(path), "edits": [{"old_string": "alpha", "new_string": "gamma"}]}
             )
 
         self.assertEqual(edit_result.status, RuntimeStatus.OK)
@@ -279,11 +263,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.assertIsNone(self.cache.get_valid_full(str(path)))
 
         edit_result = FileEditTool(cache=self.cache).invoke(
-            {
-                "file_path": str(path),
-                "old_string": "line 1\n",
-                "new_string": "changed\n",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "line 1\n", "new_string": "changed\n"}]}
         )
         self.assertEqual(edit_result.status, RuntimeStatus.OK)
         self.assertIn("changed\nline 2", path.read_text(encoding="utf-8"))
@@ -294,11 +274,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.tool.invoke({"file_path": str(path), "offset": 1, "limit": 5})
 
         edit_result = FileEditTool(cache=self.cache).invoke(
-            {
-                "file_path": str(path),
-                "old_string": "line 20\n",
-                "new_string": "changed\n",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "line 20\n", "new_string": "changed\n"}]}
         )
 
         self.assertEqual(edit_result.structured["error_code"], "PARTIAL_READ")
@@ -309,11 +285,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 1})
 
         edit_result = FileEditTool(cache=self.cache).invoke(
-            {
-                "file_path": str(path),
-                "old_string": "beta",
-                "new_string": "BETA",
-            }
+            {"file_path": str(path), "edits": [{"old_string": "beta", "new_string": "BETA"}]}
         )
 
         self.assertEqual(edit_result.status, RuntimeStatus.OK)

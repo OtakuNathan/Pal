@@ -965,7 +965,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             edit = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_file_edit",
-                    args={"file_path": str(path), "old_string": "hello", "new_string": "goodbye"},
+                    args={"file_path": str(path), "edits": [{"old_string": "hello", "new_string": "goodbye"}]},
                     meta=direct_meta,
                 )
             )
@@ -994,7 +994,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             edit_created = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_file_edit",
-                    args={"file_path": str(created_path), "old_string": "draft", "new_string": "final"},
+                    args={"file_path": str(created_path), "edits": [{"old_string": "draft", "new_string": "final"}]},
                     meta=direct_meta,
                 )
             )
@@ -1137,7 +1137,25 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         None,
                     )
                     if isinstance(guidance_node, ast.Name):
-                        guidance_node = named_guidance.get(guidance_node.id)
+                        name = guidance_node.id
+                        guidance_node = named_guidance.get(name)
+                        if guidance_node is None:
+                            # Shared contracts may be imported from pure guidance modules.
+                            # Check their resolved fields rather than requiring duplicate literals.
+                            from importlib import import_module
+                            package = "pal." + ".".join(source_path.relative_to(source_root).parts[:-1])
+                            for statement in tree.body:
+                                if not isinstance(statement, ast.ImportFrom):
+                                    continue
+                                for alias in statement.names:
+                                    if (alias.asname or alias.name) != name:
+                                        continue
+                                    module = import_module("." * statement.level + (statement.module or ""), package)
+                                    value = getattr(module, alias.name)
+                                    fields = {field: getattr(value, field) for field in (
+                                        "purpose", "use_when", "do_not_use_when", "failure_next_steps")}
+                                    guidance_node = ast.Call(func=ast.Name(id="ToolGuidance"), args=[],
+                                        keywords=[ast.keyword(arg=k, value=ast.Constant(value=v)) for k, v in fields.items()])
                     if not isinstance(guidance_node, ast.Call):
                         failures.append(f"{source_path.name}:{node.lineno}: unresolved guidance")
                         continue
@@ -1844,7 +1862,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<recalled_memories> contains durable memory context", system_text)
             self.assertIn("Direct tools are not the complete capability inventory", system_text)
             self.assertNotIn("bunshin", developer_text.split("<system_map>", 1)[0].lower())
-            self.assertIn("Memory tool descriptions", developer_text)
+            self.assertIn("Memory tools define record maintenance", developer_text)
             self.assertIn("prefixes such as fact: and case:", developer_text)
             self.assertNotIn("memory_recall", system_text)
             self.assertNotIn("memory_write", system_text)
@@ -4541,7 +4559,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("origin available", remembered_facts.content)
         self.assertIn("[fact:2]: The test user built Pal again.", remembered_facts.content)
 
-    def test_typed_l1_projection_keeps_summary_and_recalled_memory(self) -> None:
+    def test_typed_l1_projection_leaves_summary_to_l1_and_keeps_recalled_memory(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
         pack = MemoryPack(
@@ -4586,7 +4604,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(
             any(block_id.startswith("l1_recent_context") for block_id in block_ids)
         )
-        self.assertIn("memory_current_summary", block_ids)
+        self.assertNotIn("memory_current_summary", block_ids)
         self.assertIn("memory_recalled_context", block_ids)
 
     def test_memory_query_defaults_to_summary_view_enum(self) -> None:

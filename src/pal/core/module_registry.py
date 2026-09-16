@@ -34,6 +34,7 @@ class ModuleHandle:
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
     shutdown_sync: Callable[[], None] | None = None
     shutdown_async: Callable[[], Awaitable[None]] | None = None
+    execution_extension: Any | None = None
     runtime_state_port: "RuntimeStatePort | None" = None
 
 @dataclass

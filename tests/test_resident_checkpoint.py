@@ -35,6 +35,36 @@ def _build_app(root: Path) -> PalRuntimeApp:
 
 
 class ResidentCheckpointTests(unittest.TestCase):
+    def test_shutdown_persists_nested_prompt_and_observation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            app = _build_app(root)
+            metadata = {
+                "prompt_context_state": {"sources": {"route": {"revision": 7, "parts": [{"text": "route"}]}}},
+                "observation_coverage": {"native": {"states": {"session": {"revision": 2}}}},
+            }
+            app.handle.memory_service.begin_l1_turn("nested", user_text="keep context", metadata=metadata)
+            app.handle.memory_service.settle_l1_turn("nested")
+            asyncio.run(app._checkpoint_for_shutdown_async())
+            self.assertEqual(app.last_checkpoint_status, "l1_saved", app.last_checkpoint_error)
+            snapshot = ResidentCheckpointStore(root).read()
+            self.assertEqual(snapshot["modules"]["memory"]["payload"]["l1_turns"][0]["metadata"], metadata)
+            restored = _build_app(root)
+            asyncio.run(restored._restore_checkpoint_async())
+            self.assertEqual(restored.last_checkpoint_status, "restored")
+            self.assertEqual(restored.handle.memory_service.active_l1_turn("nested"), None)
+            self.assertEqual(restored.handle.memory_service.l1_store.turns.get("nested").metadata["prompt_context_state"]["sources"]["route"]["revision"], 7)
+
+    def test_checkpoint_failure_is_logged_before_process_exit(self) -> None:
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = _build_app(Path(tmpdir))
+            app._publish_checkpoint_async = AsyncMock(side_effect=OSError("disk unavailable"))
+            with self.assertLogs("pal.runtime_app", level="ERROR") as logs:
+                asyncio.run(app._checkpoint_for_shutdown_async())
+            self.assertEqual(app.last_checkpoint_status, "save_failed")
+            self.assertIn("disk unavailable", "\n".join(logs.output))
+
     def test_checkpoint_is_encrypted_and_restores_then_consumes_l1(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

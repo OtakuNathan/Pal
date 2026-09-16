@@ -281,7 +281,7 @@ class MemoryReviewService:
             return delivery_for_interaction(route, "interactive_resolve", spec)
         drafts = state["drafts"]
         counts = {key: sum(item["decision"] == key for item in drafts) for key in ("pending", "accepted", "skipped")}
-        text = f"Memory proposals: {counts['pending']} pending · {counts['accepted']} accepted · {counts['skipped']} skipped\nReview each candidate, then submit the accepted items together."
+        text = f"Memory proposals: {counts['pending']} pending · {counts['accepted']} accepted · {counts['skipped']} rejected\nReview one candidate at a time. Nothing is saved until final submission."
         text += "\nBatch: " + batch_id
         text += "\nReopen: /memory_review " + batch_id
         if state["source"].get("source_label"):
@@ -290,6 +290,10 @@ class MemoryReviewService:
             text += f"\nExtraction normalized or skipped {len(state['diagnostics'])} format issues."
         text += ("\n" + (banner or state["error"])) if banner or state["error"] else ""
         selected = next((item for item in drafts if item["candidate_id"] == candidate_id), None)
+        if view not in {"view", "edit", "field"} or selected is None:
+            selected = next((item for item in drafts if item["decision"] == "pending"), None)
+        if selected:
+            text += f"\nCandidate {drafts.index(selected) + 1} of {len(drafts)}"
         inputs = ()
         items = []
         rows = []
@@ -305,11 +309,11 @@ class MemoryReviewService:
                 rows.extend((button(FIELD_LABELS[key], "field", candidate_id, key),) for key in self.fields(selected))
             rows.append((button("Back", "view", candidate_id),))
             text += "\nEditing: " + content["title"]
-        else:
-            visible = [selected] if view == "view" and selected else drafts
+        elif selected:
+            visible = [selected]
             for draft in visible:
                 item = draft["content"]
-                label = {"pending": "Pending", "accepted": "Accepted", "skipped": "Skipped"}[draft["decision"]]
+                label = {"pending": "Pending", "accepted": "Accepted", "skipped": "Rejected"}[draft["decision"]]
                 if draft["edited"]:
                     label += " · Edited"
                 task_id = state["source"].get("task_id") or item.get("task_id")
@@ -319,18 +323,19 @@ class MemoryReviewService:
                     detail += "\n\n" + "\n\n".join(f"{FIELD_LABELS[key]}:\n{value}" for key, value in item["star"].items())
                 if item.get("why_durable"):
                     detail += "\n\nReason to retain: " + item["why_durable"]
-                if view == "view":
-                    detail += "\n\nSearch text:\n" + item["search_text"] + "\n\nSource excerpt / retrieval context:\n" + item["source_excerpt"]
+                detail += "\n\nSearch text:\n" + item["search_text"] + "\n\nSource excerpt / retrieval context:\n" + item["source_excerpt"]
                 cid = draft["candidate_id"]
                 items.append(InteractionItemSpec(cid, f"{cid} · {item['kind']} · {item['title']}", detail, label,
-                    ((button(f"{cid} Accept", "accept", cid), button(f"{cid} Skip", "skip", cid), button(f"{cid} Edit", "edit", cid), button(f"{cid} Preview", "view", cid)),)))
-            if view == "view":
-                rows.append((button("Back to batch overview", "overview"),))
-            elif counts["pending"]:
-                next_candidate = next(item for item in drafts if item["decision"] == "pending")
-                rows.append((button("Review next candidate", "view", next_candidate["candidate_id"]),))
-            elif not counts["pending"]:
-                rows.append((button("Submit accepted items" if counts["accepted"] else "Finish without saving", "submit"),))
+                    ((button("Accept", "accept", cid), button("Reject", "skip", cid), button("Edit", "edit", cid)),)))
+            if not counts["pending"]:
+                rows.append((button("Back to final review", "overview"),))
+        else:
+            text += "\n\nFinal review — submit the accepted items together, or revisit a candidate."
+            for draft in drafts:
+                label = "Accepted" if draft["decision"] == "accepted" else "Rejected"
+                text += f"\n{draft['candidate_id']} · {label} · {draft['content']['title']}"
+            rows.append((button("Submit accepted items" if counts["accepted"] else "Finish without saving", "submit"),))
+            rows.extend((button(f"Review {draft['candidate_id']}", "view", draft["candidate_id"]),) for draft in drafts)
         spec = InteractionMessageSpec(batch_id, "memory_candidate_approval", route, text,
             tuple(rows), revision=revision, items=tuple(items), inputs=inputs)
         return delivery_for_interaction(route, "interactive_open" if opening else "interactive_update", spec)

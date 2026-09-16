@@ -50,12 +50,9 @@ class BehaviorPromptFragmentProvider:
                 section="behavior_guidance_guide",
                 title="Behavior Guidance Guide",
                 content=(
-                    "Behavior guidance answers: \"When this situation appears, what route should you consider?\"\n\n"
-                    "Use behavior guidance for future routing rules and recurring decision hints. It is not durable factual "
-                    "memory, current runtime state, or a step-by-step procedure. Behavior tools define advice, learn, update, "
-                    "and forget boundaries; injected/plugin guidance is read-only through those tools. "
-                    "Temporary behavior guidance produced by advise_behavior may appear in <behavior_guidance> and retires automatically.\n\n"
-                    "Resident and learned routes remain suggestions; apply only when relevant to the current user request."
+                    "Consider relevant resident and learned routes when choosing how to approach a task. Use behavior "
+                    "tools to retain useful future routing advice; temporary advice retires automatically. Injected "
+                    "or plugin-owned guidance is read-only through those tools."
                 ),
                 priority=72,
                 metadata={

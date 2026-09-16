@@ -27,6 +27,10 @@ class MainContext:
     introspection_registry: dict[str, IntrospectionPort] = field(default_factory=dict)
     port_registry: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        from pal.execution.extensions import execution_slot
+        self.execution_runtime = execution_slot(self.execution_runtime)
+
     @property
     def core_event_bus(self) -> TurnEventBus:
         return self.turn_event_bus

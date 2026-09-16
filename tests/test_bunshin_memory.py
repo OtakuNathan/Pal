@@ -140,7 +140,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         self.assertEqual(efficiency.title, "Tool Efficiency")
         self.assertLess(efficiency.priority, 20)
-        self.assertIn("govern which work to do, not whether independent tool RPCs", efficiency.content)
+        self.assertIn("do not require separate model rounds for independent reads", efficiency.content)
         self.assertIn("Batch independent tool calls in one response", efficiency.content)
         self.assertIn("do not serialize every file or field", efficiency.content)
         self.assertIn("If read_file reports unchanged content", efficiency.content)

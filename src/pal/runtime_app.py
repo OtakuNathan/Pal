@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from copy import deepcopy
 import shutil
 import signal
@@ -199,6 +200,7 @@ class PalRuntimeApp:
         except Exception as exc:
             self.last_checkpoint_status = "save_failed"
             self.last_checkpoint_error = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).exception("Resident checkpoint save failed; latest in-memory context was not persisted")
             core.state.diagnostics.append(
                 {
                     "kind": "resident.checkpoint.save_failed",
@@ -266,10 +268,9 @@ class PalRuntimeApp:
             self.last_debug_dump_error = f"{type(exc).__name__}: {exc}"
 
     def _debug_snapshot(self) -> dict[str, object]:
-        shell_owner = getattr(self.handle.core.context.execution_runtime, "shell_owner", None)
+        execution = self.handle.core.context.execution_runtime.execution_diagnostics()
         return {
-            "shell_backend": "native" if shell_owner is not None else "python",
-            "shell_sessions": len(shell_owner.sessions) if shell_owner is not None else 0,
+            "execution": execution,
             "loop_iterations": self.loop_iterations,
             "last_tick_monotonic": self.last_tick_monotonic,
             "last_tick_utc": self.last_tick_utc,

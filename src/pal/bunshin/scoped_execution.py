@@ -335,7 +335,7 @@ def _workflow_capability(
             "scope": "workflow",
             "allow_missing_next_tool_hints": True,
             "scoped_projection": "bunshin",
-            "native_shell_delegation": name in SHELL_EVIDENCE_CAPABILITIES,
+            "delegates_execution": name in SHELL_EVIDENCE_CAPABILITIES,
         },
     )
     action = BoundCapabilityAction(
@@ -392,10 +392,9 @@ class _ExecutionOverlay:
             self.runtime.tool_result_pager = delegate_pager
         if delegate_state is not None:
             self.runtime.logical_state = delegate_state
-        native_owner = getattr(delegate, "shell_owner", None)
-        if native_owner is not None:
-            from pal.execution.native_shell.runtime import NativeExecutionRuntime
-            self.runtime = NativeExecutionRuntime.project_view(self.runtime, native_owner)
+        project = getattr(delegate, "project_execution_view", None)
+        if project is not None:
+            self.runtime = project(self.runtime)
         self._mount_allowed_generation(
             allowed_capabilities,
             guidance_overrides=guidance_overrides,
@@ -425,6 +424,7 @@ class _ExecutionOverlay:
                 record.binding.descriptor,
                 guidance_overrides=guidance_overrides,
             )
+            descriptor = getattr(self.delegate, "project_role_descriptor", lambda d: d)(descriptor)
             binding = replace(record.binding, descriptor=descriptor)
             subtree.descriptors.append(descriptor)
             subtree.bound_actions.append(binding)
@@ -509,14 +509,9 @@ class BunshinScopedExecutionRuntime:
         ).strip()
         self._direct_turn_id = f"{lifetime_id}:direct" if lifetime_id else ""
         self.allowed_capabilities = filter_bunshin_allowed_capabilities(list(self.allowed_capabilities or []))
-        shell_capabilities = SHELL_EVIDENCE_CAPABILITIES | {"op_exec_shell"}
-        if getattr(self._original_runtime, "shell_owner", None) is not None and shell_capabilities.intersection(self.allowed_capabilities):
-            # These controls grant authority only over this role's own shell
-            # instances; they do not expose resident or other-role sessions.
-            self.allowed_capabilities = list(dict.fromkeys([
-                *self.allowed_capabilities, "op_exec_session", "op_exec_status", "op_exec_recover_output",
-                "op_tool_call", "op_tool_read",
-            ]))
+        expand = getattr(self._original_runtime, "role_capabilities", None)
+        if expand is not None:
+            self.allowed_capabilities = expand(self.allowed_capabilities)
         if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
             self.allowed_capabilities.append("op_tool_result_page")
         self.capability_guidance_overrides = normalize_tool_guidance_overrides(
@@ -634,18 +629,33 @@ class BunshinScopedExecutionRuntime:
         if callable(execute):
             facade_call = _manager_call_to_facade(self._original_runtime, call)
             result = await execute(facade_call, **_supported_kwargs(execute, kwargs))
-            if call.name == "op_exec_shell" and getattr(self._original_runtime, "shell_owner", None) is not None:
-                # Verification evidence must describe a terminal command, even
-                # when its internal shell call outlives the response wait.
-                while result.ok and (result.structured or {}).get("status") in {"running", "terminating"}:
-                    result = await execute(new_tool_call(name="call_tool", args={
-                        "name": "shell_session", "args": {"session_id": result.structured["session_id"], "wait_ms": 300000},
-                    }, call_id=call.call_id), **_supported_kwargs(execute, kwargs))
+            complete = getattr(self._original_runtime, "complete_evidence", None)
+            if complete is not None:
+                result = await complete(call, result, **kwargs)
             return result
         return _error_result(call, "unknown tool", "unknown_tool")
 
     def begin_tool_result_turn(self, **kwargs: Any) -> None:
         self.base_runtime.begin_tool_result_turn(**kwargs)
+
+    def prepare_model_context(self, memory, continuation, *, context_view=None):
+        hook = getattr(self._original_runtime, "prepare_model_context", None)
+        if hook is not None:
+            hook(memory, continuation, context_view=context_view)
+
+    def model_response_received(self, continuation):
+        hook = getattr(self._original_runtime, "model_response_received", None)
+        if hook is not None:
+            hook(continuation)
+
+    def observe_tool_delivery(self, call, result):
+        hook = getattr(self._original_runtime, "observe_tool_delivery", None)
+        if hook is not None:
+            hook(call, result)
+
+    def stagnation_payload(self, call, result):
+        hook = getattr(self._original_runtime, "stagnation_payload", None)
+        return hook(call, result) if hook else {"ok": result.ok, "text": result.text, "structured": result.structured}
 
     def read_tool_result_page(self, **kwargs: Any) -> Any:
         return self.base_runtime.read_tool_result_page(**kwargs)
@@ -929,7 +939,7 @@ def _scope_descriptor(
     canonical = str(descriptor.canonical_path or descriptor.name)
     input_model = (
         BunshinScopedExecutionShellInput
-        if canonical == "op_exec_shell" and "wait_ms" not in descriptor.InputModel.model_fields
+        if canonical == "op_exec_shell" and not descriptor.metadata.get("preserve_role_contract")
         else descriptor.InputModel
     )
     guidance = bunshin_tool_guidance(
@@ -937,27 +947,8 @@ def _scope_descriptor(
         descriptor.guidance,
         guidance_overrides.get(canonical),
     )
-    native_shell = canonical == "op_exec_shell" and "wait_ms" in input_model.model_fields
-    if native_shell:
-        guidance = guidance.model_copy(update={
-            "use_when": guidance.use_when + " wait_ms controls response waiting, not process lifetime; timeout_ms is an optional hard deadline."
-                " A nonzero session_id identifies a continuing command. The runner waits up to five minutes for background completion"
-                " before the next model round and delivers output to this role's context. Use tty=true for interactive input.",
-            "failure_next_steps": guidance.failure_next_steps + " Do not replay a live session or poll repeatedly."
-                " Use shell_session for PTY input or termination and shell_recover_output for retained output."
-                " Success requires status=exited and returncode=0. Pending shell output blocks writes and submission.",
-        })
-    if canonical == "op_exec_session":
-        guidance = guidance.model_copy(update={"use_when": guidance.use_when.replace(
-            "retry_notification retries a failed completion turn; inspect its previous effects before retrying.",
-            "The role runner delivers completions automatically; retry_notification is available only in the resident host.",
-        )})
-    if canonical == "op_exec_status":
-        guidance = guidance.model_copy(update={
-            "failure_next_steps": "If this role's backend is unavailable, report the failure through the role result; do not inspect or repair the resident runtime.",
-        })
     execution = descriptor.execution
-    if execution is not None and canonical not in {"op_exec_session", "op_exec_status", "op_exec_recover_output"}:
+    if execution is not None and not descriptor.metadata.get("preserve_role_invocation_mode"):
         execution = execution.model_copy(update={"invocation_mode": InvocationMode.DIRECT})
     return replace(
         descriptor,

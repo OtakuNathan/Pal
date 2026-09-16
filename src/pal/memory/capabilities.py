@@ -231,7 +231,7 @@ class MemoryIntrospectionProvider:
                     banner = "Submission did not complete. Your review decisions are saved; you can retry."
                 state = reviews.get(state["batch_id"], action.route)
             operation = action.args.get("decision")
-            view = operation if operation in {"edit", "field", "view"} else "overview"
+            view = "view" if operation == "save" else operation if operation in {"edit", "field", "view"} else "overview"
             return {"delivery": reviews.delivery(state, action.route, view=view,
                 candidate_id=action.args.get("candidate_id", ""), field=action.args.get("field", ""), banner=banner)}
         except ValueError as exc:

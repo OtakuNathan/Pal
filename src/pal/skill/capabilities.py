@@ -46,7 +46,6 @@ from pal.skill.builtin_skills import (
     PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
     PAL_SELF_MAINTENANCE_SKILL_ID,
-    PAL_REMOTE_SETUP_SKILL_ID,
     builtin_declared_skills,
 )
 from pal.skill.contracts import SkillDescriptor
@@ -184,18 +183,6 @@ if TYPE_CHECKING:
         "自我修改", "如何配置 Pal", "怎么配置 Pal", "Pal怎么配置", "pal cli", "configure pal", "pal configuration",
     ),
     skill_refs=(PAL_SELF_MAINTENANCE_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False},
-)
-@affordance(
-    affordance_id="declared.skill.pal_remote_setup",
-    title="Pal remote host setup skill",
-    scenario_text="The user wants help installing a remote worker, enrolling SSH/RPC identities, or adding a remote execution target to Pal.",
-    prompt_hint="If this route matches, inject skill `pal.remote.setup` for platform checks, installation, target capability trimming and acceptance.",
-    activation_terms=("pal remote setup", "remote worker", "remote host setup", "remote shell setup",
-                      "远端接入", "远端安装", "远程主机配置", "安装remote端", "添加remote", "配置远端", "云主机接入"),
-    skill_refs=(PAL_REMOTE_SETUP_SKILL_ID,),
     priority=35,
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False},

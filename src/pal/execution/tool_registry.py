@@ -513,8 +513,9 @@ def _compile_next_tool_lines(
             route = f"Invoke it directly as `{hint.name}`."
         elif hint.name in indirect_aliases:
             route = (
-                f"First inspect `{hint.name}` with `read_tool(name={json.dumps(hint.name)})`, "
-                f"then invoke it with `call_tool(name={json.dumps(hint.name)}, args=...)`."
+                f"Invoke it with `call_tool(name={json.dumps(hint.name)}, args=...)`. "
+                f"If its arguments or execution semantics are unknown, inspect "
+                f"`read_tool(name={json.dumps(hint.name)})` first."
             )
         elif (
             not record.is_mcp

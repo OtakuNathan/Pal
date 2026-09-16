@@ -162,9 +162,6 @@ def compose_runtime(
     failure_runtime = FailureRuntime()
     register_core_with_core(core)
     register_execution_with_core(core.context)
-    if getattr(core.context.execution_runtime, "shell_owner", None) is not None:
-        from pal.execution.native_shell.events import attach_completion_source
-        attach_completion_source(core, core.context.execution_runtime)
     register_channel_with_core(
         core.context,
         channel_runtime,

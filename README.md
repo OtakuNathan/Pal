@@ -242,12 +242,12 @@ The surface exposed to the LLM is deliberately small: 6 singletons + 3 dynamic t
 
 Tools are the **only** execution primitive. Built-in: `shell.exec`, `tool.search`, `tool.read`. Every tool call is budgeted (max output size, timeout, read limits). Oversized results spill to artifact storage. A stagnation guard detects loops and force-terminates them.
 
-An optional [native shell backend](native/shell_runtime/README.md) supports retained
-process sessions and PTYs through the same `run_shell` entry, with session controls
-discovered on demand. Resident and Bunshin runtimes use `PAL_SHELL_BACKEND=native`
-and the separately released [pal-shell-native](https://github.com/OtakuNathan/pal-shell-native)
-extension. Its README covers installation, verification and rollback; Python remains
-the default backend.
+The optional [pal-shell-native](https://github.com/OtakuNathan/pal-shell-native)
+plugin supplies its own `run_shell` schema, retained sessions, PTYs and remote
+routing. Attach the matching plugin package to replace the built-in shell; detach
+it once work is settled to restore the built-in implementation. Bunshin uses the
+attached plugin's worker contribution. Installation and verification live in the
+extension repository.
 
 ### Prompt Assembly
 
