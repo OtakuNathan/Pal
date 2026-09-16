@@ -46,7 +46,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
     ),
     use_when=(
         "Reading local source, configuration, or other UTF-8 text. Use offset and limit for focused reads. "
-        "A focused edit is authorized once every affected line is present in the current logical context."
+        "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. Reuse valid delivered reads. Shell output alone does not register a file-tool read snapshot."
     ),
     do_not_use_when=(
         "Binary files, images, PDFs, or channel-delivered artifacts. Do not re-read an unchanged covered range after "
@@ -72,7 +72,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
 FILE_EDIT_GUIDANCE = ToolGuidance(
     purpose="Replace an exact string in a UTF-8 text file after reading every affected line.",
     use_when=(
-        "Making a focused change to an existing text file whose affected lines are already in the current logical "
+        "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
         "context. The match must be unique unless replace_all=true is intentionally requested."
     ),
     do_not_use_when=(

@@ -43,11 +43,13 @@ class ShellRouter(ShellRuntime):
 
     @property
     def remote_work(self):
-        return bool(self.tickets or self.operations)
+        return self.execution_work
 
     @property
     def execution_work(self):
-        return bool(self.tickets or any(t.kind == "execution" for t in self.operations.values()))
+        return any(self.owner.sessions.get(sid, {}).get("latest_status") not in TERMINAL
+                   for sid in self.tickets) or any(t.kind == "execution" and not t.native_id
+                                                 for t in self.operations.values())
 
     def _port(self):
         if self.owner.remote_port is None:
@@ -238,6 +240,10 @@ class ShellRouter(ShellRuntime):
             response = await self._rpc(control, 'session', {'operation_id': operation_id, 'session_id': ticket.native_id,
                 'action': action, **{k: v for k, v in kwargs.items() if v is not None}})
             result = await self._outcome(control, response)
+            if action in {'watch', 'unwatch'}:
+                previous = self.remote_completions.get(session_id)
+                if previous and previous.result.get('watch_generation', 0) < result.get('watch_generation', 0):
+                    self.remote_completions.pop(session_id, None)
             return result
         except RemoteFailure as exc:
             exc.operation_id = operation_id
@@ -313,7 +319,12 @@ class ShellRouter(ShellRuntime):
                         if owner is None:
                             break  # Keep cursor before an unadopted completion.
                         adopted = self._adopt(owner, result)
-                        if owner.public_id not in self._consumed:
+                        observed = self.owner.sessions.get(owner.public_id, {})
+                        observed['latest_status'] = adopted['status']
+                        if (owner.public_id not in self._consumed
+                            and (adopted['status'] in TERMINAL or (adopted.get('watching', True)
+                            and observed.get('watching', True)
+                            and adopted.get('watch_generation', 0) >= observed.get('watch_generation', 0)))):
                             self.remote_completions[owner.public_id] = Completion(owner.public_id, owner.origin_turn, adopted)
                             self.owner.notify()
                         self.cursors[(target, epoch)] = event['cursor']

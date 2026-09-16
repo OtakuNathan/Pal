@@ -99,6 +99,83 @@ class ProductionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*list(self.owner.events.tasks))
         await asyncio.sleep(0)
 
+    async def test_multiple_watch_events_and_unwatch_do_not_replay_or_release_output(self):
+        call = new_tool_call(name="run_shell", args={"cmd": "printf initial; sleep 60", "wait_ms": 30})
+        origin = self.origin(call)
+        result = await self.runtime.execute_tool_async(call, turn_id="origin")
+        sid = result.structured["session_id"]
+        await self.commit_origin(origin, call, result)
+        async def ensure_initial_output_delivered():
+            while True:
+                read = await self.session(sid, action="read", wait_ms=0)
+                if read.structured.get("stdout") == "initial":
+                    return
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(ensure_initial_output_delivered(), 5)
+        for count in (1, 2):
+            watched = await self.session(sid, action="watch", wait_ms=10)
+            self.assertTrue(watched.ok, watched.text)
+            await self.wait_completion()
+            await self.pump()
+            self.assertEqual(len(self.model_inputs), count)
+            self.assertIn(sid, self.owner.sessions)
+            self.assertNotIn('initial', self.model_inputs[-1].text)
+        self.assertNotEqual(self.model_inputs[0].message_id, self.model_inputs[1].message_id)
+        await self.session(sid, action="watch", wait_ms=10)
+        await self.wait_completion()
+        self.owner.events.prepare(self.core.context)
+        await self.session(sid, action="unwatch")
+        await self.pump()
+        self.assertEqual(len(self.model_inputs), 2)
+        self.assertFalse(self.owner.sessions[sid]["watching"])
+        await self.session(sid, action="terminate")
+        await self.wait_completion()
+        await self.pump()
+        self.assertEqual(len(self.model_inputs), 2)
+        self.assertFalse(self.owner.has_work)
+
+    async def _paused_wait_delivery(self, action):
+        call = new_tool_call(name="run_shell", args={"cmd": "sleep 60", "wait_ms": 0})
+        origin = self.origin(call)
+        result = await self.runtime.execute_tool_async(call, turn_id="origin")
+        sid = result.structured["session_id"]
+        await self.commit_origin(origin, call, result)
+        await self.session(sid, action="watch", wait_ms=10)
+        await self.wait_completion()
+        entered, resume = asyncio.Event(), asyncio.Event()
+        materialize = self.owner.shell.materialize
+        async def paused(event):
+            if event.get("event_kind") == "wait_expired":
+                entered.set()
+                await resume.wait()
+            return await materialize(event)
+        self.owner.shell.materialize = paused
+        pump = asyncio.create_task(self.pump())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            controlled = await self.session(sid, action=action)
+            self.assertTrue(controlled.ok, controlled.text)
+            if action == "terminate":
+                await self.wait_completion()
+            resume.set()
+            await asyncio.wait_for(pump, 5)
+            self.assertFalse(self.model_inputs)
+            self.assertFalse(self.core.state.active_turns)
+            await self.pump()
+            self.assertEqual(len(self.model_inputs), 1 if action == "terminate" else 0)
+            if action == "terminate":
+                self.assertIn('"status":"cancelled"', self.model_inputs[0].text)
+        finally:
+            resume.set()
+            await asyncio.gather(pump, return_exceptions=True)
+            self.owner.shell.materialize = materialize
+
+    async def test_unwatch_cancels_an_event_being_materialized(self):
+        await self._paused_wait_delivery("unwatch")
+
+    async def test_terminal_supersedes_wait_event_before_delivery(self):
+        await self._paused_wait_delivery("terminate")
+
     async def test_real_entry_registration_and_pty(self):
         generation = self.runtime.registry_generation
         self.assertIn("wait_ms", generation.record_for_alias("run_shell").input_schema["properties"])

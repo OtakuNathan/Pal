@@ -36,21 +36,13 @@ class ChecklistPromptFragmentProvider:
                 section="task_flow",
                 title="Task Flow",
                 content=(
-                    "Keep the active checklist small and concrete, treat its first unfinished item "
-                    "as the current work position, and call `checklist_check` when each phase "
-                    "is actually complete. Independent progress updates may share a response with other independent tool calls. When the "
-                    "checklist reaches a terminal state, settle it by one of two paths. Completion: "
-                    "review the work performed, verify within the user-requested scope to the degree warranted "
-                    "by its effects, then call `checklist_clear`. Cancellation, replacement, or "
-                    "staleness: stop the pending work, do not finish remaining items merely to close "
-                    "the checklist, review only what was actually performed and any known or "
-                    "uncertain effects, then call `checklist_clear`. In either path, use the retired "
-                    "checklist returned by `checklist_clear` to summarize to the user what was done, "
-                    "what was verified, and what remains unfinished or uncertain. Do not use a "
-                    "checklist for a simple answer, a read-only investigation, a single-step "
-                    "mutation, a conversational exchange, durable knowledge, or a Manager-owned "
-                    "Bunshin workflow. The checklist is a non-authoritative execution cursor, never "
-                    "truth, evidence, or permission."
+                    "Keep the active checklist small and concrete; its first unfinished item is the work cursor. "
+                    "Call checklist_check for phases actually completed, then checklist_clear when the task completes, "
+                    "is cancelled, or is replaced. Independent progress updates may share a response with other tools. "
+                    "Do not perform remaining work just to clear the checklist or repeat verification solely to close it. "
+                    "Summarize from actual execution evidence, including omitted checks and unfinished work; the checklist "
+                    "is not truth, evidence, or permission. Complex read-only investigations may use it when long-running "
+                    "or resumable. Simple answers, routine edits, and Manager-owned Bunshin workflows need no extra checklist."
                 ),
                 priority=91,
                 metadata={

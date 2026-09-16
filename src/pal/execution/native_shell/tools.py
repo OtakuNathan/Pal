@@ -66,19 +66,24 @@ class RunInput(StrictToolModel):
 
 class SessionInput(StrictToolModel):
     session_id: int = Field(gt=0, le=9223372036854775807)
-    action: Literal["read", "write", "resize", "terminate", "release"] = "read"
+    action: Literal["read", "write", "resize", "terminate", "release", "watch", "extend", "unwatch"] = "read"
     wait_ms: int | None = Field(default=None, ge=0, le=300000)
+    extend_by_ms: int | None = Field(default=None, ge=0, le=2147483647)
     text: str | None = None
     rows: int | None = Field(default=None, ge=1, le=65535)
     columns: int | None = Field(default=None, ge=1, le=65535)
 
     @model_validator(mode="after")
     def validate_action_arguments(self):
-        required = {"write": {"text"}, "resize": {"rows", "columns"}}.get(self.action, set())
-        allowed = required | ({"wait_ms"} if self.action == "read" else set())
-        supplied = {name for name in ("wait_ms", "text", "rows", "columns") if getattr(self, name) is not None}
+        required = {"write": {"text"}, "resize": {"rows", "columns"}, "watch": {"wait_ms"}, "extend": {"extend_by_ms"}}.get(self.action, set())
+        allowed = required | ({"wait_ms"} if self.action == "read" else set()) | ({"extend_by_ms"} if self.action == "watch" else set())
+        supplied = {name for name in ("wait_ms", "extend_by_ms", "text", "rows", "columns") if getattr(self, name) is not None}
         if not required <= supplied or not supplied <= allowed:
             raise ValueError(f"{self.action} requires {sorted(required)} and only accepts {sorted(allowed)}")
+        if self.action == "watch" and not self.wait_ms:
+            raise ValueError("watch requires a positive wait_ms")
+        if self.action == "extend" and not self.extend_by_ms:
+            raise ValueError("extend requires a positive extend_by_ms")
         if self.text is not None and len(self.text.encode("utf-8")) > 65536:
             raise ValueError("PTY input must fit the 64 KiB input queue")
         return self
@@ -93,6 +98,18 @@ def session_affordances(result: dict) -> list[ToolAffordance]:
         tool="call_tool", arguments={"name": "shell_session", "args": {"session_id": sid, "action": "read", "wait_ms": 300000}},
         reason=f"Session {sid} is {status}, not a command failure. Read/wait when needed; do not rerun or busy-poll.",
     )]
+    if status != "terminating" and result.get("watching", True):
+        actions.extend((
+            ToolAffordance(tool="call_tool", arguments={"name": "shell_session", "args": {
+                "session_id": sid, "action": "watch", "wait_ms": 300000}},
+                reason="Only when another timed decision is needed: arm one background wakeup; does not extend execution."),
+            ToolAffordance(tool="call_tool", arguments={"name": "shell_session", "args": {
+                "session_id": sid, "action": "unwatch"}},
+                reason="Only when no further notifications are wanted; leave the process and its deadline unchanged."),
+        ))
+        if result.get("remaining_ms") is not None:
+            actions.append(ToolAffordance(tool="read_tool", arguments={"name": "shell_session"},
+                reason="Only if the finite budget needs extension and its contract is not already known."))
     if result.get("tty") and status != "terminating":
         actions.append(ToolAffordance(
             tool="read_tool", arguments={"name": "shell_session"},

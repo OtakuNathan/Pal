@@ -45,7 +45,7 @@ class RecoverInput(StrictToolModel):
 
 
 class NativeSessionInput(SessionInput):
-    action: Literal["read", "write", "resize", "terminate", "release", "retry_notification"] = "read"
+    action: Literal["read", "write", "resize", "terminate", "release", "retry_notification", "watch", "extend", "unwatch"] = "read"
 
 
 STATUS_GUIDANCE = ToolGuidance(
@@ -73,7 +73,8 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
                 " directly to preserve full output. wait_ms controls response waiting (default five minutes,"
                 " one second for a PTY), not process lifetime; timeout_ms sets an optional hard deadline."
                 " Use tty=true for interactive terminal input. A nonzero session_id means execution continues."
-                " Completion is delivered to this channel separately; finish the turn when nothing else is needed."
+                " Returning control while waiting does not complete the task. Continue independent work when available; "
+                " otherwise yield until a relevant event. Completion is delivered separately while the session is watched."
                 " Success requires status=exited and returncode=0. On Linux remote targets, sudo=true supports only"
                 " apt/apt-get update or apt/apt-get install PACKAGE... without extra flags or shell operators;"
                 " each requires approval. Inspect list_remote for configured management support."
@@ -134,6 +135,10 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
             use_when=(
                 "Use the returned session_id. read returns a full snapshot; wait_ms waits for exit (default zero,"
                 " maximum five minutes). Read for progress or interactive prompts, not in a short polling loop."
+                " watch(wait_ms, extend_by_ms=0) immediately arms one background decision event, optionally extending the "
+                " existing deadline atomically. extend(extend_by_ms) adds to the existing finite deadline only. "
+                " unwatch disables future unsolicited notifications without stopping the process; watch restores attention. "
+                " A read never extends a deadline or rearms notifications. No deadline means no extension is needed. "
                 " write queues exact PTY text (include a newline to submit); acceptance does not prove processing."
                 " resize changes a live PTY. terminate requests cancellation; read terminal status to confirm exit."
                 " release discards completed output. retry_notification retries a failed completion turn;"
@@ -162,6 +167,21 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
             owner.events.retry(args["session_id"])
             return self._result({"session_id": args["session_id"], "status": "notification_retry_queued"})
         result = await owner.shell.session_snapshot(**args)
+        tracked = owner.sessions.get(args["session_id"])
+        if tracked is not None:
+            tracked["latest_status"] = result["status"]
+        if result["status"] == "terminating" and owner.events is not None:
+            owner.events.invalidate(args["session_id"], result)
+        if args.get("action") in {"watch", "extend", "unwatch"}:
+            sid = args["session_id"]
+            session = owner.sessions.get(sid)
+            if session is not None:
+                session.update(watching=result.get("watching", True), latest_status=result["status"],
+                               watch_generation=result.get("watch_generation", 0))
+            if owner.events is not None:
+                owner.events.invalidate(sid, result)
+            from .runtime import output_result
+            return output_result(result)
         if result["status"] == "released":
             owner.forget_session(result["session_id"])
             return self._result({"session_id": result["session_id"], "status": "released"})
@@ -177,7 +197,8 @@ class NativeExecutionProvider(ExecutionIntrospectionProvider):
         return self._result({
             "backend": "native", "initialized": owner._shell is not None, "closed": owner.closed,
             "sessions": [{"session_id": sid, "cmd": item["cmd"], "origin_turn": item["origin_turn"],
-                          "delivered": item["committed"]} for sid, item in owner.sessions.items()],
+                          "delivered": item["committed"], "watching": item.get("watching", True),
+                          "last_observed_status": item.get("latest_status", "running")} for sid, item in owner.sessions.items()],
             "retained_outputs": [{"call_id": key, "session_id": item.result["session_id"], "status": item.result["status"]}
                                  for key, item in owner.pending.items()],
             "notification_failures": dict(owner.events.failures) if owner.events else {},

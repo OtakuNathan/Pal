@@ -63,9 +63,9 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="capability_call",
         guidance=ToolGuidance(
             purpose="Invoke one indirect capability by its exact alias.",
-            use_when="After discovering the alias via search_tools/read_tool. Direct tools must be invoked directly.",
+            use_when="When the exact alias and sufficient valid contract are already known. Discover or inspect only missing information. Direct tools must be invoked directly.",
             do_not_use_when="For direct capabilities — they must be invoked directly and are rejected here.",
-            failure_next_steps="Use read_tool to inspect the alias schema before retrying.",
+            failure_next_steps="Follow the returned error and recovery affordance. Read the contract only for missing or changed argument/execution semantics; discovery cannot repair an offline target or failed command.",
         ),
         aliases=("call_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,

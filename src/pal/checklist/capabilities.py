@@ -167,7 +167,7 @@ class ChecklistIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="checklist_clear",
-                    use_when="Every phase is complete and verification within the requested scope is settled; reuse passing results.",
+                    use_when="Every phase is complete; close the checklist using existing execution evidence, without another verification round.",
                 ),
             ),
         ),
@@ -231,8 +231,7 @@ class ChecklistIntrospectionProvider:
                 NextToolHint(
                     name="checklist_clear",
                     use_when=(
-                        "The snapshot is complete and the work has been verified, or the task was "
-                        "cancelled, replaced, or made stale and performed work has been reviewed."
+                        "The task is complete, cancelled, replaced, or made stale; close the progress cursor without additional work."
                     ),
                 ),
             ),
@@ -265,10 +264,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="clear",
         guidance=ToolGuidance(
-            purpose="Retire Pal's terminal checklist and return its final snapshot for user-facing settlement.",
+            purpose="Close Pal's checklist and return its recorded progress.",
             use_when=(
-                "Either all steps are complete and the requested verification scope is settled, or the task was cancelled, "
-                "replaced, or made stale and only the work actually performed has been reviewed."
+                "The task is complete, cancelled, replaced, or made stale. Closing adds no verification requirement; "
+                "describe actual execution evidence and the verification scope already performed."
             ),
             do_not_use_when="The active task is still expected to continue and checklist work remains in progress.",
             failure_next_steps="If inactive, this is an idempotent no-op. If uncertain, use checklist_show to inspect the current state.",

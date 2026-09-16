@@ -40,10 +40,10 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 content=(
                     "Use the right source for the truth needed.\n\n- Current runtime state -> live introspection/capability"
                     " calls.\n- Capability availability -> current capability inventory.\n- Code behavior -> source "
-                    "inspection.\n- Execution result -> tool/capability result plus verification.\n- Durable facts, "
+                    "inspection.\n- Execution result -> confirming tool/capability result; additional verification when that result does not establish the claimed outcome.\n- Durable facts, "
                     "preferences, prior decisions, repair lessons -> memory recall.\n- Reusable procedures -> skill "
                     "search/injection.\n- Behavior route -> behavior guidance.\n- Current external facts -> external "
-                    "verification when available.\n\nFor runtime-state questions, search current capabilities with targeted"
+                    "verification when available.\n\nWhen a runtime-state question needs an unknown capability, search with targeted"
                     " terms such as:\n\"introspection\", \"inspect\", \"list\", \"health\", \"show\", \"current\", the module name, or"
                     " the system surface name.\n\nDo not treat persisted runtime-looking fields as proof of live state.\nDo "
                     "not answer current runtime state from memory, prior chat, old logs, or persisted-looking metadata."

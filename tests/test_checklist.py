@@ -248,11 +248,11 @@ class TestChecklistPrompt:
         assert task_flow.section == "task_flow"
         assert "checklist_check" in task_flow.content
         assert "checklist_clear" in task_flow.content
-        assert "Cancellation, replacement, or staleness" in task_flow.content
-        assert "do not finish remaining items" in task_flow.content
-        assert "summarize to the user what was done" in task_flow.content
-        assert "simple answer" in task_flow.content
-        assert "never truth, evidence, or permission" in task_flow.content
+        assert "is cancelled, or is replaced" in task_flow.content
+        assert "Do not perform remaining work just to clear" in task_flow.content
+        assert "Summarize from actual execution evidence" in task_flow.content
+        assert "Simple answers" in task_flow.content
+        assert "not truth, evidence, or permission" in task_flow.content
 
     def test_active_checklist_is_projected_only_in_runtime_reminder_tail(self):
         service = ChecklistService()

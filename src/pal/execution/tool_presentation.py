@@ -26,5 +26,10 @@ def render_tool_inventory(payload: dict[str, Any]) -> str:
 
 
 def render_tool_search(generation: Any, payload: dict[str, Any]) -> str:
-    """Keep baseline search presentation intact except for JSON whitespace."""
-    return render_structured_for_llm(payload)
+    """Project concise purposes; the internal search document is not a manual."""
+    hits = []
+    for hit in payload.get("hits", ()):
+        record = generation.record_for_alias(hit["alias"])
+        hits.append({**{key: value for key, value in hit.items() if key != "search_text"},
+                     "purpose": record.guidance.purpose if record else ""})
+    return render_structured_for_llm({**payload, "hits": hits})

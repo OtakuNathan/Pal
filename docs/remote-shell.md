@@ -102,14 +102,14 @@ file-output behavior. The model's display budget is separate from these limits.
 ## Configuration and offline installation
 
 Install matching versions of Pal and the independently built native package on
-Pal's machine, then install the companion `plugin-remote-0.3.0.palpkg` into its
+Pal's machine, then install the companion `plugin-remote-0.4.0.palpkg` into its
 runtime. Hub/Slot and the plugin manifest are maintained in the native repository,
 not shipped inside Pal or the remote worker binary. Build and install with the
 existing package manager:
 
 ```sh
 pal package build ../pal-shell-native/pal_plugin --output ../pal-shell-native/dist
-pal package install ../pal-shell-native/dist/plugin-remote-0.3.0.palpkg --runtime-root <runtime-root>
+pal package install ../pal-shell-native/dist/plugin-remote-0.4.0.palpkg --runtime-root <runtime-root>
 ```
 
 If upgrading a runtime that previously provisioned the built-in `remote`, perform
@@ -429,7 +429,7 @@ repository's `build/remote-validation/cloud/` directory.
 
 ## Protocol-v2 activation and transport acceptance
 
-Version 0.3.0 requires matching native wheel, remote palpkg and worker protocol 2.
+Version 0.4.0 requires matching native API 2, remote palpkg and worker protocol 3. Older workers fail negotiation; update them separately.
 Hello/authentication retain Dynabridge framing for explicit version negotiation;
 authenticated messages wrap the unchanged Dynabridge payload in a 64-bit request ID.
 There is no fallback to a serial worker. Dynabridge and FF are unchanged.

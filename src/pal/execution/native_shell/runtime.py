@@ -66,7 +66,10 @@ class NativeShellOwner:
 
     @property
     def has_work(self):
-        return bool(self.sessions or self.pending or (self._shell is not None and (self._shell._foreground or self._shell.remote_work)))
+        observed_work = any(s.get("watching", True) or s.get("latest_status") not in TERMINAL
+                            for s in self.sessions.values())
+        return bool(observed_work or self.pending or (self._shell is not None
+                    and (self._shell._foreground or self._shell.execution_work)))
 
     @asynccontextmanager
     async def write_scope(self):
@@ -130,6 +133,9 @@ class NativeShellOwner:
         if not pending.prepared:
             self.notify()
             return  # Retain failed materialization/paging for explicit recovery.
+        if session is not None:
+            session["output_offsets"] = {stream: pending.result.get(stream + "_total", 0)
+                                         for stream in ("stdout", "stderr")}
         if pending.result["status"] in TERMINAL:
             await self.shell.release_output(pending.result)
             self.sessions.pop(sid, None)

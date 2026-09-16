@@ -10,10 +10,10 @@ TOOL_EXECUTION_SYSTEM_POLICY = (
     "- Treat each tool call as one RPC. If it times out, crashes, or does not complete, its "
     "result is unavailable and its side effects may be uncertain. Inspect current state, then "
     "retry when appropriate; never infer success from the missing result.\n"
-    "- Tool outputs are point-in-time observations. Replaying a stored result does not refresh "
-    "mutable external or runtime state. Before asserting current state or making an external "
-    "mutation based on it, rerun the original read/status/list/reconcile tool or use a "
-    "version, ETag, or conditional mutation.\n"
+    "- Tool outputs are point-in-time observations. Use a just-returned tool result when it sufficiently establishes the claimed outcome. "
+    "Replaying a stored result does not refresh mutable state. Refresh a read/status observation "
+    "when it is stale, concurrent changes matter, or the outcome is uncertain; use version/ETag "
+    "or conditional mutations when available. A second check is not mandatory after every call.\n"
 )
 
 
@@ -24,12 +24,9 @@ TOOL_ROUTING_DEVELOPER_GUIDANCE = (
     "- Local file tools already enforce digest-based "
     "read-before-edit and compare-and-swap checks, so do not reread unchanged files merely "
     "because another conversational turn began.\n"
-    "- For UI, CSS, or layout work, normalized page text/HTML and source inspection are not "
-    "rendered-layout verification. Before diagnosing and after changing layout, inspect "
-    "representative selectors with computed styles, bounding geometry, and actual element "
-    "gaps using an available rendered-layout inspection capability. Cover ordinary, nested, "
-    "and edge-case content. Use screenshots only when the active model or a reviewer can "
-    "inspect pixels."
+    "- Visual or layout conclusions need relevant rendered evidence; source text alone does not "
+    "establish rendered appearance. Choose verification appropriate to the change and the user's scope. "
+    "Use screenshots only when the model or a reviewer can inspect pixels."
 )
 
 

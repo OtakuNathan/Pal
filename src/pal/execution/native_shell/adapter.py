@@ -9,6 +9,7 @@ import itertools
 from pathlib import Path
 import threading
 import weakref
+from uuid import uuid4
 
 import _pal_shell_runtime as native
 
@@ -31,7 +32,10 @@ class ShellRuntime:
     def __init__(self, *, completed_capacity: int = 32, on_ready=None):
         self.loop = asyncio.get_running_loop()
         self.loop_thread = threading.get_ident()
+        if native.API_VERSION != 2:
+            raise ShellRejected("native_incompatible: install matching pal-shell-native 0.4.0 (API 2)")
         self.native = native.Runtime(completed_capacity)
+        self.epoch = uuid4().hex
         self._sequence = itertools.count(1)
         self._pending: dict[int, tuple[asyncio.Future, str, str]] = {}
         self._owners: dict[int, str] = {}
@@ -61,7 +65,7 @@ class ShellRuntime:
     def _deliver(self, event: dict) -> None:
         self.delivery_threads.add(threading.get_ident())
         assert threading.get_ident() == self.loop_thread
-        event = dict(event)
+        event = {**event, "runtime_epoch": self.epoch}
         request = event["request_id"]
         session = event["session_id"]
         if request:
@@ -74,13 +78,14 @@ class ShellRuntime:
             if not future.done():
                 future.set_result(event)
             return
-        if session in self._seen or self._closed:
+        identity = (session, event.get("event_sequence", 0))
+        if identity in self._seen or self._closed:
             return
-        self._seen[session] = None
+        self._seen[identity] = None
         if len(self._seen) > 256:
             previous, _ = self._seen.popitem(last=False)
-            self._consumed.discard(previous)
-        origin = self._owners.pop(session, "")
+            self._consumed.discard(previous[0])
+        origin = self._owners.get(session, "")
         if session in self._consumed:
             return
         self._completions[session] = Completion(session, origin, event)
@@ -192,7 +197,8 @@ class ShellRuntime:
 
     async def session_snapshot(self, session_id: int, *, action: str = "read",
                                wait_ms: int | None = None, text: str | None = None,
-                               rows: int | None = None, columns: int | None = None) -> dict:
+                               rows: int | None = None, columns: int | None = None,
+                               extend_by_ms: int | None = None) -> dict:
         """Retained file handoff for a host that acknowledges only after paging.
 
         The tool contract validates action-specific arguments before dispatch.
@@ -204,10 +210,17 @@ class ShellRuntime:
             "resize": (session_id, rows, columns),
             "terminate": (session_id,),
             "release": (session_id,),
+            "watch": (session_id, wait_ms or 0, extend_by_ms or 0),
+            "extend": (session_id, extend_by_ms or 0),
+            "unwatch": (session_id,),
         }
         if action not in arguments:
             raise ValueError(f"unknown session action: {action}")
         result = await self._request(action, *arguments[action])
+        if action in {"watch", "unwatch"}:
+            pending = self._completions.get(session_id)
+            if pending and pending.result.get("watch_generation", 0) < result.get("watch_generation", 0):
+                self._completions.pop(session_id, None)
         if action == "release":
             self._owners.pop(session_id, None)
             self._mark_consumed(session_id)
@@ -228,6 +241,7 @@ class ShellRuntime:
         self._mark_consumed(session_id)
 
     def _mark_consumed(self, session_id: int) -> None:
+        self._owners.pop(session_id, None)
         self._consumed.add(session_id)
         self.completion_budgets.pop(session_id, None)
         self._completions.pop(session_id, None)
@@ -238,7 +252,8 @@ class ShellRuntime:
         return events
 
     async def acknowledge_completion(self, event: Completion) -> None:
-        await self.release_output(event.result)
+        if event.result["status"] in TERMINAL:
+            await self.release_output(event.result)
 
     async def interrupt_turn(self, turn_id: str) -> None:
         tasks = [task for task, owner in self._foreground.items() if owner == turn_id]
