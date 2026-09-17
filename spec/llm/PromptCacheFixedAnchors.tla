@@ -1,4 +1,5 @@
 ---------------------- MODULE PromptCacheFixedAnchors ----------------------
+\* Retired: historical economic/ACK model; current runtime uses PromptCacheTail.
 EXTENDS Naturals, FiniteSets
 CONSTANTS SkipFixed, UnprovenBase
 VARIABLES turn, u, base, covered, cache, markers, phase, h, upper, requests

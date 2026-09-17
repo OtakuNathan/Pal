@@ -1,4 +1,7 @@
-# Explicit cache handoff
+# Historical explicit cache handoff
+
+> Retired by the rolling tail strategy. This document describes the previous
+> R/estimated-ACK implementation. See [current cache modes](prompt_cache_modes.md).
 
 OpenAI explicit endpoints (Responses and Chat), including OpenRouter's OpenAI
 explicit dialect, now share `openai_explicit_economic_v1`. Existing explicit

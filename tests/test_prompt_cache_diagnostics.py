@@ -123,6 +123,7 @@ def _astra_context() -> ShapeContext:
         endpoint_id="openrouter-astra",
         model_id="openai/gpt-6-astra",
         provider_id="OpenRouter",
+        capabilities={"prompt_cache": {"mode": "explicit"}},
         base_url="https://openrouter.ai/api/v1",
     )
 
@@ -207,7 +208,7 @@ def test_zero_write_counterexample_is_exposed_without_semantics_change() -> None
     assert record["zero_read_write_with_applied_markers"] is True
     # Receipt success is not evidence of a readable boundary.
     assert snapshot["confirmed_checkpoint"] is False
-    assert snapshot["handoff"]["promotions"] == 0
+    assert "tail" in snapshot
 
 
 def test_multi_round_records_keep_stable_key_and_bound_the_ring() -> None:

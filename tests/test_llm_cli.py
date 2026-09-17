@@ -26,6 +26,25 @@ class LLMCLITests(unittest.TestCase):
         configure_llm_parser(parser)
         return parser.parse_args(list(argv))
 
+    def test_cache_mode_update_preserves_fields_and_rejects_unsupported_binding(self) -> None:
+        def run(*args):
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
+            return result, out.getvalue()
+
+        self.assertEqual(run("add", "cache-demo", "--model-id", "gpt-6-astra",
+                             "--cache-mode", "explicit", "--notes", "keep")[0], 0)
+        self.assertEqual(run("add", "cache-demo", "--replace", "--cache-mode", "hybrid")[0], 0)
+        before = json.loads(run("list", "--all", "--json")[1])["items"][0]
+        self.assertEqual(before["capabilities"]["prompt_cache"]["mode"], "hybrid")
+        self.assertIn("unsupported_request_parameters", before["capabilities"])
+        with sqlite3.connect(self.runtime_root / "pal.sqlite3") as db:
+            self.assertEqual(db.execute("SELECT notes FROM llm_endpoints WHERE endpoint_id = ?", ("cache-demo",)).fetchone()[0], "keep")
+        self.assertEqual(run("add", "cache-demo", "--replace", "--cache-mode", "explicit",
+                             "--provider", "unknown", "--base-url", "https://example.test")[0], 2)
+        after = json.loads(run("list", "--all", "--json")[1])["items"][0]
+        self.assertEqual(after, before)
+
     def test_invalid_thinking_levels_show_shape_choices(self) -> None:
         for shape in ("openai_completion", "openai_response", "anthropic_messages"):
             for invalid in ("ultra", ""):

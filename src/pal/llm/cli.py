@@ -95,6 +95,8 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--display-name", default=None)
     add_parser.add_argument("--wire-shape", choices=tuple(item.value for item in WireShape), default=None)
     add_parser.add_argument("--base-url", default=None)
+    add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
+                            help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
     add_parser.add_argument(
         "--auth-kind",
         choices=("api_key_ref", "oauth", "local_provider_auth"),
@@ -307,6 +309,17 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
             model_defaults.get("notes", "Configured via pal llm add."),
         ),
     }
+    if args.cache_mode is not None:
+        from pal.llm.cache_policy import validate_cache_policy
+        from pal.llm.shapes.base import ShapeContext
+        capabilities["prompt_cache"] = {
+            **dict(capabilities.get("prompt_cache") or {}),
+            "enabled": True, "mode": args.cache_mode,
+        }
+        validate_cache_policy(ShapeContext(
+            WireShape(wire_shape), endpoint_id, model_id, provider_id=provider,
+            base_url=base_url, capabilities=capabilities,
+        ))
     endpoint = repository.upsert(**payload)
     _store_api_key_if_requested(args, runtime_root, endpoint)
     if args.set_active:

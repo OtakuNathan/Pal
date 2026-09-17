@@ -1,4 +1,5 @@
 ------------------------- MODULE PromptCacheHandoff -------------------------
+\* Retired: historical economic/ACK model; current runtime uses PromptCacheTail.
 EXTENDS Naturals, Integers, FiniteSets, TLC
 CONSTANTS DropProtection, Optimistic, StaleOwner, IgnoreM, ClearThird, HiddenMarker,
           CircularEvidence

@@ -204,6 +204,7 @@ class FailureFlowTests(unittest.TestCase):
             model_id="openai/gpt-5.6-luna",
             provider_id="OpenRouter",
             base_url="https://openrouter.ai/api/v1",
+            capabilities={"prompt_cache": {"mode": "explicit"}},
         )
         coordinator = PromptCacheCoordinator()
         plan = coordinator.plan(request, context)

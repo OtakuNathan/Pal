@@ -1,4 +1,5 @@
 ---------------------- MODULE PromptCacheSettlement ----------------------
+\* Retired: historical economic/ACK model; current runtime uses PromptCacheTail.
 EXTENDS Integers, FiniteSets
 CONSTANTS ClearAllOnAck, DropLateEstimate, DoubleCharge, ClearOnAnchor
 VARIABLES baseline, pending, through, after, remaining, accounted, comparable,

@@ -126,7 +126,7 @@ def _astra_context(capabilities: dict | None = None) -> ShapeContext:
         model_id="openai/gpt-6-astra",
         provider_id="OpenRouter",
         base_url="https://openrouter.ai/api/v1",
-        capabilities=capabilities or {},
+        capabilities=capabilities if capabilities is not None else {"prompt_cache": {"mode": "explicit"}},
     )
 
 
@@ -218,7 +218,7 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     codec = OpenAIResponseCodec()
     base = _request()
 
-    # Group A (default): explicit mode always carries fixed S/U.
+    # Group A: explicitly selected mode always carries fixed S/U.
     context = _astra_context()
     coordinator = PromptCacheCoordinator()
     plan = coordinator.plan(base, context)
@@ -257,9 +257,9 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     )
     record_b = coordinator_b.snapshot()["recent_attempts"][-1]
     assert record_b["profile_id"] == "openrouter_astra_provider_implicit"
-    assert record_b["cache_mode"] == "automatic"
+    assert record_b["cache_mode"] == "implicit"
 
-    # Group C: hybrid — implicit plus exactly one verified stable anchor.
+    # Group C: hybrid carries both structural anchors plus automatic caching.
     context_c = _astra_context(
         {"prompt_cache": {"cache_profile": "openrouter_astra_hybrid_anchor"}}
     )
@@ -267,17 +267,17 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     plan_c = coordinator_c.plan(base, context_c)
     encoded_c = coordinator_c.inject(codec.encode(base, context_c), plan_c)
     payload_c = thaw_json(encoded_c.payload)
-    assert plan_c.dialect.value == "openrouter_automatic"
-    assert plan_c.decision == "hybrid_stable_anchor"
+    assert plan_c.dialect.value == "openrouter_openai_explicit"
+    assert plan_c.decision == "hybrid_fixed_anchors"
     assert plan_c.profile_id == "openrouter_astra_hybrid_anchor"
-    assert [item.label for item in plan_c.breakpoints] == ["stable_anchor"]
+    assert [item.label for item in plan_c.breakpoints] == ["stable", "anchor_fixed"]
     assert encoded_c.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded_c.extra_body["session_id"] == encoded_c.extra_body["prompt_cache_key"]
-    assert "prompt_cache_options" not in encoded_c.extra_body
+    assert encoded_c.extra_body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
     marked = _marked_blocks(payload_c)
-    assert len(marked) == 1
+    assert len(marked) == 2
     assert encoded_c.applied_cache_breakpoint_message_ids == (
-        plan_c.breakpoints[0].message_id,
+        plan_c.breakpoints[0].message_id, plan_c.breakpoints[1].message_id,
     )
 
 
@@ -382,13 +382,12 @@ def test_frontier_marker_submitted_without_observed_read() -> None:
         ),
     )
     snapshot = coordinator.snapshot()
-    assert snapshot["handoff"]["promotions"] == 0
-    assert snapshot["handoff"]["baseline_estimate"] == 0
+    assert len(snapshot["tail"]["tails"]) == 1
     assert snapshot["observation"]["state"] == "reported_zero"
     assert snapshot["observation"]["last_observed_read_at"] == 0.0
     record = snapshot["recent_attempts"][-1]
     assert record["zero_read_write_with_applied_markers"] is True
     assert record["usage_invariant_violation"] is False
-    # Zero/missing final evidence cannot advance the economic baseline.
+    # Aggregate usage is diagnostic only; no cache residency is claimed.
     assert snapshot["confirmed_checkpoint"] is False
     assert snapshot["submitted_checkpoint"] is False

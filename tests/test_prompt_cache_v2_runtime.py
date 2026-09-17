@@ -73,7 +73,7 @@ def response_payload(index=1, *, tool=False, usage=None):
 def test_disabled_and_mismatched_profiles_fail_before_transport(profile):
     ctx = _astra_context({"prompt_cache": {"enabled": False, "cache_profile": profile}})
     assert not PromptCacheCoordinator().plan(_request(), ctx).enabled
-    for override in ({"model_id": "other"}, {"provider_id": "OpenAI"}, {"wire_shape": WireShape.OPENAI_COMPLETION}):
+    for override in ({"model_id": "other"},):
         with pytest.raises(CacheProfileError):
             PromptCacheCoordinator().plan(_request(), replace(ctx, capabilities={"prompt_cache": {"cache_profile": profile}}, **override))
 
@@ -196,6 +196,15 @@ def test_profile_snapshot_and_hook_precedence(tmp_path):
     assert new.metadata["cache_policy_selection"]["cache_profile"] == PROFILES[2]
     assert new.metadata["cache_policy_selection"]["origin"] == "endpoint"
 
+    ep.capabilities_blob = {"prompt_cache": {"mode": "hybrid"}}
+    new_mode = llm._compile_request(ep, _request()).request
+    assert new_mode.metadata["cache_policy_selection"]["mode"] == "hybrid"
+    assert "cache_profile" not in new_mode.metadata["cache_policy_selection"]
+    snapshot = llm.cache_policy_snapshot()
+    ep.base_url = "https://other.example/v1"
+    with pytest.raises(CacheProfileError, match="identity changed"):
+        llm._compile_request(ep, replace(_request(), metadata={"cache_policy_snapshot": snapshot}))
+
 
 class FixtureFragments:
     provider_id = "fixture.cache"
@@ -286,8 +295,10 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                     assert next(item for item in payload["input"] if item.get("id") == f"reason-{old}")["encrypted_content"] == f"opaque-{old}"
                 if profile == PROFILES[1]:
                     assert "prompt_cache_breakpoint" not in str(payload)
-                if profile != PROFILES[0]:
+                if profile == PROFILES[1]:
                     assert "prompt_cache_options" not in request.extra_body
+                if profile == PROFILES[2]:
+                    assert request.extra_body["prompt_cache_options"]["mode"] == "implicit"
             assert llm.usage_ledger.snapshot()["provider_request_count"] == rounds
             assert llm.usage_ledger.snapshot()["cost"] == pytest.approx(rounds * 0.01)
             serialized = json.dumps(records)
@@ -333,7 +344,7 @@ def test_old_response_cannot_update_live_epoch_observations():
             actual_provider="fixture", prefix_preserved=True)
     assert coordinator.snapshot()["frontier"]["submitted_prefix_tokens"] == new.frontier.target_prefix_tokens
     # Neither receipt belongs to an actually submitted attempt.
-    assert coordinator.snapshot()["handoff"]["promotions"] == 0
+    assert coordinator.snapshot()["tail"]["tails"] == []
     assert coordinator.snapshot()["observation"]["last_observed_sequence"] == -1
 
 

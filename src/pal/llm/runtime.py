@@ -885,7 +885,7 @@ class LLMRuntime(LLMRuntimePort):
         for endpoint in self.endpoint_resolver.endpoints:
             policy = thaw_json((getattr(endpoint, "capabilities_blob", None) or {}).get("prompt_cache") or {})
             hook = self.model_hooks.hooks.get(str(endpoint.model_id))
-            explicit = "cache_profile" in policy or "dialect" in policy
+            explicit = "mode" in policy or "cache_profile" in policy or "dialect" in policy or policy.get("enabled") is False
             if not explicit and hook is not None and hook.cache_profile_ref:
                 policy["cache_profile"] = hook.cache_profile_ref
                 policy["origin"] = "model_hook"
@@ -894,7 +894,7 @@ class LLMRuntime(LLMRuntimePort):
             policy["generation"] = str(self.cache_profile_generation)
             snapshots[str(endpoint.endpoint_id)] = {
                 "model_id": str(endpoint.model_id), "provider": str(endpoint.provider),
-                "wire_shape": str(endpoint.wire_shape), "policy": policy,
+                "wire_shape": str(endpoint.wire_shape), "base_url": str(endpoint.base_url or ""), "policy": policy,
             }
         return snapshots
 
@@ -916,12 +916,12 @@ class LLMRuntime(LLMRuntimePort):
         if snapshot is None:
             snapshot = self.cache_policy_snapshot()
         selection = snapshot.get(str(endpoint.endpoint_id))
-        if selection is None or any(selection.get(key) != str(getattr(endpoint, key)) for key in ("model_id", "provider", "wire_shape")):
+        if selection is None or any(selection.get(key) != str(getattr(endpoint, key) or "") for key in ("model_id", "provider", "wire_shape", "base_url")):
             raise CacheProfileError("endpoint identity changed after turn cache-policy snapshot")
         policy = dict(selection["policy"])
         validate_cache_policy(ShapeContext(
             wire_shape=WireShape(endpoint.wire_shape), endpoint_id=endpoint.endpoint_id,
-            model_id=endpoint.model_id, provider_id=endpoint.provider,
+            model_id=endpoint.model_id, provider_id=endpoint.provider, base_url=endpoint.base_url,
             capabilities={"prompt_cache": policy},
         ))
         hooked = replace(hooked, metadata={**dict(hooked.metadata), "cache_policy_selection": policy})
