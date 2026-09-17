@@ -207,7 +207,7 @@ def test_zero_write_counterexample_is_exposed_without_semantics_change() -> None
     assert record["zero_read_write_with_applied_markers"] is True
     # Receipt success is not evidence of a readable boundary.
     assert snapshot["confirmed_checkpoint"] is False
-    assert snapshot["submitted_checkpoint"] is True
+    assert snapshot["handoff"]["promotions"] == 0
 
 
 def test_multi_round_records_keep_stable_key_and_bound_the_ring() -> None:
@@ -256,7 +256,7 @@ def test_multi_round_records_keep_stable_key_and_bound_the_ring() -> None:
     assert len({item["cache_key_hash"] for item in records}) == 1
     assert all(item["cache_mode"] == "explicit" for item in records)
     assert all(
-        any(marker["label"].startswith("frontier") for marker in item["planned_markers"])
+        any(marker["label"] == "stable" for marker in item["planned_markers"])
         for item in records
     )
     assert any(item["read_observed"] for item in records)

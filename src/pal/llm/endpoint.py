@@ -105,14 +105,11 @@ class ShapeEndpointInvoker:
         )
         codec = codec_for_shape(shape)
         raw_encoded = codec.encode(request, context)
-        plan = self.prompt_cache.plan(request, context, raw_encoded)
-        encoded = self.prompt_cache.inject(raw_encoded, plan)
         request_id = f"llm_{uuid4().hex}"
         started_at = time.monotonic()
         evidence = WireResponseEvidence(shape)
-        diagnostics = self.prompt_cache.start_attempt(
-            plan, request=request, context=context, encoded=encoded,
-            raw_encoded=raw_encoded, request_id=request_id,
+        plan, encoded, diagnostics = self.prompt_cache.prepare_attempt(
+            request, context, raw_encoded, request_id,
         )
         transport_request = EncodedTransportRequest(
             request_id=request_id, wire_shape=shape, timeout_seconds=float(timeout_seconds),
@@ -176,23 +173,26 @@ class ShapeEndpointInvoker:
                 elapsed_seconds=attempt.elapsed_seconds, provider_generation_id=attempt.provider_generation_id,
                 returned_model=attempt.returned_model, actual_provider=attempt.actual_provider,
                 service_tier=attempt.service_tier,
+                prompt_cache_diagnostics=evidence.prompt_cache_diagnostics,
             )
-            if status == "success":
-                self.prompt_cache.record_success(plan, usage,
-                    applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids, **diag)
+            first_settlement = self.attempt_sink(attempt) if self.attempt_sink is not None else True
+            if first_settlement is False:
+                self.prompt_cache.discard_accounted_attempt(plan, request_id)
             else:
-                self.prompt_cache.record_attempt(plan, status=status, usage=usage,
-                    applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
-                    error=error_type, **diag)
-            if self.attempt_sink is not None:
-                self.attempt_sink(attempt)
-            report_attempt = getattr(self._transport(), "report_attempt", None)
-            if callable(report_attempt):
-                report_attempt(endpoint, attempt)
-            else:
-                report_usage = getattr(self._transport(), "report_usage", None)
-                if callable(report_usage):
-                    report_usage(endpoint, request_id=request_id, usage=usage, provider_response_count=1)
+                if status == "success":
+                    self.prompt_cache.record_success(plan, usage,
+                        applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids, **diag)
+                else:
+                    self.prompt_cache.record_attempt(plan, status=status, usage=usage,
+                        applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
+                        error=error_type, **diag)
+                report_attempt = getattr(self._transport(), "report_attempt", None)
+                if callable(report_attempt):
+                    report_attempt(endpoint, attempt)
+                else:
+                    report_usage = getattr(self._transport(), "report_usage", None)
+                    if callable(report_usage):
+                        report_usage(endpoint, request_id=request_id, usage=usage, provider_response_count=1)
 
     def _transport(self) -> LLMJSONTransportPort:
         if self.transport is None:

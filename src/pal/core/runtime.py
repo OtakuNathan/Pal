@@ -240,6 +240,10 @@ class TurnManager:
         reason: str,
     ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
+        llm = self.context.port_registry.get("llm:llm")
+        close_cache = getattr(llm, "end_prompt_cache_turn", None)
+        if callable(close_cache):
+            close_cache(str(continuation.turn_id))
         method_name = {
             "interrupted": "interrupt_l1_turn",
             "aborted": "abort_l1_turn",

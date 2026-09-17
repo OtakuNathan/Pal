@@ -229,7 +229,7 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
-    assert len(_marked_blocks(payload)) >= 2
+    assert len(_marked_blocks(payload)) == 1
 
     # Group B: provider implicit; both stable keys, no options, no markers.
     context_b = _astra_context(
@@ -381,13 +381,13 @@ def test_frontier_marker_submitted_without_observed_read() -> None:
         ),
     )
     snapshot = coordinator.snapshot()
-    assert snapshot["frontier"]["submitted"] is True
-    assert snapshot["frontier"]["submitted_at"] > 0.0
+    assert snapshot["handoff"]["promotions"] == 0
+    assert snapshot["handoff"]["baseline_estimate"] == 0
     assert snapshot["observation"]["state"] == "reported_zero"
     assert snapshot["observation"]["last_observed_read_at"] == 0.0
     record = snapshot["recent_attempts"][-1]
     assert record["zero_read_write_with_applied_markers"] is True
     assert record["usage_invariant_violation"] is False
-    # Submitted candidates survive, without claiming observed readability.
+    # Zero/missing final evidence cannot advance the economic baseline.
     assert snapshot["confirmed_checkpoint"] is False
-    assert snapshot["submitted_checkpoint"] is True
+    assert snapshot["submitted_checkpoint"] is False

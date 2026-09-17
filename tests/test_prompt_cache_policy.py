@@ -180,7 +180,6 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
     assert plan.dialect == PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT
     assert [item.label for item in plan.breakpoints] == [
         "stable",
-        "anchor_candidate",
     ]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
@@ -190,7 +189,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 1
     assert set(encoded.applied_cache_breakpoint_message_ids) == {
         item.message_id for item in plan.breakpoints
     }
@@ -203,7 +202,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         if item.get("role") == "user"
         and str(item.get("content", [{}])[0].get("text") or "").startswith("current ")
     )
-    assert "prompt_cache_breakpoint" in current["content"][0]
+    assert "prompt_cache_breakpoint" not in current["content"][0]
 
 
 def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
@@ -222,10 +221,9 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-    assert plan.anchor.decision == "economic_advance"
+    assert plan.decision == "competing_bound_unknown"
     assert [item.label for item in plan.breakpoints] == [
         "stable",
-        "anchor_candidate",
     ]
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
@@ -236,7 +234,7 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 1
 
 
 def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
@@ -287,7 +285,7 @@ def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
             for item in payload["input"]
             for block in item.get("content", [])
             if isinstance(block, dict)
-        ) == 2
+        ) == 1
         if provider_id == "OpenRouter":
             assert (
                 encoded.extra_body["session_id"]
@@ -346,7 +344,7 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in message.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 1
     user_blocks = next(
         message["content"]
         for message in payload["messages"]
@@ -359,7 +357,7 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in user_blocks
         if str(block.get("text") or "").startswith("current ")
     )
-    assert "prompt_cache_breakpoint" in current_block
+    assert "prompt_cache_breakpoint" not in current_block
 
 
 def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() -> None:
@@ -471,7 +469,7 @@ def test_openai_chat_uses_supported_text_block_breakpoints() -> None:
         for block in message.get("content", [])
         if "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 1
 
 
 def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> None:
@@ -501,90 +499,33 @@ def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> Non
 
 
 def test_openai_responses_frontier_marks_tool_output_and_rolls_within_turn() -> None:
-    request = _active_tool_request(_request())
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-luna",
-        provider_id="OpenAI",
-    )
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-
-    first = coordinator.plan(request, context)
-    raw = OpenAIResponseCodec().encode(request, context)
-    encoded = coordinator.inject(raw, first)
-    payload = thaw_json(encoded.payload)
-    tool_output = next(
-        item for item in payload["input"] if item.get("type") == "function_call_output"
-    )
-
-    assert first.anchor.candidate_message_id == request.messages[2].message_id
-    assert first.frontier.candidate_message_id == request.messages[-2].message_id
-    assert tool_output["output"][0]["type"] == "input_text"
-    assert "prompt_cache_breakpoint" in tool_output["output"][0]
-    _record_success(coordinator, first, LLMUsageIR(reported=True))
-
-    reused = coordinator.plan(request, context)
-    assert reused.anchor.decision == "submitted_reuse"
-    assert reused.frontier.decision == "submitted_reuse"
-
-    extended = _extend_active_tool_request(request, suffix="two")
-    advanced = coordinator.plan(extended, context)
-    assert advanced.anchor.decision == "submitted_reuse"
-    assert advanced.frontier.decision == "economic_advance"
-    assert [item.label for item in advanced.breakpoints] == [
-        "stable",
-        "anchor_submitted",
-        "frontier_submitted",
-        "frontier_candidate",
-    ]
+    request, context = _request(), _openai_context()
+    _send_evidence(coordinator, request, context)
+    _send_evidence(coordinator, request, context)
+    _send_evidence(coordinator, request, context)
+    assert coordinator.snapshot()["handoff"]["promotions"] == 1
+    extended = _active_tool_request(request)
+    plan = coordinator.plan(extended, context)
+    raw = OpenAIResponseCodec().encode(extended, context)
+    encoded = coordinator.inject(raw, plan)
+    tool = next(item for item in encoded.payload["input"] if item.get("type") == "function_call_output")
+    assert "prompt_cache_breakpoint" in tool["output"][0]
+    assert coordinator.snapshot()["handoff"]["pending"]["kind"] == "frontier"
+    assert len(plan.breakpoints) <= 4
 
 
-def test_frontier_resets_when_active_input_changes_but_anchor_survives() -> None:
-    request = _active_tool_request(_request())
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-luna",
-        provider_id="OpenAI",
-    )
+def test_turn_commit_discards_pending_frontier_preserving_anchor() -> None:
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    first = coordinator.plan(request, context)
-    _record_success(coordinator, first, LLMUsageIR(reported=True))
-
-    next_request = replace(
-        request,
-        messages=(
-            request.messages[0],
-            request.messages[1],
-            replace(
-                request.messages[2],
-                prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            ),
-            replace(
-                request.messages[3],
-                prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            ),
-            replace(
-                request.messages[4],
-                prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            ),
-            LLMMessageIR(
-                MessageRole.USER,
-                (TextPartIR("next user " * 900),),
-                prompt_region=PromptRegionIR.ACTIVE_INPUT,
-            ),
-            request.messages[-1],
-        ),
-    )
-    next_plan = coordinator.plan(next_request, context)
-
-    assert next_plan.anchor.submitted_message_id == request.messages[2].message_id
-    assert next_plan.frontier.submitted_message_id == ""
-    assert next_plan.frontier.decision == "unavailable"
-    assert "frontier_submitted" not in {
-        item.label for item in next_plan.breakpoints
-    }
+    request, context = _request(), _openai_context()
+    for _ in range(3):
+        _send_evidence(coordinator, request, context)
+    anchor = coordinator.snapshot()["handoff"]["baseline_estimate"]
+    coordinator.plan(_active_tool_request(request), context)
+    assert coordinator.snapshot()["handoff"]["pending"]["kind"] == "frontier"
+    coordinator.end_turn("")
+    assert coordinator.snapshot()["handoff"]["pending"] is None
+    assert coordinator.snapshot()["handoff"]["baseline_estimate"] == anchor
 
 
 def test_anthropic_four_slots_prioritize_anchor_before_frontier_candidate() -> None:
@@ -692,141 +633,55 @@ def test_anthropic_anchor_is_gated_then_survives_the_turn_boundary() -> None:
     assert "cache_control" not in payload["messages"][-1]["content"][-1]
 
 
-def test_submitted_prefix_guides_incremental_planning_without_confirming_a_hit() -> None:
-    request = _request()
-    context = ShapeContext(wire_shape=WireShape.OPENAI_RESPONSE, endpoint_id="openai",
-                           model_id="gpt-5.6-sol", provider_id="OpenAI")
-    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=2000)
-    first = coordinator.plan(request, context)
-    _record_success(coordinator, first, LLMUsageIR(input_tokens=10000, cache_write_input_tokens=5000, reported=True))
-    second = coordinator.plan(_next_request(request), context)
-    assert second.anchor.submitted_message_id == first.anchor.target_message_id
-    assert second.anchor.confirmed_prefix_tokens == 0
-    assert second.anchor.planning_base_tokens == first.anchor.target_prefix_tokens
-    assert second.anchor.reprocessed_delta_tokens == second.anchor.target_prefix_tokens - first.anchor.target_prefix_tokens
-    assert second.anchor.decision == "economic_batching"
-    assert [item.label for item in second.breakpoints] == ["stable", "anchor_submitted"]
-    assert not coordinator.snapshot()["confirmed_checkpoint"]
-
-
-def test_failed_candidate_is_not_promoted() -> None:
-    request = _request()
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-sol",
-        provider_id="OpenAI",
-    )
+def test_unsubmitted_receipt_cannot_establish_economic_baseline() -> None:
     coordinator = PromptCacheCoordinator()
+    request, context = _request(), _openai_context()
+    plan = coordinator.plan(request, context)
+    _record_success(coordinator, plan, LLMUsageIR(input_tokens=10000, cache_write_input_tokens=5000, reported=True))
+    assert coordinator.snapshot()["handoff"]["baseline_estimate"] == 0
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
 
-    failed = coordinator.plan(request, context)
-    retry = coordinator.plan(request, context)
 
-    assert failed.anchor.decision == "economic_advance"
-    assert retry.anchor.decision == "economic_advance"
-    assert [item.label for item in retry.breakpoints] == [
-        "stable",
-        "anchor_candidate",
-    ]
+def test_repeated_builds_do_not_spend_attempts_or_promote() -> None:
+    coordinator = PromptCacheCoordinator()
+    request, context = _request(), _openai_context()
+    first = coordinator.plan(request, context)
+    for _ in range(50):
+        assert coordinator.plan(request, context) == first
+    assert coordinator.snapshot()["handoff"]["send_sequence"] == 0
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
 
 
 def test_success_without_applied_candidate_marker_is_not_promoted() -> None:
-    request = _request()
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-sol",
-        provider_id="OpenAI",
-    )
     coordinator = PromptCacheCoordinator()
-    candidate = coordinator.plan(request, context)
+    request, context = _request(), _openai_context()
+    _send_evidence(coordinator, request, context)
+    plan = coordinator.plan(request, context)
     raw = OpenAIResponseCodec().encode(request, context)
-    encoded = coordinator.inject(
-        replace(
-            raw,
-            message_spans=tuple(
-                replace(span, cache_targets=())
-                if span.message_id == candidate.candidate_message_id
-                else span
-                for span in raw.message_spans
-            ),
-        ),
-        candidate,
-    )
-
-    assert candidate.candidate_message_id
-    assert (
-        candidate.candidate_message_id
-        not in encoded.applied_cache_breakpoint_message_ids
-    )
-    coordinator.record_success(
-        candidate,
-        LLMUsageIR(reported=True),
-        applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
-    )
-
-    retry = coordinator.plan(request, context)
-    assert retry.anchor.decision == "economic_advance"
-    assert retry.submitted_message_id == ""
+    coordinator.start_attempt(plan, request=request, context=context, encoded=raw, raw_encoded=raw, request_id="missing-marker")
+    coordinator.record_success(plan, _usage(10000, 9000), request_id="missing-marker")
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
 
 
 def test_stale_success_cannot_regress_submitted_checkpoint() -> None:
-    request = _request()
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-sol",
-        provider_id="OpenAI",
-    )
     coordinator = PromptCacheCoordinator()
-    older = coordinator.plan(request, context)
-    newer = coordinator.plan(request, context)
-
-    _record_success(coordinator, newer, LLMUsageIR(reported=True))
-    _record_success(coordinator, older, LLMUsageIR(reported=True))
-
-    reused = coordinator.plan(request, context)
-    assert reused.anchor.decision == "submitted_reuse"
-    assert reused.submitted_message_id == request.messages[2].message_id
+    request, context = _request(), _openai_context()
+    plan = _send_evidence(coordinator, request, context)
+    before = coordinator.snapshot()["handoff"]
+    coordinator.record_success(plan, _usage(10000, 9000), request_id="already-settled")
+    assert coordinator.snapshot()["handoff"] == before
 
 
 def test_missing_submitted_message_bootstraps_a_new_cache_epoch() -> None:
-    request = _request()
-    context = ShapeContext(
-        wire_shape=WireShape.OPENAI_RESPONSE,
-        endpoint_id="openai",
-        model_id="gpt-5.6-sol",
-        provider_id="OpenAI",
-    )
-    coordinator = PromptCacheCoordinator()
-    first = coordinator.plan(request, context)
-    _record_success(coordinator, first, LLMUsageIR(reported=True))
-    compacted = replace(
-        request,
-        messages=(
-            request.messages[0],
-            LLMMessageIR(
-                MessageRole.USER,
-                (TextPartIR("compacted baseline " * 900),),
-                prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            ),
-            LLMMessageIR(
-                MessageRole.USER,
-                (TextPartIR("post compaction " * 900),),
-                prompt_region=PromptRegionIR.ACTIVE_INPUT,
-            ),
-            request.messages[-1],
-        ),
-    )
-
-    reset = coordinator.plan(compacted, context)
-
-    assert reset.anchor.decision == "economic_advance"
-    assert reset.submitted_message_id == ""
-    assert [item.label for item in reset.breakpoints] == [
-        "stable",
-        "anchor_candidate",
-    ]
+    coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
+    request, context = _request(), _openai_context()
+    _send_evidence(coordinator, request, context)
+    plan = coordinator.plan(request, context)
+    assert plan.handoff_candidate
+    compacted = replace(request, messages=(request.messages[0], replace(request.messages[2], parts=(TextPartIR("replacement " * 900),))))
+    new = coordinator.plan(compacted, context)
+    assert new.handoff_candidate != plan.handoff_candidate
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
 
 
 def test_unknown_openai_compatible_provider_gets_no_unsupported_cache_fields() -> None:
@@ -846,7 +701,7 @@ def test_unknown_openai_compatible_provider_gets_no_unsupported_cache_fields() -
     assert encoded.extra_body == {}
 
 
-def test_cache_economics_use_only_the_latest_eight_observations() -> None:
+def test_cache_diagnostics_keep_only_the_latest_eight_observations() -> None:
     request = _request()
     context = ShapeContext(
         wire_shape=WireShape.OPENAI_RESPONSE,
@@ -856,12 +711,7 @@ def test_cache_economics_use_only_the_latest_eight_observations() -> None:
     )
     coordinator = PromptCacheCoordinator()
     for _ in range(10):
-        plan = coordinator.plan(request, context)
-        _record_success(
-            coordinator,
-            plan,
-            LLMUsageIR(input_tokens=1_000, cached_input_tokens=1_000, reported=True),
-        )
+        _send_evidence(coordinator, request, context)
 
     assert coordinator.snapshot()["observed_request_count"] == 8
 
@@ -891,7 +741,7 @@ def test_warm_deadline_requires_boundary_evidence_not_submission_or_aggregate_re
     for usage in (LLMUsageIR(reported=True), LLMUsageIR(reported=True, cached_input_tokens=8000)):
         plan = coordinator.plan(request, context)
         _record_success(coordinator, plan, usage)
-        assert coordinator.snapshot()["submitted_checkpoint"]
+        assert coordinator.snapshot()["handoff"]["promotions"] == 0
         assert not coordinator.snapshot()["confirmed_checkpoint"]
         assert not coordinator.warm_deadline_snapshot()["eligible"]
         assert coordinator.confirmed_anchor_request() == {}
@@ -933,3 +783,27 @@ def test_checkpoint_requires_enough_incremental_benefit_for_its_write_price() ->
         assert plan.reprocessed_delta_tokens == 8192
         assert plan.decision == expected
         assert bool(plan.candidate_message_id) == (expected == "economic_advance")
+
+
+def _openai_context():
+    return ShapeContext(WireShape.OPENAI_RESPONSE, "openai", "gpt-6-astra", provider_id="openai")
+
+
+def _usage(total, hit):
+    return LLMUsageIR(input_tokens=total, cached_input_tokens=hit, reported=True, final=True,
+        reported_fields=("input_tokens", "cached_input_tokens"), input_accounting="inclusive_cache")
+
+
+def _send_evidence(coordinator, request, context):
+    from pal.llm.cache_handoff import clean_request, suffix_estimate
+    from uuid import uuid4
+    raw = OpenAIResponseCodec().encode(request, context)
+    plan = coordinator.plan(request, context, raw)
+    encoded = coordinator.inject(raw, plan)
+    identity = uuid4().hex
+    coordinator.start_attempt(plan, request=request, context=context, encoded=encoded, raw_encoded=raw, request_id=identity)
+    clean = clean_request(raw)
+    span = next(s for s in clean.message_spans if s.message_id == plan.breakpoints[-1].message_id)
+    tail = suffix_estimate(clean, span.cache_targets[-1])
+    coordinator.record_success(plan, _usage(span.estimated_cache_prefix_tokens + tail, span.estimated_cache_prefix_tokens), request_id=identity)
+    return plan

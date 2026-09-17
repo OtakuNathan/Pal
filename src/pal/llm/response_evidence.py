@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from pal.llm.ir import LLMUsageIR, WireShape
 from pal.llm.usage_normalization import merge_usage, usage_from_mapping
+from pal.shared.json_values import thaw_json
 
 
 @dataclass
@@ -16,6 +17,7 @@ class WireResponseEvidence:
     returned_model: str = ""
     actual_provider: str = ""
     service_tier: str = ""
+    prompt_cache_diagnostics: dict = field(default_factory=dict)
     last_sequence: int = -1
     last_provider_sequence: int = -1
 
@@ -39,6 +41,11 @@ class WireResponseEvidence:
         )
         final = final or bool(not event and ("output" in payload or "content" in payload or complete_chat))
         for source in objects:
+            diagnostics = source.get("prompt_cache_diagnostics")
+            if isinstance(diagnostics, Mapping):
+                # Best-effort request diagnostics, never a per-marker receipt.
+                self.prompt_cache_diagnostics = {k: thaw_json(diagnostics[k]) for k in
+                    ("type", "reason", "comparison_response_id") if k in diagnostics}
             identity_object = source is nested or any(k in source for k in ("output", "content", "choices"))
             if identity_object:
                 for wire_key, attr in (("id", "provider_generation_id"), ("model", "returned_model"),

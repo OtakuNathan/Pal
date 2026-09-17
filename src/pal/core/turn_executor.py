@@ -1777,6 +1777,10 @@ class TurnExecutor:
     # ── post-turn commit ─────────────────────────────────────────────────
 
     async def schedule_post_turn_commit_async(self, outcome) -> Any:
+        llm = self.context.port_registry.get("llm:llm")
+        close_cache = getattr(llm, "end_prompt_cache_turn", None)
+        if callable(close_cache):
+            close_cache(str(outcome.commit_payload.turn_id))
         memory_service = self.context.port_registry.get("memory:memory")
         result = None
         if memory_service is not None:

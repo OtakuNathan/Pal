@@ -17,7 +17,9 @@ for model in \
     L1TurnLifecycle \
     EndpointInvocationLifecycle \
     ItemCommitLifecycle \
-    BrokerTransportLifecycle
+    BrokerTransportLifecycle \
+    PromptCacheHandoff \
+    PromptCacheSettlement
 do
     echo "==> TLC ${model}"
     java -XX:+UseParallelGC -jar "${tla_jar}" \

@@ -332,7 +332,9 @@ def test_old_response_cannot_update_live_epoch_observations():
             applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,
             actual_provider="fixture", prefix_preserved=True)
     assert coordinator.snapshot()["frontier"]["submitted_prefix_tokens"] == new.frontier.target_prefix_tokens
-    assert coordinator.snapshot()["observation"]["last_observed_sequence"] == new.plan_sequence
+    # Neither receipt belongs to an actually submitted attempt.
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
+    assert coordinator.snapshot()["observation"]["last_observed_sequence"] == -1
 
 
 def test_provider_sequences_and_final_settlement_ignore_replayed_intermediate():
