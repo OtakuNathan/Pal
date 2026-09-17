@@ -208,6 +208,7 @@ class LLMRuntime(LLMRuntimePort):
     last_model_id: str | None = None
     think_level: str = ""
     active_endpoint_id: str | None = None
+    _endpoint_fallback_enabled: bool | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
     cache_profile_generation: int = field(default=1, init=False)
@@ -248,6 +249,7 @@ class LLMRuntime(LLMRuntimePort):
         configured = self.settings_repository.get_active_llm_endpoint_id()
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.active_endpoint_id = configured if configured in endpoint_ids else None
+        self._endpoint_fallback_enabled = None
         endpoint = self.active_endpoint()
         self.think_level = self._effective_thinking_level(endpoint) or ""
         if endpoint is not None and (
@@ -994,9 +996,12 @@ class LLMRuntime(LLMRuntimePort):
     ) -> list[LLMEndpointModel]:
         preferred = str(preferred_endpoint_id or "").strip() or None
         source = str(preferred_endpoint_source or "").strip().lower()
+        policy = str(endpoint_fallback_policy or "").strip().lower()
+        explicit_policy = bool(policy)
         strict = (
-            str(endpoint_fallback_policy or "").strip().lower() in _FALLBACK_DISABLED_POLICIES
+            policy in _FALLBACK_DISABLED_POLICIES
             or bool(preferred and source in _STRICT_ENDPOINT_PREFERRED_SOURCES)
+            or (not explicit_policy and not self.llm_endpoint_fallback_enabled())
         )
         if strict:
             selected = preferred or self.active_endpoint_id
@@ -1012,6 +1017,37 @@ class LLMRuntime(LLMRuntimePort):
             fallback_endpoint_id=self.active_endpoint_id,
             include_remaining=True,
         )
+
+    def llm_endpoint_fallback_enabled(self) -> bool:
+        """Whether generic requests may fall back to other enabled endpoints.
+
+        Disabled by default: failing the preferred endpoint honestly surfaces
+        the failure instead of silently continuing on a different model.
+        Explicit per-request ``endpoint_fallback_policy`` metadata overrides
+        this global setting in both directions.
+        """
+
+        if self._endpoint_fallback_enabled is None:
+            getter = getattr(self.settings_repository, "get_llm_endpoint_fallback", None)
+            self._endpoint_fallback_enabled = bool(getter()) if callable(getter) else False
+        return bool(self._endpoint_fallback_enabled)
+
+    def set_llm_endpoint_fallback(self, enabled: bool) -> dict[str, Any]:
+        setter = getattr(self.settings_repository, "set_llm_endpoint_fallback", None)
+        if not callable(setter):
+            raise LLMEndpointInvocationError(
+                "settings repository does not support the endpoint fallback switch"
+            )
+        setter(bool(enabled))
+        self._endpoint_fallback_enabled = bool(enabled)
+        return {
+            "endpoint_fallback_enabled": bool(enabled),
+            "note": (
+                "Future requests may fall back to other enabled endpoints."
+                if enabled
+                else "Future requests fail on the preferred endpoint instead of falling back."
+            ),
+        }
 
     def _effective_thinking_level(self, endpoint: LLMEndpointModel | None) -> str | None:
         if endpoint is None:

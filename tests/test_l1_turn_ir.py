@@ -33,8 +33,12 @@ class L1TurnIRTests(unittest.TestCase):
         settled = store.require_active("turn-1").settle()
         store.replace(settled)
         self.assertEqual(settled.state, L1TurnState.SETTLED)
+        # Provider-neutral reasoning parts are retired atomically at settlement...
         self.assertEqual(settled.messages[-1].reasoning_text, "")
-        self.assertIsNone(settled.messages[-1].replay)
+        # ...but the wire replay envelope survives: same-endpoint replays stay
+        # byte-identical so the prompt-cache prefix crosses turn boundaries.
+        self.assertIsNotNone(settled.messages[-1].replay)
+        self.assertEqual(settled.messages[-1].replay.payload, {"message": {}})
 
     def test_tool_result_must_consume_one_pending_call_exactly_once(self) -> None:
         turn = L1TurnStore().begin("turn-1", user_text="hello")

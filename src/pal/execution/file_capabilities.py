@@ -41,21 +41,28 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 FILE_READ_GUIDANCE = ToolGuidance(
     purpose=(
         "Read selected lines from a UTF-8 text file and return line-numbered content. "
-        "When an unchanged marker is returned, refer to the earlier read result and do not call "
-        "read_file again unless the file changed or another range is needed."
+        "One call reads one file; pass ranges=[{offset, limit}, ...] to deliver multiple line "
+        "blocks of that file in a single call, like sed -n 'a,bp;c,dp'. When an unchanged "
+        "marker is returned, refer to the earlier read result and do not call read_file again "
+        "unless the file changed or another range is needed."
     ),
     use_when=(
-        "Reading local source, configuration, or other UTF-8 text. Use offset and limit for focused reads. "
-        "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. Reuse valid delivered reads. Shell output alone does not register a file-tool read snapshot."
+        "Reading local source, configuration, or other UTF-8 text. Use ranges for multiple "
+        "blocks of the same file (for example scattered definitions found by rg) instead of "
+        "several single-range calls; each block renders with its own header and truncation note. "
+        "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. "
+        "Reuse valid delivered reads. Shell output alone does not register a file-tool read snapshot."
     ),
     do_not_use_when=(
-        "Binary files, images, PDFs, or channel-delivered artifacts. Do not re-read an unchanged covered range after "
-        "read_file returns an unchanged marker; use the earlier result unless the file changed or another range is needed."
+        "Binary files, images, PDFs, or channel-delivered artifacts. Reading several different "
+        "files at once (read_file reads one file per call; batch ranges apply within one file). "
+        "Do not re-read an unchanged covered block after read_file returns an unchanged marker; "
+        "use the earlier result unless the file changed or another range is needed."
     ),
     failure_next_steps=(
         "For FILE_NOT_FOUND or NOT_A_FILE, correct the path and use run_shell with rg --files or a bounded listing if "
-        "discovery is needed. For INVALID_ARGUMENT, correct offset/limit. For UNSUPPORTED_TEXT_ENCODING, do not retry "
-        "as text; use the appropriate artifact or binary workflow."
+        "discovery is needed. For INVALID_ARGUMENT, fix offset/limit (and every ranges entry) to be positive integers. "
+        "For UNSUPPORTED_TEXT_ENCODING, do not retry as text; use the appropriate artifact or binary workflow."
     ),
     next_tool_hints=(
         NextToolHint(

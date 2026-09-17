@@ -320,12 +320,18 @@ CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput = _stri
     },
 )
 
+class FileReadRangeItem(StrictToolModel):
+    offset: int = Field(1, description="1-based line number to start this block from. Defaults to 1.", ge=1)
+    limit: int = Field(2000, description="Maximum number of lines to return for this block. Defaults to 2000.", ge=1)
+
+
 ExecutionFileCapabilitiesFileCapabilityMixinReadInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinReadInput',
     {
         'file_path': (str, Field(..., description='Path to the file to read.')),
-        'offset': (int, Field(None, description='1-based line number to start reading from. Defaults to 1.', ge=1)),
-        'limit': (int, Field(None, description='Maximum number of lines to return. Defaults to 2000.', ge=1)),
+        'offset': (int, Field(None, description='1-based line number to start reading from. Defaults to 1. Ignored when ranges is set.', ge=1)),
+        'limit': (int, Field(None, description='Maximum number of lines to return. Defaults to 2000. Ignored when ranges is set.', ge=1)),
+        'ranges': (list[FileReadRangeItem], Field(None, min_length=1, description='Multiple line blocks of the same file to deliver in one call, like sed -n a,bp;c,dp. Each block renders independently with its own header and truncation marker. Prefer this over repeated single-range calls; covered blocks are marked unchanged instead of being re-delivered.')),
     },
 )
 
@@ -340,6 +346,7 @@ ExecutionFileCapabilitiesFileCapabilityMixinReadOutput = _strict_model(
         'truncated': (bool, Field(None)),
         'full_view': (bool, Field(None)),
         'unchanged': (bool, Field(None)),
+        'blocks': (list[dict], Field(None, description='Per-block delivery summary when ranges was used: start_line, end_line, truncated, unchanged.')),
         'encoding': (str, Field(None)),
         'utf8_bom': (bool, Field(None, description='True when the source begins with a UTF-8 byte-order mark. The marker is preserved but omitted from displayed line text.')),
         'error_code': (str, Field(None)),

@@ -79,6 +79,14 @@ class _MemorySettingsRepository:
     def set_active_llm_endpoint_id(self, endpoint_id: str) -> None:
         self.active_endpoint_id = str(endpoint_id)
 
+    # These tests exercise fallback behavior, which is opt-in since the
+    # honest-by-default switch landed: the repository reports it enabled.
+    def get_llm_endpoint_fallback(self) -> bool:
+        return True
+
+    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
+        self.fallback_enabled = bool(enabled)
+
 
 class PalV2LLMStickyFallbackTests(unittest.TestCase):
     def test_fallback_sticks_to_working_endpoint(self) -> None:
@@ -93,6 +101,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     settings_repository=RuntimeSettingRepository(),
                     endpoint_invoker=invoker,
                 )
+                runtime.set_llm_endpoint_fallback(True)
                 request = request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
 
                 first = runtime.generate(request)

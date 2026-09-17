@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.execution.contracts import CapabilityResult
@@ -207,6 +207,7 @@ class FileReadTool:
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or args.get("path") or "").strip()
+        blocks_error = self._validate_requested_blocks(args)
         offset = _positive_int(args.get("offset"), default=1)
         limit = _positive_int(args.get("limit"), default=DEFAULT_LIMIT)
         if offset is None or limit is None:
@@ -217,6 +218,12 @@ class FileReadTool:
                 error_code=ERR_INVALID_ARGUMENT,
                 offset=args.get("offset"),
                 limit=args.get("limit"),
+            )
+        if blocks_error is not None:
+            return _result(
+                RuntimeStatus.INVALID,
+                blocks_error,
+                error_code=ERR_INVALID_ARGUMENT,
             )
 
         if not file_path:
@@ -265,11 +272,9 @@ class FileReadTool:
         # Build line-numbered output.
         lines = raw.splitlines(keepends=True)
         total_lines = len(lines)
-        start = max(1, offset)
-        end = min(start + limit - 1, total_lines)
-        full_view = start == 1 and (total_lines == 0 or end == total_lines)
         version = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         utf8_bom = raw.startswith(UTF8_BOM)
+        requested_blocks = _requested_blocks(args, offset, limit)
 
         # A logical-session read is authorized only after its result reaches
         # L1. A failed lookup can still leave leases for an older digest in the
@@ -285,13 +290,36 @@ class FileReadTool:
             if callable(retire_obsolete):
                 retire_obsolete(resolved, observed_digest=version)
 
-        already_visible = self.visibility_cache.covers(
-            self.visibility_scope,
-            resolved,
-            version=version,
-            start_line=start,
-            end_line=end,
-        )
+        # Normalize every requested block against the real file: clamp ends,
+        # keep out-of-range starts as reportable skips.
+        normalized: list[tuple[int, int]] = []
+        skipped: list[dict[str, Any]] = []
+        for block_offset, block_limit in requested_blocks:
+            start = max(1, block_offset)
+            end = min(start + block_limit - 1, total_lines)
+            if start > total_lines:
+                skipped.append(
+                    {
+                        "start_line": block_offset,
+                        "end_line": total_lines,
+                        "truncated": False,
+                        "unchanged": False,
+                        "beyond_eof": True,
+                    }
+                )
+                continue
+            normalized.append((start, end))
+
+        visible_flags = [
+            self.visibility_cache.covers(
+                self.visibility_scope,
+                resolved,
+                version=version,
+                start_line=start,
+                end_line=end,
+            )
+            for start, end in normalized
+        ]
 
         # The state cache stores the complete bytes for stale detection, but
         # mutation authority is limited to the exact visible line ranges.
@@ -299,24 +327,20 @@ class FileReadTool:
             self.cache.mark_read(
                 str(resolved),
                 raw,
-                full_view=full_view,
-                covered_ranges=(
-                    ((start, end),)
-                    if total_lines > 0 and start <= end
-                    else ()
-                ),
+                full_view=_blocks_cover_full_file(normalized, total_lines),
+                covered_ranges=tuple(normalized),
             )
 
-        if already_visible:
+        if normalized and all(visible_flags) and not skipped:
             return _result(
                 RuntimeStatus.OK,
                 FILE_UNCHANGED_STUB,
                 file_path=str(resolved),
-                start_line=start,
-                end_line=end,
+                start_line=normalized[0][0],
+                end_line=normalized[-1][1],
                 total_lines=total_lines,
-                truncated=end < total_lines,
-                full_view=full_view,
+                truncated=False,
+                full_view=_blocks_cover_full_file(normalized, total_lines),
                 unchanged=True,
                 encoding="utf-8",
                 utf8_bom=utf8_bom,
@@ -345,12 +369,12 @@ class FileReadTool:
                 _context_delivery=manifest.to_dict(),
             )
 
-        # Offset beyond file: return informative message instead of empty content.
-        if start > total_lines:
-            msg = f"(file has {total_lines} lines; offset {start} is beyond end of file)"
+        if not normalized:
+            # Offset beyond file for every requested block.
+            msg = f"(file has {total_lines} lines; every requested block starts beyond end of file)"
             structured = {
                 "file_path": str(resolved),
-                "start_line": start,
+                "start_line": offset,
                 "end_line": total_lines,
                 "total_lines": total_lines,
                 "truncated": False,
@@ -358,62 +382,108 @@ class FileReadTool:
                 "unchanged": False,
                 "encoding": "utf-8",
                 "utf8_bom": utf8_bom,
+                "blocks": skipped,
             }
             return _result(RuntimeStatus.OK, msg, **structured)
 
+        multi_block = _used_explicit_ranges(args)
+
         if not self.defer_delivery:
-            self.visibility_cache.mark_visible(
-                self.visibility_scope,
-                resolved,
-                version=version,
-                start_line=start,
-                end_line=end,
-            )
+            for (start, end), already_visible in zip(normalized, visible_flags):
+                if not already_visible:
+                    self.visibility_cache.mark_visible(
+                        self.visibility_scope,
+                        resolved,
+                        version=version,
+                        start_line=start,
+                        end_line=end,
+                    )
 
-        truncated = end < total_lines
-
-        selected = lines[start - 1 : end]
-        numbered: list[str] = []
+        bom_notice = f"{UTF8_BOM_NOTICE}\n" if utf8_bom and normalized[0][0] == 1 else ""
+        rendered_blocks: list[str] = []
         spans: list[FileDeliverySpan] = []
-        bom_notice = f"{UTF8_BOM_NOTICE}\n" if utf8_bom and start == 1 else ""
+        blocks_summary: list[dict[str, Any]] = []
         cursor = len(bom_notice)
-        for i, line in enumerate(selected, start=start):
-            display_line = line
-            if i == 1 and display_line.startswith(UTF8_BOM):
-                display_line = display_line[len(UTF8_BOM) :]
-            rendered_line = (
-                f"{i:>6}\t{display_line.rstrip(chr(10)).rstrip(chr(13))}"
-            )
-            numbered.append(rendered_line)
-            spans.append(
-                FileDeliverySpan(
-                    start_offset=cursor,
-                    end_offset=cursor + len(rendered_line),
-                    start_line=i,
-                    end_line=i,
-                    visible_start_in_line=0,
-                    visible_end_in_line=len(rendered_line),
-                    line_length=len(rendered_line),
+        for (start, end), already_visible in zip(normalized, visible_flags):
+            if already_visible and multi_block:
+                header = f"──── lines {start}-{end} unchanged; already delivered ────"
+                rendered_blocks.append(header)
+                blocks_summary.append(
+                    {
+                        "start_line": start,
+                        "end_line": end,
+                        "truncated": False,
+                        "unchanged": True,
+                    }
                 )
+                continue
+            selected = lines[start - 1 : end]
+            numbered: list[str] = []
+            cursor = len(bom_notice) + (
+                len("\n\n".join(rendered_blocks)) + 2 if rendered_blocks else 0
             )
-            cursor += len(rendered_line) + 1
+            for i, line in enumerate(selected, start=start):
+                display_line = line
+                if i == 1 and display_line.startswith(UTF8_BOM):
+                    display_line = display_line[len(UTF8_BOM) :]
+                rendered_line = (
+                    f"{i:>6}\t{display_line.rstrip(chr(10)).rstrip(chr(13))}"
+                )
+                numbered.append(rendered_line)
+                spans.append(
+                    FileDeliverySpan(
+                        start_offset=cursor,
+                        end_offset=cursor + len(rendered_line),
+                        start_line=i,
+                        end_line=i,
+                        visible_start_in_line=0,
+                        visible_end_in_line=len(rendered_line),
+                        line_length=len(rendered_line),
+                    )
+                )
+                cursor += len(rendered_line) + 1
+            block_text = "\n".join(numbered)
+            remaining = total_lines - end
+            block_truncated = end < total_lines
+            if multi_block:
+                header = f"──── lines {start}-{end} of {total_lines} ────"
+                block_body = f"{header}\n{block_text}"
+            else:
+                block_body = block_text
+            if block_truncated:
+                block_body += f"\n\n... ({remaining} more lines below)"
+            rendered_blocks.append(block_body)
+            blocks_summary.append(
+                {
+                    "start_line": start,
+                    "end_line": end,
+                    "truncated": block_truncated,
+                    "unchanged": False,
+                }
+            )
 
-        content = bom_notice + "\n".join(numbered)
-        if truncated:
-            content += f"\n\n... ({total_lines - end} more lines below)"
+        content = bom_notice + "\n\n".join(rendered_blocks)
+        if skipped:
+            content += "\n\n" + "; ".join(
+                f"(block starting at line {item['start_line']} is beyond end of file)"
+                for item in skipped
+            )
+        blocks_summary.extend(skipped)
 
         structured = {
             "file_path": str(resolved),
-            "start_line": start,
-            "end_line": end,
+            "start_line": normalized[0][0],
+            "end_line": normalized[-1][1],
             "total_lines": total_lines,
-            "truncated": truncated,
-            "full_view": full_view,
+            "truncated": any(item.get("truncated") for item in blocks_summary),
+            "full_view": _blocks_cover_full_file(normalized, total_lines),
             "unchanged": False,
             "encoding": "utf-8",
             "utf8_bom": utf8_bom,
             "content": content,
         }
+        if multi_block or len(normalized) > 1:
+            structured["blocks"] = blocks_summary
         manifest = FileDeliveryManifest(
             file_key=file_cache_key(resolved),
             digest=version,
@@ -432,6 +502,24 @@ class FileReadTool:
         _ = kwargs
         return self.invoke(args)
 
+    @staticmethod
+    def _validate_requested_blocks(args: dict[str, Any]) -> str | None:
+        """Return an error message when the ranges argument is malformed."""
+
+        ranges = args.get("ranges")
+        if ranges in (None, ""):
+            return None
+        if not isinstance(ranges, (list, tuple)) or not ranges:
+            return "ranges must be a non-empty list of {offset, limit} blocks."
+        for item in ranges:
+            if not isinstance(item, Mapping) and not hasattr(item, "offset"):
+                return "each ranges entry must be an object with offset and limit."
+            block_offset = item.get("offset") if isinstance(item, Mapping) else getattr(item, "offset", None)
+            block_limit = item.get("limit") if isinstance(item, Mapping) else getattr(item, "limit", None)
+            if _positive_int(block_offset, default=1) is None or _positive_int(block_limit, default=DEFAULT_LIMIT) is None:
+                return "each ranges entry needs positive integer offset and limit."
+        return None
+
 
 def _positive_int(value: Any, *, default: int) -> int | None:
     if value is None or value == "":
@@ -445,6 +533,65 @@ def _positive_int(value: Any, *, default: int) -> int | None:
     if parsed < 1:
         return None
     return parsed
+
+
+def _used_explicit_ranges(args: dict[str, Any]) -> bool:
+    ranges = args.get("ranges")
+    return bool(ranges) and isinstance(ranges, (list, tuple))
+
+
+def _requested_blocks(
+    args: dict[str, Any],
+    default_offset: int,
+    default_limit: int,
+) -> tuple[tuple[int, int], ...]:
+    """Resolve requested (offset, limit) blocks; ranges wins over offset/limit."""
+
+    ranges = args.get("ranges")
+    if not _used_explicit_ranges(args):
+        _ = ranges
+        return ((default_offset, default_limit),)
+    blocks: list[tuple[int, int]] = []
+    for item in ranges:
+        if isinstance(item, Mapping):
+            block_offset = _positive_int(item.get("offset"), default=1)
+            block_limit = _positive_int(item.get("limit"), default=DEFAULT_LIMIT)
+        else:
+            block_offset = _positive_int(getattr(item, "offset", None), default=1)
+            block_limit = _positive_int(getattr(item, "limit", None), default=DEFAULT_LIMIT)
+        if block_offset is None or block_limit is None:
+            continue
+        blocks.append((block_offset, block_limit))
+    return tuple(blocks) or ((default_offset, default_limit),)
+
+
+def _block_limit_for(
+    requested_blocks: tuple[tuple[int, int], ...],
+    start: int,
+) -> int:
+    for block_offset, block_limit in requested_blocks:
+        if block_offset == start:
+            return block_limit
+    return DEFAULT_LIMIT
+
+
+def _blocks_cover_full_file(
+    normalized: list[tuple[int, int]],
+    total_lines: int,
+) -> bool:
+    if total_lines == 0:
+        return True
+    if not normalized:
+        return False
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(normalized):
+        if not merged or start > merged[-1][1] + 1:
+            merged.append((start, end))
+            continue
+        previous_start, previous_end = merged[-1]
+        merged[-1] = (previous_start, max(previous_end, end))
+    # Full view requires one contiguous range with no interior holes.
+    return len(merged) == 1 and merged[0][0] <= 1 and merged[0][1] >= total_lines
 
 
 def _result(status: str, text: str, **structured: Any) -> CapabilityResult:

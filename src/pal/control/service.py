@@ -407,6 +407,23 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="llm_fallback",
+                handler=self._handle_llm_fallback,
+                aliases=("fallback",),
+                description=(
+                    "Show or toggle endpoint fallback for future requests. "
+                    "Default is off: the preferred endpoint fails honestly instead of "
+                    "silently continuing on a different model."
+                ),
+                usage="/llm_fallback [on|off]",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=True,
+                panel_label="Fallback",
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="model",
                 handler=self._handle_model,
                 description="Show or update the active LLM model for future turns.",
@@ -545,6 +562,32 @@ class ControlPlane(ControlPlanePort):
             target_scope="runtime",
             route=invocation.route,
             args={"think_level": requested},
+        )
+
+    def _handle_llm_fallback(self, invocation: ControlCommandInvocation) -> ControlAction:
+        if not invocation.argv:
+            return ControlAction(
+                action_kind="show_llm_fallback",
+                target_scope="runtime",
+                route=invocation.route,
+            )
+        requested = str(invocation.argv[0] or "").strip().lower()
+        if requested not in {"on", "off"}:
+            return ControlAction(
+                action_kind="invalid_command",
+                target_scope="control",
+                route=invocation.route,
+                args={
+                    "command_name": invocation.command_name,
+                    "reason": "invalid fallback value",
+                },
+                notes="Use /llm_fallback on or /llm_fallback off.",
+            )
+        return ControlAction(
+            action_kind="set_llm_fallback",
+            target_scope="runtime",
+            route=invocation.route,
+            args={"enabled": requested == "on"},
         )
 
     def _handle_model(self, invocation: ControlCommandInvocation) -> ControlAction:

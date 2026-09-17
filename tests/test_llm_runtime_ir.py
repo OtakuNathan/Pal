@@ -94,6 +94,12 @@ class _Settings:
     def set_think_level(self, endpoint_id: str, value: str) -> None:
         self.values[f"think:{endpoint_id}"] = value
 
+    def get_llm_endpoint_fallback(self) -> bool:
+        return self.values.get("endpoint_fallback", "") in {"on", "true", "1"}
+
+    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
+        self.values["endpoint_fallback"] = "on" if enabled else "off"
+
 
 class _Invoker:
     def __init__(self) -> None:
@@ -516,6 +522,9 @@ class LLMRuntimeIRTests(unittest.TestCase):
             endpoint_invoker=invoker,
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp()), llm_endpoint_retry_attempts=1),
         )
+        # This test exercises endpoint fallback, which is opt-in since the
+        # honest-by-default switch landed.
+        runtime.set_llm_endpoint_fallback(True)
         request = replace(_request(), policy=GenerationPolicyIR(
             max_output_tokens=6144, thinking_selection="lowest_supported",
         ))

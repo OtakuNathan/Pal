@@ -52,8 +52,11 @@ class L1TurnIR:
             for message in self.messages:
                 if message.state == MessageState.IN_PROGRESS:
                     raise L1TurnProtocolError("settled L1 turn contains an in-progress message")
-                if message.reasoning_text or message.replay is not None:
-                    raise L1TurnProtocolError("settled L1 turn retains transient reasoning replay")
+                if message.reasoning_text:
+                    raise L1TurnProtocolError(
+                        "settled L1 turn retains provider-neutral reasoning parts; "
+                        "wire replay envelopes are allowed and stay frozen"
+                    )
 
     @classmethod
     def begin(
@@ -491,7 +494,12 @@ class L1TurnStore:
 
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:
     if message.role == MessageRole.ASSISTANT:
-        return message.retire_reasoning()
+        # Keep the wire replay envelope across settlement: same-endpoint replays
+        # stay byte-identical so the prompt-cache prefix survives turn boundaries.
+        # Provider-neutral reasoning parts are still stripped: they are the
+        # cross-endpoint fallback projection, which must not leak reasoning.
+        closed = message.retire_reasoning()
+        return replace(closed, replay=message.replay)
     return replace(
         message,
         state=MessageState.COMPLETE,

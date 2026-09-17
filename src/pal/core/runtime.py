@@ -1084,6 +1084,12 @@ class PalCore(MemoryMaintenanceMixin):
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
                 return
+            if action.action_kind == "show_llm_fallback":
+                await self._handle_show_llm_fallback_async(action)
+                return
+            if action.action_kind == "set_llm_fallback":
+                await self._handle_set_llm_fallback_async(action)
+                return
             if action.action_kind == "show_model":
                 await self._handle_show_model_async(action)
                 return
@@ -1262,6 +1268,40 @@ class PalCore(MemoryMaintenanceMixin):
             action,
             f"Think level for {endpoint_id or 'the active endpoint'} updated to {resolved}. "
             "This applies to new turns only.",
+        )
+
+    async def _handle_show_llm_fallback_async(self, action: ControlAction) -> None:
+        llm_runtime = self.context.require_port("llm:llm")
+        getter = getattr(llm_runtime, "llm_endpoint_fallback_enabled", None)
+        enabled = bool(getter()) if callable(getter) else False
+        state = "on" if enabled else "off"
+        summary = (
+            "Endpoint fallback is ON: requests may continue on other enabled endpoints "
+            "when the preferred one fails."
+            if enabled
+            else "Endpoint fallback is OFF: the preferred endpoint fails honestly; "
+            "no silent model switching. Use /llm_fallback on to enable."
+        )
+        await self._complete_action_reply_async(action, f"Endpoint fallback: {state}.\n{summary}")
+
+    async def _handle_set_llm_fallback_async(self, action: ControlAction) -> None:
+        enabled = bool(action.args.get("enabled"))
+        llm_runtime = self.context.require_port("llm:llm")
+        setter = getattr(llm_runtime, "set_llm_endpoint_fallback", None)
+        if not callable(setter):
+            await self._complete_action_reply_async(action, "Endpoint fallback switch is unavailable.")
+            return
+        try:
+            setter(enabled)
+        except Exception as exc:
+            await self._complete_action_reply_async(
+                action, f"Failed to update endpoint fallback: {exc}"
+            )
+            return
+        state = "on" if enabled else "off"
+        await self._complete_action_reply_async(
+            action,
+            f"Endpoint fallback set to {state}. This applies to new requests only.",
         )
 
     async def _handle_show_model_async(self, action: ControlAction) -> None:

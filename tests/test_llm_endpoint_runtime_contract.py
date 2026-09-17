@@ -57,6 +57,9 @@ class _Settings:
     def __init__(self) -> None:
         self.active: str | None = None
         self.thinking: dict[str, str] = {}
+        # These contract tests exercise failover semantics; fallback is
+        # opt-in since the honest-by-default switch landed.
+        self.fallback: bool = True
 
     def get_active_llm_endpoint_id(self) -> str | None:
         return self.active
@@ -69,6 +72,12 @@ class _Settings:
 
     def set_think_level(self, endpoint_id: str, level: str) -> None:
         self.thinking[endpoint_id] = level
+
+    def get_llm_endpoint_fallback(self) -> bool:
+        return self.fallback
+
+    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
+        self.fallback = bool(enabled)
 
 
 class _Completions:
