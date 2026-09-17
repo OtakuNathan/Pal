@@ -56,7 +56,8 @@ class Continuity:
             if message.message_id == self.anchor:
                 if message.metadata.get("continuity_id") != self.source_id:
                     messages[index] = replace(message, parts=(self.part, *message.parts),
-                                              metadata={**message.metadata, "continuity_id": self.source_id})
+                                              metadata={**message.metadata, "continuity_id": self.source_id,
+                                                        "continuity_part_index": 0})
                 return messages
         # A request without the anchored input still needs its compact seed.
         # Keep tool call/result adjacency intact by inserting before all history.
@@ -65,5 +66,5 @@ class Continuity:
         messages.insert(index, LLMMessageIR(
             role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
             semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            metadata={"continuity_id": self.source_id}))
+            metadata={"continuity_id": self.source_id, "continuity_part_index": 0}))
         return messages

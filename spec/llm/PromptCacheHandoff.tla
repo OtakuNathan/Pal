@@ -1,7 +1,7 @@
 ------------------------- MODULE PromptCacheHandoff -------------------------
 EXTENDS Naturals, Integers, FiniteSets, TLC
 CONSTANTS DropProtection, Optimistic, StaleOwner, IgnoreM, ClearThird, HiddenMarker,
-          CircularEvidence, DropAtTurn
+          CircularEvidence
 VARIABLES owner, pending, calibrated, attempts, sentOwner, sentSeq, seq,
           cache, markers, served, h, bound, accepted, ackSource, phase, turns,
           through, after, remaining, settled, lostThird, target, estimateError, low, high
@@ -58,13 +58,13 @@ Observe == /\ phase="response" /\ sentSeq \notin settled
            /\ through'=IF LocalAck THEN 0 ELSE through+2
            /\ after'=after+target-3
            /\ remaining'=IF LocalAck THEN after+target-3 ELSE through+after+target-1
-           /\ phase'=IF LocalAck \/ attempts=3 THEN "done" ELSE "ready"
+           /\ phase'=IF LocalAck \/ attempts=3 \/ ~pending THEN "done" ELSE "ready"
            /\ UNCHANGED <<owner,attempts,sentOwner,sentSeq,seq,cache,markers,
                            served,h,bound,turns,target,estimateError>>
 Turn == /\ turns<2 /\ phase \in {"ready","response"}
         /\ owner'=owner+1 /\ turns'=turns+1
-        /\ pending'=IF DropAtTurn THEN FALSE ELSE pending
-        /\ phase'=IF DropAtTurn THEN "done" ELSE phase
+        /\ pending'=IF StaleOwner THEN pending ELSE FALSE
+        /\ phase'=IF phase="ready" THEN "done" ELSE phase
         /\ UNCHANGED <<calibrated,attempts,sentOwner,sentSeq,seq,cache,markers,
                         served,h,bound,accepted,ackSource,through,after,
                         remaining,settled,lostThird,target,estimateError,low,high>>
@@ -90,5 +90,4 @@ AttemptBudget == attempts<=3
 ThirdResponse == ~lostThird
 CostConservation == remaining=through+after
 OwnerIsolation == (phase="done" /\ accepted=3) => sentOwner=owner
-AnchorSurvival == DropAtTurn => ~ (turns>0 /\ attempts=0 /\ phase="done")
 =============================================================================

@@ -1146,7 +1146,8 @@ class TurnExecutor:
                     message,
                     prompt_region=(
                         PromptRegionIR.ACTIVE_INPUT
-                        if index == 0 and message.role == MessageRole.USER
+                        if message.role == MessageRole.USER and
+                        (index == 0 or message.semantic_kind in {"user_request", "user_interjection"})
                         else PromptRegionIR.ACTIVE_HISTORY
                     ),
                 )

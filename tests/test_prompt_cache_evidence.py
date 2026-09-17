@@ -218,7 +218,7 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     codec = OpenAIResponseCodec()
     base = _request()
 
-    # Group A (default): explicit mode with anchor/frontier markers.
+    # Group A (default): explicit mode always carries fixed S/U.
     context = _astra_context()
     coordinator = PromptCacheCoordinator()
     plan = coordinator.plan(base, context)
@@ -229,7 +229,8 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
-    assert len(_marked_blocks(payload)) == 1
+    assert len(_marked_blocks(payload)) == 2
+    assert [point.label for point in plan.breakpoints] == ["stable", "anchor_fixed"]
 
     # Group B: provider implicit; both stable keys, no options, no markers.
     context_b = _astra_context(

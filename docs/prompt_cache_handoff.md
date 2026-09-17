@@ -6,20 +6,35 @@ profile names remain configuration aliases; implicit, hybrid and Anthropic
 strategies are unchanged. No price multiplier or profitability threshold changed.
 The new profile can also be selected explicitly in `prompt_cache.cache_profile`.
 
-A successful HTTP response or cache write no longer advances a rolling baseline.
-The controller keeps S (stable instructions), U (accepted user anchor), F (accepted
-round frontier) and at most one pending C. Identical positions are deduplicated;
-the actual request carries at most four markers. C does not replace the old
-protected positions until a subsequent request supplies qualifying read evidence.
-“Accepted” below always means **estimated attribution**, not a provider receipt.
+A successful HTTP response or cache write does not advance the economic baseline.
+Internal state version 2 keeps S (stable system/developer endpoint), U (fixed user
+endpoint), F (accepted round frontier) and at most one pending C. Every legal S
+and U is sent, independently of minimum estimated size, profitability, missing
+usage, candidate failure or cooldown. Identical positions are deduplicated;
+the actual request carries at most four markers. Only F/C use the economic gate.
+“Accepted” below means **estimated attribution**, not a provider receipt.
+
+For an ordinary turn, U ends at the last actual user input, excluding runtime
+context appended using the user role. On the first turn observing a new compact
+generation, U ends at the compact block itself, including when it is the first
+block of a larger user message. Later rounds retain this exact boundary; the next
+turn uses its new user input. Without active user input, the compact block is the
+fallback. L1 projection metadata and codec paths identify the block; no text search
+or neighboring-block fallback is used.
 
 ## Evidence algorithm
 
-1. Bootstrap with S alone where available. Prior successful final input counts
-   bound every marker actually audited in that request. A positive read with S as
-   the sole marker can tighten its bound and establish the initial estimated
-   baseline. Establishing that baseline starts a fresh economic estimate epoch;
-   it does not alter the usage ledger. Without competing bounds, defer new trials.
+1. Always send S/U. Marker presence and observed read coverage are separate facts.
+   The baseline is the furthest read-covered S/U or accepted F, using its local
+   estimate coordinate; without evidence it is zero. In the audited closed
+   explicit set, a positive read covers S. U requires H strictly above reliable
+   frozen upper bounds of **every earlier marked boundary**. A read from F/C also
+   covers U; this does not prove that U itself has a resident cache entry.
+   Unknown earlier bounds prevent U confirmation, never U transmission.
+   Successful final inclusive input/read counts can establish upper bounds for
+   audited markers; evidence is learned only after judging the current response.
+   C may be proposed while U remains unconfirmed, once all competitor bounds are
+   known. Its position must be beyond U (or S if U is unavailable).
 2. At actual submission, freeze every competing marker's independent upper bound
    and its source request/version. M is their maximum. Any unknown competitor
    makes M unknown; zero is permitted only for an empty competing set.
@@ -53,13 +68,13 @@ The bounded session index excludes turn ID; the upstream cache key already did.
 Endpoint/model/shape/provider URL, profile generation and policy binding isolate
 state. Final returned provider/model/tier changes invalidate active evidence.
 
-Turn closure revokes the old owner's response authority. An anchor candidate can
-be adopted by the next turn only if its exact encoded prefix remains present.
-It retains candidate identity, calibration, attempt count and original deadline.
-A pending round frontier is not adopted. Settling L1 may retire replay or change
-roles; the resulting prefix change invalidates affected evidence. Neither message
-ID nor a session index can override that check. Accepted protection survives only
-while its exact prefix survives.
+Turn closure revokes old responses' handoff authority, discards F/pending C and
+ends the estimate epoch. The next turn sends its new U immediately. There is no
+anchor candidate or cross-turn candidate adoption. S/read evidence survives only
+while its exact encoded prefix and binding survive. Changed U starts unconfirmed;
+unchanged U may retain coverage. Compact/replay retirement invalidates affected
+prefix evidence; message IDs alone cannot preserve it. Provider/model/tier changes
+clear read evidence and F/C while retaining legal fixed marker placement.
 
 The unchanged economic heuristic is:
 
@@ -69,7 +84,8 @@ net = (R + D) * (1 - read_multiplier) - D * max(write_multiplier - 1, 0)
 ```
 
 R is estimated repeated processing, not an exact bill or guaranteed future saving.
-A proposal must be at least as far as the greatest already accumulated target.
+A proposal must be at least as far as the greatest already submitted target;
+this ensures all existing R lies at or before C.
 Existing R enters `through_C`; subsequent actual attempts at p settle once:
 
 ```
@@ -79,6 +95,15 @@ after_C   += max(0, p - c)
 
 ACK discards through_C and preserves after_C. Abandonment preserves their sum.
 For b=40K, c=60K and p=70K/80K, ACK retains 30K; abandonment retains 70K.
+Fixed-anchor confirmation during a trial must also settle only covered costs.
+Alongside the two C sums, maintain `after_S` and `after_U`. Each comparable actual
+request contributes `max(0, p - max(b, x))` to the accumulator for fixed point x.
+When x becomes the new baseline, remaining R is `after_x`; if C is pending,
+`through_C = after_x - after_C`. Keep `after_C` unchanged. Counters for fixed points
+at or behind the new base become remaining R. C ACK sets them to `after_C`.
+For b=40K, U=50K, C=60K and p=70K/80K, U confirmation retains 50K (20K through C,
+30K after C); subsequent C confirmation settles only through C.
+
 Comparable late requests use the current split, even if their owner cannot ACK.
 A changed accumulated prefix resets only the economic estimate epoch. Actual
 billing remains in the existing identity-based usage ledger.
@@ -105,6 +130,27 @@ roles and replay. Wire-audit identity separately includes marker paths/options a
 routing keys. Removing an old F marker therefore does not invalidate the new F's
 content identity. Hash-only attempt logs include M, bound sources and versions,
 calibration/attempt state and the local decision; no control messages enter L1.
+With the existing `prompt_log_enabled` switch, submitted and settled attempt
+records are logged as `prompt_cache_handoff` JSON. Fixed marker paths, read flags,
+base source, candidate and audit evidence distinguish “sent” from “read-covered”.
+Absent usage fields are null in these log records, not fabricated zero writes.
+
+To inspect a live run, group these records by attempt ID and compare submitted
+and settled records. The following distinctions are intentional:
+
+| Observation | Meaning |
+| --- | --- |
+| S/U in `planned_markers` and `applied_marker_paths` | Local payload carried the fixed markers; inspect the audit result as well. |
+| `base_source=S`, `anchor_read=false` | U was sent, but there is insufficient evidence to use its coordinate as the economic base. |
+| `base_source=U`, no F | A read covered U; there has been no accepted frontier handoff. |
+| Pending C, unchanged fingerprint across attempts | The same candidate is being tested, not silently moved on each request. |
+| `estimated_ack`, `base_source=F` | A later request passed attribution using its frozen bounds and interval. |
+| Reads repeatedly equal S, trial exhausted | No acceptable C-reuse evidence arrived within the budget. This alone does not locate the fault in Pal, the gateway or the provider. |
+
+The policy intentionally advances U when a new turn starts. A single-round turn
+has no later same-turn request to test its new U or C; mandatory U transmission
+alone is not a guarantee of historical-prefix reads across such turns.
+
 
 ## Offline verification and activation
 
@@ -129,14 +175,16 @@ python -m pytest -q tests/test_cache_handoff.py tests/test_prompt_cache_policy.p
 
 The mutation runner requires counterexamples for dropping F, optimistic promotion,
 stale ownership, ignoring M, clearing C on the third submit, hidden markers,
-circular evidence and dropping anchors at every turn boundary. Python regressions
+circular evidence, omitting fixed anchors and using an unproven U baseline. Python regressions
 cover independent mock-provider reads across ten single-round turns, both OpenAI
 wire shapes and both bindings, plus payload, lifecycle and economic edge cases.
 `PromptCacheSettlement.tla` separately checks the two accumulators against a
 per-request ghost ledger, including arbitrary receipt order, duplicate receipts,
-ACK, abandonment and epoch invalidation. It assumes the handoff guard already
-accepted the ACK. Its three negative checks discard all R on ACK, ignore late
+ACK, U confirmation during a pending trial, abandonment and epoch invalidation. It assumes the handoff guard already
+accepted the ACK. Its negative checks discard all R on ACK or U confirmation, ignore late
 receipts using a sequence high-water mark, and charge duplicates twice.
+`PromptCacheFixedAnchors.tla` independently checks mandatory S/U transmission
+and read-covered baselines across a turn change.
 Existing 8/50-round compiler/runtime tests and the four CI batches cover integration.
 
 This is an offline code change. Activation of the resident runtime requires a
@@ -150,10 +198,22 @@ and [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices
 These describe explicit lookup and aggregate diagnostics; none supplies the
 per-marker reuse acknowledgement required to label this evidence exact.
 
-Validation on Linux/Python 3.13 (2026-09-17): core-a 1005 passed/7 skipped,
-core-b 830 passed, bunshin-a 466 passed, bunshin-b 478 passed. Subsequent focused
-cache checks passed 75 tests; the 8/50-round integration scenarios also passed.
-The handoff model explored 53,424 distinct states; settlement explored 36.
-All eleven deliberate faults produced the expected invariant counterexamples.
-Hypothesis was installed only in a temporary test virtual environment. macOS and
-Python 3.12 were not exercised locally; no paid provider canary was run.
+State-version-2 validation on Linux/Python 3.13 (2026-09-17): the focused cache,
+continuity and 8/50-round runtime suite passed 125 tests. A final handoff-only run
+passed 50 tests. TLC explored 10,980 handoff states, 736 fixed-anchor states
+(including provider eviction) and 60 settlement states; all 13 deliberate faults
+produced their expected counterexamples. Full batch results are recorded below.
+No paid provider canary, macOS or Python 3.12 run was performed. Local checks cannot
+establish gateway behavior or future cache residency.
+
+| Full batch | Result |
+| --- | --- |
+| core-a | 1,029 passed, 7 skipped |
+| core-b | 829 passed; one old explicit-wire snapshot expected S alone. Updated to require S/U; all 7 tests in that file passed afterward. |
+| bunshin-a | 466 passed |
+| bunshin-b | 477 passed; one sandbox subprocess exceeded its 20-second deadline during the parallel batch run. Its isolated rerun passed. |
+
+No production code was changed for the sandbox timeout. The full batches were
+not repeated after those focused checks; the final handoff regression also covers
+the last logging and turn-closure adjustments. Test dependencies were reused from
+a temporary virtual environment; runtime configuration was preserved.

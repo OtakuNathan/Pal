@@ -179,7 +179,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
 
     assert plan.dialect == PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT
     assert [item.label for item in plan.breakpoints] == [
-        "stable",
+        "stable", "anchor_fixed",
     ]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
@@ -189,7 +189,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 1
+    assert len(marked) == 2
     assert set(encoded.applied_cache_breakpoint_message_ids) == {
         item.message_id for item in plan.breakpoints
     }
@@ -202,7 +202,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         if item.get("role") == "user"
         and str(item.get("content", [{}])[0].get("text") or "").startswith("current ")
     )
-    assert "prompt_cache_breakpoint" not in current["content"][0]
+    assert "prompt_cache_breakpoint" in current["content"][0]
 
 
 def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
@@ -221,9 +221,9 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-    assert plan.decision == "competing_bound_unknown"
+    assert plan.decision == "user_anchor_changed"
     assert [item.label for item in plan.breakpoints] == [
-        "stable",
+        "stable", "anchor_fixed",
     ]
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
@@ -234,7 +234,7 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 1
+    assert len(marked) == 2
 
 
 def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
@@ -285,7 +285,7 @@ def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
             for item in payload["input"]
             for block in item.get("content", [])
             if isinstance(block, dict)
-        ) == 1
+        ) == 2
         if provider_id == "OpenRouter":
             assert (
                 encoded.extra_body["session_id"]
@@ -344,7 +344,7 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in message.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 1
+    assert len(marked) == 2
     user_blocks = next(
         message["content"]
         for message in payload["messages"]
@@ -357,7 +357,7 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in user_blocks
         if str(block.get("text") or "").startswith("current ")
     )
-    assert "prompt_cache_breakpoint" not in current_block
+    assert "prompt_cache_breakpoint" in current_block
 
 
 def test_openrouter_anthropic_messages_keeps_sticky_session_and_breakpoints() -> None:
@@ -469,7 +469,7 @@ def test_openai_chat_uses_supported_text_block_breakpoints() -> None:
         for block in message.get("content", [])
         if "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 1
+    assert len(marked) == 2
 
 
 def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> None:
@@ -504,7 +504,7 @@ def test_openai_responses_frontier_marks_tool_output_and_rolls_within_turn() -> 
     _send_evidence(coordinator, request, context)
     _send_evidence(coordinator, request, context)
     _send_evidence(coordinator, request, context)
-    assert coordinator.snapshot()["handoff"]["promotions"] == 1
+    assert coordinator.snapshot()["handoff"]["promotions"] == 0
     extended = _active_tool_request(request)
     plan = coordinator.plan(extended, context)
     raw = OpenAIResponseCodec().encode(extended, context)
@@ -674,7 +674,7 @@ def test_stale_success_cannot_regress_submitted_checkpoint() -> None:
 
 def test_missing_submitted_message_bootstraps_a_new_cache_epoch() -> None:
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    request, context = _request(), _openai_context()
+    request, context = _active_tool_request(_request()), _openai_context()
     _send_evidence(coordinator, request, context)
     plan = coordinator.plan(request, context)
     assert plan.handoff_candidate

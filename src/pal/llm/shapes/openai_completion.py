@@ -125,6 +125,8 @@ class OpenAICompletionCodec(ShapeCodecBase):
                 if spans and spans[-1].message_id == message.message_id:
                     paths = tuple(("messages", i) for i in range(wire_start, len(messages)))
                     spans[-1] = replace(spans[-1], wire_item_paths=paths or spans[-1].cache_targets)
+                    if message.metadata.get("continuity_part_index") == 0 and spans[-1].cache_targets:
+                        spans[-1] = replace(spans[-1], continuity_target=spans[-1].cache_targets[0])
         if not messages:
             messages.append({"role": "user", "content": "Continue."})
 

@@ -125,6 +125,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 if spans and spans[-1].message_id == message.message_id:
                     paths = tuple(("input", i) for i in range(wire_start, len(input_items)))
                     spans[-1] = replace(spans[-1], wire_item_paths=paths or spans[-1].cache_targets)
+                    if message.metadata.get("continuity_part_index") == 0 and paths:
+                        spans[-1] = replace(spans[-1], continuity_target=(*paths[0], "content", 0))
         if not input_items:
             input_items.append({"role": "user", "content": "Continue."})
         policy = request.policy

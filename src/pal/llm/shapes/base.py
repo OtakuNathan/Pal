@@ -40,6 +40,7 @@ class EncodedMessageSpan:
     cache_prefix_fingerprint: str = ""
     estimated_cache_prefix_tokens: int = 0
     wire_item_paths: tuple[tuple[JSONPathPart, ...], ...] = ()
+    continuity_target: tuple[JSONPathPart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
                 message_id=span.message_id,
                 cache_targets=span.cache_targets,
                 wire_item_paths=span.wire_item_paths,
+                continuity_target=span.continuity_target,
                 cache_prefix_fingerprint=hashlib.sha256(
                     serialized.encode("utf-8")
                 ).hexdigest(),

@@ -10,7 +10,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.llm.ir import LLMUsageIR
@@ -18,6 +18,7 @@ from pal.llm.shapes.base import EncodedRequest, finalize_cache_spans
 from pal.shared.json_values import thaw_json
 
 POLICY = "openai_explicit_economic_v1"
+STATE_VERSION = 2
 CONTROL_FIELDS = ("prompt_cache_breakpoint", "cache_control")
 
 
@@ -93,7 +94,7 @@ def inject_exact(encoded: EncodedRequest, points: tuple, cache_key: str,
         span = spans.get(point.message_id)
         if not span or not span.cache_targets:
             continue
-        target = at(payload, span.cache_targets[-1])
+        target = at(payload, point.path or span.cache_targets[-1])
         # Only supported content blocks; never fallback to an earlier block.
         if isinstance(target, dict) and target.get("type") in {
             "input_text", "output_text", "text", "input_image", "image_url",
@@ -155,6 +156,17 @@ class Boundary:
     path: tuple
     fingerprint: str
     coordinate: int
+
+
+def boundary_at(encoded: EncodedRequest, message_id: str, path: tuple) -> Boundary | None:
+    """Describe a selected block, including an interior continuity block."""
+    from pal.llm.shapes.base import _provider_prefix
+    prefix = _provider_prefix(thaw_json(encoded.payload), path)
+    if prefix is None or not isinstance(at(encoded.payload, path), Mapping):
+        return None
+    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"))
+    return Boundary(message_id, path, hashlib.sha256(serialized.encode()).hexdigest(),
+                    max(1, (len(serialized) + 3) // 4))
 
 
 @dataclass(frozen=True)
@@ -227,13 +239,39 @@ class Handoff:
     service_tier: str = ""
     binding_sequence: int = 0
     stable_read: bool = False
+    anchor_read: bool = False
+    after_stable: int = 0
+    after_anchor: int = 0
+    continuity_id: str = ""
+    continuity_turn: str = ""
     ack_source: str = ""
     promotions: int = 0
 
     @property
     def baseline(self) -> int:
-        return max((b.coordinate for b in (self.stable, self.anchor, self.frontier)
-                    if b and (b != self.stable or self.stable_read)), default=0)
+        return max((b.coordinate for b, read in ((self.stable, self.stable_read),
+                    (self.anchor, self.anchor_read), (self.frontier, True)) if b and read), default=0)
+
+    def _reset_economics(self):
+        self.economic_epoch += 1
+        self.r = self.max_target = self.after_stable = self.after_anchor = 0
+        self.extent = None
+        if self.pending:
+            self.pending.through = self.pending.after = 0
+
+    def _advance_fixed_baseline(self, old_base: int):
+        if self.baseline <= old_base:
+            return
+        anchor_is_base = self.anchor_read and self.anchor and self.baseline == self.anchor.coordinate
+        remaining = self.after_anchor if anchor_is_base else self.after_stable
+        if self.pending:
+            self.pending.through = remaining - self.pending.after
+        else:
+            self.r = remaining
+        if self.stable and self.baseline >= self.stable.coordinate:
+            self.after_stable = remaining
+        if self.anchor and self.baseline >= self.anchor.coordinate:
+            self.after_anchor = remaining
 
     def markers(self) -> tuple[Boundary, ...]:
         points = (self.stable, self.anchor, self.frontier,
@@ -255,11 +293,15 @@ class Handoff:
             return
         self.owner += 1
         self.closed = True
-        if self.pending and (self.pending.kind != "anchor" or self.pending.attempts >= 3):
-            self.end_candidate("turn_ended", cooldown=self.pending.attempts >= 3)
+        self.end_candidate("turn_ended")
+        self.frontier = None
+        self.ack_source = ""
+        self.cooldown = None
+        self.deferred = None
+        self._reset_economics()
 
     def refresh(self, turn: str, boundaries: dict[str, Boundary], stable: Boundary | None,
-                now: float):
+                now: float, *, anchor: Boundary | None = None):
         self.last_access = now
         if turn != self.turn or self.closed:
             self.end_turn(self.turn)
@@ -281,16 +323,26 @@ class Handoff:
             self.anchor = self.frontier = None
             self.bounds.clear()
             self.stable_read = False
+            self.anchor_read = False
             self.ack_source = ""
             reset_economics = True
         self.stable = stable
-        for name in ("anchor", "frontier"):
-            old = getattr(self, name)
-            new = retained(old)
-            if old and not new:
-                self.end_candidate("prefix_invalidated")
+        old_anchor = self.anchor
+        if old_anchor != anchor:
+            same = old_anchor and anchor and old_anchor.fingerprint == anchor.fingerprint and old_anchor.path == anchor.path
+            if not same:
+                self.end_candidate("user_anchor_changed")
+                self.frontier = None
+                self.ack_source = ""
+                self.anchor_read = False
                 reset_economics = True
-            setattr(self, name, new)
+            self.anchor = anchor
+        old_frontier = self.frontier
+        self.frontier = retained(old_frontier)
+        if old_frontier and not self.frontier:
+            self.end_candidate("prefix_invalidated")
+            self.ack_source = ""
+            reset_economics = True
         if self.pending:
             b = retained(self.pending.boundary)
             if b is None:
@@ -300,11 +352,7 @@ class Handoff:
                 if self.pending.deadline and now >= self.pending.deadline:
                     self.end_candidate("candidate_expired", cooldown=True)
         if reset_economics or (self.extent and not retained(self.extent)):
-            self.economic_epoch += 1
-            self.r = self.max_target = 0
-            self.extent = None
-            if self.pending:
-                self.pending.through = self.pending.after = 0
+            self._reset_economics()
         # Evidence storage is bounded by current protected points and one pending.
         keep = {b.fingerprint for b in self.markers()}
         self.bounds = {k: v for k, v in self.bounds.items() if k in keep}
@@ -319,7 +367,7 @@ class Handoff:
         if self.deferred == (boundary.fingerprint, self.revision):
             return
         b, c = self.baseline, boundary.coordinate
-        if c <= b or c < minimum or c < self.max_target:
+        if c <= max(b, self.anchor.coordinate if self.anchor else 0) or c < minimum or c < self.max_target:
             self.decision = "await_farther_candidate"
             return
         delta = c - b
@@ -370,6 +418,10 @@ class Handoff:
         candidate = self.pending
         if sent.economic_epoch == self.economic_epoch:
             b, p = self.baseline, sent.target
+            if self.stable:
+                self.after_stable += max(0, p - max(b, self.stable.coordinate))
+            if self.anchor:
+                self.after_anchor += max(0, p - max(b, self.anchor.coordinate))
             if candidate:
                 c = candidate.boundary.coordinate
                 candidate.through += max(0, min(p, c) - b)
@@ -399,10 +451,10 @@ class Handoff:
             self.end_candidate("provider_binding_changed")
             self.bounds.clear()
             self.stable_read = False
-            self.anchor = self.frontier = None
-            self.economic_epoch += 1
-            self.r = self.max_target = 0
-            self.extent = None
+            self.anchor_read = False
+            self.frontier = None
+            self.ack_source = ""
+            self._reset_economics()
             return
         valid = (success and usage.final and usage.reported and not usage.usage_anomaly
                  and usage.has("input_tokens") and usage.has("cached_input_tokens")
@@ -426,6 +478,23 @@ class Handoff:
             "hit": usage.cached_input_tokens if usage.has("cached_input_tokens") else None}
         promoted = False
         h, total = usage.cached_input_tokens, usage.input_tokens
+        covered_now = []
+        # Read coverage, not a lease or an ACK of an individual stored entry.
+        # Every legal source is at or beyond S. For U, exclude every earlier
+        # source using bounds frozen at submission; a later source also covers U.
+        if valid and current and sent.markers and h > 0:
+            old_base = self.baseline
+            for name in ("stable", "anchor"):
+                point = getattr(self, name)
+                if point is None or point not in sent.markers:
+                    continue
+                earlier = [b for b in sent.markers if b.path < point.path]
+                bounds = dict(sent.bounds)
+                if all(b.fingerprint in bounds and bounds[b.fingerprint] is not None
+                       and h > bounds[b.fingerprint].upper for b in earlier):
+                    setattr(self, name + "_read", True)
+                    covered_now.append(point)
+            self._advance_fixed_baseline(old_base)
         if candidate and candidate.identity == sent.candidate and current:
             if now >= candidate.deadline:
                 self.end_candidate("candidate_expired", cooldown=True)
@@ -444,13 +513,9 @@ class Handoff:
                 elif (candidate.calibration_sequence and sent.sequence > candidate.calibration_sequence
                       and candidate.interval and sent.m is not None and h > sent.m
                       and candidate.interval[0] <= h <= candidate.interval[1]):
-                    if candidate.kind == "anchor":
-                        self.anchor = candidate.boundary
-                        if self.frontier and self.frontier.coordinate <= self.anchor.coordinate:
-                            self.frontier = None
-                    else:
-                        self.frontier = candidate.boundary
+                    self.frontier = candidate.boundary
                     self.r = candidate.after
+                    self.after_stable = self.after_anchor = self.r
                     self.pending = None
                     self.ack_source = "estimated"
                     self.promotions += 1
@@ -469,16 +534,13 @@ class Handoff:
             for b in sent.markers:
                 if b.fingerprint in active_fingerprints:
                     self._bound(b, total, identity)
+            for b in covered_now:
+                if b.fingerprint in active_fingerprints:
+                    self._bound(b, h, identity)
             if len(sent.markers) == 1 and h > 0:
                 b = sent.markers[0]
                 if b.fingerprint in active_fingerprints:
                     self._bound(b, h, identity)
-                if (self.stable and b.fingerprint == self.stable.fingerprint
-                        and not self.stable_read and self.pending is None):
-                    self.stable_read = True
-                    self.economic_epoch += 1
-                    self.r = self.max_target = 0
-                    self.extent = None
             # An independently attributed later boundary also bounds earlier ones.
             if promoted:
                 for b in self.markers():
@@ -493,7 +555,13 @@ class Handoff:
 
     def snapshot(self):
         c = self.pending
-        return {"policy": POLICY, "decision": self.decision, "ack_source": self.ack_source,
+        return {"policy": POLICY, "state_version": STATE_VERSION, "decision": self.decision, "ack_source": self.ack_source,
+                "stable_read": self.stable_read, "anchor_read": self.anchor_read,
+                "base_source": "F" if self.frontier and self.baseline == self.frontier.coordinate else
+                    "U" if self.anchor_read and self.anchor else "S" if self.stable_read else "cold",
+                "fixed_markers": [{"kind": kind, "message_id": b.message_id, "path": b.path,
+                    "coordinate_estimate": b.coordinate} for kind, b in (("S", self.stable), ("U", self.anchor)) if b],
+                "after_stable_estimate": self.after_stable, "after_anchor_estimate": self.after_anchor,
                 "promotions": self.promotions, "owner_epoch": self.owner,
                 "economic_epoch": self.economic_epoch, "send_sequence": self.sequence,
                 "baseline_estimate": self.baseline, "reprocessed_estimate": self.r,

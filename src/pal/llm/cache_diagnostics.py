@@ -43,7 +43,8 @@ def describe_request(request, raw_encoded, encoded) -> dict[str, Any]:
     for span in encoded.message_spans:
         if span.message_id not in applied:
             continue
-        for path in span.cache_targets:
+        paths = dict.fromkeys((*span.cache_targets, *((span.continuity_target,) if span.continuity_target else ())))
+        for path in paths:
             target = at_path(encoded.payload, path)
             if not isinstance(target, dict) and not hasattr(target, "get"):
                 continue

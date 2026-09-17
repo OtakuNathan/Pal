@@ -19,6 +19,7 @@ for model in \
     ItemCommitLifecycle \
     BrokerTransportLifecycle \
     PromptCacheHandoff \
+    PromptCacheFixedAnchors \
     PromptCacheSettlement
 do
     echo "==> TLC ${model}"

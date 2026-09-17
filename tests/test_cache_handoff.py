@@ -22,7 +22,7 @@ def boundary(name, pos):
 def state():
     s = Handoff(stable=boundary("s", 40000), stable_read=True)
     s.bounds["s"] = Bound(40000, "bootstrap", 1)
-    s.propose(boundary("c", 60000), "anchor", minimum=0, read=.1, write=1.25, threshold=0)
+    s.propose(boundary("c", 60000), "frontier", minimum=0, read=.1, write=1.25, threshold=0)
     return s
 
 
@@ -82,9 +82,7 @@ def test_late_attempt_uses_current_split_without_stale_promotion():
     submit(s, "late", 80000)
     submit(s, "first", 70000)
     s.settle("first", usage(70000, 40000), success=True, now=2)
-    s.end_turn("")
-    s.turn = "new"
-    s.closed = False
+    s.owner += 1  # Same content epoch, but this response has lost ACK authority.
     s.settle("late", usage(80000, 60000), success=True, now=3)
     assert s.promotions == 0
     assert (s.pending.through, s.pending.after) == (40000, 30000)
@@ -123,13 +121,12 @@ class ExplicitProvider:
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("provider", ["openai", "openrouter"])
-def test_ten_single_round_turns_adopt_anchor(shape, provider):
+def test_ten_single_round_turns_always_send_current_anchor(shape, provider):
     context = ShapeContext(shape, "endpoint", "openai/gpt-6-astra" if provider == "openrouter" else "gpt-6-astra",
                            provider_id=provider, capabilities={"prompt_cache": {"minimum_tokens": 1, "net_threshold_tokens": 0}})
     coordinator, server = PromptCacheCoordinator(), ExplicitProvider()
     messages = [LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("abc " * 1000),), message_id="system",
                              prompt_region=PromptRegionIR.STABLE_SYSTEM)]
-    first = None
     for turn in range(10):
         messages = [replace(m, prompt_region=PromptRegionIR.SETTLED_HISTORY)
                     if m.role != MessageRole.SYSTEM else m for m in messages]
@@ -142,13 +139,10 @@ def test_ten_single_round_turns_adopt_anchor(shape, provider):
         coordinator.start_attempt(plan, request=request, context=context, encoded=encoded, raw_encoded=raw, request_id=str(turn))
         coordinator.record_success(plan, server.respond(encoded), request_id=str(turn))
         current = coordinator.snapshot()["handoff"]
-        if turn == 1:
-            first = current["pending"]
-            assert first["attempts"] == 1
-        if turn == 2:
-            assert current["promotions"] == 1
+        assert [b.message_id for b in plan.breakpoints] == ["system", f"user{turn}"]
+        assert current["pending"] is None
+        assert current["promotions"] == 0
         coordinator.end_turn(str(turn))
-    assert current["promotions"] >= 3
     assert current["active_attempts"] == 0
 
 
@@ -171,20 +165,18 @@ def test_exact_audit_and_content_identity_survive_old_marker_removal():
     assert not audit(tampered, (("input", 0, "content", 1),))[0]
 
 
-def test_adoption_preserves_trial_identity_and_absolute_deadline():
+def test_new_turn_discards_trial_and_sends_new_fixed_anchor():
     s = state()
     submit(s, "one")
     s.settle("one", usage(70000, 40000), success=True, now=2)
-    c = s.pending
-    before = (c.identity, c.attempts, c.deadline, c.calibration_request, c.through, c.after)
+    old_candidate = s.pending.boundary
     s.end_turn("")
-    points = {b.message_id: b for b in (s.stable, c.boundary, s.extent)}
-    s.refresh("new", points, s.stable, 3)
-    assert s.pending is c
-    assert before == (c.identity, c.attempts, c.deadline, c.calibration_request, c.through, c.after)
-    submit(s, "two")
-    s.settle("two", usage(70000, 60000), success=True, now=4)
-    assert s.promotions == 1
+    u = boundary("new-user", 80000)
+    points = {b.message_id: b for b in (s.stable, old_candidate, u)}
+    s.refresh("new", points, s.stable, 3, anchor=u)
+    assert s.pending is None and s.frontier is None
+    assert s.markers() == (s.stable, u)
+    assert not s.anchor_read and s.baseline == 40000
 
 
 def test_prefix_change_invalidates_candidate_but_not_raw_billing():
@@ -193,7 +185,7 @@ def test_prefix_change_invalidates_candidate_but_not_raw_billing():
     s.settle("one", usage(70000, 40000), success=True, now=2)
     s.end_turn("")
     s.refresh("next", {"s": s.stable}, s.stable, 3)
-    assert s.pending is None and s.economic_epoch == 1
+    assert s.pending is None and s.economic_epoch >= 1
     assert s.r == 0
     # Usage accounting lives in LLMUsageLedger; invalidation only drops estimates.
 
@@ -302,9 +294,9 @@ def test_provider_binding_change_cannot_ack_and_partial_round_does_not_cool():
 
 
 def test_final_payload_content_tampering_cannot_calibrate():
-    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence
+    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence, _active_tool_request
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    request, context = _request(), _openai_context()
+    request, context = _active_tool_request(_request()), _openai_context()
     _send_evidence(coordinator, request, context)
     raw = codec_for_shape(context.wire_shape).encode(request, context)
     plan = coordinator.plan(request, context, raw)
@@ -336,10 +328,10 @@ def test_partial_tool_batch_has_no_candidate_boundary():
 
 
 def test_fourth_request_omits_pending_marker_without_destroying_third_ack():
-    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence
+    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence, _active_tool_request
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    request, context = _request(), _openai_context()
-    _send_evidence(coordinator, request, context)
+    request, context = _active_tool_request(_request()), _openai_context()
+    _send_evidence(coordinator, _request(), context)
     _send_evidence(coordinator, request, context)
     raw = codec_for_shape(context.wire_shape).encode(request, context)
     for name in ("second", "third"):
@@ -358,9 +350,9 @@ def test_fourth_request_omits_pending_marker_without_destroying_third_ack():
 
 def test_concurrent_preparation_cannot_reserve_four_carrying_attempts():
     from concurrent.futures import ThreadPoolExecutor
-    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence
+    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence, _active_tool_request
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    request, context = _request(), _openai_context()
+    request, context = _active_tool_request(_request()), _openai_context()
     _send_evidence(coordinator, request, context)
     raw = codec_for_shape(context.wire_shape).encode(request, context)
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -443,9 +435,9 @@ def test_turn_notification_supports_invokers_without_cache_policy():
 
 
 def test_accounted_attempt_releases_inflight_snapshot_without_charging_again():
-    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence
+    from tests.test_prompt_cache_policy import _request, _openai_context, _send_evidence, _active_tool_request
     coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
-    request, context = _request(), _openai_context()
+    request, context = _active_tool_request(_request()), _openai_context()
     _send_evidence(coordinator, request, context)
     raw = codec_for_shape(context.wire_shape).encode(request, context)
     plan, _, _ = coordinator.prepare_attempt(request, context, raw, "duplicate")
@@ -466,3 +458,179 @@ def test_provider_diagnostics_remain_serializable_auxiliary_data():
     }}))
     assert json.loads(json.dumps(evidence.prompt_cache_diagnostics))["reason"]["code"] == "example"
     assert not evidence.usage.reported
+
+
+def test_fixed_anchor_confirmation_preserves_pending_and_late_costs():
+    s = state()
+    s.anchor = boundary("u", 50000)
+    s.bounds["u"] = Bound(50000, "independent", 2)
+    submit(s, "one", 70000)
+    s.settle("one", usage(70000, 40000), success=True, now=2)
+    submit(s, "late", 80000, 20000)
+    submit(s, "confirm-u", 70000)
+    s.settle("confirm-u", usage(70000, 50000), success=True, now=3)
+    assert s.anchor_read and s.baseline == 50000
+    assert s.pending and (s.pending.through, s.pending.after) == (20000, 20000)
+    # Already-sent response is charged against the current split, once.
+    s.settle("late", usage(80000, 60000), success=True, now=4)
+    assert s.frontier and s.baseline == 60000 and s.r == 40000
+    s.settle("late", usage(80000, 60000), success=True, now=5)
+    assert s.r == 40000
+
+
+def test_fixed_anchor_uses_frozen_earlier_bounds_without_circular_evidence():
+    s = Handoff(stable=boundary("s", 40000), anchor=boundary("u", 50000))
+    submit(s, "unknown")
+    s.settle("unknown", usage(70000, 50000), success=True, now=2)
+    assert s.stable_read and not s.anchor_read and s.baseline == 40000
+    # H may bound S after this decision; it cannot retrospectively confirm U.
+    assert s.bounds["s"].upper == 50000
+    submit(s, "freeze")
+    s.bounds["s"] = Bound(40000, "later-independent", 10)
+    s.settle("freeze", usage(70000, 50000), success=True, now=3)
+    assert not s.anchor_read
+    submit(s, "confirm")
+    s.settle("confirm", usage(70000, 50000), success=True, now=4)
+    assert s.anchor_read and s.baseline == 50000
+    assert s.r == 60000  # Three requests, each with 20K beyond U.
+
+
+@pytest.mark.parametrize("evidence", [LLMUsageIR(), replace(usage(70000, 0),
+    cache_write_input_tokens=50000, reported_fields=("input_tokens", "cache_write_input_tokens"))])
+def test_missing_read_or_write_only_never_confirms_fixed_anchors(evidence):
+    s = Handoff(stable=boundary("s", 40000), anchor=boundary("u", 50000))
+    submit(s, "one")
+    s.settle("one", evidence, success=True, now=2)
+    assert len(s.markers()) == 2 and s.baseline == 0
+    assert not s.stable_read and not s.anchor_read
+
+
+@pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
+@pytest.mark.parametrize("provider", ["openai", "openrouter"])
+def test_small_fixed_markers_ignore_economic_gate_and_failed_trials(shape, provider):
+    context = ShapeContext(shape, "endpoint", "openai/gpt-6-astra" if provider == "openrouter" else "gpt-6-astra",
+        provider_id=provider, capabilities={"prompt_cache": {"minimum_tokens": 100000, "net_threshold_tokens": 100000}})
+    request = LLMRequestIR((
+        LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("stable"),), message_id="s", prompt_region=PromptRegionIR.STABLE_SYSTEM),
+        LLMMessageIR(MessageRole.USER, (TextPartIR("question"),), message_id="u", prompt_region=PromptRegionIR.ACTIVE_INPUT),
+    ), tools=(), policy=GenerationPolicyIR(max_output_tokens=128), logical_scope_id="fixed", metadata={"turn_id": "one"})
+    coordinator = PromptCacheCoordinator()
+    raw = codec_for_shape(shape).encode(request, context)
+    for i in range(5):
+        plan = coordinator.plan(request, context, raw)
+        assert [p.message_id for p in plan.breakpoints] == ["s", "u"]
+        assert audit(coordinator.inject(raw, plan), tuple(p.path for p in plan.breakpoints))[0]
+        s = coordinator._handoffs[plan.scope_key]
+        s.cooldown = set()
+        s.max_target = 999999
+        s.deferred = ("u", s.revision)
+    assert s.baseline == 0 and not s.pending
+
+
+@pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
+@pytest.mark.parametrize("provider", ["openai", "openrouter"])
+def test_compact_anchor_is_exact_interior_block_then_advances_next_turn(shape, provider):
+    from pal.memory.continuity import Continuity
+    from pal.llm.cache_handoff import boundary_at
+    context = ShapeContext(shape, "endpoint", "openai/gpt-6-astra" if provider == "openrouter" else "gpt-6-astra", provider_id=provider)
+    system = LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("stable instructions"),), message_id="s", prompt_region=PromptRegionIR.STABLE_SYSTEM)
+    user = LLMMessageIR(MessageRole.USER, (TextPartIR("current input"), TextPartIR("another input block")), message_id="u", prompt_region=PromptRegionIR.ACTIVE_INPUT)
+    continuity = Continuity.from_message(LLMMessageIR(MessageRole.USER, (TextPartIR("summary"),), message_id="compact"), {"continuity_anchor": "u"})
+    request = LLMRequestIR(tuple(continuity.project([system, user])), tools=(), policy=GenerationPolicyIR(max_output_tokens=128), logical_scope_id="compact", metadata={"turn_id": "one", "continuity_id": "compact"})
+    coordinator = PromptCacheCoordinator()
+    codec = codec_for_shape(shape)
+    first = None
+    for round_ in range(3):
+        raw = codec.encode(request, context)
+        plan = coordinator.plan(request, context, raw)
+        u = plan.breakpoints[1]
+        assert u.path[-2:] == ("content", 0)
+        encoded = coordinator.inject(raw, plan)
+        assert audit(encoded, tuple(p.path for p in plan.breakpoints))[0]
+        if first is None:
+            first = boundary_at(clean_request(encoded), u.message_id, u.path)
+        assert boundary_at(clean_request(encoded), u.message_id, u.path) == first
+        coordinator.start_attempt(plan, request=request, context=context, raw_encoded=raw, encoded=encoded, request_id=str(round_))
+        coordinator.record_success(plan, usage(100, 0), request_id=str(round_))
+        request = replace(request, messages=(*request.messages[:-1], replace(request.messages[-1], parts=(*request.messages[-1].parts[:1], TextPartIR("changed after compact " + str(round_))))))
+    coordinator.end_turn("one")
+    next_user = replace(user, message_id="next")
+    request = replace(request, messages=(*[replace(m, prompt_region=PromptRegionIR.SETTLED_HISTORY) if m.role == MessageRole.USER else m for m in request.messages], next_user), metadata={**request.metadata, "turn_id": "two"})
+    plan = coordinator.plan(request, context)
+    assert plan.breakpoints[1].message_id == "next"
+    from pal.llm.cache_handoff import at
+    assert at(coordinator.inject(codec.encode(request, context), plan).payload, plan.breakpoints[1].path)["text"] == "another input block"
+    assert coordinator.snapshot()["handoff"]["base_source"] == "cold"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_handoff_attempt_log_is_opt_in_and_has_no_prompt_text(caplog, enabled):
+    import json
+    from tests.test_prompt_cache_policy import _request, _openai_context
+    request = replace(_request(), metadata={"prompt_log_enabled": enabled})
+    context, coordinator = _openai_context(), PromptCacheCoordinator()
+    raw = codec_for_shape(context.wire_shape).encode(request, context)
+    caplog.set_level("INFO", logger="pal.llm.prompt_cache")
+    plan, encoded, _ = coordinator.prepare_attempt(request, context, raw, "logged")
+    coordinator.record_success(plan, usage(10000, 1000), request_id="logged")
+    rows = [json.loads(r.message.split("prompt_cache_handoff ", 1)[1]) for r in caplog.records if "prompt_cache_handoff " in r.message]
+    assert bool(rows) == enabled
+    if enabled:
+        assert len(rows) == 2
+        final = rows[-1]
+        assert final["cache_write_input_tokens"] is None
+        assert final["applied_marker_paths"]
+        assert final["wire_audit_fingerprint"]
+        assert final["cache_handoff"]["base_source"] == "S"
+        assert "stable stable" not in json.dumps(rows)
+
+
+def test_s_only_provider_never_confirms_u_or_f_but_trials_continue():
+    from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+    context = ShapeContext(WireShape.OPENAI_RESPONSE, "endpoint", "gpt-6-astra",
+        provider_id="openai", capabilities={"prompt_cache": {"minimum_tokens": 1, "net_threshold_tokens": 0}})
+    coordinator = PromptCacheCoordinator()
+    messages = [
+        LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("abc " * 1000),), message_id="s", prompt_region=PromptRegionIR.STABLE_SYSTEM),
+        LLMMessageIR(MessageRole.USER, (TextPartIR("abc " * 1000),), message_id="u", prompt_region=PromptRegionIR.ACTIVE_INPUT),
+    ]
+    trials = set()
+    decisions = set()
+    for round_ in range(10):
+        request = LLMRequestIR(tuple(messages), tools=(), policy=GenerationPolicyIR(max_output_tokens=128), logical_scope_id="s-only", metadata={"turn_id": "one", "llm_round_index": round_})
+        raw = codec_for_shape(context.wire_shape).encode(request, context)
+        plan, encoded, _ = coordinator.prepare_attempt(request, context, raw, str(round_))
+        assert [p.message_id for p in plan.breakpoints[:2]] == ["s", "u"]
+        assert audit(encoded, tuple(p.path for p in plan.breakpoints))[0]
+        if plan.handoff_candidate:
+            trials.add(plan.handoff_candidate)
+        # Independent provider counts words, stores/reads S only, ignores later markers.
+        total = (round_ + 2) * 1000
+        coordinator.record_success(plan, usage(total, 1000 if round_ else 0), request_id=str(round_))
+        state_ = coordinator.snapshot()["handoff"]
+        decisions.add(state_["decision"])
+        assert not state_["anchor_read"] and state_["promotions"] == 0
+        assert state_["base_source"] == ("cold" if round_ == 0 else "S")
+        messages.extend([
+            LLMMessageIR(MessageRole.ASSISTANT, (ToolCallIR(str(round_), "probe", {}),), message_id=f"call{round_}", prompt_region=PromptRegionIR.ACTIVE_HISTORY),
+            LLMMessageIR(MessageRole.TOOL, (ToolResultIR(str(round_), "probe", "abc " * 1000),), message_id=f"result{round_}", prompt_region=PromptRegionIR.ACTIVE_HISTORY),
+        ])
+    assert len(trials) >= 2
+    assert "candidate_budget_exhausted" in decisions
+
+
+def test_compiler_anchors_last_real_user_interjection_not_runtime_user_context():
+    from pal.core import PalCore, register_with_core
+    from pal.memory import MemoryService, register_with_core as register_memory
+    from tests.test_compact_continuity import request as build_request
+    core, memory = PalCore(), MemoryService()
+    register_with_core(core)
+    register_memory(core.context, memory)
+    memory.begin_l1_turn("one", user_text="original request")
+    memory.append_l1_user("one", LLMMessageIR(MessageRole.USER, (TextPartIR("new requirement"),), message_id="interjection", semantic_kind="user_interjection"))
+    memory.append_l1_user("one", LLMMessageIR(MessageRole.USER, (TextPartIR("runtime information"),), message_id="context", semantic_kind="pal_prompt_context"))
+    request = build_request(core, "one")
+    active = [m.message_id for m in request.messages if m.prompt_region == PromptRegionIR.ACTIVE_INPUT]
+    assert active[-1] == "interjection" and "context" not in active
+    plan = PromptCacheCoordinator().plan(request, ShapeContext(WireShape.OPENAI_RESPONSE, "openai", "gpt-6-astra", provider_id="openai"))
+    assert next(b for b in plan.breakpoints if b.label == "anchor_fixed").message_id == "interjection"

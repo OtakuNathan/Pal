@@ -93,6 +93,7 @@ class PromptCacheBreakpoint:
     message_id: str
     ttl: str = "5m"
     prefix_tokens: int = 0
+    path: tuple[str | int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -579,33 +580,39 @@ class PromptCacheCoordinator:
                     and message.prompt_region == PromptRegionIR.ACTIVE_HISTORY):
                 frontier = boundary(spans.get(message.message_id)) or frontier
         minimum = _capability_int(context.capabilities, "minimum_tokens", self.minimum_prefix_tokens)
-        if stable and stable.coordinate < minimum:
-            stable = None
         # Session scope deliberately excludes the turn; upstream keys do too.
         key_request = replace(request, metadata={**request.metadata, "turn_id": "", "artifact_turn_id": ""})
         scope = _scope_key(key_request, context, dialect) + "|" + handoff.digest(
-            {"policy": handoff.POLICY, "binding": _prompt_cache_capabilities(context.capabilities)})
+            {"policy": handoff.POLICY, "state_version": handoff.STATE_VERSION,
+             "binding": _prompt_cache_capabilities(context.capabilities)})
         key = _cache_key(request, context)
         with self._lock:
             state = self._handoffs.setdefault(scope, handoff.Handoff())
             now = time.monotonic()
-            state.refresh(str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or ""),
-                          boundaries, stable, now)
+            turn = str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or "")
+            continuity = str(request.metadata.get("continuity_id") or "")
+            if continuity != state.continuity_id:
+                state.continuity_id, state.continuity_turn = continuity, turn
+            if continuity:
+                for message in request.messages:
+                    span = spans.get(message.message_id)
+                    if span and span.continuity_target and message.metadata.get("continuity_id") == continuity:
+                        compact = handoff.boundary_at(clean, message.message_id, span.continuity_target)
+                        if compact:
+                            boundaries["continuity:" + continuity] = compact
+                            if state.continuity_turn == turn or anchor is None:
+                                anchor = compact
+                        break
+            state.refresh(turn, boundaries, stable, now, anchor=anchor)
             for old_key, old_state in sorted(self._handoffs.items(), key=lambda item: item[1].last_access):
                 if old_key != scope and not old_state.active and (
                     now - old_state.last_access > self.observation_ttl_seconds
                     or len(self._handoffs) > self.max_scope_count):
                     del self._handoffs[old_key]
             if not state.pending and state.cooldown is None:
-                accepted = state.anchor.coordinate if state.anchor else 0
-                use_anchor = anchor and anchor.coordinate >= state.max_target and anchor.coordinate > max(accepted, state.baseline)
-                target, kind = (anchor, "anchor") if use_anchor else (frontier, "frontier")
-                # A deferred anchor does not prevent a farther completed-round trial.
-                if target and state.deferred == (target.fingerprint, state.revision):
-                    target, kind = frontier, "frontier"
-                state.propose(target, kind, minimum=minimum,
+                state.propose(frontier, "frontier", minimum=minimum,
                     read=_capability_float(context.capabilities, "read_multiplier", .10),
-                    write=_capability_float(context.capabilities, kind + "_write_multiplier",
+                    write=_capability_float(context.capabilities, "frontier_write_multiplier",
                         _capability_float(context.capabilities, "write_multiplier", 1.25)),
                     threshold=_capability_int(context.capabilities, "net_threshold_tokens", self.rolling_net_threshold_tokens))
             points = state.markers()
@@ -617,8 +624,8 @@ class PromptCacheCoordinator:
             plan = PromptCachePlan(scope_key=scope, cache_key=key, dialect=dialect,
                 breakpoints=tuple(PromptCacheBreakpoint(
                     (candidate.kind + "_candidate") if candidate and b == candidate.boundary else
-                    "stable" if b == state.stable else "anchor_accepted" if b == state.anchor else "frontier_accepted",
-                    b.message_id, "30m", b.coordinate) for b in points),
+                    "stable" if b == state.stable else "anchor_fixed" if b == state.anchor else "frontier_accepted",
+                    b.message_id, "30m", b.coordinate, b.path) for b in points),
                 decision=state.decision, plan_sequence=state.sequence + 1,
                 estimated_prefix_tokens=max((b.coordinate for b in (anchor, frontier) if b), default=0),
                 handoff_encoded=clean, handoff_owner=state.owner, handoff_epoch=state.economic_epoch,
@@ -748,15 +755,15 @@ class PromptCacheCoordinator:
                 state = self._handoffs[plan.scope_key]
                 clean = plan.handoff_encoded or handoff.clean_request(raw_encoded)
                 actual_clean = handoff.clean_request(encoded)
-                actual_spans = {s.message_id: s for s in actual_clean.message_spans}
                 spans = {s.message_id: s for s in clean.message_spans}
-                expected = tuple(spans[b.message_id].cache_targets[-1] for b in plan.breakpoints
+                expected = tuple(b.path or spans[b.message_id].cache_targets[-1] for b in plan.breakpoints
                                  if b.message_id in spans and spans[b.message_id].cache_targets)
+                points = tuple(handoff.boundary_at(clean, b.message_id, path)
+                               for b, path in zip(plan.breakpoints, expected))
                 audited, wire_hash = handoff.audit(encoded, expected)
                 audited &= len(expected) == len(plan.breakpoints)
-                audited &= all(b.message_id in actual_spans and b.message_id in spans and
-                    actual_spans[b.message_id].cache_prefix_fingerprint == spans[b.message_id].cache_prefix_fingerprint
-                    for b in plan.breakpoints)
+                audited &= all(b is not None and
+                    handoff.boundary_at(actual_clean, b.message_id, b.path) == b for b in points)
                 audited &= encoded.extra_body.get("prompt_cache_key") == plan.cache_key
                 if plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT:
                     audited &= encoded.extra_body.get("session_id") == plan.cache_key
@@ -773,9 +780,7 @@ class PromptCacheCoordinator:
                     audited=audited, wire_fingerprint=wire_hash, now=time.monotonic(),
                     candidate_id=plan.handoff_candidate, owner=plan.handoff_owner,
                     economic_epoch=plan.handoff_epoch,
-                    points=tuple(handoff.Boundary(s.message_id, s.cache_targets[-1], s.cache_prefix_fingerprint,
-                        s.estimated_cache_prefix_tokens) for b in plan.breakpoints
-                        if (s := spans.get(b.message_id)) and s.cache_targets))
+                    points=tuple(b for b in points if b is not None))
                 if not audited:
                     state.decision = "marker_set_uncontrolled"
         description = describe_request(request, raw_encoded, encoded)
@@ -804,6 +809,7 @@ class PromptCacheCoordinator:
                 "previous_request_gap": gap, "started_at": time.time(),
                 "retry_recovery_cause": str(request.metadata.get("max_output_recovery_stage") or request.metadata.get("retry_cause") or ""),
                 "session_key_hash": _short_hash(str(encoded.extra_body.get("session_id") or "")),
+                "prompt_log_enabled": bool(request.metadata.get("prompt_log_enabled")),
             }
         if plan.strategy == handoff.POLICY:
             diagnostics.update(cache_handoff=state.snapshot(), wire_audit_fingerprint=wire_hash)
@@ -886,6 +892,7 @@ class PromptCacheCoordinator:
                     "message_id": item.message_id,
                     "ttl": item.ttl,
                     "prefix_tokens": int(item.prefix_tokens),
+                    "path": list(item.path),
                 }
                 for item in plan.breakpoints
             ],
@@ -945,6 +952,8 @@ class PromptCacheCoordinator:
             if previous is not None:
                 if previous["status"] != "submitted":
                     return
+                if not record["wire_audit_fingerprint"]:
+                    record["wire_audit_fingerprint"] = previous.get("wire_audit_fingerprint", "")
                 previous.update(record)
             else:
                 self._attempt_records.append(record)
@@ -958,6 +967,22 @@ class PromptCacheCoordinator:
                     stats.recent_cache_observations.clear()
             while len(self._attempt_records) > max(1, int(self.max_attempt_records)):
                 self._attempt_records.popleft()
+            log_enabled = bool(diagnostics.get("prompt_log_enabled") or
+                               previous and previous.get("prompt_log_enabled"))
+            record["prompt_log_enabled"] = log_enabled
+            if previous is not None:
+                previous["prompt_log_enabled"] = log_enabled
+            log_record = dict(previous if previous is not None else record) if log_enabled else {}
+        if log_enabled and plan.strategy == handoff.POLICY:
+            event = {key: log_record.get(key) for key in (
+                "attempt_id", "status", "turn_id", "round_index", "planned_markers",
+                "applied_marker_paths", "wire_audit_fingerprint", "cache_handoff",
+                "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "reported_fields",
+                "cache_key_hash", "session_key_hash")}
+            for counter in ("input_tokens", "cached_input_tokens", "cache_write_input_tokens"):
+                if counter not in log_record.get("reported_fields", ()):
+                    event[counter] = None
+            logger.info("prompt_cache_handoff %s", json.dumps(event, ensure_ascii=False))
 
     def record_attempt_failure(
         self,
