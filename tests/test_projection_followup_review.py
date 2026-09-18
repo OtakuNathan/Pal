@@ -138,7 +138,12 @@ class ProjectionFollowupReview(unittest.TestCase):
         request_shell = shell((system, q))
         first_key = key_for(s, "first")
         s.begin_round(first_key, requires_native=False)
-        first = payload(s.prepare(HistoryView(s.frontier, (system, q)),
+        # Single-supply contract (review G1/G2): the shell owns the system
+        # preamble; the view owns the chronological conversation.  Supplying
+        # the same system message through BOTH channels would legitimately
+        # produce two top-level system parts now that tail-hoisted head
+        # content is merged instead of silently dropped.
+        first = payload(s.prepare(HistoryView(s.frontier, (q,)),
                                   request_shell=request_shell))
         self.assertIn("system", first)
         s.observe_commit(receipt(s, first_key), accepted_messages=(assistant("first answer"),))

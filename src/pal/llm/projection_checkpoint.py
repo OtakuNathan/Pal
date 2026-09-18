@@ -84,6 +84,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         "projection_generation": session.identity.projection_generation,
         "frontier": _cursor_fields(session.frontier),
         "pending_wire_tail": thaw_json(list(session._pending_wire_tail)),
+        "committed_head_system": thaw_json(list(session._committed_head_system)),
         "chunks": [
             {
                 "attempt_id": chunk.round_attempt_id,
@@ -366,6 +367,16 @@ def restore_projection(
     if not isinstance(pending_raw, (list, tuple)):
         raise ProjectionCheckpointError("pending_wire_tail section is invalid")
     pending_wire_tail = json.loads(json.dumps(list(pending_raw)))
+    head_system_raw = section.get("committed_head_system")
+    # Absent key = pre-G2-persistence snapshot: empty is the only faithful
+    # reconstruction (the prototype never persisted hoisted head parts).
+    if head_system_raw is None:
+        head_system_raw = ()
+    if not isinstance(head_system_raw, (list, tuple)) or not all(
+        isinstance(part, Mapping) for part in head_system_raw
+    ):
+        raise ProjectionCheckpointError("committed_head_system section is invalid")
+    committed_head_system = json.loads(json.dumps(list(head_system_raw)))
     if chunks:
         if expected_before != frontier:
             raise ProjectionCheckpointError(
@@ -396,6 +407,7 @@ def restore_projection(
     session._prefix_items = prefix_items
     session._frontier_item_count = len(prefix_items)
     session._pending_wire_tail = pending_wire_tail
+    session._committed_head_system = committed_head_system
     session.native_by_attempt = {
         record["attempt_id"]: {
             "payload_json": record["payload_json"],

@@ -129,6 +129,72 @@ message）。曾尝试物化边界合并补丁，因会改写已冻结区而回�
 "先立契约再打补丁"原则，需要重新设计稳定冻结边界（含完整 tool 组）后解决，
 不做局部补丁。该差异已用测试钉住（纵向测试注释）。
 
+## 第三轮外部 review 修正（2026-09-19，针对 4afee09）
+
+`pal_projection_review_4afee09` 四项指控（G1/G2/G3 P1 级 + G4 P2 级）逐条源码核实
+**全部属实**，已修：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| G1 | preamble 同时进入独立编码与 conversation chunk：prepared_items 混入 preamble 而 _frontier_item_count 是会话坐标，首轮 commit 即把 S 冻进前缀，后续请求 S\|S\|Q1\|A1… 且前缀身份破坏 | prepared_items 只存会话跨度项（prefix+pending+tail）；preamble 每次 prepare 在装配时新鲜注入容器头部，永不进入冻结流；anthropic 拼接边界改用纯会话坐标 |
+| G2 | Anthropic 提升分支只看本地 messages 空：tail 单独编码时首部 developer（甚至 SYSTEM）被提升到 tail 的 top-level system，被 prepare 丢弃 | 提升条件改为边界感知（本地空且 has_conversation_prefix 为假）；中段 system/developer 一律按时序降级为 user 块；prepare 把 tail 提升的 system parts 按序合并到 shell system 之后，不再丢弃 |
+| G3 | native/语义兼容只对 call-ID：name/args 不同也放行；native+纯文本 IR assistant 双份入历史 | ClosedRound 构造期验证 native 载荷与语义记录逐调用有序 id+name+args 语义相等（bool≠数字、int/float 数值等价）；observe_commit 在 native 在场时拒绝一切 assistant 角色 IR（文本与调用同拒） |
+| G4 | _item_tool_events 拆两个列表，validator 先消全部 calls 再消 results，item 内顺序被抹平，且不看所在 role | 单遍历有序事件流（call/result 交错保序）+ 同遍 role 门禁（tool_use 仅 assistant、tool_result 仅 user、completion tool_calls 仅 assistant）；build/直接构造/反序列化同一实现 |
+
+**超出 review 描述的同族问题（修复时源码验证发现）：**
+
+1. `has_conversation_prefix` 把 preamble 算进「会话前缀」——对 Completion 的
+   developer 提升判定是错信号（F1 只修了一半）：首轮 preamble 后的 tail
+   developer 会被错误降级。修正为纯会话语义（prefix+pending，不含 preamble）。
+2. Completion 相邻 system 文本合并不发生在 preamble|conversation 拼缝：增量得到
+   两条 system，全量是一条合并文本。装配时补对称拼缝合并（O(1)，仅
+   completion，镜像 codec 的 _merge_instruction_text）。
+3. G2 修复的深化：tail 首部提升的请求头内容渲染在 top-level system，容器坐标
+   冻不进 chunk——当轮保住了但后续轮永久丢失。新增 session 持有的
+   `_committed_head_system`（anthropic 专属路径）跨轮重入每次请求、随
+   checkpoint 持久化。
+
+**本轮确立的更强契约（场景矩阵钉住）：** 对三个 wire shape 参数化的多轮场景
+（shell preamble + 首部/中段 developer 插入 + 多轮 commit + checkpoint/restore），
+**装配后的增量请求与全量 codec 编码逐字节相等**（容器与 top-level system 均
+等）——不再只是内容/计数等价。旧「相邻 assistant 合并」限制仍在（见下），
+矩阵场景刻意避开该边界。
+
+**性能（Nathan 明确要求，A/B 同机连跑）：** 稳态 prepare @800 前缀项、尾部 1 条：
+openai_completion 14.62→14.53ms、openai_response 20.28→20.13ms、
+anthropic_messages 18.70→18.67ms（基线 4afee09 vs 修复后）。首版 G4 双趟扫描
+一度回退至 26/34/32ms，已合并为单趟线性扫描恢复至持平。G3 验证仅在
+ClosedRound 构造时解析一次 native 载荷（每轮一次，非每消息）。
+
+**契约澄清（fixture 适配，非断言削弱）：** shell 与 view 单一供给——同一条
+逻辑消息不再同时经 shell 与 view 双通道供给（双供给会在合并语义下合法产生两份
+ top-level system）。两个旧 fixture 按此修正
+（test_anthropic_system_survives… 改 view 不再携带 shell 已有的 system；
+test_closed_round_native_association… 的抽象载荷改为携带与语义记录一致的
+tool_use——G3 后 ID 声明必须被载荷内容背书）。
+
+新增测试：review 8 反例 + 3 shape 场景矩阵（含 restore）+ 边界补充（中段 SYSTEM、
+头部 developer 合并 system、数值/布尔参数等价性、role 门禁反例）合入
+`tests/test_projection_third_review.py`（15 项 + 14 subtests）。
+
+### 已知限制（2026-09-19 更新）
+
+- **相邻 assistant 合并差异（既有，未变）**：见上文第二轮声明，本轮未触碰，
+  仍需冻结边界重设计；场景矩阵避开该边界。
+- **旧快照兼容**：G2 持久化之前的快照没有 committed_head_system 段，restore
+  置空（原型阶段无生产快照，无实际影响）；schema 版本未 bump（结构增量，
+  缺失键有确定语义）。
+- **单一供给契约**：增量装配假设 shell 与 view 不重复供给同一条逻辑消息；
+  双供给不再被静默去重，而是按合并语义产生两份（见上）。
+
+### 本轮回归（分文件隔离，PYTHONPATH=$PWD/src）
+
+- 受影响面 15 文件全绿（projection×7 + llm×5 + prompt_cache×3 + setup_wizard
+  + continuation_capture，218 passed）。
+- llm 全族 27 文件：**347 passed + 78 subtests + 6 skipped**
+  （real-integration 按设计跳过，无付费调用），零失败。
+- 受影响面之外未跑全量 146 文件套件（本轮改动仅触及 llm/projection 面）。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径切换未执行**：resident LLMRuntime 仍走 per-message ReplayEnvelope

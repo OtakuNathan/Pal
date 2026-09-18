@@ -106,6 +106,10 @@ class _ActiveRound:
     requires_native: bool
     prepared_items: list[dict] = field(default_factory=list)
     prepared_base_cursor: HistoryCursor | None = None
+    # Top-level system parts hoisted from THIS round's tail-head messages
+    # (review G2 persistence): container coordinates cannot freeze them, so
+    # observe_commit transfers them into the session-owned head-system list.
+    prepared_head_system: list[dict] = field(default_factory=list)
 
 
 class EndpointProjectionSession:
@@ -132,6 +136,13 @@ class EndpointProjectionSession:
         # commit freezes past them.  Semantic acceptance and wire freezing
         # are different coordinates.
         self._pending_wire_tail: list[dict] = []
+        # Top-level system parts hoisted from past rounds' tail-head
+        # system/developer messages (review G2 persistence).  Anthropic
+        # renders request-head content outside the container, so committed
+        # chunks cannot carry it; the session re-merges these parts into
+        # every request after the fresh shell preamble, keeping the
+        # incremental lineage equal to whole-history encoding.
+        self._committed_head_system: list[dict] = []
         self._owner_fence = 0
         self.retired = False
 
@@ -160,6 +171,7 @@ class EndpointProjectionSession:
         self.frontier = HistoryCursor.initial()
         self._prefix_items = []
         self._pending_wire_tail = []
+        self._committed_head_system = []
         self._active = None
 
     def retire(self) -> None:
@@ -168,6 +180,7 @@ class EndpointProjectionSession:
         self.chunks = ()
         self._prefix_items = []
         self._pending_wire_tail = []
+        self._committed_head_system = []
         self._active = None
 
     def _require_identity(self) -> ProjectionIdentity:
@@ -319,14 +332,16 @@ class EndpointProjectionSession:
                     self.binding.wire_shape, accepted_native["payload_json"]
                 )
             )
-            # One representation per assistant contribution (review F3):
-            # when native carries the assistant turn, accepted IR messages
-            # must not repeat its tool calls — only tool results (a separate
-            # contribution) may join.
+            # One representation per assistant contribution (review F3/G3):
+            # when native carries the assistant turn — its tool calls AND its
+            # plain text — accepted IR must not repeat ANY of it.  Only tool
+            # results (a separate contribution) may join the commit.  A
+            # text-only assistant IR message used to slip through and duplicate
+            # the native answer (review G3).
             for message in accepted_messages:
-                if message.role == MessageRole.ASSISTANT and message.tool_calls:
+                if message.role == MessageRole.ASSISTANT:
                     raise ProjectionSessionError(
-                        "accepted IR messages repeat the assistant tool calls "
+                        "accepted IR messages repeat the assistant turn "
                         "already carried by the native material"
                     )
         if accepted_messages:
@@ -374,6 +389,12 @@ class EndpointProjectionSession:
         # exposed and shares nothing with the frozen chunk snapshot above.
         self._prefix_items.extend(items)
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
+        # Request-head content hoisted to top-level system this round becomes
+        # session-owned exactly like the wire tail (review G2 persistence):
+        # the frozen chunk cannot carry it, but later requests must keep it.
+        self._committed_head_system.extend(
+            dict(part) for part in self._active.prepared_head_system
+        )
         self.frontier = receipt.append.after
         self._frontier_item_count = frozen_item_count
         if not receipt.native_committed:
@@ -479,24 +500,36 @@ class EndpointProjectionSession:
                 if index < len(container_items)
             ]
         # 2) Tail encode with explicit boundary context: position-sensitive
-        # projections must see that a conversation prefix exists even though
-        # the frozen items are not in this encode batch.
+        # projections must see that a CONVERSATION prefix precedes this batch
+        # even though the frozen items are not in this encode list.  The
+        # preamble is deliberately excluded from this flag: shell-owned head
+        # content does not make a tail message mid-conversation.  Including it
+        # made a round-one tail developer message degrade while whole-history
+        # encoding still promoted it (review G2).
+        tail_payload: dict[str, Any] = {}
         if view.messages:
             tail_context = replace(
                 context,
                 has_conversation_prefix=bool(
-                    self._prefix_items or self._pending_wire_tail or preamble_items
+                    self._prefix_items or self._pending_wire_tail
                 ),
             )
             encoded_tail = codec.encode(replace(shell, messages=view.messages), tail_context)
+            tail_payload = dict(encoded_tail.payload)
             tail_items = [
                 dict(item)
-                for item in (dict(encoded_tail.payload).get(container) or [])
+                for item in (tail_payload.get(container) or [])
             ]
         else:
             tail_items = []
-        items: list[dict] = [
-            *(dict(item) for item in preamble_items),
+        # Conversation-span items only (review G1): the preamble NEVER enters
+        # the frozen conversation stream, so commit accounting over
+        # prepared_items uses conversation coordinates exclusively — a
+        # request-with-preamble array can no longer be sliced with a
+        # conversation-only cursor, and a committed chunk can no longer
+        # freeze the preamble into the prefix.  Preamble items are re-injected
+        # fresh at assembly time below, honoring per-request shell budgets.
+        conversation_items: list[dict] = [
             *self._prefix_items,
             *(dict(item) for item in self._pending_wire_tail),
             *tail_items,
@@ -505,16 +538,83 @@ class EndpointProjectionSession:
         # _append_message behavior), so the pending/tail boundary must merge
         # the same way a whole-history encode would — otherwise assembled
         # requests differ from full encodings by one split user message.
+        # Boundary index is in conversation coordinates (review G1).
         if (
             self.binding.wire_shape.value == "anthropic_messages"
             and self._pending_wire_tail
             and tail_items
         ):
-            boundary = len(preamble_items) + len(self._prefix_items) + len(self._pending_wire_tail) - 1
-            _merged, items = _merge_anthropic_user_boundary(items, boundary)
-        self._active.prepared_items = items
+            boundary = len(self._prefix_items) + len(self._pending_wire_tail) - 1
+            _merged, conversation_items = _merge_anthropic_user_boundary(
+                conversation_items, boundary
+            )
+        self._active.prepared_items = conversation_items
         self._active.prepared_base_cursor = view.cursor
-        payload: dict[str, Any] = {**shell_fields, container: items}
+        assembled: list[dict] = [
+            *(dict(item) for item in preamble_items),
+            *conversation_items,
+        ]
+        # The Completion codec merges adjacent same-role system text at encode
+        # time (_append_chat_message); the fresh-preamble|frozen-conversation
+        # seam must merge the same way, or the assembled request differs from
+        # a whole-history encoding by one split system message (review G1/G2
+        # seam).  The preamble side is always a fresh copy, so merging here
+        # never mutates the frozen prefix.
+        if (
+            self.binding.wire_shape.value == "openai_completion"
+            and preamble_items
+            and len(assembled) > len(preamble_items)
+        ):
+            seam = len(preamble_items) - 1
+            left, right = assembled[seam], assembled[seam + 1]
+            if (
+                isinstance(left, dict)
+                and isinstance(right, dict)
+                and left.get("role") == "system"
+                and right.get("role") == "system"
+                and isinstance(left.get("content"), str)
+                and isinstance(right.get("content"), str)
+            ):
+                merged = dict(left)
+                merged["content"] = _merge_system_instruction_text(
+                    str(left["content"]), str(right["content"])
+                )
+                assembled = [
+                    *assembled[:seam],
+                    merged,
+                    *assembled[seam + 2 :],
+                ]
+        payload: dict[str, Any] = {**shell_fields, container: assembled}
+        # Position-sensitive codecs may hoist tail-head system/developer
+        # content into the TAIL encode's top-level ``system`` when this batch
+        # sits at the request head (no conversation prefix).  Those parts are
+        # request content, not envelope noise: they are re-merged AFTER the
+        # shell's fresh preamble and BEFORE previously committed head parts,
+        # instead of being silently dropped (review G2).  Committed head
+        # parts are session-owned across rounds; this round's tail parts
+        # transfer to that list at commit time.
+        tail_system_parts: list[dict] = []
+        raw_tail_system = tail_payload.get("system")
+        if isinstance(raw_tail_system, (list, tuple)):
+            tail_system_parts = [
+                dict(part)
+                for part in raw_tail_system
+                if isinstance(part, Mapping)
+            ]
+        self._active.prepared_head_system = tail_system_parts
+        merged_system: list[dict] = [
+            *(dict(part) for part in self._committed_head_system),
+            *tail_system_parts,
+        ]
+        if merged_system:
+            shell_system = shell_fields.get("system")
+            if isinstance(shell_system, (list, tuple)):
+                payload["system"] = [
+                    *(dict(part) for part in shell_system),
+                    *merged_system,
+                ]
+            else:
+                payload["system"] = merged_system
         if controls:
             payload["controls"] = dict(controls)
         return PreparedRequest.build(
@@ -620,6 +720,14 @@ class EndpointProjectionSession:
             context,
         )
         return list(dict(encoded.payload).get(container) or [])
+
+
+def _merge_system_instruction_text(left: str, right: str) -> str:
+    """Mirror of the Completion codec's system-text merge (keep in sync)."""
+
+    if left.strip() and right.strip():
+        return f"{left.rstrip()}\n\n{right.lstrip()}"
+    return left or right
 
 
 def _merge_anthropic_user_boundary(items: list[dict], boundary: int) -> tuple[bool, list[dict]]:

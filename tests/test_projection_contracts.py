@@ -268,10 +268,15 @@ class RoundContractTests(unittest.TestCase):
         attempt = _attempt()
         call_a = self._call("call-a")
         result_a = ToolResultRecord("call-a", "42", ToolOutcome.SUCCESS)
+        # Review G3: call-ID claims must be backed by the payload itself —
+        # the native payload carries the accepted call (matching name and
+        # arguments), not an opaque placeholder.
         material = NativeMaterial(
             origin=attempt,
             call_ids=("call-a",),
-            payload_json='{"thinking": "opaque"}',
+            payload_json=json.dumps({"content": [
+                {"type": "tool_use", "id": "call-a", "name": "lookup", "input": {}},
+            ]}),
         )
         ClosedRound(
             attempt=attempt,

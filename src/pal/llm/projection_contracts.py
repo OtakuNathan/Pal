@@ -420,6 +420,20 @@ class ClosedRound:
                 )
             if tuple(material.call_ids) != call_ids:
                 raise ProjectionContractError("stale native call inventory")
+            # Call-ID equality alone proves nothing about WHAT was called
+            # (review G3): the native payload's calls must match the accepted
+            # semantic records by ordered id, name, and semantically equal
+            # arguments, or the next request would describe a different
+            # operation than the accepted one.
+            mismatch = _native_call_inventory_mismatch(
+                self.attempt.identity.binding.wire_shape.value,
+                material.payload_json,
+                self.calls,
+            )
+            if mismatch:
+                raise ProjectionContractError(
+                    f"native material does not match the accepted call records: {mismatch}"
+                )
         if self.continuation.kind is NativeContinuationKind.REQUIRED and material is None:
             raise ProjectionContractError("required native continuation is missing")
 
@@ -492,33 +506,49 @@ def _collect_item_tool_ids(item: Any, calls: set[str], results: set[str]) -> Non
                     results.add(call_id)
 
 
-def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Ordered (call, result) occurrences inside one wire item."""
+def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[str]]:
+    """Ordered tool events and placement problems in ONE pass over the item.
 
-    calls: list[tuple[str, str]] = []
-    results: list[tuple[str, str]] = []
+    Each event is ``("call"|"result", call_id)``.  Interleaving is preserved
+    so the validator can reject a result that precedes its call INSIDE the
+    same item (review G4); the previous two-list shape normalized that
+    ordering away.  Role-appropriate placement is collected in the same
+    pass: content-block ``tool_use`` is legal only inside an assistant
+    message, ``tool_result`` only inside a user message, completion
+    ``tool_calls`` only on an assistant message.  One allocation-light pass
+    keeps the sendable gate linear and cheap on large requests.
+    """
+
+    events: list[tuple[str, str]] = []
+    problems: list[str] = []
     if not isinstance(item, Mapping):
-        return calls, results
+        return events, problems
+    role = str(item.get("role") or "")
     if isinstance(item.get("tool_calls"), (list, tuple)):
+        if item["tool_calls"] and role != "assistant":
+            problems.append(
+                f"tool_calls outside an assistant message (role={role!r})"
+            )
         for call in item["tool_calls"]:
             if isinstance(call, Mapping):
                 call_id = str(call.get("id") or "").strip()
-                name = str((call.get("function") or {}).get("name") or "") if isinstance(call.get("function"), Mapping) else ""
                 if call_id:
-                    calls.append((call_id, name))
-    if str(item.get("role") or "") == "tool":
+                    events.append(("call", call_id))
+    if role == "tool":
         result_id = str(item.get("tool_call_id") or "").strip()
         if result_id:
-            results.append((result_id, ""))
+            events.append(("result", result_id))
+        else:
+            problems.append("tool message has no tool_call_id")
     item_type = str(item.get("type") or "")
     if item_type == "function_call":
         call_id = str(item.get("call_id") or "").strip()
         if call_id:
-            calls.append((call_id, str(item.get("name") or "")))
+            events.append(("call", call_id))
     elif item_type == "function_call_output":
         call_id = str(item.get("call_id") or "").strip()
         if call_id:
-            results.append((call_id, ""))
+            events.append(("result", call_id))
     content = item.get("content")
     if isinstance(content, (list, tuple)):
         for block in content:
@@ -526,14 +556,22 @@ def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[tuple[str,
                 continue
             block_type = str(block.get("type") or "")
             if block_type == "tool_use":
+                if role != "assistant":
+                    problems.append(
+                        f"tool_use block outside an assistant message (role={role!r})"
+                    )
                 call_id = str(block.get("id") or "").strip()
                 if call_id:
-                    calls.append((call_id, str(block.get("name") or "")))
+                    events.append(("call", call_id))
             elif block_type == "tool_result":
+                if role != "user":
+                    problems.append(
+                        f"tool_result block outside a user message (role={role!r})"
+                    )
                 call_id = str(block.get("tool_use_id") or "").strip()
                 if call_id:
-                    results.append((call_id, ""))
-    return calls, results
+                    events.append(("result", call_id))
+    return events, problems
 
 
 def _validate_sendable_payload(payload: Mapping[str, Any]) -> None:
@@ -557,29 +595,175 @@ def _validate_sendable_payload(payload: Mapping[str, Any]) -> None:
     open_calls: dict[str, str] = {}
     problems: list[str] = []
     for index, item in enumerate(payload[container]):
-        calls, results = _item_tool_events(item)
-        for call_id, _name in calls:
-            if call_id in open_calls:
-                problems.append(
-                    f"item[{index}]: duplicate call {call_id!r} while its previous "
-                    "occurrence is still unanswered"
-                )
+        events, placement = _item_tool_events(item)
+        if placement:
+            problems.extend(f"item[{index}]: {problem}" for problem in placement)
+        for kind, call_id in events:
+            if kind == "call":
+                if call_id in open_calls:
+                    problems.append(
+                        f"item[{index}]: duplicate call {call_id!r} while its previous "
+                        "occurrence is still unanswered"
+                    )
+                else:
+                    open_calls[call_id] = str(index)
             else:
-                open_calls[call_id] = str(index)
-        for call_id, _name in results:
-            if call_id not in open_calls:
-                problems.append(
-                    f"item[{index}]: orphan result {call_id!r} without an open call "
-                    "(missing call or result precedes its call)"
-                )
-            else:
-                del open_calls[call_id]
+                if call_id not in open_calls:
+                    problems.append(
+                        f"item[{index}]: orphan result {call_id!r} without an open call "
+                        "(missing call, wrong block order, or result precedes its call)"
+                    )
+                else:
+                    del open_calls[call_id]
     for call_id in sorted(open_calls):
         problems.append(f"pending tool call {call_id!r} has no result")
     if problems:
         raise ProjectionContractError(
             "prepared payload violates the tool protocol: " + "; ".join(problems)
         )
+
+
+# ---------------------------------------------------------------------------
+# Native/semantic call compatibility (review G3)
+# ---------------------------------------------------------------------------
+
+
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Structural JSON equality for tool-call arguments.
+
+    ``bool`` never equals a number (Python's ``True == 1`` must not leak into
+    wire semantics) while ``int``/``float`` compare by numeric value so a
+    provider echoing ``1.0`` for ``1`` stays a compatible continuation.
+    """
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left.keys()) != set(right.keys()):
+            return False
+        return all(_json_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _json_values_equal(a, b) for a, b in zip(left, right)
+        )
+    if type(left) is not type(right):
+        return False
+    return left == right
+
+
+def _native_arguments_match(native_args: Any, semantic_json: str) -> bool:
+    if isinstance(native_args, str):
+        try:
+            native_args = json.loads(native_args)
+        except (TypeError, json.JSONDecodeError):
+            return False
+    elif native_args is None:
+        native_args = {}
+    if not isinstance(native_args, Mapping):
+        return False
+    try:
+        semantic = json.loads(semantic_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return _json_values_equal(native_args, semantic)
+
+
+def _native_call_inventory_mismatch(
+    shape_value: str,
+    payload_json: str,
+    calls: tuple[ToolCallRecord, ...],
+) -> str:
+    """Compare the native payload's calls with the accepted semantic records.
+
+    Returns ``""`` when every native call matches its semantic record by
+    ordered id, name, and semantically equal parsed arguments; otherwise a
+    human-readable mismatch description.  Signatures and encrypted bytes are
+    never mutated to force agreement (review G3): mismatch rejects
+    continuity instead.
+    """
+
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        return f"native payload is not valid JSON: {exc}"
+    if not isinstance(payload, Mapping):
+        return "native payload is not a JSON object"
+    native: list[tuple[str, str, Any]] = []
+    if shape_value == "openai_completion":
+        message = payload.get("message")
+        if isinstance(message, Mapping) and isinstance(
+            message.get("tool_calls"), (list, tuple)
+        ):
+            for call in message["tool_calls"]:
+                if isinstance(call, Mapping):
+                    function = call.get("function")
+                    native.append(
+                        (
+                            str(call.get("id") or ""),
+                            str(function.get("name") or "")
+                            if isinstance(function, Mapping)
+                            else "",
+                            function.get("arguments")
+                            if isinstance(function, Mapping)
+                            else None,
+                        )
+                    )
+    elif shape_value == "openai_response":
+        output = payload.get("output")
+        if isinstance(output, (list, tuple)):
+            for item in output:
+                if (
+                    isinstance(item, Mapping)
+                    and str(item.get("type") or "") == "function_call"
+                ):
+                    native.append(
+                        (
+                            str(item.get("call_id") or ""),
+                            str(item.get("name") or ""),
+                            item.get("arguments"),
+                        )
+                    )
+    elif shape_value == "anthropic_messages":
+        content = payload.get("content")
+        if isinstance(content, (list, tuple)):
+            for block in content:
+                if (
+                    isinstance(block, Mapping)
+                    and str(block.get("type") or "") == "tool_use"
+                ):
+                    native.append(
+                        (
+                            str(block.get("id") or ""),
+                            str(block.get("name") or ""),
+                            block.get("input"),
+                        )
+                    )
+    else:
+        return f"unsupported wire shape for native call validation: {shape_value!r}"
+    if len(native) != len(calls):
+        return (
+            f"native call count {len(native)} does not match the accepted "
+            f"semantic records {len(calls)}"
+        )
+    for (native_id, native_name, native_args), call in zip(native, calls):
+        if native_id != call.call_id:
+            return (
+                f"native call order/id {native_id!r} does not match semantic "
+                f"{call.call_id!r}"
+            )
+        if native_name != call.name:
+            return (
+                f"native call {call.call_id!r} name {native_name!r} does not "
+                f"match the accepted name {call.name!r}"
+            )
+        if not _native_arguments_match(native_args, call.arguments_json):
+            return (
+                f"native call {call.call_id!r} arguments do not semantically "
+                "match the accepted record"
+            )
+    return ""
 
 
 @dataclass(frozen=True)

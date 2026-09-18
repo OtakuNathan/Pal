@@ -47,10 +47,23 @@ class AnthropicMessagesCodec(ShapeCodecBase):
             wire_start = len(messages)
             system_start = len(system_parts)
             try:
-                if message.role == MessageRole.SYSTEM or (
-                    message.role == MessageRole.DEVELOPER
-                    and not messages
-                    and message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+                # Boundary-aware hoisting (review G2): system/developer content
+                # joins the top-level ``system`` ONLY at the request head — no
+                # chronological message emitted yet AND no conversation prefix
+                # preceding this batch (the incremental tail cannot see the
+                # frozen prefix, so the boundary comes from the context flag).
+                # Mid-conversation system/developer content degrades to a
+                # chronological user block so the complete and incremental
+                # encodings agree on presence, placement, and role.
+                at_request_head = (
+                    not messages and not context.has_conversation_prefix
+                )
+                if at_request_head and (
+                    message.role == MessageRole.SYSTEM
+                    or (
+                        message.role == MessageRole.DEVELOPER
+                        and message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+                    )
                 ):
                     text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                     if text:
@@ -64,12 +77,14 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     else:
                         spans.append(EncodedMessageSpan(message.message_id))
                     continue
-                if message.role == MessageRole.DEVELOPER:
+                if message.role in (MessageRole.SYSTEM, MessageRole.DEVELOPER):
                     # Anthropic Messages has no generally available developer
-                    # role. Preserve chronological placement by degrading runtime
-                    # developer guidance to a distinct user content block. Keeping
-                    # it distinct lets a cache marker remain on the immutable user
-                    # block immediately before this dynamic suffix.
+                    # role and no mid-conversation system role. Preserve
+                    # chronological placement by degrading runtime developer
+                    # guidance (and mid-stream system content) to a distinct
+                    # user content block. Keeping it distinct lets a cache
+                    # marker remain on the immutable user block immediately
+                    # before this dynamic suffix.
                     blocks = _anthropic_user_content(message.parts)
                     if blocks:
                         _append_message(messages, "user", blocks)
