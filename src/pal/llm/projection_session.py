@@ -40,7 +40,6 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
-from pal.shared.json_values import thaw_json
 
 __all__ = [
     "ProjectionChunk",
@@ -309,8 +308,11 @@ class EndpointProjectionSession:
         items.extend(dict(item) for item in tail_items)
         self._active.prepared_items = items
         self._active.prepared_base_cursor = view.cursor
+        # Items are plain dicts by construction (codec encode output); no
+        # defensive deep conversion — it dominated prepare cost (measured
+        # 9.9ms of 17.4ms at n=800) with zero effect.
         payload = {
-            container: thaw_json(items),
+            container: items,
             **({"controls": dict(controls)} if controls else {}),
         }
         return PreparedRequest.build(
