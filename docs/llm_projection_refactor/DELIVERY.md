@@ -50,9 +50,18 @@
   thaw_json），在 PLAN §5.4 声明的包络内（"不承诺端到端 O(tail)"）。
 - **全量套件（P6 gate）**：分文件隔离跑，结果见下表。
 
-### 全量回归（branch @ P6）
+### 全量回归（branch @ P6，分文件隔离）
 
-**[待填——pal-v2-final-regression 运行中]**
+| 项 | 基线（P0） | 分支（P6） |
+|---|---|---|
+| 文件 | 141 | 146（+5 个新测试文件） |
+| rc=0 | 139 | 144 |
+| 通过测试 | 2557 | **2605**（+48） |
+| 非零 | 2（已知环境项） | 同 2 项，完全同款 |
+
+非零项与基线一致：`test_package_installation` 1 failed（主 checkout 复现过的
+setuptools/_vendor 环境性失败）与 `test_tool_schema_properties` 模块级 skip
+（缺 hypothesis_jsonschema）。**零回归，全部新增测试通过。**
 
 ## 静态推导（有测试支撑的类型/构造保证，未做端到端运行验证）
 
