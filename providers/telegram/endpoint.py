@@ -786,11 +786,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         if update.kind == ChannelStreamUpdateKind.DONE:
             buffered = self._turn_stream_text.pop(key, "")
-            if str(update.finish_reason or "") in {
-                LLMFinishReason.TOOL_CALLS.value,
-                LLMFinishReason.COMPACT_REQUIRED.value,
-            }:
+            if str(update.finish_reason or "") == LLMFinishReason.COMPACT_REQUIRED.value:
+                # Compaction is an internal control-flow round; its text is a
+                # system-generated notice, not a user answer.
                 return None
+            # Tool-call round text is still user-visible assistant content: it
+            # may carry the real answer that happens to be paired with tool
+            # calls.  Deliver it instead of discarding it silently.
             text = str(update.text or buffered).strip()
             if text:
                 return self._schedule_ordered_send(
@@ -823,13 +825,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         )
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
-        # Core marks the assistant text attached to a tool-call round
-        # explicitly. This is the only reply Telegram suppresses. A tool echo
-        # is also non-terminal, but is independent user-visible progress and
-        # must still be delivered. Terminal replies always win regardless of
-        # stream flush timing.
-        if bool(response_handle.reply_target.get("_pal_stream_companion")):
-            return None
+        # Tool-call round assistant text must stay user-visible: it may carry
+        # the real answer.  Dedup against stream-delivered text is handled by
+        # the base class; non-terminal tool echoes are independent progress
+        # and are also delivered.
         return text
 
     def apply_auth_material(self, material: dict[str, Any]) -> dict[str, Any]:
