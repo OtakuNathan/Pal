@@ -945,8 +945,10 @@ workspace_policy: {}
             "Do not use when: Do not use it for broad repository archaeology.",
             provider["description"],
         )
+        # The unchanged-marker reuse rule lives in purpose, so a family's
+        # use_when/do_not_use_when override cannot strip it from the surface.
         self.assertIn(
-            "refer to the earlier read result and do not call read_file again",
+            "When an unchanged marker is returned, reuse the earlier result",
             provider["description"],
         )
 
