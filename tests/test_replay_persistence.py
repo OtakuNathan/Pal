@@ -31,6 +31,7 @@ from pal.llm.shapes.base import ShapeContext
 from pal.memory.service import MemoryService
 from pal.memory.runtime_state import MemoryRuntimeStatePort
 from pal.memory.turn_ir import L1TurnState, L1TurnStore
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
 
 def _context(shape: WireShape, endpoint: str = "demo", model: str = "demo-model") -> ShapeContext:
@@ -245,6 +246,139 @@ class SettledReplayIdentityTests(unittest.TestCase):
             _payload_hash(before),
             _payload_hash(after),
             "restore changed the encoded prefix",
+        )
+
+class RestoreProtocolRepairTests(unittest.TestCase):
+    """Restore repair must reach the wire, not just the IR view.
+
+    The regression these tests guard: ``_normalize_tool_protocol`` removed
+    dangling tool calls from ``parts`` but kept the stale wire replay
+    envelope, and same-endpoint encoders prefer replay over parts — so the
+    repaired-away call reappeared on the wire with no matching result.
+    """
+
+    def _assistant_with_dangling_call(self) -> LLMMessageIR:
+        envelope = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "let me check"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        return LLMMessageIR(
+            role=MessageRole.ASSISTANT,
+            state=MessageState.COMPLETE,
+            parts=(
+                TextPartIR("let me check"),
+                ToolCallIR(call_id="call-1", name="lookup"),
+            ),
+            replay=ReplayEnvelope(
+                WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
+            ),
+        )
+
+    def test_restore_repair_does_not_smuggle_dangling_call_onto_wire(self) -> None:
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="hello")
+        service.upsert_l1_assistant(
+            "turn-1", self._assistant_with_dangling_call()
+        )
+
+        payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
+        restored = MemoryService()
+        port = MemoryRuntimeStatePort(restored)
+        port.install_prepared_state(port.prepare_restore_state(payload))
+
+        assistant = restored.l1_store.turns.get("turn-1").messages[-1]
+        # The IR view was repaired...
+        self.assertFalse(
+            any(isinstance(part, ToolCallIR) for part in assistant.parts),
+            "dangling call survived restore normalization in parts",
+        )
+        # ...and the stale envelope no longer rides along.
+        self.assertIsNone(
+            assistant.replay,
+            "repaired message kept its stale replay envelope",
+        )
+
+        encoded = _encode_messages(
+            WireShape.OPENAI_RESPONSE,
+            restored.l1_store.turns.get("turn-1").messages,
+        )
+        dumped = json.dumps(encoded, ensure_ascii=False, default=str)
+        self.assertNotIn("call-1", dumped, "dangling call re-entered the wire request")
+        self.assertIn("let me check", dumped)
+
+    def test_restore_keeps_replay_for_protocol_intact_messages(self) -> None:
+        """Only repaired messages lose their envelope; a healthy
+        call+result pair keeps its byte-stable replay across restore."""
+
+        envelope = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "checking"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-2",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="hello")
+        service.upsert_l1_assistant(
+            "turn-1",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                state=MessageState.COMPLETE,
+                parts=(
+                    TextPartIR("checking"),
+                    ToolCallIR(call_id="call-2", name="lookup"),
+                ),
+                replay=ReplayEnvelope(
+                    WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
+                ),
+            ),
+        )
+        service.append_l1_tool_result(
+            "turn-1", ToolResultIR(call_id="call-2", name="lookup", content="42")
+        )
+
+        before = _encode_messages(
+            WireShape.OPENAI_RESPONSE,
+            service.l1_store.turns.get("turn-1").messages,
+        )
+
+        payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
+        restored = MemoryService()
+        port = MemoryRuntimeStatePort(restored)
+        port.install_prepared_state(port.prepare_restore_state(payload))
+
+        assistant = restored.l1_store.turns.get("turn-1").messages[1]
+        self.assertIsNotNone(
+            assistant.replay,
+            "protocol-intact message lost its replay envelope at restore",
+        )
+        after = _encode_messages(
+            WireShape.OPENAI_RESPONSE,
+            restored.l1_store.turns.get("turn-1").messages,
+        )
+        self.assertEqual(
+            _payload_hash(before),
+            _payload_hash(after),
+            "restore changed the encoded prefix for a protocol-intact turn",
         )
 
 

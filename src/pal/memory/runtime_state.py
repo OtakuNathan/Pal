@@ -236,7 +236,14 @@ def _normalize_tool_protocol(
                 message,
                 parts=parts,
                 state=MessageState.COMPLETE,
-                replay=message.replay,
+                # Protocol content changed during restore normalization: the
+                # wire replay envelope still carries the removed/modified
+                # protocol items, and same-endpoint encoders prefer replay
+                # over parts, which would smuggle dangling calls back onto
+                # the wire. Re-encode changed messages from their repaired
+                # IR instead; untouched messages keep their byte-stable
+                # envelope.
+                replay=None if changed else message.replay,
             )
             if changed
             else message
