@@ -1,0 +1,116 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 28 and seed 721470493075612042 with 1 worker on 4 cores with 1820MB heap and 64MB offheap memory [pid: 16802] (Linux 6.18.39+rpt-rpi-v8 aarch64, Debian 21.0.10 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/nathan/Documents/coding/Pal-projection-v2/docs/llm_projection_refactor/formal/EndpointProjection.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module EndpointProjection
+Starting... (2026-09-18 10:05:20)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-18 10:05:21.
+Error: Invariant DraftAligned is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ slots = ( resident :>
+      [ generation |-> 0,
+        fence |-> 0,
+        endpoint |-> A,
+        attempt |-> 0,
+        phase |-> "Idle",
+        history |-> <<>>,
+        native |-> <<>>,
+        cache |-> <<>>,
+        sent |-> <<>>,
+        work |->
+            [ calls |-> {},
+              started |-> {},
+              results |-> {},
+              nativeCalls |-> {},
+              token |-> "no-token" ] ] )
+/\ mail = {}
+
+State 2: <Begin line 53, col 5 to line 67, col 34 of module EndpointProjection>
+/\ slots = ( resident :>
+      [ generation |-> 0,
+        fence |-> 0,
+        endpoint |-> A,
+        attempt |-> 1,
+        phase |-> "Streaming",
+        history |-> <<>>,
+        native |-> <<>>,
+        cache |-> <<>>,
+        sent |-> <<>>,
+        work |->
+            [ calls |-> {callA},
+              started |-> {},
+              results |-> {},
+              nativeCalls |-> {callA},
+              token |->
+                  [ generation |-> 0,
+                    fence |-> 0,
+                    endpoint |-> A,
+                    attempt |-> 1,
+                    scope |-> resident ] ] ] )
+/\ mail = { [ generation |-> 0,
+    fence |-> 0,
+    endpoint |-> A,
+    attempt |-> 1,
+    scope |-> resident ] }
+
+State 3: <Next line 175, col 12 to line 175, col 36 of module EndpointProjection>
+/\ slots = ( resident :>
+      [ generation |-> 0,
+        fence |-> 0,
+        endpoint |-> A,
+        attempt |-> 1,
+        phase |-> "Tools",
+        history |-> <<>>,
+        native |-> <<>>,
+        cache |-> <<>>,
+        sent |-> <<>>,
+        work |->
+            [ calls |-> {callA},
+              started |-> {},
+              results |-> {},
+              nativeCalls |-> {callA},
+              token |->
+                  [ generation |-> 0,
+                    fence |-> 0,
+                    endpoint |-> A,
+                    attempt |-> 1,
+                    scope |-> resident ] ] ] )
+/\ mail = {}
+
+State 4: <Repair line 98, col 5 to line 107, col 21 of module EndpointProjection>
+/\ slots = ( resident :>
+      [ generation |-> 0,
+        fence |-> 0,
+        endpoint |-> A,
+        attempt |-> 1,
+        phase |-> "Committable",
+        history |-> <<>>,
+        native |-> <<>>,
+        cache |-> <<>>,
+        sent |-> <<>>,
+        work |->
+            [ calls |-> {},
+              started |-> {},
+              results |-> {},
+              nativeCalls |-> {callA},
+              token |->
+                  [ generation |-> 0,
+                    fence |-> 0,
+                    endpoint |-> A,
+                    attempt |-> 1,
+                    scope |-> resident ] ] ] )
+/\ mail = {}
+
+73 states generated, 62 distinct states found, 37 states left on queue.
+The depth of the complete state graph search is 4.
+The average outdegree of the complete state graph is 3 (minimum is 0, the maximum 9 and the 95th percentile is 8).
+Finished in 02s at (2026-09-18 10:05:21)

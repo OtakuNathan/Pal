@@ -1,0 +1,13 @@
+
+****** SANY2 Version 2.1 created 24 February 2014
+
+Parsing file /home/nathan/Documents/coding/Pal-projection-v2/docs/llm_projection_refactor/formal/EndpointProjection.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module EndpointProjection
