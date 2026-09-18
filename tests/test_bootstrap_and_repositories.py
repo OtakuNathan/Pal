@@ -3710,6 +3710,8 @@ class _FakeTelegramBot:
         self.actions: list[tuple[str, dict[str, object]]] = []
         self.files: dict[str, _FakeTelegramFile] = {}
         self.message_delays: dict[str, float] = {}
+        self.pin_error: BaseException | None = None
+        self.unpin_error: BaseException | None = None
         self._next_message_id = 1000
 
     async def set_message_reaction(self, **kwargs):
@@ -3738,6 +3740,16 @@ class _FakeTelegramBot:
 
     async def delete_message(self, **kwargs):
         self.actions.append(("delete_message", dict(kwargs)))
+
+    async def pin_chat_message(self, **kwargs):
+        if self.pin_error is not None:
+            raise self.pin_error
+        self.actions.append(("pin_chat_message", dict(kwargs)))
+
+    async def unpin_chat_message(self, **kwargs):
+        if self.unpin_error is not None:
+            raise self.unpin_error
+        self.actions.append(("unpin_chat_message", dict(kwargs)))
 
     async def get_file(self, file_id: str):
         return self.files[file_id]
@@ -3969,6 +3981,97 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         deletes = [payload for kind, payload in self.fake_bot.actions if kind == "delete_message"]
         self.assertEqual(deletes, [{"chat_id": 42, "message_id": target["message_id"]}])
         self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+
+    async def test_checklist_message_pins_once_and_unpins_on_clear(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "42", "thread_id": "7"},
+        )
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        target = self.endpoint._tagged_message_targets[("42", "7", "checklist")]
+        pins = [payload for kind, payload in self.fake_bot.actions if kind == "pin_chat_message"]
+        self.assertEqual(
+            pins,
+            [{"chat_id": 42, "message_id": target["message_id"], "disable_notification": True}],
+        )
+
+        checked = ChannelMessage(
+            text="Checklist progress 1/1\n✅ step",
+            tag="checklist",
+            payload={"action": "check", "active": True, "done": 1, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, checked)
+        # Already pinned: the edit round must not pin again.
+        self.assertEqual(
+            len([1 for kind, _ in self.fake_bot.actions if kind == "pin_chat_message"]),
+            1,
+        )
+
+        cleared = ChannelMessage(
+            text="Checklist cleared.",
+            tag="checklist",
+            payload={"action": "clear", "active": False},
+        )
+        await self.endpoint._send_channel_message_async(handle, cleared)
+        order = [kind for kind, _ in self.fake_bot.actions]
+        self.assertLess(order.index("unpin_chat_message"), order.index("delete_message"))
+        unpins = [payload for kind, payload in self.fake_bot.actions if kind == "unpin_chat_message"]
+        self.assertEqual(unpins, [{"chat_id": 42, "message_id": target["message_id"]}])
+        self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+
+    async def test_checklist_pin_failure_is_tolerated_and_retried_on_next_update(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        self.fake_bot.pin_error = RuntimeError("not enough rights")
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        target = self.endpoint._tagged_message_targets[("42", "", "checklist")]
+        self.assertIs(target["pinned"], False)
+        self.assertFalse(self.endpoint.last_delivery_error)
+
+        self.fake_bot.pin_error = None
+        checked = ChannelMessage(
+            text="Checklist progress 1/1\n✅ step",
+            tag="checklist",
+            payload={"action": "check", "active": True, "done": 1, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, checked)
+        pins = [payload for kind, payload in self.fake_bot.actions if kind == "pin_chat_message"]
+        self.assertEqual(
+            pins,
+            [{"chat_id": 42, "message_id": target["message_id"], "disable_notification": True}],
+        )
+        self.assertIs(
+            self.endpoint._tagged_message_targets[("42", "", "checklist")]["pinned"],
+            True,
+        )
+
+    async def test_checklist_unpin_failure_still_deletes_message(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        self.fake_bot.unpin_error = RuntimeError("message to unpin not found")
+        cleared = ChannelMessage(
+            text="Checklist cleared.",
+            tag="checklist",
+            payload={"action": "clear", "active": False},
+        )
+        await self.endpoint._send_channel_message_async(handle, cleared)
+        deletes = [payload for kind, payload in self.fake_bot.actions if kind == "delete_message"]
+        self.assertEqual(len(deletes), 1)
+        self.assertNotIn(("42", "", "checklist"), self.endpoint._tagged_message_targets)
+        self.assertFalse(self.endpoint.last_delivery_error)
 
     async def test_unknown_message_tag_falls_back_to_ordinary_text(self) -> None:
         handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
