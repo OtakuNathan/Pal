@@ -248,22 +248,184 @@ class SettledReplayIdentityTests(unittest.TestCase):
             "restore changed the encoded prefix",
         )
 
-def _assistant_with_dangling_call() -> LLMMessageIR:
-    envelope = {
-        "output": [
-            {
-                "type": "message",
+_ALL_SHAPES = (
+    WireShape.OPENAI_COMPLETION,
+    WireShape.OPENAI_RESPONSE,
+    WireShape.ANTHROPIC_MESSAGES,
+)
+
+
+def _dangling_envelope(shape: WireShape) -> dict:
+    """One unanswered lookup call in the native wire form of ``shape``."""
+
+    if shape == WireShape.OPENAI_COMPLETION:
+        return {
+            "message": {
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "let me check"}],
-            },
-            {
-                "type": "function_call",
-                "call_id": "call-1",
-                "name": "lookup",
-                "arguments": "{}",
-            },
+                "content": [{"type": "text", "text": "let me check"}],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            }
+        }
+    if shape == WireShape.OPENAI_RESPONSE:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "let me check"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            ]
+        }
+    return {
+        "content": [
+            {"type": "text", "text": "let me check"},
+            {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {}},
         ]
     }
+
+
+def _mixed_envelope(shape: WireShape) -> dict:
+    """One answered call (call-a, lookup) plus one dangling call (call-b, fetch)."""
+
+    if shape == WireShape.OPENAI_COMPLETION:
+        return {
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "checking"}],
+                "tool_calls": [
+                    {
+                        "id": "call-a",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": '{"q": "life"}'},
+                    },
+                    {
+                        "id": "call-b",
+                        "type": "function",
+                        "function": {"name": "fetch", "arguments": "{}"},
+                    },
+                ],
+            }
+        }
+    if shape == WireShape.OPENAI_RESPONSE:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "checking"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-a",
+                    "name": "lookup",
+                    "arguments": '{"q": "life"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-b",
+                    "name": "fetch",
+                    "arguments": "{}",
+                },
+            ]
+        }
+    return {
+        "content": [
+            {"type": "text", "text": "checking"},
+            {"type": "tool_use", "id": "call-a", "name": "lookup", "input": {"q": "life"}},
+            {"type": "tool_use", "id": "call-b", "name": "fetch", "input": {}},
+        ]
+    }
+
+
+def _wire_tool_inventory(shape: WireShape, encoded: dict) -> dict:
+    """Normalize wire tool calls/results across all three shapes.
+
+    Structural extraction from the encoded payload — call id sets, names,
+    arguments, and result bodies — so assertions prove exact pairing instead
+    of relying on substring hits in a JSON dump.
+    """
+
+    calls: dict[str, dict] = {}
+    results: dict[str, dict] = {}
+
+    def _block_text(content) -> str:
+        if isinstance(content, (list, tuple)):
+            return "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict)
+            )
+        return str(content or "")
+
+    if shape == WireShape.OPENAI_RESPONSE:
+        for item in encoded.get("input") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                calls[item.get("call_id")] = {
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments"),
+                }
+            elif item.get("type") == "function_call_output":
+                results[item.get("call_id")] = {
+                    "text": _block_text(item.get("output")),
+                    "is_error": None,
+                }
+    elif shape == WireShape.OPENAI_COMPLETION:
+        for message in encoded.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                calls[call.get("id")] = {
+                    "name": function.get("name"),
+                    "arguments": function.get("arguments"),
+                }
+            if message.get("role") == "tool":
+                results[message.get("tool_call_id")] = {
+                    "text": _block_text(message.get("content")),
+                    "is_error": None,
+                }
+    else:
+        for message in encoded.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    calls[block.get("id")] = {
+                        "name": block.get("name"),
+                        "arguments": block.get("input"),
+                    }
+                elif block.get("type") == "tool_result":
+                    results[block.get("tool_use_id")] = {
+                        "text": _block_text(block.get("content")),
+                        "is_error": block.get("is_error"),
+                    }
+    return {
+        "call_ids": set(calls),
+        "calls": calls,
+        "result_ids": set(results),
+        "results": results,
+    }
+
+
+def _assistant_with_dangling_call(
+    shape: WireShape = WireShape.OPENAI_RESPONSE,
+) -> LLMMessageIR:
     return LLMMessageIR(
         role=MessageRole.ASSISTANT,
         state=MessageState.COMPLETE,
@@ -272,7 +434,7 @@ def _assistant_with_dangling_call() -> LLMMessageIR:
             ToolCallIR(call_id="call-1", name="lookup"),
         ),
         replay=ReplayEnvelope(
-            WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
+            shape, "demo", "demo-model", _dangling_envelope(shape)
         ),
     )
 
@@ -392,29 +554,45 @@ class LiveTurnCloseTests(unittest.TestCase):
     look legal, so the restore normalizer cannot detect the leftover envelope.
     """
 
-    def _service_with_dangling_call(self) -> MemoryService:
+    def _service_with_dangling_call(
+        self, shape: WireShape = WireShape.OPENAI_RESPONSE
+    ) -> MemoryService:
         service = MemoryService()
         service.begin_l1_turn("turn-1", user_text="hello")
-        service.upsert_l1_assistant("turn-1", _assistant_with_dangling_call())
+        service.upsert_l1_assistant("turn-1", _assistant_with_dangling_call(shape))
         return service
 
-    def _assert_clean_wire(self, messages, call_id: str = "call-1") -> None:
-        encoded = _encode_messages(WireShape.OPENAI_RESPONSE, messages)
+    def _assert_clean_wire(
+        self,
+        messages,
+        shape: WireShape = WireShape.OPENAI_RESPONSE,
+        call_id: str = "call-1",
+    ) -> None:
+        encoded = _encode_messages(shape, messages)
+        inventory = _wire_tool_inventory(shape, encoded)
+        self.assertEqual(
+            inventory["call_ids"], set(), "pruned call re-entered the wire request"
+        )
+        self.assertEqual(inventory["result_ids"], set())
         dumped = json.dumps(encoded, ensure_ascii=False, default=str)
-        self.assertNotIn(call_id, dumped, "pruned call re-entered the wire request")
+        self.assertNotIn(call_id, dumped)
         self.assertIn("let me check", dumped)
 
     def test_interrupt_does_not_smuggle_dangling_call_onto_wire(self) -> None:
-        service = self._service_with_dangling_call()
-        interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
-        self.assertEqual(interrupted.state, L1TurnState.INTERRUPTED)
-        self._assert_clean_wire(interrupted.messages)
+        for shape in _ALL_SHAPES:
+            with self.subTest(shape=shape):
+                service = self._service_with_dangling_call(shape)
+                interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
+                self.assertEqual(interrupted.state, L1TurnState.INTERRUPTED)
+                self._assert_clean_wire(interrupted.messages, shape)
 
     def test_abort_does_not_smuggle_dangling_call_onto_wire(self) -> None:
-        service = self._service_with_dangling_call()
-        aborted = service.abort_l1_turn("turn-1", reason="stop")
-        self.assertEqual(aborted.state, L1TurnState.ABORTED)
-        self._assert_clean_wire(aborted.messages)
+        for shape in _ALL_SHAPES:
+            with self.subTest(shape=shape):
+                service = self._service_with_dangling_call(shape)
+                aborted = service.abort_l1_turn("turn-1", reason="stop")
+                self.assertEqual(aborted.state, L1TurnState.ABORTED)
+                self._assert_clean_wire(aborted.messages, shape)
 
     def test_interrupt_then_restore_stays_clean(self) -> None:
         """Live pruning happens first, so the restore normalizer sees a
@@ -422,80 +600,120 @@ class LiveTurnCloseTests(unittest.TestCase):
         the message still carries: only retiring the envelope at interrupt
         time keeps this path clean."""
 
-        service = self._service_with_dangling_call()
-        service.interrupt_l1_turn("turn-1", reason="stop")
+        for shape in _ALL_SHAPES:
+            with self.subTest(shape=shape):
+                service = self._service_with_dangling_call(shape)
+                service.interrupt_l1_turn("turn-1", reason="stop")
 
-        payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
-        restored = MemoryService()
-        port = MemoryRuntimeStatePort(restored)
-        port.install_prepared_state(port.prepare_restore_state(payload))
+                payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
+                restored = MemoryService()
+                port = MemoryRuntimeStatePort(restored)
+                port.install_prepared_state(port.prepare_restore_state(payload))
 
-        self._assert_clean_wire(
-            restored.l1_store.turns.get("turn-1").messages
-        )
+                self._assert_clean_wire(
+                    restored.l1_store.turns.get("turn-1").messages, shape
+                )
 
     def test_interrupt_keeps_paired_call_and_prunes_only_dangling(self) -> None:
         """Two calls in one assistant message: one answered, one dangling.
-        The answered call and its result must survive; only the dangling one
-        disappears — and its disappearance retires the envelope for that
-        message, not for the whole turn."""
+        Structural assertions: the wire carries exactly the answered call and
+        its result — matching id sets {"call-a"}, the right tool name, the
+        original arguments, and the result body "42" — and nothing else."""
 
-        envelope = {
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "checking"}],
-                },
-                {
-                    "type": "function_call",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": "{}",
-                },
-                {
-                    "type": "function_call",
-                    "call_id": "call-b",
-                    "name": "fetch",
-                    "arguments": "{}",
-                },
-            ]
-        }
-        service = MemoryService()
-        service.begin_l1_turn("turn-1", user_text="hello")
-        service.upsert_l1_assistant(
-            "turn-1",
-            LLMMessageIR(
-                role=MessageRole.ASSISTANT,
-                state=MessageState.COMPLETE,
-                parts=(
-                    TextPartIR("checking"),
-                    ToolCallIR(call_id="call-a", name="lookup"),
-                    ToolCallIR(call_id="call-b", name="fetch"),
-                ),
-                replay=ReplayEnvelope(
-                    WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
-                ),
-            ),
-        )
-        service.append_l1_tool_result(
-            "turn-1",
-            ToolResultIR(call_id="call-a", name="lookup", content="42"),
-        )
+        for shape in _ALL_SHAPES:
+            with self.subTest(shape=shape):
+                service = MemoryService()
+                service.begin_l1_turn("turn-1", user_text="hello")
+                service.upsert_l1_assistant(
+                    "turn-1",
+                    LLMMessageIR(
+                        role=MessageRole.ASSISTANT,
+                        state=MessageState.COMPLETE,
+                        parts=(
+                            TextPartIR("checking"),
+                            ToolCallIR(call_id="call-a", name="lookup", arguments={"q": "life"}),
+                            ToolCallIR(call_id="call-b", name="fetch"),
+                        ),
+                        replay=ReplayEnvelope(
+                            shape, "demo", "demo-model", _mixed_envelope(shape)
+                        ),
+                    ),
+                )
+                service.append_l1_tool_result(
+                    "turn-1",
+                    ToolResultIR(call_id="call-a", name="lookup", content="42"),
+                )
 
-        interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
-        encoded = _encode_messages(WireShape.OPENAI_RESPONSE, interrupted.messages)
-        dumped = json.dumps(encoded, ensure_ascii=False, default=str)
+                interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
+                encoded = _encode_messages(shape, interrupted.messages)
+                inventory = _wire_tool_inventory(shape, encoded)
 
-        self.assertNotIn("call-b", dumped, "dangling call re-entered the wire request")
-        self.assertIn(
-            "call-a", dumped, "answered call must survive interruption"
-        )
-        self.assertIn(
-            "function_call_output", dumped,
-            "the answered call's result must survive interruption",
-        )
-        self.assertIn("checking", dumped)
+                self.assertEqual(
+                    inventory["call_ids"],
+                    {"call-a"},
+                    "wire must carry exactly the answered call",
+                )
+                self.assertEqual(
+                    inventory["result_ids"],
+                    {"call-a"},
+                    "wire must carry exactly the answered call's result",
+                )
+                self.assertEqual(inventory["calls"]["call-a"]["name"], "lookup")
+                arguments = inventory["calls"]["call-a"]["arguments"]
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                self.assertEqual(arguments, {"q": "life"})
+                self.assertEqual(
+                    inventory["results"]["call-a"]["text"],
+                    "42",
+                    "the answered call's result body must survive interruption",
+                )
+                if shape == WireShape.ANTHROPIC_MESSAGES:
+                    self.assertFalse(inventory["results"]["call-a"]["is_error"])
+                dumped = json.dumps(encoded, ensure_ascii=False, default=str)
+                self.assertNotIn("call-b", dumped)
+                self.assertIn("checking", dumped)
+
+    def test_interrupt_leaves_earlier_healthy_round_prefix_unchanged(self) -> None:
+        """A settled healthy round keeps its byte-exact wire prefix when a
+        LATER round is interrupted: pruning must retire only the damaged
+        message's envelope, never the earlier history's."""
+
+        for shape in _ALL_SHAPES:
+            with self.subTest(shape=shape):
+                service = MemoryService()
+                service.begin_l1_turn("turn-1", user_text="first question")
+                service.upsert_l1_assistant("turn-1", _assistant_message(shape))
+                settled = service.settle_l1_turn("turn-1")
+
+                before = _encode_messages(shape, settled.messages)
+
+                service.begin_l1_turn("turn-2", user_text="second question")
+                service.upsert_l1_assistant(
+                    "turn-2", _assistant_with_dangling_call(shape)
+                )
+                interrupted = service.interrupt_l1_turn("turn-2", reason="stop")
+
+                after = _encode_messages(
+                    shape, settled.messages + interrupted.messages
+                )
+
+                key = (
+                    "input"
+                    if shape == WireShape.OPENAI_RESPONSE
+                    else "messages"
+                )
+                prefix = before[key]
+                self.assertEqual(
+                    after[key][: len(prefix)],
+                    prefix,
+                    "earlier healthy prefix changed when a later round was "
+                    f"interrupted ({shape})",
+                )
+                self.assertIsNotNone(
+                    settled.messages[-1].replay,
+                    "a later interrupt retired an earlier round's envelope",
+                )
 
 
 if __name__ == "__main__":
