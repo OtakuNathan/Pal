@@ -144,7 +144,11 @@ def _validate_anthropic(candidate: NativeCandidate) -> ContinuationDecision:
             issues.append(
                 _issue("unknown_block_type", f"content[{index}] has unknown type {block_type!r}")
             )
-    if tool_ids and tuple(tool_ids) != candidate.call_ids:
+    # Inventory equality is unconditional in BOTH directions: a wire with
+    # no calls paired with a candidate that claims calls is just as wrong as
+    # the reverse.  A truthy-left shortcut would let an empty wire inventory
+    # silently mask a non-empty semantic inventory (review R8).
+    if tuple(tool_ids) != candidate.call_ids:
         issues.append(
             _issue(
                 "tool_inventory_mismatch",
@@ -205,7 +209,7 @@ def _validate_openai_response(candidate: NativeCandidate) -> ContinuationDecisio
             issues.append(
                 _issue("unknown_item_type", f"output[{index}] has unknown type {item_type!r}")
             )
-    if call_ids and tuple(call_ids) != candidate.call_ids:
+    if tuple(call_ids) != candidate.call_ids:
         issues.append(
             _issue(
                 "tool_inventory_mismatch",
@@ -256,7 +260,7 @@ def _validate_openai_completion(candidate: NativeCandidate) -> ContinuationDecis
                 )
             else:
                 call_ids.append(call_id)
-    if call_ids and tuple(call_ids) != candidate.call_ids:
+    if tuple(call_ids) != candidate.call_ids:
         issues.append(
             _issue(
                 "tool_inventory_mismatch",

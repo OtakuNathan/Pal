@@ -26,6 +26,7 @@ from pal.llm.projection_contracts import (
     ProjectionIdentity,
 )
 from pal.llm.projection_session import EndpointProjectionSession
+from pal.shared.json_values import freeze_json_mapping, thaw_json
 
 __all__ = [
     "PROJECTION_CHECKPOINT_SCHEMA_VERSION",
@@ -44,8 +45,22 @@ class ProjectionCheckpointError(ValueError):
     """A projection checkpoint could not be validated or restored."""
 
 
+def _cursor_fields(cursor: HistoryCursor) -> dict[str, Any]:
+    return {
+        "history_epoch": cursor.history_epoch,
+        "block_sequence": cursor.block_sequence,
+        "prefix_digest": cursor.prefix_digest,
+    }
+
+
 def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
-    """Serialize the session's durable continuation state (derived chunks excluded)."""
+    """Serialize the session's durable continuation state.
+
+    Derived chunks ARE persisted as wire items (review R5): a restored
+    session must rebuild its materialized prefix, or the next request would
+    silently drop every committed block while claiming coverage through a
+    non-zero frontier.
+    """
 
     if session.identity is None or session.binding is None:
         return {
@@ -67,11 +82,17 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
             "config_fingerprint": binding.config_fingerprint,
         },
         "projection_generation": session.identity.projection_generation,
-        "frontier": {
-            "history_epoch": session.frontier.history_epoch,
-            "block_sequence": session.frontier.block_sequence,
-            "prefix_digest": session.frontier.prefix_digest,
-        },
+        "frontier": _cursor_fields(session.frontier),
+        "chunks": [
+            {
+                "attempt_id": chunk.round_attempt_id,
+                "cursor_before": _cursor_fields(chunk.cursor_before),
+                "cursor_after": _cursor_fields(chunk.cursor_after),
+                "items": thaw_json(list(chunk.items)),
+                "prefix_digest": chunk.prefix_digest,
+            }
+            for chunk in session.chunks
+        ],
         "native_records": [
             {
                 "attempt_id": attempt_id,
@@ -83,16 +104,9 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         "committed_attempts": [
             {
                 "attempt_id": receipt.attempt.attempt_id,
-                "before": {
-                    "history_epoch": receipt.append.before.history_epoch,
-                    "block_sequence": receipt.append.before.block_sequence,
-                    "prefix_digest": receipt.append.before.prefix_digest,
-                },
-                "after": {
-                    "history_epoch": receipt.append.after.history_epoch,
-                    "block_sequence": receipt.append.after.block_sequence,
-                    "prefix_digest": receipt.append.after.prefix_digest,
-                },
+                "owner_fence": receipt.attempt.owner_fence.fence,
+                "before": _cursor_fields(receipt.append.before),
+                "after": _cursor_fields(receipt.append.after),
                 "block_count": receipt.append.block_count,
                 "closed_call_ids": list(receipt.closed_call_ids),
                 "native_committed": receipt.native_committed,
@@ -182,20 +196,28 @@ def restore_projection(
     except (ProjectionContractError, TypeError, ValueError) as exc:
         raise ProjectionCheckpointError(f"projection frontier is invalid: {exc}") from exc
 
-    # Joint-consistency gate: the projection cannot cover more history than
-    # the L1 snapshot restored in the same transaction.  A frontier ahead of
-    # the semantic cursor means native and IR come from different
-    # generations — refuse instead of stitching (PLAN §8.2).
-    if (
-        frontier.history_epoch > l1_history_cursor.history_epoch
-        or (
-            frontier.history_epoch == l1_history_cursor.history_epoch
-            and frontier.block_sequence > l1_history_cursor.block_sequence
+    # Joint-consistency gate (review R6): the projection and the L1 history
+    # must come from the SAME durable snapshot.  "Not newer than L1" alone
+    # proves nothing — equal position with a different digest, or a projection
+    # from a pre-compaction epoch, are both mismatched generations.
+    if frontier.history_epoch != l1_history_cursor.history_epoch:
+        raise ProjectionCheckpointError(
+            "projection frontier epoch differs from the L1 history cursor; "
+            "refusing to stitch mismatched checkpoint generations "
+            "(including pre-compaction native lineages)"
         )
-    ):
+    if frontier.block_sequence > l1_history_cursor.block_sequence:
         raise ProjectionCheckpointError(
             "projection frontier is ahead of the L1 history cursor; "
             "refusing to combine mismatched checkpoint generations"
+        )
+    if (
+        frontier.block_sequence == l1_history_cursor.block_sequence
+        and frontier.prefix_digest != l1_history_cursor.prefix_digest
+    ):
+        raise ProjectionCheckpointError(
+            "projection frontier matches the L1 position but not its digest; "
+            "same length is not an identity proof"
         )
 
     records_raw = section.get("native_records")
@@ -235,9 +257,18 @@ def restore_projection(
     if not isinstance(committed_raw, (list, tuple)):
         raise ProjectionCheckpointError("committed_attempts is invalid")
     committed_attempts: dict[str, HistoryCommitReceipt] = {}
+    seen_committed: set[str] = set()
     for item in committed_raw:
         if not isinstance(item, Mapping):
             raise ProjectionCheckpointError("committed attempt entry is not an object")
+        attempt_id = str(item.get("attempt_id") or "")
+        if not attempt_id:
+            raise ProjectionCheckpointError("committed attempt entry has no attempt id")
+        if attempt_id in seen_committed:
+            raise ProjectionCheckpointError(
+                f"duplicate committed attempt entry: {attempt_id}"
+            )
+        seen_committed.add(attempt_id)
         try:
             before = HistoryCursor(
                 history_epoch=int(item["before"]["history_epoch"]),
@@ -256,8 +287,11 @@ def restore_projection(
                         binding=binding,
                         projection_generation=generation,
                     ),
-                    owner_fence=OwnerFence(0),
-                    attempt_id=str(item.get("attempt_id") or ""),
+                    # Source owner identity is preserved verbatim (review R6):
+                    # rewriting history to fence 0 would turn an idempotent
+                    # receipt replay into a false "conflicting receipt".
+                    owner_fence=OwnerFence(int(item.get("owner_fence", 0) or 0)),
+                    attempt_id=attempt_id,
                 ),
                 append=AppendReceipt(
                     before=before,
@@ -271,7 +305,75 @@ def restore_projection(
             raise ProjectionCheckpointError(
                 f"committed attempt entry is invalid: {exc}"
             ) from exc
-        committed_attempts[receipt.attempt.attempt_id] = receipt
+        committed_attempts[attempt_id] = receipt
+
+    # Chunk chain (review R5/R6): rebuild the materialized prefix and verify
+    # the chain is contiguous from the initial cursor to the frontier.
+    chunks_raw = section.get("chunks") or ()
+    if not isinstance(chunks_raw, (list, tuple)):
+        raise ProjectionCheckpointError("projection chunks section is invalid")
+    from pal.llm.projection_session import ProjectionChunk
+
+    chunks: list[ProjectionChunk] = []
+    prefix_items: list[dict] = []
+    expected_before = HistoryCursor.initial()
+    for raw in chunks_raw:
+        if not isinstance(raw, Mapping):
+            raise ProjectionCheckpointError("chunk entry is not an object")
+        try:
+            cursor_before = HistoryCursor(
+                history_epoch=int(raw["cursor_before"]["history_epoch"]),
+                block_sequence=int(raw["cursor_before"]["block_sequence"]),
+                prefix_digest=str(raw["cursor_before"]["prefix_digest"]),
+            )
+            cursor_after = HistoryCursor(
+                history_epoch=int(raw["cursor_after"]["history_epoch"]),
+                block_sequence=int(raw["cursor_after"]["block_sequence"]),
+                prefix_digest=str(raw["cursor_after"]["prefix_digest"]),
+            )
+        except (KeyError, TypeError, ValueError, ProjectionContractError) as exc:
+            raise ProjectionCheckpointError(f"chunk cursor is invalid: {exc}") from exc
+        if cursor_before != expected_before:
+            raise ProjectionCheckpointError(
+                "chunk chain is not contiguous; refusing to stitch a broken prefix"
+            )
+        items_raw = raw.get("items")
+        if not isinstance(items_raw, (list, tuple)) or not all(
+            isinstance(entry, Mapping) for entry in items_raw
+        ):
+            raise ProjectionCheckpointError("chunk items are invalid")
+        items = tuple(dict(entry) for entry in items_raw)
+        chunks.append(
+            ProjectionChunk(
+                round_attempt_id=str(raw.get("attempt_id") or ""),
+                cursor_before=cursor_before,
+                cursor_after=cursor_after,
+                items=tuple(freeze_json_mapping(item) for item in items),
+                prefix_digest=str(raw.get("prefix_digest") or ""),
+            )
+        )
+        # The restored private prefix holds mutable copies (the public chunk
+        # snapshot is deep-frozen); the two share nothing.
+        prefix_items.extend(dict(item) for item in items)
+        expected_before = cursor_after
+    if chunks:
+        if expected_before != frontier:
+            raise ProjectionCheckpointError(
+                "chunk chain does not end at the frontier; refusing restore"
+            )
+        if len({chunk.round_attempt_id for chunk in chunks}) != len(chunks):
+            raise ProjectionCheckpointError("duplicate attempt in chunk chain")
+        chunk_receipts = {chunk.round_attempt_id for chunk in chunks}
+        missing = chunk_receipts - set(committed_attempts)
+        if missing:
+            raise ProjectionCheckpointError(
+                f"chunks without a committed receipt: {sorted(missing)}"
+            )
+    elif frontier.block_sequence or committed_attempts:
+        raise ProjectionCheckpointError(
+            "non-empty frontier has no materialized chunks; refusing to "
+            "restore a projection that claims coverage it cannot rebuild"
+        )
 
     # Install atomically: everything validated above; these assignments are
     # the only visible restore boundary.
@@ -280,6 +382,9 @@ def restore_projection(
         session=session.session_id, binding=binding, projection_generation=generation
     )
     session.frontier = frontier
+    session.chunks = tuple(chunks)
+    session._prefix_items = prefix_items
+    session._frontier_item_count = len(prefix_items)
     session.native_by_attempt = {
         record["attempt_id"]: {
             "payload_json": record["payload_json"],
@@ -289,8 +394,13 @@ def restore_projection(
         }
         for record in native_records
     }
-    # Receipt ledger survives restart: idempotent replays of pre-restart
-    # receipts stay no-ops and conflicting ones stay refused (PLAN 8.2).
+    # Receipt ledger survives restart with its SOURCE owner fence intact:
+    # idempotent replays of pre-restart receipts stay no-ops and conflicting
+    # ones stay refused (PLAN §8.2, review R6).  The new worker's write
+    # permission is a separate, higher fence it brings itself.
     session._committed_attempts = committed_attempts
-    _ = OwnerFence(0)  # fence bump happens in the runtime when it reowns
+    session._owner_fence = max(
+        (receipt.attempt.owner_fence.fence for receipt in committed_attempts.values()),
+        default=0,
+    )
     return True

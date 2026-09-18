@@ -429,6 +429,82 @@ class ClosedRound:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_CALL_RESULT_CONTAINERS = ("messages", "input")
+
+
+def _payload_tool_inventories(payload: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """Extract (call_ids, result_ids) from a provider payload for all shapes.
+
+    Recognized pairings:
+    - openai_completion: messages[].tool_calls[].id  <->  role:"tool" tool_call_id
+    - openai_response:   input[].function_call.call_id <-> function_call_output.call_id
+    - anthropic_messages: content[].tool_use.id      <->  content[].tool_result.tool_use_id
+    """
+
+    calls: set[str] = set()
+    results: set[str] = set()
+    container = next(
+        (key for key in _TOOL_CALL_RESULT_CONTAINERS if isinstance(payload.get(key), (list, tuple))),
+        None,
+    )
+    if container is None:
+        return calls, results
+    for item in payload[container]:
+        if not isinstance(item, Mapping):
+            continue
+        if isinstance(item.get("tool_calls"), (list, tuple)):
+            for call in item["tool_calls"]:
+                if isinstance(call, Mapping):
+                    call_id = str(call.get("id") or "").strip()
+                    if call_id:
+                        calls.add(call_id)
+        if str(item.get("role") or "") == "tool":
+            result_id = str(item.get("tool_call_id") or "").strip()
+            if result_id:
+                results.add(result_id)
+        item_type = str(item.get("type") or "")
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or "").strip()
+            if call_id:
+                calls.add(call_id)
+        elif item_type == "function_call_output":
+            call_id = str(item.get("call_id") or "").strip()
+            if call_id:
+                results.add(call_id)
+        content = item.get("content")
+        if isinstance(content, (list, tuple)):
+            for block in content:
+                if not isinstance(block, Mapping):
+                    continue
+                block_type = str(block.get("type") or "")
+                if block_type == "tool_use":
+                    call_id = str(block.get("id") or "").strip()
+                    if call_id:
+                        calls.add(call_id)
+                elif block_type == "tool_result":
+                    call_id = str(block.get("tool_use_id") or "").strip()
+                    if call_id:
+                        results.add(call_id)
+    return calls, results
+
+
+def _validate_sendable_payload(payload: Mapping[str, Any]) -> None:
+    """A sendable request cannot carry pending (unanswered) tool calls.
+
+    A checksum proves integrity of bytes, not legality of content: a payload
+    with dangling tool_calls still digests fine (review R7).  Every tool call
+    in a request the transport may send must already be paired with its
+    result — pending calls live in DraftRound, never on the wire.
+    """
+
+    calls, results = _payload_tool_inventories(payload)
+    pending = sorted(calls - results)
+    if pending:
+        raise ProjectionContractError(
+            f"prepared payload carries pending tool calls without results: {pending}"
+        )
+
+
 @dataclass(frozen=True)
 class PreparedRequest:
     """Immutable, tamper-evident request snapshot for one attempt.
@@ -461,6 +537,9 @@ class PreparedRequest:
         base_cursor: HistoryCursor,
         payload: Mapping[str, Any],
     ) -> "PreparedRequest":
+        # Build is the single controlled entry: protocol legality (no pending
+        # tool calls) is checked here, not left to caller discipline.
+        _validate_sendable_payload(payload)
         payload_json = json.dumps(
             dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )

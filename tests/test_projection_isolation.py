@@ -128,7 +128,11 @@ class WorkerRestartTests(unittest.TestCase):
         )
         self.assertTrue(bound)
         self.assertEqual(successor.frontier, HistoryCursor(0, 1, "d" * 64))
-        self.assertEqual(len(successor.chunks), 0)  # derived; rebuilt on demand
+        # The materialized prefix is REBUILT from the snapshot (review R5):
+        # a restored session with a non-zero frontier and an empty prefix
+        # would silently drop every committed block from the next request.
+        self.assertEqual(len(successor.chunks), 1)
+        self.assertEqual(len(successor._prefix_items), 2)  # q + a wire items
 
         # A late (idempotent) replay of the pre-restart receipt: no-op.
         successor.observe_commit(receipt)
@@ -140,7 +144,22 @@ class WorkerRestartTests(unittest.TestCase):
             HistoryView(cursor=successor.frontier, messages=(_user("q2"), _assistant("a2")))
         )
         items = json.loads(request.payload_json)["messages"]
-        self.assertTrue(items)
+        # The pre-restart history must actually be present in the next wire
+        # request — not merely "some items" (review R5 test-strength fix).
+        contents = [
+            "".join(
+                block.get("text", "")
+                for block in (message.get("content") or [])
+                if isinstance(block, dict)
+            )
+            if isinstance(message.get("content"), list)
+            else str(message.get("content") or "")
+            for message in items
+        ]
+        self.assertIn("q", contents)
+        self.assertIn("a", contents)
+        self.assertIn("q2", contents)
+        self.assertIn("a2", contents)
 
     def test_conflicting_late_receipt_refused_after_restart(self) -> None:
         worker, _ = _driven_session("bunshin:verifier:run-4", "a1")

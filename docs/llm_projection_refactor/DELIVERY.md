@@ -4,6 +4,15 @@
 **基线：`7e0b1f74`。安全分支：`safety/llm-projection-before-v2-7e0b1f7`（本地）。**
 **日期：2026-09-18。执行者：Pal。main / 线上 Pal / 生产配置全程未动。**
 
+> **交付状态修正（2026-09-18 外部 review 后）：** 本分支的交付状态是
+> **“新组件旁路原型 + native 捕获接线”，不是“新实现全部完成，只差 P7 部署”。**
+> 请求热路径（`endpoint.py::_iterate()`）仍走 per-message ReplayEnvelope
+> 编码；EndpointProjectionSession / joint checkpoint / Bunshin owner 未进入
+> 实际请求与恢复链。原 PLAN 的 P4（resident 集成）、P5（Bunshin/Manager
+> proxy 集成）、P6（旧热路径清理）在分支中完成的是**组件层与隔离测试**，
+> 不是集成交付；本报告原阶段命名与 PLAN 同名不同义，易波误读，特此修正。
+> 集成部分仍待做，完成前不得作为可切换实现验收。详见“外部 review 修正记录”。
+
 ## 分支提交
 
 | commit | 内容 |
@@ -69,6 +78,28 @@ setuptools/_vendor 环境性失败）与 `test_tool_schema_properties` 模块级
   scope 身份保证（S20/S13/S21/S22 会话层测试覆盖；未接 Manager proxy 全链路）。
 - 断电/崩溃半写的拒绝路径（frontier 超前 L1、截断 native、错 schema）由
   构造与 checkpoint 测试覆盖；真实进程级崩溃注入未做。
+
+## 外部 review 修正记录（2026-09-18）
+
+`~/Documents/coding/pal_branch_review_2026-09-18`（REVIEW.md + 13 个产品 API 级反例
+草案）核实八项问题全部属实，已在分支修复：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| R2 | PreparedRequest 只保留 items，丢 system/tools/policy | prepare 保留 codec 全部外壳字段（新增 `request_shell` 参数；Anthropic system 回归测试钉住）；零 tail 时复用 shell 不调 codec |
+| R3 | chunk 封存的是 prepare 输入而非已接受输出 | observe_commit 新增物化：native payload 按 shape 抽取为 wire items，或 `accepted_messages` IR 经 codec 编码；repair 的 calls/results 同样物化 |
+| R4 | requires_native/attach/native_committed 三者不闭环 | commit 验证 native 材料存在性与 call inventory 一致性；requires_native 缺失拒绝；布尔自称不再生效 |
+| R5 | restore 后 frontier 非零但 prefix 空，旧历史丢失 | snapshot 持久化 chunk 链，restore 重建 prefix 并验证链接到 frontier；“非空 frontier 无 chunks”拒绝 |
+| R6 | 一致性 gate 只查“不超前”；fence 被改写为 0 | epoch 必须相等（拒跨 compact 拼接）、同位必验 digest；fence 原样保存/恢复；committed/chunk 链验证 |
+| R7 | 构造保证未挡非法路径 | attach_native 验开放轮 + binding（shape/endpoint/model）；chunk 公开快照深冻结（改即 TypeError）；PreparedRequest.build 拒悬空 tool calls；owner fence 单调 |
+| R8 | inventory 空比较被短路跳过 | 三 shape validator 无条件双向比较 inventory |
+
+反例测试已合入 `tests/test_projection_review_adversarial.py`（13 项 + 3 subtests，
+断言强度未削弱，仅 output 形态适配 codec 实际结构）。
+
+**性能数字（840x）降级为合成场景观察**：在完整请求等价、恢复与 native
+正确性达成前，不作为验收结论；旧 finalize_cache_spans 的累积前缀开销
+是可独立测量的旧成本，benchmark 需在集成后重测。
 
 ## 未覆盖 / 明确未做
 

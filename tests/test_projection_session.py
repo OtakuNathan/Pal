@@ -124,8 +124,11 @@ class IncrementalProjectionTests(unittest.TestCase):
             WireShape.OPENAI_COMPLETION, _binding(), first_round + second_round
         )
         self.assertEqual(incremental_items, full)
-        # The frozen chunk is a real prefix of both.
-        chunk_items = [item for chunk in session.chunks for item in chunk.items]
+        # The frozen chunk is a real prefix of both.  Public chunk items are
+        # deep-frozen snapshots (review R7); thaw for value comparison.
+        from pal.shared.json_values import thaw_json
+
+        chunk_items = thaw_json([item for chunk in session.chunks for item in chunk.items])
         self.assertEqual(first_items, chunk_items)
         self.assertEqual(incremental_items[: len(chunk_items)], chunk_items)
 
@@ -233,6 +236,7 @@ class NativeGateTests(unittest.TestCase):
         session = EndpointProjectionSession(LogicalSessionId("s"))
         session.bind(_binding(WireShape.ANTHROPIC_MESSAGES))
         attempt = _attempt(session, "a1")
+        session.begin_round(attempt, requires_native=True)
         # Thinking block without a signature -> Degraded by contract.
         candidate = NativeCandidate(
             wire_shape=WireShape.ANTHROPIC_MESSAGES,

@@ -18,14 +18,21 @@ no silent semantic-only fallback (PLAN §0.2).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping, Sequence
 
 from pal.llm.continuation_policy import (
     ContinuationDecisionKind,
     NativeCandidate,
     validate_candidate,
 )
-from pal.llm.ir import LLMMessageIR
+from pal.llm.ir import (
+    GenerationPolicyIR,
+    LLMMessageIR,
+    LLMRequestIR,
+    MessageRole,
+)
 from pal.llm.projection_contracts import (
     AttemptKey,
     ClosedRound,
@@ -40,6 +47,8 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
+from pal.shared.json_values import freeze_json_mapping
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
 __all__ = [
     "ProjectionChunk",
@@ -114,8 +123,15 @@ class EndpointProjectionSession:
         self._active: _ActiveRound | None = None
         # Amortized assembled prefix of all frozen chunk items; extended on
         # commit only, never rebuilt per prepare (PLAN §11: no per-round
-        # deepcopy of old chunks).
+        # deepcopy of old chunks).  Private mutable dicts: the public chunk
+        # view holds deep-frozen snapshots (review R7).
         self._prefix_items: list[dict] = []
+        # Request shell fields (everything the codec emits besides the item
+        # container: system preamble, model, tool definitions, policy caps).
+        # Cached at the first tail encode so zero-tail prepares can reuse the
+        # shell without invoking the codec's empty-request fallback.
+        self._last_shell_fields: dict[str, Any] | None = None
+        self._owner_fence = 0
         self.retired = False
 
     # -- binding lifecycle -------------------------------------------------
@@ -134,12 +150,15 @@ class EndpointProjectionSession:
         )
         # Endpoint switch destroys old active data (PLAN §8.1): native store,
         # derived chunks, frontier coverage, and any open round die together.
+        # The owner fence survives: it counts worker ownership generations,
+        # not endpoint bindings (review R7).
         self.native_by_attempt = {}
         self.chunks = ()
         self._frontier_item_count = 0
         self._committed_attempts = {}
         self.frontier = HistoryCursor.initial()
         self._prefix_items = []
+        self._last_shell_fields = None
         self._active = None
 
     def retire(self) -> None:
@@ -164,11 +183,28 @@ class EndpointProjectionSession:
         Degraded/unsupported REQUIRED material raises ContinuationUnavailable:
         the round cannot legally continue on this protocol, and silently
         re-encoding from IR is forbidden (PLAN §0.2/§6.3).
+
+        Association is enforced, not assumed (review R7): the attempt must be
+        the currently open round, and the candidate must come from the same
+        binding (shape/endpoint/model).  A late native from a cancelled
+        attempt or an alien provider must not enter the store.
         """
 
         self._require_identity()
         if attempt.identity != self.identity:
             raise ProjectionSessionError("attempt belongs to a different projection identity")
+        if self._active is None or attempt != self._active.attempt:
+            raise ProjectionSessionError(
+                "native material may only attach to the currently open round's attempt"
+            )
+        if (
+            candidate.wire_shape != self.binding.wire_shape
+            or candidate.endpoint_id != self.binding.endpoint_id
+            or candidate.model_id != self.binding.model_id
+        ):
+            raise ProjectionSessionError(
+                "native candidate binding does not match the session binding"
+            )
         decision = validate_candidate(candidate)
         if decision.kind is not ContinuationDecisionKind.PRESERVED:
             detail = "; ".join(f"{issue.code}: {issue.detail}" for issue in decision.issues)
@@ -183,7 +219,16 @@ class EndpointProjectionSession:
         }
 
     def native_for(self, attempt_id: str) -> dict | None:
-        return self.native_by_attempt.get(attempt_id)
+        record = self.native_by_attempt.get(attempt_id)
+        if record is None:
+            return None
+        # Defensive copy: internal records stay private (review R7).
+        return {
+            "payload_json": record["payload_json"],
+            "call_ids": tuple(record["call_ids"]),
+            "endpoint_id": record["endpoint_id"],
+            "model_id": record["model_id"],
+        }
 
     # -- rounds and commits --------------------------------------------------
 
@@ -193,6 +238,13 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("a round is already open for this session")
         if attempt.identity != identity:
             raise ProjectionSessionError("attempt identity does not match the session binding")
+        if attempt.owner_fence.fence < self._owner_fence:
+            # Owner fences move forward only: a stale worker cannot reopen
+            # rounds after a reown (review R7).
+            raise ProjectionSessionError(
+                "attempt owner fence regresses below the session's current fence"
+            )
+        self._owner_fence = attempt.owner_fence.fence
         self._active = _ActiveRound(attempt=attempt, requires_native=requires_native)
 
     def close_round(self) -> AttemptKey:
@@ -204,8 +256,27 @@ class EndpointProjectionSession:
         self._active = None
         return attempt
 
-    def observe_commit(self, receipt: HistoryCommitReceipt) -> None:
-        """Advance the frontier with a trusted joint commit (idempotent)."""
+    def observe_commit(
+        self,
+        receipt: HistoryCommitReceipt,
+        *,
+        accepted_messages: Sequence[LLMMessageIR] = (),
+    ) -> None:
+        """Advance the frontier with a trusted joint commit (idempotent).
+
+        The sealed chunk must contain what this round actually ACCEPTED, not
+        merely a re-freeze of the request input (review R3).  Materialization
+        sources, in order:
+
+        1. attached native material (when ``receipt.native_committed``) — the
+           provider-native assistant wire items, byte-true;
+        2. ``accepted_messages`` — IR blocks (e.g. repaired tool results)
+           encoded through the shape codec.
+
+        Both may contribute in one commit (native assistant turn + IR tool
+        results).  Neither source alone may be replaced by the caller merely
+        asserting ``native_committed=True`` (review R4).
+        """
 
         self._require_identity()
         previous = self._committed_attempts.get(receipt.attempt.attempt_id)
@@ -217,9 +288,40 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("conflicting receipts for one attempt")
         if self._active is None or receipt.attempt != self._active.attempt:
             raise ProjectionSessionError("commit receipt does not match the open round")
+        # -- native eligibility is verified against stored material, never
+        # -- taken on the caller's word (review R4).
+        if self._active.requires_native and not receipt.native_committed:
+            raise ProjectionSessionError(
+                "round requires native continuation but the receipt commits none"
+            )
+        accepted_native: dict | None = None
+        if receipt.native_committed:
+            accepted_native = self.native_by_attempt.get(receipt.attempt.attempt_id)
+            if accepted_native is None:
+                raise ProjectionSessionError(
+                    "native_committed receipt has no attached native material"
+                )
+            if tuple(accepted_native["call_ids"]) != tuple(receipt.closed_call_ids):
+                raise ProjectionSessionError(
+                    "native call inventory does not match the receipt's closed calls"
+                )
         receipt.append.verify_against(self.frontier)
         if receipt.append.after.history_epoch != self.frontier.history_epoch:
             raise ProjectionSessionError("commit receipt epoch does not match frontier")
+        # Materialize the accepted output beyond the prepared request input.
+        materialized: list[dict] = []
+        if accepted_native is not None:
+            materialized.extend(
+                dict(item)
+                for item in _wire_items_from_native(
+                    self.binding.wire_shape, accepted_native["payload_json"]
+                )
+            )
+        if accepted_messages:
+            materialized.extend(
+                dict(item) for item in self._encode_messages(tuple(accepted_messages))
+            )
+        self._active.prepared_items.extend(materialized)
         items = tuple(self._active.prepared_items[self._frontier_item_count :])
         if not items:
             raise ProjectionSessionError(
@@ -243,10 +345,14 @@ class EndpointProjectionSession:
             round_attempt_id=receipt.attempt.attempt_id,
             cursor_before=self.frontier,
             cursor_after=receipt.append.after,
-            items=items,
+            # Deep-frozen public snapshot: mutating a committed chunk raises
+            # instead of silently rewriting later requests (review R7).
+            items=tuple(freeze_json_mapping(item) for item in items),
             prefix_digest=receipt.append.after.prefix_digest,
         )
         self.chunks = (*self.chunks, chunk)
+        # The private amortized prefix keeps the mutable dicts; it is never
+        # exposed and shares nothing with the frozen chunk snapshot above.
         self._prefix_items.extend(items)
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
         self.frontier = receipt.append.after
@@ -268,15 +374,29 @@ class EndpointProjectionSession:
 
     # -- preparation ---------------------------------------------------------
 
-    def prepare(self, view: HistoryView, *, controls: dict | None = None) -> PreparedRequest:
+    def prepare(
+        self,
+        view: HistoryView,
+        *,
+        controls: dict | None = None,
+        request_shell: LLMRequestIR | None = None,
+    ) -> PreparedRequest:
         """Build the next request: frozen chunks + newly encoded tail.
 
         Fast path requires the view cursor to equal the frontier (the L1
         writer and the session agree through the receipt chain).  A cursor
         mismatch is an explicit failure — same length is not an append proof.
+
+        ``request_shell`` carries the real request envelope (tools, policy,
+        model hint).  Its codec products besides the item container — the
+        Anthropic system preamble, model, tool definitions, token caps — are
+        preserved verbatim in the prepared payload (review R2).  Without a
+        shell a placeholder envelope is used; production wiring must always
+        pass one.
         """
 
         identity = self._require_identity()
+        _ = identity
         if self._active is None:
             raise ProjectionSessionError("prepare requires an open round (begin_round first)")
         if view.cursor != self.frontier:
@@ -290,31 +410,43 @@ class EndpointProjectionSession:
             endpoint_id=self.binding.endpoint_id,
             model_id=self.binding.model_id,
         )
+        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         # Frozen prefix comes from the amortized cache: no per-item copies,
         # no re-encode of committed items.
         items: list[dict] = list(self._prefix_items)
-        # Tail: messages after the committed prefix.  With no receipts yet
-        # the whole view is the tail (full encode once per generation).
-        from pal.llm.ir import GenerationPolicyIR, LLMRequestIR
-
-        request = LLMRequestIR(
-            messages=view.messages,
-            tools=(),
-            policy=GenerationPolicyIR(max_output_tokens=4096),
-        )
-        encoded = codec.encode(request, context)
-        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
-        tail_items = list(encoded.payload.get(container) or [])
-        items.extend(dict(item) for item in tail_items)
+        if view.messages:
+            shell = request_shell or LLMRequestIR(
+                messages=(),
+                tools=(),
+                policy=GenerationPolicyIR(max_output_tokens=4096),
+            )
+            encoded = codec.encode(replace(shell, messages=view.messages), context)
+            shell_fields = {
+                key: value
+                for key, value in dict(encoded.payload).items()
+                if key != container
+            }
+            self._last_shell_fields = shell_fields
+            tail_items = [
+                dict(item) for item in (dict(encoded.payload).get(container) or [])
+            ]
+        else:
+            # Zero new messages: reuse the frozen prefix and the last request
+            # shell verbatim.  The codec is NOT invoked — its empty-request
+            # fallback could inject semantic content ("Continue.") into an
+            # otherwise no-op request (review edge 3).
+            if self._last_shell_fields is None:
+                raise ProjectionSessionError(
+                    "the first prepare of a generation must carry a non-empty view"
+                )
+            shell_fields = dict(self._last_shell_fields)
+            tail_items = []
+        items.extend(tail_items)
         self._active.prepared_items = items
         self._active.prepared_base_cursor = view.cursor
-        # Items are plain dicts by construction (codec encode output); no
-        # defensive deep conversion — it dominated prepare cost (measured
-        # 9.9ms of 17.4ms at n=800) with zero effect.
-        payload = {
-            container: items,
-            **({"controls": dict(controls)} if controls else {}),
-        }
+        payload: dict[str, Any] = {**shell_fields, container: items}
+        if controls:
+            payload["controls"] = dict(controls)
         return PreparedRequest.build(
             attempt=self._active.attempt,
             base_cursor=view.cursor,
@@ -323,14 +455,23 @@ class EndpointProjectionSession:
 
     # -- repair ---------------------------------------------------------------
 
-    def accept_repaired_round(self, closed: ClosedRound, *, cursor_after: HistoryCursor, block_count: int) -> HistoryCommitReceipt:
+    def accept_repaired_round(
+        self,
+        closed: ClosedRound,
+        *,
+        cursor_after: HistoryCursor,
+        block_count: int,
+    ) -> HistoryCommitReceipt:
         """Seal a repaired round produced by the shared runtime.
 
         The session never repairs by itself; it only accepts runtime-validated
         repaired rounds (dangling calls pruned, native association intact).
+        The repaired calls/results are materialized into the chunk as IR
+        blocks encoded by the shape codec (review R3): a legally preserved
+        call/result pair must reach later requests, not only the receipt.
         """
 
-        from pal.llm.projection_contracts import AppendReceipt
+        from pal.llm.projection_contracts import AppendReceipt, ToolOutcome
 
         if self._active is None or closed.attempt != self._active.attempt:
             raise ProjectionSessionError("repaired round does not match the open round")
@@ -339,6 +480,39 @@ class EndpointProjectionSession:
             if material is None:
                 raise ContinuationUnavailable("repaired round lost required native material")
             self.attach_native(closed.attempt, _candidate_from(material))
+        # Materialize the repaired protocol: assistant tool calls and their
+        # results become IR blocks so the next request carries them.
+        accepted: list[LLMMessageIR] = []
+        if closed.calls:
+            accepted.append(
+                LLMMessageIR(
+                    role=MessageRole.ASSISTANT,
+                    parts=tuple(
+                        ToolCallIR(
+                            call.call_id,
+                            call.name,
+                            json.loads(call.arguments_json),
+                        )
+                        for call in closed.calls
+                    ),
+                )
+            )
+        if closed.results:
+            names = {call.call_id: call.name for call in closed.calls}
+            accepted.append(
+                LLMMessageIR(
+                    role=MessageRole.TOOL,
+                    parts=tuple(
+                        ToolResultIR(
+                            result.call_id,
+                            names.get(result.call_id) or result.call_id,
+                            result.body,
+                            ok=result.outcome is ToolOutcome.SUCCESS,
+                        )
+                        for result in closed.results
+                    ),
+                )
+            )
         receipt = HistoryCommitReceipt(
             attempt=closed.attempt,
             append=AppendReceipt(
@@ -350,8 +524,26 @@ class EndpointProjectionSession:
             native_committed=closed.continuation.kind
             is not NativeContinuationKind.ABSENT,
         )
-        self.observe_commit(receipt)
+        self.observe_commit(receipt, accepted_messages=tuple(accepted))
         return receipt
+
+    def _encode_messages(self, messages: tuple[LLMMessageIR, ...]) -> list[dict]:
+        codec = codec_for_shape(self.binding.wire_shape)
+        context = ShapeContext(
+            wire_shape=self.binding.wire_shape,
+            endpoint_id=self.binding.endpoint_id,
+            model_id=self.binding.model_id,
+        )
+        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
+        encoded = codec.encode(
+            LLMRequestIR(
+                messages=messages,
+                tools=(),
+                policy=GenerationPolicyIR(max_output_tokens=4096),
+            ),
+            context,
+        )
+        return list(dict(encoded.payload).get(container) or [])
 
 
 def _candidate_from(material) -> NativeCandidate:
@@ -363,3 +555,26 @@ def _candidate_from(material) -> NativeCandidate:
         payload_json=material.payload_json,
         call_ids=tuple(material.call_ids),
     )
+
+
+def _wire_items_from_native(shape_value: str, payload_json: str) -> list[dict]:
+    """Project a provider-native response payload into request wire items.
+
+    This is the byte-true path (review R3/R4): the assistant turn that the
+    provider returned is replayed exactly as the provider shaped it, so
+    signatures/encrypted reasoning survive instead of being re-encoded.
+    """
+
+    payload = json.loads(payload_json)
+    if shape_value == "openai_completion":
+        message = payload.get("message")
+        return [dict(message)] if isinstance(message, dict) else []
+    if shape_value == "openai_response":
+        output = payload.get("output")
+        return [dict(item) for item in output] if isinstance(output, list) else []
+    if shape_value == "anthropic_messages":
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return []
+        return [{"role": "assistant", "content": [dict(block) for block in content]}]
+    return []

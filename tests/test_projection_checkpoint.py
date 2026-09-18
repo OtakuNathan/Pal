@@ -59,7 +59,19 @@ def _user(text: str):
 def _committed_session() -> EndpointProjectionSession:
     session = EndpointProjectionSession(LogicalSessionId("pal:resident"))
     session.bind(_binding())
-    session.begin_round(_attempt(session, "a1"), requires_native=False)
+    session.begin_round(_attempt(session, "a1"), requires_native=True)
+    # Native attaches to the OPEN round before the commit (review R4/R7):
+    # post-commit attachments from closed rounds are refused.
+    session.attach_native(
+        _attempt(session, "a1"),
+        NativeCandidate(
+            wire_shape=WireShape.OPENAI_COMPLETION,
+            endpoint_id="e-1",
+            model_id="m-1",
+            payload_json='{"message": {"role": "assistant", "reasoning_content": "x"}}',
+            call_ids=(),
+        ),
+    )
     session.prepare(
         HistoryView(cursor=HistoryCursor.initial(), messages=(_user("q"),))
     )
@@ -72,18 +84,8 @@ def _committed_session() -> EndpointProjectionSession:
                 block_count=1,
             ),
             closed_call_ids=(),
-            native_committed=False,
+            native_committed=True,
         )
-    )
-    session.attach_native(
-        _attempt(session, "a1"),
-        NativeCandidate(
-            wire_shape=WireShape.OPENAI_COMPLETION,
-            endpoint_id="e-1",
-            model_id="m-1",
-            payload_json='{"message": {"role": "assistant", "reasoning_content": "x"}}',
-            call_ids=(),
-        ),
     )
     return session
 
