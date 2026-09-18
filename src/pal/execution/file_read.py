@@ -419,9 +419,18 @@ class FileReadTool:
                 continue
             selected = lines[start - 1 : end]
             numbered: list[str] = []
+            header = (
+                f"──── lines {start}-{end} of {total_lines} ────"
+                if multi_block
+                else ""
+            )
+            # Spans must reference the rendered content, so the block header
+            # (and its newline) is part of the offset math before line spans
+            # are generated; otherwise manifest.slice() credits lines that the
+            # pager window never actually showed.
             cursor = len(bom_notice) + (
                 len("\n\n".join(rendered_blocks)) + 2 if rendered_blocks else 0
-            )
+            ) + len(header) + (1 if header else 0)
             for i, line in enumerate(selected, start=start):
                 display_line = line
                 if i == 1 and display_line.startswith(UTF8_BOM):
@@ -445,8 +454,7 @@ class FileReadTool:
             block_text = "\n".join(numbered)
             remaining = total_lines - end
             block_truncated = end < total_lines
-            if multi_block:
-                header = f"──── lines {start}-{end} of {total_lines} ────"
+            if header:
                 block_body = f"{header}\n{block_text}"
             else:
                 block_body = block_text

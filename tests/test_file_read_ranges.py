@@ -14,7 +14,11 @@ from pathlib import Path
 
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import FileReadTool, FileVisibilityCache
-from pal.execution.file_state import FileStateCache
+from pal.execution.file_state import FileStateCache, SessionFileStateCache
+from pal.execution.session_state import (
+    FileDeliveryManifest,
+    InMemoryLogicalExecutionState,
+)
 from pal.shared import RuntimeStatus
 
 
@@ -241,6 +245,175 @@ class BatchReadEditAuthorityTests(_RangesTestMixin, unittest.TestCase):
         )
         self.assertNotEqual(edited.status, RuntimeStatus.OK)
         self.assertEqual(edited.structured.get("error_code"), "PARTIAL_READ")
+
+class DeliverySpanOffsetTests(_RangesTestMixin, unittest.TestCase):
+    """Delivery spans must reference the rendered content, headers included.
+
+    The regression these tests guard: block headers were prepended to the
+    rendered text after spans were generated, so every span was short by
+    ``len(header) + 1``.  ``FileDeliveryManifest.slice()`` then credited lines
+    the pager window never showed, silently granting edit authority for
+    source the model had not received.
+    """
+
+    def _manifest(self, result) -> FileDeliveryManifest:
+        manifest = FileDeliveryManifest.from_dict(result.context_delivery)
+        self.assertIsNotNone(manifest)
+        return manifest
+
+    def test_delivery_spans_slice_to_exact_numbered_lines(self) -> None:
+        path = self._write_tmp(
+            "spans.txt", "\n".join(f"line {i}" for i in range(1, 21))
+        )
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "ranges": [
+                    {"offset": 1, "limit": 3},
+                    {"offset": 10, "limit": 2},
+                ],
+            }
+        )
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        manifest = self._manifest(result)
+        self.assertEqual([span.start_line for span in manifest.spans], [1, 2, 3, 10, 11])
+        for span in manifest.spans:
+            expected = f"{span.start_line:>6}\tline {span.start_line}"
+            self.assertEqual(
+                result.text[span.start_offset:span.end_offset],
+                expected,
+                f"span for line {span.start_line} does not slice to its rendered line",
+            )
+
+    def test_pager_window_does_not_credit_undelivered_lines(self) -> None:
+        """Requested lines are not delivered lines: after slicing the
+        manifest to a pager window, only lines actually visible in that
+        window may be credited as fully delivered."""
+
+        path = self._write_tmp(
+            "paged.txt", "\n".join(f"row {i}" for i in range(1, 201))
+        )
+        result = self.tool.invoke(
+            {"file_path": str(path), "ranges": [{"offset": 1, "limit": 30}]}
+        )
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        manifest = self._manifest(result)
+
+        cut = 260
+        sliced = manifest.slice(0, cut)
+        self.assertIsNotNone(sliced)
+        window = result.text[:cut]
+
+        fully_credited: list[int] = []
+        partial_lines: list[int] = []
+        for span in sliced.spans:
+            if span.visible_start_in_line <= 0 and span.visible_end_in_line >= span.line_length:
+                fully_credited.append(span.start_line)
+                expected = f"{span.start_line:>6}\trow {span.start_line}"
+                self.assertEqual(
+                    window[span.start_offset:span.end_offset],
+                    expected,
+                    f"line {span.start_line} is credited as delivered but is not "
+                    "visible in the pager window",
+                )
+            else:
+                partial_lines.append(span.start_line)
+
+        # The window cuts mid-line, so the cut line must be marked partial and
+        # every line beyond it must be absent from the sliced manifest.
+        self.assertTrue(partial_lines, "window end should land inside a line")
+        last_credited = max(fully_credited)
+        self.assertEqual(
+            max(partial_lines), last_credited + 1,
+            "the first partially visible line must follow the last fully credited one",
+        )
+        self.assertNotIn(last_credited + 2, fully_credited + partial_lines)
+
+
+class DeferredDeliveryAuthorityTests(unittest.TestCase):
+    """Full deferred chain: render -> pager slice -> record_delivery -> grant.
+
+    A deferred read authorizes nothing by itself; only the manifest slices
+    the pager actually delivers become edit authority.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        path = Path(self._tmpdir) / "deferred.txt"
+        path.write_text(
+            "\n".join(f"row {i}" for i in range(1, 201)), encoding="utf-8"
+        )
+        self.path = path
+        self.backend = InMemoryLogicalExecutionState()
+        self.backend.begin_input(
+            execution_lifetime_id="life-1", input_id="input-1"
+        )
+        self.context = self.backend.context("life-1")
+        self.cache = SessionFileStateCache(backend=self.backend, context=self.context)
+        self.tool = FileReadTool(
+            cache=self.cache,
+            visibility_cache=FileVisibilityCache(),
+            defer_delivery=True,
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _deferred_result(self):
+        result = self.tool.invoke(
+            {"file_path": str(self.path), "ranges": [{"offset": 1, "limit": 30}]}
+        )
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        return result
+
+    def test_paged_delivery_grants_only_lines_actually_shown(self) -> None:
+        result = self._deferred_result()
+        edit_tool = FileEditTool(cache=self.cache)
+
+        # Nothing committed yet: a deferred read alone grants no authority.
+        denied = edit_tool.invoke(
+            {"file_path": str(self.path), "edits": [{"old_string": "row 5\n", "new_string": "x\n"}]}
+        )
+        self.assertNotEqual(denied.status, RuntimeStatus.OK)
+
+        # The pager delivers only the first 256-char window.
+        manifest = FileDeliveryManifest.from_dict(result.context_delivery)
+        sliced = manifest.slice(0, 256)
+        self.assertIsNotNone(sliced)
+        committed = sliced.to_dict()
+        committed["result_id"] = "pager:page-1"
+        self.backend.record_delivery(
+            execution_lifetime_id="life-1", delivery=committed
+        )
+
+        # A line fully inside the delivered window is now authorized...
+        granted = edit_tool.invoke(
+            {"file_path": str(self.path), "edits": [{"old_string": "row 5\n", "new_string": "shown\n"}]}
+        )
+        self.assertEqual(granted.status, RuntimeStatus.OK, granted.llm_text)
+
+    def test_paged_delivery_denies_lines_outside_the_window(self) -> None:
+        result = self._deferred_result()
+        manifest = FileDeliveryManifest.from_dict(result.context_delivery)
+        sliced = manifest.slice(0, 256)
+        committed = sliced.to_dict()
+        committed["result_id"] = "pager:page-1"
+        self.backend.record_delivery(
+            execution_lifetime_id="life-1", delivery=committed
+        )
+        edit_tool = FileEditTool(cache=self.cache)
+
+        # Line cut mid-window: only a fragment was delivered.
+        partial = edit_tool.invoke(
+            {"file_path": str(self.path), "edits": [{"old_string": "row 19\n", "new_string": "x\n"}]}
+        )
+        self.assertNotEqual(partial.status, RuntimeStatus.OK)
+
+        # Line never shown in the window: no authority at all.
+        unseen = edit_tool.invoke(
+            {"file_path": str(self.path), "edits": [{"old_string": "row 30\n", "new_string": "x\n"}]}
+        )
+        self.assertNotEqual(unseen.status, RuntimeStatus.OK)
 
 
 if __name__ == "__main__":
