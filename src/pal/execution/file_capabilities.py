@@ -40,16 +40,16 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 FILE_READ_GUIDANCE = ToolGuidance(
     purpose=(
-        "Read selected lines from a UTF-8 text file and return line-numbered content. "
-        "One call reads one file; pass ranges=[{offset, limit}, ...] to deliver multiple line "
-        "blocks of that file in a single call, like sed -n 'a,bp;c,dp'. When an unchanged "
-        "marker is returned, refer to the earlier read result and do not call read_file again "
-        "unless the file changed or another range is needed."
+        "Read selected lines from one UTF-8 text file, line-numbered. "
+        "Pass ranges=[{offset, limit}, ...] to deliver multiple blocks of that file in one call, "
+        "like sed -n 'a,bp;c,dp'."
     ),
     use_when=(
         "Reading local source, configuration, or other UTF-8 text. Use ranges for multiple "
         "blocks of the same file (for example scattered definitions found by rg) instead of "
         "several single-range calls; each block renders with its own header and truncation note. "
+        "When an unchanged marker is returned, reuse the earlier read result and do not call again "
+        "unless the file changed or another range is needed. "
         "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. "
         "Reuse valid delivered reads. Shell output alone does not register a file-tool read snapshot."
     ),
