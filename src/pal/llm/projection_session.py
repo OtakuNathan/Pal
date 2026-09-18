@@ -113,6 +113,10 @@ class EndpointProjectionSession:
         self._committed_attempts: dict[str, HistoryCommitReceipt] = {}
         self._frontier_item_count: int = 0
         self._active: _ActiveRound | None = None
+        # Amortized assembled prefix of all frozen chunk items; extended on
+        # commit only, never rebuilt per prepare (PLAN §11: no per-round
+        # deepcopy of old chunks).
+        self._prefix_items: list[dict] = []
         self.retired = False
 
     # -- binding lifecycle -------------------------------------------------
@@ -136,12 +140,14 @@ class EndpointProjectionSession:
         self._frontier_item_count = 0
         self._committed_attempts = {}
         self.frontier = HistoryCursor.initial()
+        self._prefix_items = []
         self._active = None
 
     def retire(self) -> None:
         self.retired = True
         self.native_by_attempt = {}
         self.chunks = ()
+        self._prefix_items = []
         self._active = None
 
     def _require_identity(self) -> ProjectionIdentity:
@@ -242,6 +248,7 @@ class EndpointProjectionSession:
             prefix_digest=receipt.append.after.prefix_digest,
         )
         self.chunks = (*self.chunks, chunk)
+        self._prefix_items.extend(items)
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
         self.frontier = receipt.append.after
         self._frontier_item_count = frozen_item_count
@@ -284,7 +291,9 @@ class EndpointProjectionSession:
             endpoint_id=self.binding.endpoint_id,
             model_id=self.binding.model_id,
         )
-        items: list[dict] = [dict(item) for chunk in self.chunks for item in chunk.items]
+        # Frozen prefix comes from the amortized cache: no per-item copies,
+        # no re-encode of committed items.
+        items: list[dict] = list(self._prefix_items)
         # Tail: messages after the committed prefix.  With no receipts yet
         # the whole view is the tail (full encode once per generation).
         from pal.llm.ir import GenerationPolicyIR, LLMRequestIR

@@ -573,16 +573,6 @@ def _requested_blocks(
     return tuple(blocks) or ((default_offset, default_limit),)
 
 
-def _block_limit_for(
-    requested_blocks: tuple[tuple[int, int], ...],
-    start: int,
-) -> int:
-    for block_offset, block_limit in requested_blocks:
-        if block_offset == start:
-            return block_limit
-    return DEFAULT_LIMIT
-
-
 def _blocks_cover_full_file(
     normalized: list[tuple[int, int]],
     total_lines: int,
