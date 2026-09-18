@@ -15,7 +15,10 @@ from typing import Any, Mapping
 
 from pal.llm.ir import WireShape
 from pal.llm.projection_contracts import (
+    AppendReceipt,
+    AttemptKey,
     EndpointBinding,
+    HistoryCommitReceipt,
     HistoryCursor,
     LogicalSessionId,
     OwnerFence,
@@ -76,6 +79,25 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "call_ids": list(record["call_ids"]),
             }
             for attempt_id, record in sorted(session.native_by_attempt.items())
+        ],
+        "committed_attempts": [
+            {
+                "attempt_id": receipt.attempt.attempt_id,
+                "before": {
+                    "history_epoch": receipt.append.before.history_epoch,
+                    "block_sequence": receipt.append.before.block_sequence,
+                    "prefix_digest": receipt.append.before.prefix_digest,
+                },
+                "after": {
+                    "history_epoch": receipt.append.after.history_epoch,
+                    "block_sequence": receipt.append.after.block_sequence,
+                    "prefix_digest": receipt.append.after.prefix_digest,
+                },
+                "block_count": receipt.append.block_count,
+                "closed_call_ids": list(receipt.closed_call_ids),
+                "native_committed": receipt.native_committed,
+            }
+            for attempt_id, receipt in sorted(session._committed_attempts.items())
         ],
     }
 
@@ -209,6 +231,48 @@ def restore_projection(
     if generation < 0:
         raise ProjectionCheckpointError("negative projection generation")
 
+    committed_raw = section.get("committed_attempts") or ()
+    if not isinstance(committed_raw, (list, tuple)):
+        raise ProjectionCheckpointError("committed_attempts is invalid")
+    committed_attempts: dict[str, HistoryCommitReceipt] = {}
+    for item in committed_raw:
+        if not isinstance(item, Mapping):
+            raise ProjectionCheckpointError("committed attempt entry is not an object")
+        try:
+            before = HistoryCursor(
+                history_epoch=int(item["before"]["history_epoch"]),
+                block_sequence=int(item["before"]["block_sequence"]),
+                prefix_digest=str(item["before"]["prefix_digest"]),
+            )
+            after = HistoryCursor(
+                history_epoch=int(item["after"]["history_epoch"]),
+                block_sequence=int(item["after"]["block_sequence"]),
+                prefix_digest=str(item["after"]["prefix_digest"]),
+            )
+            receipt = HistoryCommitReceipt(
+                attempt=AttemptKey(
+                    identity=ProjectionIdentity(
+                        session=session.session_id,
+                        binding=binding,
+                        projection_generation=generation,
+                    ),
+                    owner_fence=OwnerFence(0),
+                    attempt_id=str(item.get("attempt_id") or ""),
+                ),
+                append=AppendReceipt(
+                    before=before,
+                    after=after,
+                    block_count=int(item.get("block_count", 0)),
+                ),
+                closed_call_ids=tuple(str(call) for call in (item.get("closed_call_ids") or ())),
+                native_committed=bool(item.get("native_committed")),
+            )
+        except (KeyError, TypeError, ValueError, ProjectionContractError) as exc:
+            raise ProjectionCheckpointError(
+                f"committed attempt entry is invalid: {exc}"
+            ) from exc
+        committed_attempts[receipt.attempt.attempt_id] = receipt
+
     # Install atomically: everything validated above; these assignments are
     # the only visible restore boundary.
     session.bind(binding)
@@ -225,5 +289,8 @@ def restore_projection(
         }
         for record in native_records
     }
+    # Receipt ledger survives restart: idempotent replays of pre-restart
+    # receipts stay no-ops and conflicting ones stay refused (PLAN 8.2).
+    session._committed_attempts = committed_attempts
     _ = OwnerFence(0)  # fence bump happens in the runtime when it reowns
     return True
