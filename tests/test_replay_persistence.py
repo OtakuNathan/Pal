@@ -29,6 +29,7 @@ from pal.llm.serde import message_from_payload, message_to_payload
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
 from pal.memory.service import MemoryService
+from pal.memory.runtime_state import MemoryRuntimeStatePort
 from pal.memory.turn_ir import L1TurnState, L1TurnStore
 
 
@@ -204,6 +205,47 @@ class SettledReplayIdentityTests(unittest.TestCase):
         )
         restored = service.l1_store.turns.get("bunshin-turn")
         self.assertIsNotNone(restored.messages[-1].replay)
+
+    def test_runtime_state_restore_keeps_encoded_prefix_identical(self) -> None:
+        """Restart-style snapshot/restore must not move the encoded prefix:
+        restore used to strip replay envelopes, killing the cache prefix at
+        every restart."""
+
+        envelope = {
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "chain of thought",
+                "content": "answer",
+            }
+        }
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="hello")
+        service.upsert_l1_assistant(
+            "turn-1",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(ReasoningPartIR("chain of thought"), TextPartIR("answer")),
+                replay=ReplayEnvelope(
+                    WireShape.OPENAI_COMPLETION, "demo", "demo-model", envelope
+                ),
+            ),
+        )
+        settled = service.settle_l1_turn("turn-1")
+        before = _encode_messages(WireShape.OPENAI_COMPLETION, settled.messages)
+
+        payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
+        restored = MemoryService()
+        port = MemoryRuntimeStatePort(restored)
+        port.install_prepared_state(port.prepare_restore_state(payload))
+
+        turn = restored.l1_store.turns.get("turn-1")
+        self.assertIsNotNone(turn.messages[-1].replay, "restore dropped the replay envelope")
+        after = _encode_messages(WireShape.OPENAI_COMPLETION, turn.messages)
+        self.assertEqual(
+            _payload_hash(before),
+            _payload_hash(after),
+            "restore changed the encoded prefix",
+        )
 
 
 if __name__ == "__main__":

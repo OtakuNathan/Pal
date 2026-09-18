@@ -175,7 +175,11 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
 def _normalize_closed_turn_projection(
     messages: tuple[LLMMessageIR, ...],
 ) -> tuple[LLMMessageIR, ...]:
-    """Strip provider transients while preserving completed tool evidence."""
+    """Strip provider-neutral reasoning transients while preserving evidence.
+
+    Wire replay envelopes survive restore: same-endpoint encodes stay
+    byte-identical, so the prompt-cache prefix crosses restart boundaries.
+    """
 
     migrated: list[LLMMessageIR] = []
     for message in messages:
@@ -187,7 +191,7 @@ def _normalize_closed_turn_projection(
                 message,
                 parts=parts,
                 state=MessageState.COMPLETE,
-                replay=None,
+                replay=message.replay,
             )
         )
     return tuple(migrated)
@@ -232,9 +236,9 @@ def _normalize_tool_protocol(
                 message,
                 parts=parts,
                 state=MessageState.COMPLETE,
-                replay=None,
+                replay=message.replay,
             )
-            if changed or message.replay is not None
+            if changed
             else message
         )
         repaired = repaired or changed
