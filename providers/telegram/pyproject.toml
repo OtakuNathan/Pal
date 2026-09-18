@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pal-channel-provider-telegram"
-version = "0.3.2"
+version = "0.3.3"
 description = "Telegram channel provider for Pal"
 readme = "README.md"
 authors = [{ name = "Nathan Wu (OtakuNathan)" }]
