@@ -248,6 +248,35 @@ class SettledReplayIdentityTests(unittest.TestCase):
             "restore changed the encoded prefix",
         )
 
+def _assistant_with_dangling_call() -> LLMMessageIR:
+    envelope = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "let me check"}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "lookup",
+                "arguments": "{}",
+            },
+        ]
+    }
+    return LLMMessageIR(
+        role=MessageRole.ASSISTANT,
+        state=MessageState.COMPLETE,
+        parts=(
+            TextPartIR("let me check"),
+            ToolCallIR(call_id="call-1", name="lookup"),
+        ),
+        replay=ReplayEnvelope(
+            WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
+        ),
+    )
+
+
 class RestoreProtocolRepairTests(unittest.TestCase):
     """Restore repair must reach the wire, not just the IR view.
 
@@ -258,32 +287,7 @@ class RestoreProtocolRepairTests(unittest.TestCase):
     """
 
     def _assistant_with_dangling_call(self) -> LLMMessageIR:
-        envelope = {
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "let me check"}],
-                },
-                {
-                    "type": "function_call",
-                    "call_id": "call-1",
-                    "name": "lookup",
-                    "arguments": "{}",
-                },
-            ]
-        }
-        return LLMMessageIR(
-            role=MessageRole.ASSISTANT,
-            state=MessageState.COMPLETE,
-            parts=(
-                TextPartIR("let me check"),
-                ToolCallIR(call_id="call-1", name="lookup"),
-            ),
-            replay=ReplayEnvelope(
-                WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
-            ),
-        )
+        return _assistant_with_dangling_call()
 
     def test_restore_repair_does_not_smuggle_dangling_call_onto_wire(self) -> None:
         service = MemoryService()
@@ -380,6 +384,118 @@ class RestoreProtocolRepairTests(unittest.TestCase):
             _payload_hash(after),
             "restore changed the encoded prefix for a protocol-intact turn",
         )
+
+class LiveTurnCloseTests(unittest.TestCase):
+    """interrupt()/abort() prune dangling calls in-place (no restore involved):
+    the pruned message must lose its stale replay envelope too, and a later
+    snapshot/restore must not resurrect it — after live pruning the parts
+    look legal, so the restore normalizer cannot detect the leftover envelope.
+    """
+
+    def _service_with_dangling_call(self) -> MemoryService:
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="hello")
+        service.upsert_l1_assistant("turn-1", _assistant_with_dangling_call())
+        return service
+
+    def _assert_clean_wire(self, messages, call_id: str = "call-1") -> None:
+        encoded = _encode_messages(WireShape.OPENAI_RESPONSE, messages)
+        dumped = json.dumps(encoded, ensure_ascii=False, default=str)
+        self.assertNotIn(call_id, dumped, "pruned call re-entered the wire request")
+        self.assertIn("let me check", dumped)
+
+    def test_interrupt_does_not_smuggle_dangling_call_onto_wire(self) -> None:
+        service = self._service_with_dangling_call()
+        interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
+        self.assertEqual(interrupted.state, L1TurnState.INTERRUPTED)
+        self._assert_clean_wire(interrupted.messages)
+
+    def test_abort_does_not_smuggle_dangling_call_onto_wire(self) -> None:
+        service = self._service_with_dangling_call()
+        aborted = service.abort_l1_turn("turn-1", reason="stop")
+        self.assertEqual(aborted.state, L1TurnState.ABORTED)
+        self._assert_clean_wire(aborted.messages)
+
+    def test_interrupt_then_restore_stays_clean(self) -> None:
+        """Live pruning happens first, so the restore normalizer sees a
+        legal text-only message (changed=False) and keeps whatever replay
+        the message still carries: only retiring the envelope at interrupt
+        time keeps this path clean."""
+
+        service = self._service_with_dangling_call()
+        service.interrupt_l1_turn("turn-1", reason="stop")
+
+        payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
+        restored = MemoryService()
+        port = MemoryRuntimeStatePort(restored)
+        port.install_prepared_state(port.prepare_restore_state(payload))
+
+        self._assert_clean_wire(
+            restored.l1_store.turns.get("turn-1").messages
+        )
+
+    def test_interrupt_keeps_paired_call_and_prunes_only_dangling(self) -> None:
+        """Two calls in one assistant message: one answered, one dangling.
+        The answered call and its result must survive; only the dangling one
+        disappears — and its disappearance retires the envelope for that
+        message, not for the whole turn."""
+
+        envelope = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "checking"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-a",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-b",
+                    "name": "fetch",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="hello")
+        service.upsert_l1_assistant(
+            "turn-1",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                state=MessageState.COMPLETE,
+                parts=(
+                    TextPartIR("checking"),
+                    ToolCallIR(call_id="call-a", name="lookup"),
+                    ToolCallIR(call_id="call-b", name="fetch"),
+                ),
+                replay=ReplayEnvelope(
+                    WireShape.OPENAI_RESPONSE, "demo", "demo-model", envelope
+                ),
+            ),
+        )
+        service.append_l1_tool_result(
+            "turn-1",
+            ToolResultIR(call_id="call-a", name="lookup", content="42"),
+        )
+
+        interrupted = service.interrupt_l1_turn("turn-1", reason="stop")
+        encoded = _encode_messages(WireShape.OPENAI_RESPONSE, interrupted.messages)
+        dumped = json.dumps(encoded, ensure_ascii=False, default=str)
+
+        self.assertNotIn("call-b", dumped, "dangling call re-entered the wire request")
+        self.assertIn(
+            "call-a", dumped, "answered call must survive interruption"
+        )
+        self.assertIn(
+            "function_call_output", dumped,
+            "the answered call's result must survive interruption",
+        )
+        self.assertIn("checking", dumped)
 
 
 if __name__ == "__main__":

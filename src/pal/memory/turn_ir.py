@@ -267,9 +267,16 @@ class L1TurnIR:
                 )
                 if not parts:
                     continue
+                protocol_changed = parts != message.parts
                 message = replace(
                     message,
                     parts=parts,
+                    # Pruned protocol content must not survive in the wire
+                    # replay envelope: same-endpoint encoders prefer replay
+                    # over parts, so a stale envelope would re-emit the pruned
+                    # dangling call onto the wire. Re-encode pruned messages
+                    # from their repaired parts instead.
+                    replay=None if protocol_changed else message.replay,
                     semantic_kind=(
                         "assistant_reply"
                         if not any(isinstance(part, ToolCallIR) for part in parts)
