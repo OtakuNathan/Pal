@@ -197,6 +197,51 @@ class BatchReadEditAuthorityTests(_RangesTestMixin, unittest.TestCase):
         self.assertIn([1, 3], covered)
         self.assertIn([13, 15], covered)
 
+    def test_edit_spanning_gap_between_read_blocks_is_rejected(self) -> None:
+        """A single match reaching from a covered block into the unread gap
+        must not slip through per-block authorization."""
+
+        path = self._write_tmp("span.txt", "\n".join(f"s{i}" for i in range(1, 16)))
+        self.tool.invoke(
+            {
+                "file_path": str(path),
+                "ranges": [
+                    {"offset": 1, "limit": 3},
+                    {"offset": 13, "limit": 3},
+                ],
+            }
+        )
+        edit_tool = FileEditTool(cache=self.cache)
+        # Spans line 3 (covered) into line 4 (unread gap).
+        edited = edit_tool.invoke(
+            {"file_path": str(path), "edits": [{"old_string": "s3\ns4", "new_string": "x\ny"}]}
+        )
+        self.assertNotEqual(edited.status, RuntimeStatus.OK)
+        self.assertEqual(edited.structured.get("error_code"), "PARTIAL_READ")
+
+    def test_replace_all_with_matches_in_uncovered_region_is_rejected(self) -> None:
+        path = self._write_tmp(
+            "dup.txt", "\n".join(["dup"] * 15)
+        )
+        self.tool.invoke(
+            {
+                "file_path": str(path),
+                "ranges": [
+                    {"offset": 1, "limit": 3},
+                    {"offset": 13, "limit": 3},
+                ],
+            }
+        )
+        edit_tool = FileEditTool(cache=self.cache)
+        edited = edit_tool.invoke(
+            {
+                "file_path": str(path),
+                "edits": [{"old_string": "dup", "new_string": "hit", "replace_all": True}],
+            }
+        )
+        self.assertNotEqual(edited.status, RuntimeStatus.OK)
+        self.assertEqual(edited.structured.get("error_code"), "PARTIAL_READ")
+
 
 if __name__ == "__main__":
     unittest.main()
