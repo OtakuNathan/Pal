@@ -128,11 +128,21 @@ class ShapeEndpointInvoker:
                 evidence.observe(frame)
                 yield frame
 
+        # P4: capture native continuation material BEFORE response hooks can
+        # drop it; semantics flow through untouched (pass-through iterator).
+        from pal.llm.native_capture import decode_with_capture
+
+        capture = decode_with_capture(
+            codec.decode(observed_frames(), context),
+            endpoint_id=str(endpoint.endpoint_id),
+            model_id=str(endpoint.model_id),
+        )
+
         try:
             decoded = self.response_hooks.normalize(
                 endpoint_id=str(endpoint.endpoint_id), provider_id=str(endpoint.provider),
                 model_id=str(endpoint.model_id), wire_shape=shape, request=request,
-                updates=codec.decode(observed_frames(), context),
+                updates=capture,
             )
             for update in decoded:
                 response = replace(update.response, attempt_ids=(request_id,))
@@ -165,6 +175,7 @@ class ShapeEndpointInvoker:
                 returned_model=evidence.returned_model, actual_provider=evidence.actual_provider,
                 service_tier=evidence.service_tier, elapsed_seconds=time.monotonic() - started_at,
                 error_type=error_type,
+                native_payload_json=_captured_native_payload(capture),
             )
             diag = dict(
                 diagnostics, request_id=request_id, endpoint_id=attempt.endpoint_id,
@@ -198,3 +209,16 @@ class ShapeEndpointInvoker:
         if self.transport is None:
             raise RuntimeError("LLM JSON transport is not configured")
         return self.transport
+
+
+def _captured_native_payload(capture) -> str:
+    """Best-effort native payload for diagnostics; authoritative capture is
+    consumed by the projection session owner, not by the attempt record."""
+
+    try:
+        candidate = capture.result()
+    except Exception:
+        return ""
+    if candidate is None:
+        return ""
+    return candidate.payload_json

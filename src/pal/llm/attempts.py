@@ -19,3 +19,6 @@ class LLMAttemptResult:
     service_tier: str = ""
     elapsed_seconds: float = 0.0
     error_type: str = ""
+    # P4: canonical native continuation payload captured before response
+    # hooks dropped it (empty when the attempt produced no native envelope).
+    native_payload_json: str = ""
