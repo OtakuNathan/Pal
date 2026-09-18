@@ -126,11 +126,12 @@ class EndpointProjectionSession:
         # deepcopy of old chunks).  Private mutable dicts: the public chunk
         # view holds deep-frozen snapshots (review R7).
         self._prefix_items: list[dict] = []
-        # Request shell fields (everything the codec emits besides the item
-        # container: system preamble, model, tool definitions, policy caps).
-        # Cached at the first tail encode so zero-tail prepares can reuse the
-        # shell without invoking the codec's empty-request fallback.
-        self._last_shell_fields: dict[str, Any] | None = None
+        # Unfrozen wire tail kept across rounds (review F2): trailing items
+        # trimmed from a commit (e.g. Anthropic user-role tool results) stay
+        # session-owned and are re-injected into every prepare until a later
+        # commit freezes past them.  Semantic acceptance and wire freezing
+        # are different coordinates.
+        self._pending_wire_tail: list[dict] = []
         self._owner_fence = 0
         self.retired = False
 
@@ -158,7 +159,7 @@ class EndpointProjectionSession:
         self._committed_attempts = {}
         self.frontier = HistoryCursor.initial()
         self._prefix_items = []
-        self._last_shell_fields = None
+        self._pending_wire_tail = []
         self._active = None
 
     def retire(self) -> None:
@@ -166,6 +167,7 @@ class EndpointProjectionSession:
         self.native_by_attempt = {}
         self.chunks = ()
         self._prefix_items = []
+        self._pending_wire_tail = []
         self._active = None
 
     def _require_identity(self) -> ProjectionIdentity:
@@ -317,6 +319,16 @@ class EndpointProjectionSession:
                     self.binding.wire_shape, accepted_native["payload_json"]
                 )
             )
+            # One representation per assistant contribution (review F3):
+            # when native carries the assistant turn, accepted IR messages
+            # must not repeat its tool calls — only tool results (a separate
+            # contribution) may join.
+            for message in accepted_messages:
+                if message.role == MessageRole.ASSISTANT and message.tool_calls:
+                    raise ProjectionSessionError(
+                        "accepted IR messages repeat the assistant tool calls "
+                        "already carried by the native material"
+                    )
         if accepted_messages:
             materialized.extend(
                 dict(item) for item in self._encode_messages(tuple(accepted_messages))
@@ -333,10 +345,17 @@ class EndpointProjectionSession:
         # Trim trailing mergeable items back into the unfrozen tail; they are
         # re-encoded (bounded cost) until a later commit freezes past them.
         frozen_item_count = len(self._active.prepared_items)
+        unfrozen_suffix: list[dict] = []
         if self.binding.wire_shape.value == "anthropic_messages":
             while items and isinstance(items[-1], dict) and items[-1].get("role") == "user":
+                unfrozen_suffix.insert(0, items[-1])
                 items = items[:-1]
                 frozen_item_count -= 1
+        # The trimmed suffix stays session-owned instead of vanishing (review
+        # F2): semantic coverage moved past it, but the wire has not frozen
+        # it.  Every later prepare re-injects it until a commit freezes past
+        # it — callers never re-supply already-accepted results by hand.
+        self._pending_wire_tail = [dict(item) for item in unfrozen_suffix]
         if not items:
             raise ProjectionSessionError(
                 "round produced no prefix-stable items to freeze"
@@ -374,6 +393,8 @@ class EndpointProjectionSession:
 
     # -- preparation ---------------------------------------------------------
 
+    _PREAMBLE_ROLES = frozenset({"system", "developer"})
+
     def prepare(
         self,
         view: HistoryView,
@@ -381,22 +402,27 @@ class EndpointProjectionSession:
         controls: dict | None = None,
         request_shell: LLMRequestIR | None = None,
     ) -> PreparedRequest:
-        """Build the next request: frozen chunks + newly encoded tail.
+        """Build the next request: preamble + frozen chunks + pending + tail.
 
         Fast path requires the view cursor to equal the frontier (the L1
         writer and the session agree through the receipt chain).  A cursor
         mismatch is an explicit failure — same length is not an append proof.
 
-        ``request_shell`` carries the real request envelope (tools, policy,
-        model hint).  Its codec products besides the item container — the
-        Anthropic system preamble, model, tool definitions, token caps — are
-        preserved verbatim in the prepared payload (review R2).  Without a
-        shell a placeholder envelope is used; production wiring must always
-        pass one.
+        Shell/tail separation (review F1): ``request_shell`` owns the stable
+        request envelope — its ``messages`` are the preamble (system /
+        developer heads), its tools/policy drive the codec fields (model,
+        max_tokens, tool definitions, the Anthropic top-level ``system``).
+        The shell is encoded VERBATIM on every prepare (O(preamble)), so the
+        preamble survives every incremental round and honors per-request
+        budgets; only preamble-role messages from the shell enter the item
+        array (conversation heads in the shell stay with the conversation,
+        where the frontier already covers them).  The tail is encoded
+        separately with an explicit boundary-context flag so position-
+        sensitive projections (Completion developer promotion) match
+        whole-history encoding.
         """
 
-        identity = self._require_identity()
-        _ = identity
+        self._require_identity()
         if self._active is None:
             raise ProjectionSessionError("prepare requires an open round (begin_round first)")
         if view.cursor != self.frontier:
@@ -411,37 +437,81 @@ class EndpointProjectionSession:
             model_id=self.binding.model_id,
         )
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
-        # Frozen prefix comes from the amortized cache: no per-item copies,
-        # no re-encode of committed items.
-        items: list[dict] = list(self._prefix_items)
-        if view.messages:
-            shell = request_shell or LLMRequestIR(
-                messages=(),
-                tools=(),
-                policy=GenerationPolicyIR(max_output_tokens=4096),
+        shell = request_shell or LLMRequestIR(
+            messages=(),
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=4096),
+        )
+        # 1) Shell envelope, encoded verbatim each prepare (small, stable).
+        #    Even a message-less shell (pure policy/tools change) produces
+        #    envelope fields; the codec's empty-request fallback items live
+        #    in the container and are simply discarded here.
+        shell_fields: dict[str, Any] = {}
+        preamble_items: list[dict] = []
+        encoded_shell = codec.encode(shell, context)
+        shell_payload = dict(encoded_shell.payload)
+        shell_fields = {
+            key: value for key, value in shell_payload.items() if key != container
+        }
+        preamble_only = tuple(
+            message
+            for message in shell.messages
+            if message.role.value in self._PREAMBLE_ROLES
+        )
+        if preamble_only:
+            encoded_preamble = codec.encode(
+                replace(shell, messages=preamble_only), context
             )
-            encoded = codec.encode(replace(shell, messages=view.messages), context)
-            shell_fields = {
-                key: value
-                for key, value in dict(encoded.payload).items()
-                if key != container
-            }
-            self._last_shell_fields = shell_fields
+            # Only wire items actually mapped to a preamble message (via the
+            # codec's own spans) enter the request.  The codec's empty-array
+            # fallback ("Continue.") has no span and is excluded here.
+            spanned_indexes: set[int] = set()
+            for span in encoded_preamble.message_spans:
+                for path in span.wire_item_paths:
+                    if len(path) >= 2 and path[0] == container and isinstance(path[1], int):
+                        spanned_indexes.add(path[1])
+            container_items = list(
+                dict(encoded_preamble.payload).get(container) or []
+            )
+            preamble_items = [
+                dict(container_items[index])
+                for index in sorted(spanned_indexes)
+                if index < len(container_items)
+            ]
+        # 2) Tail encode with explicit boundary context: position-sensitive
+        # projections must see that a conversation prefix exists even though
+        # the frozen items are not in this encode batch.
+        if view.messages:
+            tail_context = replace(
+                context,
+                has_conversation_prefix=bool(
+                    self._prefix_items or self._pending_wire_tail or preamble_items
+                ),
+            )
+            encoded_tail = codec.encode(replace(shell, messages=view.messages), tail_context)
             tail_items = [
-                dict(item) for item in (dict(encoded.payload).get(container) or [])
+                dict(item)
+                for item in (dict(encoded_tail.payload).get(container) or [])
             ]
         else:
-            # Zero new messages: reuse the frozen prefix and the last request
-            # shell verbatim.  The codec is NOT invoked — its empty-request
-            # fallback could inject semantic content ("Continue.") into an
-            # otherwise no-op request (review edge 3).
-            if self._last_shell_fields is None:
-                raise ProjectionSessionError(
-                    "the first prepare of a generation must carry a non-empty view"
-                )
-            shell_fields = dict(self._last_shell_fields)
             tail_items = []
-        items.extend(tail_items)
+        items: list[dict] = [
+            *(dict(item) for item in preamble_items),
+            *self._prefix_items,
+            *(dict(item) for item in self._pending_wire_tail),
+            *tail_items,
+        ]
+        # Anthropic merges adjacent user-role wire messages (source-verified
+        # _append_message behavior), so the pending/tail boundary must merge
+        # the same way a whole-history encode would — otherwise assembled
+        # requests differ from full encodings by one split user message.
+        if (
+            self.binding.wire_shape.value == "anthropic_messages"
+            and self._pending_wire_tail
+            and tail_items
+        ):
+            boundary = len(preamble_items) + len(self._prefix_items) + len(self._pending_wire_tail) - 1
+            _merged, items = _merge_anthropic_user_boundary(items, boundary)
         self._active.prepared_items = items
         self._active.prepared_base_cursor = view.cursor
         payload: dict[str, Any] = {**shell_fields, container: items}
@@ -475,15 +545,21 @@ class EndpointProjectionSession:
 
         if self._active is None or closed.attempt != self._active.attempt:
             raise ProjectionSessionError("repaired round does not match the open round")
-        if closed.continuation.kind is NativeContinuationKind.REQUIRED:
+        # One representation per assistant contribution (review F3): when the
+        # continuation carries native material (REQUIRED or OPTIONAL), the
+        # native payload already contains the assistant turn including its
+        # tool calls; IR rebuilds would duplicate them.  Native material is
+        # attached from the ClosedRound itself (no reliance on an earlier
+        # side-channel attach).  Tool results are separate contributions and
+        # always materialize as IR.
+        has_native = closed.continuation.kind is not NativeContinuationKind.ABSENT
+        if has_native:
             material = closed.continuation.material
             if material is None:
-                raise ContinuationUnavailable("repaired round lost required native material")
+                raise ContinuationUnavailable("repaired round lost its native material")
             self.attach_native(closed.attempt, _candidate_from(material))
-        # Materialize the repaired protocol: assistant tool calls and their
-        # results become IR blocks so the next request carries them.
         accepted: list[LLMMessageIR] = []
-        if closed.calls:
+        if not has_native and closed.calls:
             accepted.append(
                 LLMMessageIR(
                     role=MessageRole.ASSISTANT,
@@ -544,6 +620,33 @@ class EndpointProjectionSession:
             context,
         )
         return list(dict(encoded.payload).get(container) or [])
+
+
+def _merge_anthropic_user_boundary(items: list[dict], boundary: int) -> tuple[bool, list[dict]]:
+    """Merge the pending/tail boundary the way Anthropic's encoder would.
+
+    Mirrors the codec's _append_message merge for adjacent user messages
+    with list content: content blocks concatenate into one message.  This is
+    the explicit boundary rule that keeps assembled incremental requests
+    byte-equal to whole-history encodings (review F2).
+    """
+
+    if boundary < 0 or boundary + 1 >= len(items):
+        return False, items
+    left = items[boundary]
+    right = items[boundary + 1]
+    if (
+        isinstance(left, dict)
+        and isinstance(right, dict)
+        and left.get("role") == "user"
+        and right.get("role") == "user"
+        and isinstance(left.get("content"), list)
+        and isinstance(right.get("content"), list)
+    ):
+        merged_item = dict(left)
+        merged_item["content"] = [*left["content"], *right["content"]]
+        return True, [*items[:boundary], merged_item, *items[boundary + 2 :]]
+    return False, items
 
 
 def _candidate_from(material) -> NativeCandidate:

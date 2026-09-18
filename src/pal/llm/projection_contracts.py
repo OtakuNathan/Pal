@@ -450,58 +450,135 @@ def _payload_tool_inventories(payload: Mapping[str, Any]) -> tuple[set[str], set
     if container is None:
         return calls, results
     for item in payload[container]:
-        if not isinstance(item, Mapping):
-            continue
-        if isinstance(item.get("tool_calls"), (list, tuple)):
-            for call in item["tool_calls"]:
-                if isinstance(call, Mapping):
-                    call_id = str(call.get("id") or "").strip()
-                    if call_id:
-                        calls.add(call_id)
-        if str(item.get("role") or "") == "tool":
-            result_id = str(item.get("tool_call_id") or "").strip()
-            if result_id:
-                results.add(result_id)
-        item_type = str(item.get("type") or "")
-        if item_type == "function_call":
-            call_id = str(item.get("call_id") or "").strip()
-            if call_id:
-                calls.add(call_id)
-        elif item_type == "function_call_output":
-            call_id = str(item.get("call_id") or "").strip()
-            if call_id:
-                results.add(call_id)
-        content = item.get("content")
-        if isinstance(content, (list, tuple)):
-            for block in content:
-                if not isinstance(block, Mapping):
-                    continue
-                block_type = str(block.get("type") or "")
-                if block_type == "tool_use":
-                    call_id = str(block.get("id") or "").strip()
-                    if call_id:
-                        calls.add(call_id)
-                elif block_type == "tool_result":
-                    call_id = str(block.get("tool_use_id") or "").strip()
-                    if call_id:
-                        results.add(call_id)
+        _collect_item_tool_ids(item, calls, results)
+    return calls, results
+
+
+def _collect_item_tool_ids(item: Any, calls: set[str], results: set[str]) -> None:
+    if not isinstance(item, Mapping):
+        return
+    if isinstance(item.get("tool_calls"), (list, tuple)):
+        for call in item["tool_calls"]:
+            if isinstance(call, Mapping):
+                call_id = str(call.get("id") or "").strip()
+                if call_id:
+                    calls.add(call_id)
+    if str(item.get("role") or "") == "tool":
+        result_id = str(item.get("tool_call_id") or "").strip()
+        if result_id:
+            results.add(result_id)
+    item_type = str(item.get("type") or "")
+    if item_type == "function_call":
+        call_id = str(item.get("call_id") or "").strip()
+        if call_id:
+            calls.add(call_id)
+    elif item_type == "function_call_output":
+        call_id = str(item.get("call_id") or "").strip()
+        if call_id:
+            results.add(call_id)
+    content = item.get("content")
+    if isinstance(content, (list, tuple)):
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "tool_use":
+                call_id = str(block.get("id") or "").strip()
+                if call_id:
+                    calls.add(call_id)
+            elif block_type == "tool_result":
+                call_id = str(block.get("tool_use_id") or "").strip()
+                if call_id:
+                    results.add(call_id)
+
+
+def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Ordered (call, result) occurrences inside one wire item."""
+
+    calls: list[tuple[str, str]] = []
+    results: list[tuple[str, str]] = []
+    if not isinstance(item, Mapping):
+        return calls, results
+    if isinstance(item.get("tool_calls"), (list, tuple)):
+        for call in item["tool_calls"]:
+            if isinstance(call, Mapping):
+                call_id = str(call.get("id") or "").strip()
+                name = str((call.get("function") or {}).get("name") or "") if isinstance(call.get("function"), Mapping) else ""
+                if call_id:
+                    calls.append((call_id, name))
+    if str(item.get("role") or "") == "tool":
+        result_id = str(item.get("tool_call_id") or "").strip()
+        if result_id:
+            results.append((result_id, ""))
+    item_type = str(item.get("type") or "")
+    if item_type == "function_call":
+        call_id = str(item.get("call_id") or "").strip()
+        if call_id:
+            calls.append((call_id, str(item.get("name") or "")))
+    elif item_type == "function_call_output":
+        call_id = str(item.get("call_id") or "").strip()
+        if call_id:
+            results.append((call_id, ""))
+    content = item.get("content")
+    if isinstance(content, (list, tuple)):
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "tool_use":
+                call_id = str(block.get("id") or "").strip()
+                if call_id:
+                    calls.append((call_id, str(block.get("name") or "")))
+            elif block_type == "tool_result":
+                call_id = str(block.get("tool_use_id") or "").strip()
+                if call_id:
+                    results.append((call_id, ""))
     return calls, results
 
 
 def _validate_sendable_payload(payload: Mapping[str, Any]) -> None:
-    """A sendable request cannot carry pending (unanswered) tool calls.
+    """Validate the ordered tool protocol of a request the transport may send.
 
-    A checksum proves integrity of bytes, not legality of content: a payload
-    with dangling tool_calls still digests fine (review R7).  Every tool call
-    in a request the transport may send must already be paired with its
-    result — pending calls live in DraftRound, never on the wire.
+    A checksum proves integrity of bytes, not legality of content.  The
+    protocol trace is validated linearly, per pending group: a call must
+    open its group, a result must consume an open call, one pending group
+    per call id at a time, and nothing may remain pending at the end.
+    Orphan results, duplicate calls within one group, and results before
+    their calls are all rejected (review F4).  Set equality of ids is NOT a
+    protocol proof and is not used.
     """
 
-    calls, results = _payload_tool_inventories(payload)
-    pending = sorted(calls - results)
-    if pending:
+    container = next(
+        (key for key in _TOOL_CALL_RESULT_CONTAINERS if isinstance(payload.get(key), (list, tuple))),
+        None,
+    )
+    if container is None:
+        return
+    open_calls: dict[str, str] = {}
+    problems: list[str] = []
+    for index, item in enumerate(payload[container]):
+        calls, results = _item_tool_events(item)
+        for call_id, _name in calls:
+            if call_id in open_calls:
+                problems.append(
+                    f"item[{index}]: duplicate call {call_id!r} while its previous "
+                    "occurrence is still unanswered"
+                )
+            else:
+                open_calls[call_id] = str(index)
+        for call_id, _name in results:
+            if call_id not in open_calls:
+                problems.append(
+                    f"item[{index}]: orphan result {call_id!r} without an open call "
+                    "(missing call or result precedes its call)"
+                )
+            else:
+                del open_calls[call_id]
+    for call_id in sorted(open_calls):
+        problems.append(f"pending tool call {call_id!r} has no result")
+    if problems:
         raise ProjectionContractError(
-            f"prepared payload carries pending tool calls without results: {pending}"
+            "prepared payload violates the tool protocol: " + "; ".join(problems)
         )
 
 
@@ -529,6 +606,16 @@ class PreparedRequest:
         computed = hashlib.sha256(self.payload_json.encode("utf-8")).hexdigest()
         if computed != self.payload_digest:
             raise ProjectionContractError("prepared payload digest mismatch")
+        # The SAME protocol validation as build(): a correct checksum on an
+        # illegal payload must not make it sendable (review F4).  This covers
+        # direct construction and deserialization paths.
+        try:
+            parsed = json.loads(self.payload_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ProjectionContractError("prepared payload is not valid JSON") from exc
+        if not isinstance(parsed, Mapping):
+            raise ProjectionContractError("prepared payload must be a JSON object")
+        _validate_sendable_payload(parsed)
 
     @classmethod
     def build(

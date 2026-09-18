@@ -101,6 +101,34 @@ setuptools/_vendor 环境性失败）与 `test_tool_schema_properties` 模块级
 正确性达成前，不作为验收结论；旧 finalize_cache_spans 的累积前缀开销
 是可独立测量的旧成本，benchmark 需在集成后重测。
 
+## 第二轮外部 review 修正（2026-09-19，针对 ae04397）
+
+`pal_branch_review_2026-09-18/pal_projection_review_ae04397` 五项指控全部属实，已修：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| F1 | system 首轮存活、增量轮丢失；developer 位置投影在独立 tail 编码下错判；零 tail 忽略新 shell；restore 后零 tail 不可用 | shell/tail 彻底分离：request_shell.messages = preamble，每次 prepare 原样编码外壳（system 跨轮稳定、per-request budget 生效、零 tail/restore 后均可用）；tail 独立编码带显式边界标志 ShapeContext.has_conversation_prefix（Completion codec 位置判定改用）；空数组 fallback（"Continue."）用 codec 自身 spans 排除 |
+| F2 | anthropic tool result 被 trim 后消失但 frontier 已跨过；下轮 pending-call 校验直接阻断续接 | 语义接受与 wire 冻结分离：trim 尾部进入 session 持有的 _pending_wire_tail，每次 prepare 自动注入直到后续冻结；跨 checkpoint 持久化；pending/tail 边界按 codec 合并规则拼接（user-user），调用方不再手动重喂已提交结果 |
+| F3 | REQUIRED-native repair 同一调用双重物化；OPTIONAL 分支 native_committed=True 却不 attach | 同一 assistant contribution 单一表示：有 native 物化时不重建 IR calls（仅 results 走 IR）；REQUIRED/OPTIONAL 均从 ClosedRound attach material；observe_commit 拒绝 native+assistant-IR 双表示 |
+| F4 | set 比较丢次数/顺序：孤儿 result、同轮重复 call、result 先于 call 全部放行；直接构造 PreparedRequest 绕过校验 | 线性顺序敏感 pairing 状态机（call 开组、result 消费、组内唯一、无残留）；__post_init__ 同规，构造器/反序列化不可绕过 |
+| F5 | restore 浅拷贝与调用者 snapshot 共享嵌套对象，事后篡改污染 prefix | restore 边界一次性 JSON 深拷贝（ownership transfer），不逐 prepare 复制 |
+
+新增测试：review 10 反例（tests/test_projection_followup_review.py）+ 离线纵向路径
+（tests/test_projection_vertical_path.py：shell→native 回答→REQUIRED-native repair→
+checkpoint→新 owner 恢复→完整请求，与全历史参考做内容/顺序/计数断言）。
+合并回归：llm 全族 760 passed（2 失败为 bunshin 同进程混跑预存干扰，单跑皆过，
+与本分支无关）。
+
+### 已知限制（诚实声明）
+
+anthropic 的相邻同 role 合并语义与冻结边界存在一处未收口的等价性差异：当已冻结
+的 assistant item 之后紧跟本轮接受的 native assistant 轮（文本回答后直接接工具
+调用），全量编码会合并为一条 message，增量路径保持两条相邻 message。**内容块、
+顺序、计数完全等价**，仅 wire item 划分不同（Anthropic API 接受连续同 role
+message）。曾尝试物化边界合并补丁，因会改写已冻结区而回滚——按 review
+"先立契约再打补丁"原则，需要重新设计稳定冻结边界（含完整 tool 组）后解决，
+不做局部补丁。该差异已用测试钉住（纵向测试注释）。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径切换未执行**：resident LLMRuntime 仍走 per-message ReplayEnvelope

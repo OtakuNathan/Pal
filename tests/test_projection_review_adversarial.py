@@ -206,11 +206,22 @@ class AstraProjectionReview(unittest.TestCase):
     def test_anthropic_prepare_keeps_system_preamble(self):
         s = session(WireShape.ANTHROPIC_MESSAGES)
         s.begin_round(attempt(s), requires_native=False)
-        messages = (
+        # The preamble belongs to the request shell (review F1/F2 follow-up):
+        # the shell owns system/developer heads, the view owns the tail.
+        shell_messages = (
             LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("SYSTEM_SENTINEL"),)),
-            user("hello"),
         )
-        prepared = s.prepare(HistoryView(s.frontier, messages))
+        from pal.llm.ir import GenerationPolicyIR, LLMRequestIR
+
+        shell = LLMRequestIR(
+            messages=shell_messages,
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=4096),
+        )
+        prepared = s.prepare(
+            HistoryView(s.frontier, (user("hello"),)),
+            request_shell=shell,
+        )
         self.assertIn("system", payload(prepared))
         self.assertIn("SYSTEM_SENTINEL", prepared.payload_json)
 

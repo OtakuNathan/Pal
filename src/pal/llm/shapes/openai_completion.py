@@ -93,7 +93,7 @@ class OpenAICompletionCodec(ShapeCodecBase):
                         )
                     spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
                     continue
-                role = _completion_message_role(message, messages)
+                role = _completion_message_role(message, messages, context.has_conversation_prefix)
                 content = openai_content(message.parts)
                 if role == "user":
                     content = _openai_user_blocks(content)
@@ -160,11 +160,20 @@ def _openai_user_blocks(content: Any) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text}] if text else []
 
 
-def _completion_message_role(message: Any, messages: list[dict[str, Any]]) -> str:
+def _completion_message_role(
+    message: Any,
+    messages: list[dict[str, Any]],
+    has_conversation_prefix: bool = False,
+) -> str:
     if message.role != MessageRole.DEVELOPER:
         return role_value(message.role)
+    # Position-sensitive projection.  In an incremental (tail-only) encode
+    # the conversation prefix is absent from ``messages``; the explicit
+    # boundary flag keeps the same developer message from being promoted to
+    # system just because it happens to start the tail batch.
     stable_prefix = message.prompt_region == PromptRegionIR.STABLE_SYSTEM or (
         message.prompt_region != PromptRegionIR.ACTIVE_DYNAMIC
+        and not has_conversation_prefix
         and not any(str(item.get("role") or "") != "system" for item in messages)
     )
     return "system" if stable_prefix else "user"

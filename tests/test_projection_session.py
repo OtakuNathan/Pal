@@ -279,18 +279,21 @@ class AnthropicFreezeBoundaryTests(unittest.TestCase):
         self.assertNotEqual(
             chunk_items[-1].get("role"), "user", "trailing user item was frozen"
         )
-        # The user content stays unfrozen and re-encodes in the next tail.
+        # The unfrozen user content stays session-owned (pending wire tail):
+        # the next prepare re-injects it automatically — callers never
+        # re-supply already-committed results by hand (review F2).
         session.begin_round(_attempt(session, "a2"), requires_native=False)
-        tail = (
-            LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR("tool-result-body"),)),
-            _user("next question"),
-        )
+        tail = (_user("next question"),)
         request_two = session.prepare(HistoryView(cursor=_cursor(1, "d" * 64), messages=tail))
         assembled = _items(request_two)
         full = _full_encode(
             WireShape.ANTHROPIC_MESSAGES,
             _binding(WireShape.ANTHROPIC_MESSAGES),
-            (_user("question"), _assistant("checking")) + tail,
+            (_user("question"), _assistant("checking"))
+            + (
+                LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR("tool-result-body"),)),
+                _user("next question"),
+            ),
         )
         self.assertEqual(assembled, full)
 

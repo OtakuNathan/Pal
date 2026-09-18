@@ -28,6 +28,13 @@ class ShapeContext:
     provider_id: str = ""
     base_url: str = ""
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+    # Explicit boundary context for incremental (tail-only) encodes: True
+    # means conversation items precede this batch even though they are not
+    # present in ``messages``.  Position-sensitive projections (e.g. the
+    # Completion codec promoting a leading developer message to system)
+    # must consult this instead of inferring position from an empty list,
+    # because encode(prefix + tail) != encode(prefix) + encode(tail).
+    has_conversation_prefix: bool = False
 
 
 JSONPathPart: TypeAlias = str | int

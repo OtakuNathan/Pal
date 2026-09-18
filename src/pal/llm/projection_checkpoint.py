@@ -83,6 +83,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         },
         "projection_generation": session.identity.projection_generation,
         "frontier": _cursor_fields(session.frontier),
+        "pending_wire_tail": thaw_json(list(session._pending_wire_tail)),
         "chunks": [
             {
                 "attempt_id": chunk.round_attempt_id,
@@ -342,7 +343,12 @@ def restore_projection(
             isinstance(entry, Mapping) for entry in items_raw
         ):
             raise ProjectionCheckpointError("chunk items are invalid")
-        items = tuple(dict(entry) for entry in items_raw)
+        # Ownership transfer at the restore boundary (review F5): deep-copy
+        # the caller's snapshot data ONCE here.  Shallow dict() copies would
+        # alias nested content lists back to the caller's mutable checkpoint,
+        # letting post-restore mutations rewrite the private prefix while
+        # frontier/digest stay unchanged.
+        items = tuple(json.loads(json.dumps(list(items_raw))))
         chunks.append(
             ProjectionChunk(
                 round_attempt_id=str(raw.get("attempt_id") or ""),
@@ -352,10 +358,14 @@ def restore_projection(
                 prefix_digest=str(raw.get("prefix_digest") or ""),
             )
         )
-        # The restored private prefix holds mutable copies (the public chunk
-        # snapshot is deep-frozen); the two share nothing.
+        # The restored private prefix holds the deep-copied owned dicts (the
+        # public chunk snapshot is deep-frozen); the two share nothing.
         prefix_items.extend(dict(item) for item in items)
         expected_before = cursor_after
+    pending_raw = section.get("pending_wire_tail") or ()
+    if not isinstance(pending_raw, (list, tuple)):
+        raise ProjectionCheckpointError("pending_wire_tail section is invalid")
+    pending_wire_tail = json.loads(json.dumps(list(pending_raw)))
     if chunks:
         if expected_before != frontier:
             raise ProjectionCheckpointError(
@@ -385,6 +395,7 @@ def restore_projection(
     session.chunks = tuple(chunks)
     session._prefix_items = prefix_items
     session._frontier_item_count = len(prefix_items)
+    session._pending_wire_tail = pending_wire_tail
     session.native_by_attempt = {
         record["attempt_id"]: {
             "payload_json": record["payload_json"],
