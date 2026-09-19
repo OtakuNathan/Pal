@@ -250,6 +250,44 @@ review 同时明确了下一阶段 gate（非本轮范围）：稳定冻结 cut/
 真实 runtime 接受与 durable checkpoint、resident/Bunshin 共享实现；live canary
 不能替代离线集成。
 
+## 第六轮外部 review（2026-09-19，pal_full_branch_review_f12730e，整分支 vs main）：B1-B4 已修
+
+范围从「最后一个修复提交」扩大到全部净变更、旧调用链兼容与新公共 API 的
+退出/恢复语义。四项发现都在**尚未接线的新组件**上，不是已确认的线上回归；
+G1-G4 / H1-H3 不重新打开。
+
+| # | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| B1 | P1（接入阻塞） | session 重建 ShapeContext 只给 shape/endpoint_id/model_id，capabilities 回落 {}：端点声明 unsupported_request_parameters=["temperature"] 时旧完整编码省略、新入口重新生成——请求契约不一致（probe 实证） | bind() 新增 capabilities 关键字参数（调用方解析的已验证 profile，深冻结存储，随 lineage 生命周期）；新增 _shape_context() 单一构造点，shell/tail/accepted-message 三处编码共用同一 profile；checkpoint 持久化 capabilities 并在 restore 回传（缺失键 → 空，pre-B1 快照忠实重建） |
+| B2 | P2 | attach_native 提交前即写入 native_by_attempt；close/reject 只清 _active 不清未接受 native；snapshot 不过滤——取消的 payload 留在权威 store 与 checkpoint | close_round/reject_commit 丢弃本轮未接受 native（draft 随 round 生死）；snapshot native_records 按 committed receipt 过滤（开轮中的 draft 永不入 checkpoint）；已提交 native 原样保留，迟到 attach 仍拒 |
+| B3 | P2 | legacy/unbound restore 对 populated target 只 retired=False+return False，旧 identity/chunks/native 仍可用——与「fresh lineage」承诺不符 | restore 开头 pristine 检查（identity/active/chunks/native/ledger/pending/head/frontier 任一非空 → 拒绝且零修改）；legacy/unbound 与 bound 路径同一规则，不再静默合并；fresh target 兼容恢复不变 |
+| B4 | P2 | begin_round 推进 current fence 与 commit 无关，但 snapshot 只存历史 receipt 的 source fence，restore 用 max(source) 重建——取消过的高 fence 重启后回退，重启前拒绝的 stale worker 重启后被接受 | current owner fence 独立持久化（snapshot owner_fence 字段）；restore 从该字段重建并 max(persisted, max-committed-source) 保单调；pre-B4 快照缺失键回退 max(source)（忠实重建，测试钉住） |
+
+review 另确认：旧热路径（_iterate）未接 session；usage/proxy 路线（已读链路）
+未见新增 native 泄漏；共享 Anthropic codec 位置规则变更需旧链路回归（已含在
+本轮全族）；file_read 净变更为删死代码；TLA+ Restart/Cancel 边界由产品测试
+闭合（B4 已闭合）。
+
+**合并提醒（review 建议采纳）**：本分支与 main 已分叉（main 独有 Telegram
+pin/正文/provider 0.3.3 三提交，两侧文件无交集，未做真实 merge 测试）；
+合并前先在 worktree 合并当前 main 跑组合回归，不用分支旧 tree 替换 main。
+
+新增测试：`tests/test_projection_branch_review.py`（**13 项 + 10 subtests**，
+B1 含普通 endpoint 保留 temperature 对照组、capabilities 深冻结、非 Mapping
+拒绝、restore 后存活；B3 含 bound 路径同规则；B4 含 pre-B4 快照回退语义）。
+review 自带验收：B2/B3/B4 六项原样通过；B1 按其文件头说明需 fixture 注入新
+通道（断言不变，注入后在本仓库测试中全绿）。
+
+### 本轮回归与性能
+
+- llm 全族 31 文件（含新增 branch_review）分文件隔离：**376 passed +
+  110 subtests + 6 skipped 零失败**（real-integration 按设计跳过，无付费调用；
+  日志 /tmp/proj6_regress.log，ALL_DONE）。
+- 性能 A/B（同机同脚本 /tmp/pal_bench_prepare.py，prepare@800 前缀项、
+  尾部 1 条、50 轮）：openai_completion 14.65ms、openai_response 20.01ms、
+  anthropic_messages 18.69ms vs 基线 14.5/20.1/18.7——持平（±1% 噪声内），
+  零回退。B1 改动为每 prepare 一次 context 构造（引用传递），无热路径开销。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径尚未接线（离线集成与上线 canary 分离）**：resident LLMRuntime 仍走

@@ -129,6 +129,13 @@ class EndpointProjectionSession:
         self._committed_attempts: dict[str, HistoryCommitReceipt] = {}
         self._frontier_item_count: int = 0
         self._active: _ActiveRound | None = None
+        # Validated endpoint capabilities for THIS lineage (review B1): the
+        # binding's config_fingerprint summarizes the config but cannot
+        # reconstitute it, so the encode profile (e.g.
+        # unsupported_request_parameters) is supplied at bind time, kept
+        # deeply frozen, and used by EVERY encode the session performs —
+        # shell, tail, and accepted-message encodes share one profile.
+        self._capabilities: Mapping[str, Any] = freeze_json_mapping({})
         # Amortized assembled prefix of all frozen chunk items; extended on
         # commit only, never rebuilt per prepare (PLAN §11: no per-round
         # deepcopy of old chunks).  Private mutable dicts: the public chunk
@@ -152,13 +159,35 @@ class EndpointProjectionSession:
 
     # -- binding lifecycle -------------------------------------------------
 
-    def bind(self, binding: EndpointBinding) -> None:
-        """Initial bind or rebind after switch; destroys the old lineage."""
+    def bind(
+        self,
+        binding: EndpointBinding,
+        *,
+        capabilities: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Initial bind or rebind after switch; destroys the old lineage.
+
+        ``capabilities`` (review B1) is the validated endpoint capability
+        profile the caller resolved for THIS binding — the same data the
+        legacy invoker reads from the endpoint (e.g.
+        ``unsupported_request_parameters``).  It is deeply frozen here and
+        reused by every encode in the lineage; a profile change is a new
+        binding (fingerprint bump), never an in-place mutation.
+        """
 
         if self.retired:
             raise ProjectionSessionError("session is retired")
+        if capabilities is None:
+            frozen_capabilities: Mapping[str, Any] = freeze_json_mapping({})
+        else:
+            if not isinstance(capabilities, Mapping):
+                raise ProjectionSessionError(
+                    "endpoint capabilities must be a mapping"
+                )
+            frozen_capabilities = freeze_json_mapping(dict(capabilities))
         generation = 0 if self.identity is None else self.identity.projection_generation + 1
         self.binding = binding
+        self._capabilities = frozen_capabilities
         self.identity = ProjectionIdentity(
             session=self.session_id,
             binding=binding,
@@ -193,6 +222,25 @@ class EndpointProjectionSession:
         if self.retired:
             raise ProjectionSessionError("session is retired")
         return self.identity
+
+    def _shape_context(self, *, has_conversation_prefix: bool = False) -> ShapeContext:
+        """The ONE validated encode profile for this lineage (review B1).
+
+        Every encode the session performs — shell envelope, tail, and
+        accepted-message materialization — goes through this context, so a
+        capability-restricted endpoint (e.g. one that rejects ``temperature``)
+        omits unsupported optional fields exactly like the legacy full
+        encode would.  Building contexts ad hoc with empty capabilities
+        silently re-adds them.
+        """
+
+        return ShapeContext(
+            wire_shape=self.binding.wire_shape,
+            endpoint_id=self.binding.endpoint_id,
+            model_id=self.binding.model_id,
+            capabilities=self._capabilities,
+            has_conversation_prefix=has_conversation_prefix,
+        )
 
     # -- native continuation -----------------------------------------------
 
@@ -267,11 +315,18 @@ class EndpointProjectionSession:
         self._active = _ActiveRound(attempt=attempt, requires_native=requires_native)
 
     def close_round(self) -> AttemptKey:
-        """Close the in-flight round without committing (cancel path)."""
+        """Close the in-flight round without committing (cancel path).
+
+        The round's UNACCEPTED native material dies with it (review B2):
+        attach_native is draft-scoped until a commit accepts it, so a
+        cancelled round must not leave its payload in the authoritative
+        store or the next snapshot.
+        """
 
         if self._active is None:
             raise ProjectionSessionError("no open round")
         attempt = self._active.attempt
+        self.native_by_attempt.pop(attempt.attempt_id, None)
         self._active = None
         return attempt
 
@@ -416,11 +471,16 @@ class EndpointProjectionSession:
         self._active = None
 
     def reject_commit(self, attempt_id: str, reason: str) -> None:
-        """Drop an open round without sealing (late/failed response)."""
+        """Drop an open round without sealing (late/failed response).
+
+        Same draft-native rule as close_round (review B2): rejection never
+        promotes unaccepted native material into the authoritative store.
+        """
 
         _ = reason
         if self._active is None or self._active.attempt.attempt_id != attempt_id:
             raise ProjectionSessionError("no matching open round to reject")
+        self.native_by_attempt.pop(attempt_id, None)
         self._active = None
 
     # -- preparation ---------------------------------------------------------
@@ -463,11 +523,7 @@ class EndpointProjectionSession:
                 "append proof missing"
             )
         codec = codec_for_shape(self.binding.wire_shape)
-        context = ShapeContext(
-            wire_shape=self.binding.wire_shape,
-            endpoint_id=self.binding.endpoint_id,
-            model_id=self.binding.model_id,
-        )
+        context = self._shape_context()
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         shell = request_shell or LLMRequestIR(
             messages=(),
@@ -725,11 +781,7 @@ class EndpointProjectionSession:
 
     def _encode_messages(self, messages: tuple[LLMMessageIR, ...]) -> list[dict]:
         codec = codec_for_shape(self.binding.wire_shape)
-        context = ShapeContext(
-            wire_shape=self.binding.wire_shape,
-            endpoint_id=self.binding.endpoint_id,
-            model_id=self.binding.model_id,
-        )
+        context = self._shape_context()
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         encoded = codec.encode(
             LLMRequestIR(

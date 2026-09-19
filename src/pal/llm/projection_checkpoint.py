@@ -83,6 +83,14 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         },
         "projection_generation": session.identity.projection_generation,
         "frontier": _cursor_fields(session.frontier),
+        # Validated encode profile for this lineage (review B1): a restored
+        # session must encode with the SAME capabilities or a capability-
+        # restricted endpoint would regain unsupported optional fields.
+        "capabilities": thaw_json(session._capabilities),
+        # The CURRENT write fence is a separate fact from every historical
+        # receipt's SOURCE fence (review B4): cancelled rounds advance it
+        # without ever producing a receipt, so it must be persisted itself.
+        "owner_fence": session._owner_fence,
         "pending_wire_tail": thaw_json(list(session._pending_wire_tail)),
         "committed_head_system": thaw_json(list(session._committed_head_system)),
         "chunks": [
@@ -102,6 +110,10 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "call_ids": list(record["call_ids"]),
             }
             for attempt_id, record in sorted(session.native_by_attempt.items())
+            # Authoritative snapshot scope is COMMITTED material only
+            # (review B2): a draft native attached to a still-open or
+            # cancelled round never belongs in a checkpoint.
+            if attempt_id in session._committed_attempts
         ],
         "committed_attempts": [
             {
@@ -147,8 +159,26 @@ def restore_projection(
 
     Refusals (mixed generations, schema mismatch, frontier beyond the L1
     cursor, duplicate native records) raise before any state is touched.
+    The target session must be PRISTINE (review B3): restore installs a
+    lineage wholesale or refuses — it never merges into an existing one,
+    and a legacy/unbound section (which promises a fresh generation-0
+    lineage) must not leave old state reachable behind a ``False`` return.
     """
 
+    if (
+        session.identity is not None
+        or session._active is not None
+        or session.chunks
+        or session.native_by_attempt
+        or session._committed_attempts
+        or session._pending_wire_tail
+        or session._committed_head_system
+        or session.frontier != HistoryCursor.initial()
+    ):
+        raise ProjectionCheckpointError(
+            "restore_projection requires a pristine session target; refusing "
+            "to install over existing projection state"
+        )
     section = payload.get(_PROJECTION_SECTION_KEY)
     if section is None:
         # Legacy snapshot: fresh lineage; old ReplayEnvelope messages are the
@@ -398,7 +428,14 @@ def restore_projection(
 
     # Install atomically: everything validated above; these assignments are
     # the only visible restore boundary.
-    session.bind(binding)
+    capabilities_raw = section.get("capabilities")
+    # Pre-B1 snapshots lack the field: empty capabilities is the only
+    # faithful reconstruction for them (prototype snapshots only).
+    if capabilities_raw is None:
+        capabilities_raw = {}
+    if not isinstance(capabilities_raw, Mapping):
+        raise ProjectionCheckpointError("projection capabilities section is invalid")
+    session.bind(binding, capabilities=capabilities_raw)
     session.identity = ProjectionIdentity(
         session=session.session_id, binding=binding, projection_generation=generation
     )
@@ -422,8 +459,23 @@ def restore_projection(
     # ones stay refused (PLAN §8.2, review R6).  The new worker's write
     # permission is a separate, higher fence it brings itself.
     session._committed_attempts = committed_attempts
-    session._owner_fence = max(
+    # CURRENT write authority is restored from its own persisted field
+    # (review B4), never derived from historical receipt source fences
+    # alone: cancelled rounds advance the current fence without leaving a
+    # receipt, and letting it fall back to max(source fences) would
+    # re-authorize a worker that was already stale before the snapshot.
+    # Snapshots written before B4 lack the field; their most faithful
+    # reconstruction is still the highest committed source fence.
+    legacy_fence = max(
         (receipt.attempt.owner_fence.fence for receipt in committed_attempts.values()),
         default=0,
     )
+    persisted_fence = section.get("owner_fence")
+    if (
+        not isinstance(persisted_fence, int)
+        or isinstance(persisted_fence, bool)
+        or persisted_fence < 0
+    ):
+        persisted_fence = legacy_fence
+    session._owner_fence = max(persisted_fence, legacy_fence)
     return True
