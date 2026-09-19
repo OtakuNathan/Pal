@@ -216,15 +216,22 @@ class TurnExecutor:
         elif (
             self._inject_pending is not None
             and str(getattr(advice, "status", "")) == LLMPreflightStatus.READY
+            and getattr(continuation, "llm_round_index", 0) >= 1
             and getattr(self.state, "pending_channel_turns", None)
             and not compaction_gate_active(self.state)
         ):
-            # Queued interjection admission point (P1 ordering): input is
-            # admitted only when the next ordinary request is real and no
-            # compaction ticket holds the scope, so fresh user input is
-            # never fed into an imminent compaction source. The prompt and
-            # budget advice are recomputed after the append (one bounded
-            # second pass; no further injection inside this effect).
+            # Queued interjection admission point (P1 ordering): queued
+            # input is admitted only between rounds of a running turn
+            # (llm_round_index >= 1, i.e. after a tool batch), never at
+            # the turn's first preflight — a burst that arrived before
+            # the turn ever ran stays FIFO-queued and drains as its own
+            # turns instead of being absorbed into this one. Admission
+            # additionally requires the next ordinary request to be real
+            # and no compaction ticket holding the scope, so fresh user
+            # input is never fed into an imminent compaction source. The
+            # prompt and budget advice are recomputed after the append
+            # (one bounded second pass; no further injection inside this
+            # effect).
             injected = await self._inject_pending(continuation)
             if injected:
                 prompt = self.build_turn_prompt(
@@ -245,12 +252,16 @@ class TurnExecutor:
     def _round_safe_for_compaction(self, continuation) -> bool:
         """Round-safety evidence for auto compaction admission (A01-A05).
 
-        HTTP completion alone is not proof: require no live assistant
-        streaming round, no in-progress/incomplete message, and a fully
-        paired tool protocol on the active L1 turn. Effects are strictly
-        sequential in the turn program, so while this effect runs no other
-        effect can be mid-flight (checking ``waiting_effect_id`` here would
-        always see this effect itself and reject every legitimate claim).
+        HTTP completion alone is not proof: require no in-progress/
+        incomplete message and a fully paired tool protocol on the active
+        L1 turn. Effects are strictly sequential in the turn program, so
+        while this effect runs no other effect can be mid-flight
+        (checking ``waiting_effect_id`` here would always see this effect
+        itself and reject every legitimate claim). Likewise the L1 store's
+        ``has_open_round`` streaming bookkeeping stays open after the
+        terminal provider response on the real auto path, so it must not
+        gate admission here either; message-state closure below is the
+        boundary that matters.
         """
         memory_service = self.context.port_registry.get("memory:memory")
         if memory_service is None:
@@ -259,10 +270,6 @@ class TurnExecutor:
         active_turn_reader = getattr(memory_service, "active_l1_turn", None)
         turn = active_turn_reader(turn_id) if callable(active_turn_reader) else None
         if turn is None:
-            return False
-        turns_store = getattr(getattr(memory_service, "l1_store", None), "turns", None)
-        has_open_round = getattr(turns_store, "has_open_round", None)
-        if callable(has_open_round) and has_open_round(turn_id):
             return False
         calls: set[str] = set()
         results: set[str] = set()
