@@ -494,6 +494,29 @@ class CompactionEngine:
                     output_target = max(1, (output_target or visible_limit) // 2)
                 continue
 
+            # I14/B05 next-request fit precheck: a schema-valid seed that
+            # cannot fit the post-install context — with the next round's
+            # tool-result headroom reserved — must never be committed
+            # as-is. The engine retries shorter inside the same ticket;
+            # without a window budget nothing is claimed to fit.
+            headroom = max(0, int(
+                snapshot.metadata.get("next_round_headroom_tokens") or 0
+            ))
+            if snapshot.target_input_budget > 0:
+                seed_tokens = _estimate_visible_tokens(
+                    summary_entry.rendered or summary_entry.summary
+                )
+                if seed_tokens + headroom > snapshot.target_input_budget:
+                    log_failure("fit:seed_over_budget")
+                    output_target = max(
+                        1,
+                        min(
+                            output_target or compaction_visible_token_limit(snapshot),
+                            max(1, snapshot.target_input_budget - headroom),
+                        ) // 2,
+                    )
+                    continue
+
             if commit_guard is not None and not commit_guard():
                 # Cancel/sweep safety (X03/X06/X07): a ticket that lost
                 # commit eligibility must never install; memory and the

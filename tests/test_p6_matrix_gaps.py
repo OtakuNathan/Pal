@@ -415,6 +415,136 @@ def test_b04_output_reservation_counts_against_total_window():
     assert unknown.compact_required is False
 
 
+# ── B05/I14 · next-request fit precheck with headroom ───────────────────
+
+
+def test_i14_seed_that_cannot_fit_is_never_committed():
+    async def scenario():
+        from dataclasses import replace as dc_replace
+        from pal.core.compaction import (
+            CompactionClockKind,
+            CompactionEngine,
+            CompactionSnapshot,
+        )
+        from pal.core.compaction import _estimate_visible_tokens
+        from pal.core.pal_compaction import PalCompactionPolicy
+
+        service = _memory_with_turns(2)
+        base_snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+            metadata={"compaction_op_id": "op-i14"},
+            source_epoch=service.context_epoch,
+        )
+        # Measure the real rendered seed so the budget is decisively off.
+        entry = PalCompactionPolicy().validate_checkpoint(
+            _valid_pal_payload("i14 seed that will not fit"), base_snapshot,
+        )
+        rendered = _estimate_visible_tokens(entry.rendered or entry.summary)
+        # Budget exactly twice the rendered seed: the checkpoint passes the
+        # visible-limit validation (half the budget), but the seed plus the
+        # incompressible base (headroom) still cannot fit — never commit.
+        snapshot = dc_replace(
+            base_snapshot,
+            target_input_budget=2 * rendered + 4,
+            metadata={
+                **base_snapshot.metadata,
+                "next_round_headroom_tokens": rendered + 100,
+            },
+        )
+        engine = CompactionEngine(PalCompactionPolicy())
+        payloads = [
+            generation_result_from_values(
+                text=_valid_pal_payload("i14 seed that will not fit")
+            )
+            for _ in range(4)
+        ]
+        result = await engine.run(
+            snapshot,
+            llm_runtime=_ScriptedLLM(payloads),
+            memory_service=service,
+        )
+        # Never committed: no install, bounded retries, an explicit fit
+        # failure, and a shorter regeneration was actually attempted.
+        assert not result.success
+        assert "fit:seed_over_budget" in " ".join(result.failures)
+        assert result.attempts >= 2
+        assert service.context_epoch == 0
+        assert service.compaction_receipts == {}
+    _run(scenario())
+
+
+def test_b05_headroom_participates_in_the_fit_decision():
+    async def scenario():
+        from dataclasses import replace as dc_replace
+        from pal.core.compaction import (
+            CompactionClockKind,
+            CompactionEngine,
+            CompactionSnapshot,
+            _estimate_visible_tokens,
+        )
+        from pal.core.pal_compaction import PalCompactionPolicy
+
+        service = _memory_with_turns(2)
+        base_snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+            metadata={"compaction_op_id": "op-b05"},
+            source_epoch=service.context_epoch,
+        )
+        entry = PalCompactionPolicy().validate_checkpoint(
+            _valid_pal_payload("b05 seed"), base_snapshot,
+        )
+        rendered = _estimate_visible_tokens(entry.rendered or entry.summary)
+        # The seed fits on its own (well inside half the budget) but NOT
+        # with the next round's tool-result headroom reserved.
+        snapshot = dc_replace(
+            base_snapshot,
+            target_input_budget=2 * rendered + 4,
+            metadata={
+                **base_snapshot.metadata,
+                "next_round_headroom_tokens": rendered + 5,
+            },
+        )
+        engine = CompactionEngine(PalCompactionPolicy())
+        result = await engine.run(
+            snapshot,
+            llm_runtime=_ScriptedLLM([
+                generation_result_from_values(text=_valid_pal_payload("b05 seed"))
+                for _ in range(4)
+            ]),
+            memory_service=service,
+        )
+        assert not result.success
+        assert "fit:seed_over_budget" in " ".join(result.failures)
+        assert service.context_epoch == 0
+        # Without a window budget nothing is claimed to fit: the same seed
+        # installs normally when there is no budget to reason about.
+        no_budget = dc_replace(
+            base_snapshot,
+            target_input_budget=0,
+            metadata={
+                **base_snapshot.metadata,
+                "next_round_headroom_tokens": 64,
+            },
+        )
+        ok = await engine.run(
+            no_budget,
+            llm_runtime=_ScriptedLLM([
+                generation_result_from_values(text=_valid_pal_payload("b05 seed"))
+            ]),
+            memory_service=service,
+        )
+        assert ok.success, ok.failures
+    _run(scenario())
+
+
 # ── A04 · unknown/unreconciled effect is explicit reconcile-required ────
 
 
