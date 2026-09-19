@@ -331,6 +331,90 @@ def test_i11_final_reply_is_real_answer_not_handoff_json():
     assert service.context_epoch == 1
 
 
+# ── B03/B04 · budget boundary math ───────────────────────────────────
+
+
+def test_b03_boundary_equality_fits_one_token_over_rejects():
+    from pal.llm.ir import (
+        LLMMessageIR,
+        MessageRole,
+        PromptRegionIR,
+        TextPartIR,
+    )
+    from pal.llm.runtime import LLMRuntime, PreparedLLMRequest, _estimate_request_tokens
+
+    runtime = LLMRuntime.__new__(LLMRuntime)
+    runtime.safety_margin_tokens = 1024
+    endpoint = SimpleNamespace(
+        context_window=8192, max_output_tokens=None, endpoint_id="b03",
+    )
+    target = runtime._target_input_budget(endpoint, output_tokens=2048)
+    # window 8192 - output 2048 - margin max(1024, 5%) = 5120.
+    assert target == 5120
+    base = PreparedLLMRequest(
+        endpoint=endpoint,
+        request=SimpleNamespace(),
+        estimated_input_tokens=target,
+        target_input_budget=target,
+    )
+    # H+J+O+E exactly == C: the equality fits (send eligibility holds).
+    assert base.compact_required is False
+    # One token over C: rejected.
+    assert replace(base, estimated_input_tokens=target + 1).compact_required is True
+    # Cached discounts never enter the capacity math: the estimate is a
+    # pure character count and prompt_region (cache locality) cannot
+    # shrink it.
+    active = SimpleNamespace(
+        messages=(LLMMessageIR(
+            role=MessageRole.USER,
+            parts=(TextPartIR("x" * 400),),
+            prompt_region=PromptRegionIR.ACTIVE_INPUT,
+        ),),
+        tools=(),
+    )
+    settled = SimpleNamespace(
+        messages=(LLMMessageIR(
+            role=MessageRole.USER,
+            parts=(TextPartIR("x" * 400),),
+            prompt_region=PromptRegionIR.SETTLED_HISTORY,
+        ),),
+        tools=(),
+    )
+    assert _estimate_request_tokens(active) == _estimate_request_tokens(settled)
+
+
+def test_b04_output_reservation_counts_against_total_window():
+    from pal.llm.runtime import LLMRuntime, PreparedLLMRequest
+
+    runtime = LLMRuntime.__new__(LLMRuntime)
+    runtime.safety_margin_tokens = 1024
+    endpoint = SimpleNamespace(
+        context_window=8192, max_output_tokens=None, endpoint_id="b04",
+    )
+    small_output = runtime._target_input_budget(endpoint, output_tokens=1024)
+    large_output = runtime._target_input_budget(endpoint, output_tokens=4096)
+    # The output reservation (thinking included, since the thinking
+    # budget must stay < max_output_tokens) consumes the same window the
+    # input draws from: a bigger reserved output strictly shrinks the
+    # input-only cap.
+    assert small_output == 8192 - 1024 - 1024
+    assert large_output == 8192 - 4096 - 1024
+    assert large_output < small_output
+    # The input-only cap never collapses below 1, and without window
+    # knowledge there is no budget to enforce (nothing is rejected on a
+    # made-up number).
+    assert runtime._target_input_budget(
+        SimpleNamespace(context_window=0), output_tokens=512,
+    ) == 0
+    unknown = PreparedLLMRequest(
+        endpoint=endpoint,
+        request=SimpleNamespace(),
+        estimated_input_tokens=10**9,
+        target_input_budget=0,
+    )
+    assert unknown.compact_required is False
+
+
 # ── A04 · unknown/unreconciled effect is explicit reconcile-required ────
 
 
