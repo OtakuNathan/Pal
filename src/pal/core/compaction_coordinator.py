@@ -93,6 +93,11 @@ class CompactionGate:
         self._state = state
         self._lock = transition_lock
 
+    @property
+    def lock(self) -> Any | None:
+        """The transition lock this gate coordinates with (may be None)."""
+        return self._lock
+
     # ── inspection ───────────────────────────────────────────────────
 
     def ticket_for(self, scope: str) -> CompactionTicket | None:

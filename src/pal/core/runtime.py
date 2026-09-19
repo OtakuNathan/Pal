@@ -541,11 +541,12 @@ class PalCore(MemoryMaintenanceMixin):
         self.turn_executor = self.agent_turn_runtime.executor
         # P1 compaction admission wiring: the executor claims the scope's
         # ticket for auto compaction; queued interjection admission moved
-        # from the post-batch hook to the preflight effect.
-        self.turn_executor.compaction_gate = self._compaction_gate()
-        self.turn_executor.compaction_scope = RESIDENT_COMPACTION_SCOPE
-        self.turn_executor.inject_pending = self._inject_pending_for_executor_async
-        self.turn_executor.after_compaction = self._after_compaction_async
+        # from the post-batch hook to the preflight effect. (Private attrs:
+        # the executor stores these with a leading underscore.)
+        self.turn_executor._compaction_gate = self._compaction_gate()
+        self.turn_executor._compaction_scope = RESIDENT_COMPACTION_SCOPE
+        self.turn_executor._inject_pending = self._inject_pending_for_executor_async
+        self.turn_executor._after_compaction = self._after_compaction_async
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
         self.cache_warm_deadline = CacheWarmDeadlineManager(
             cache_snapshot=self._prompt_cache_warm_deadline_snapshot,

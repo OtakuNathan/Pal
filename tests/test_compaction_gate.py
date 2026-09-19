@@ -662,6 +662,8 @@ def test_round_safe_rejects_open_streaming_round_and_in_progress(tmp_path):
         ))
         continuation = SimpleNamespace(turn_id="t1", waiting_effect_id=None)
         assert core.turn_executor._round_safe_for_compaction(continuation) is False
-        waiting = SimpleNamespace(turn_id="t1", waiting_effect_id="effect-live")
-        assert core.turn_executor._round_safe_for_compaction(waiting) is False
+        # NOTE: waiting_effect_id is deliberately NOT part of the predicate:
+        # the effect wrapper sets it while dispatching THIS effect, so any
+        # check would reject every legitimate auto claim (sequential-model
+        # guarantee covers other-effect concurrency instead).
     _run(scenario())

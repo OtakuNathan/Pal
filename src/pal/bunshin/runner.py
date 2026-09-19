@@ -1491,7 +1491,7 @@ class BunshinRunner:
                 metadata={**dict(prompt.metadata), **_bunshin_llm_request_metadata(self.pack, self.run_id)},
             )
 
-        return AgentTurnRuntime.build(
+        runtime = AgentTurnRuntime.build(
             context=context,
             config=bundle.config or RuntimeConfig.defaults(),
             call_port_async=self._call_port_async,
@@ -1516,6 +1516,26 @@ class BunshinRunner:
             ),
             compaction_policy=BunshinCompactionPolicy(),
             compaction_clock_provider=lambda: state.llm_round_count,
+        )
+        self._attach_bunshin_compaction_gate(runtime)
+        return runtime
+
+    def _attach_bunshin_compaction_gate(self, runtime: AgentTurnRuntime) -> None:
+        """Give this worker's executor its own scoped compaction gate.
+
+        The gate rides a dedicated CoreRuntimeState carrier so Bunshin's own
+        loop state never needs resident lock fields; scopes stay isolated
+        (I17: one resident or Bunshin compaction never blocks another).
+        """
+        from pal.core.compaction_coordinator import CompactionGate
+        from pal.core.contracts import CoreRuntimeState
+
+        carrier = CoreRuntimeState()
+        runtime.executor._compaction_gate = CompactionGate(
+            carrier, transition_lock=carrier.channel_turn_transition_lock
+        )
+        runtime.executor._compaction_scope = (
+            f"bunshin:{self.pack.work_order_id or self.run_id}"
         )
 
     def _build_bunshin_prompt_fragment_registry(self) -> PromptFragmentRegistry:

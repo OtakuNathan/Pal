@@ -245,12 +245,13 @@ class TurnExecutor:
     def _round_safe_for_compaction(self, continuation) -> bool:
         """Round-safety evidence for auto compaction admission (A01-A05).
 
-        HTTP completion alone is not proof: require no in-flight effect, no
-        live assistant streaming round, no in-progress/incomplete message,
-        and a fully paired tool protocol on the active L1 turn.
+        HTTP completion alone is not proof: require no live assistant
+        streaming round, no in-progress/incomplete message, and a fully
+        paired tool protocol on the active L1 turn. Effects are strictly
+        sequential in the turn program, so while this effect runs no other
+        effect can be mid-flight (checking ``waiting_effect_id`` here would
+        always see this effect itself and reject every legitimate claim).
         """
-        if getattr(continuation, "waiting_effect_id", None) is not None:
-            return False
         memory_service = self.context.port_registry.get("memory:memory")
         if memory_service is None:
             return False
@@ -303,9 +304,12 @@ class TurnExecutor:
             )
         memory_service = self.context.require_port("memory:memory")
         gate = self._compaction_gate
+        gate_lock = (
+            getattr(gate, "lock", None) if gate is not None else None
+        ) or getattr(self.state, "channel_turn_transition_lock", None)
         ticket = None
         if gate is not None:
-            async with self.state.channel_turn_transition_lock:
+            async with gate_lock:
                 ticket = gate.claim(
                     self._compaction_scope,
                     trigger=CompactionTrigger.AUTO,
@@ -327,13 +331,13 @@ class TurnExecutor:
                 continuation=continuation,
             )
             if ticket is not None and run_result.success:
-                async with self.state.channel_turn_transition_lock:
+                async with gate_lock:
                     gate.advance(ticket, CompactionPhase.COMMITTED)
         finally:
             if ticket is not None:
                 # Identity-checked release: cancellation or failure removes
                 # only this ticket; a successor's gate survives (F07/Q14).
-                async with self.state.channel_turn_transition_lock:
+                async with gate_lock:
                     gate.release(ticket)
         if not run_result.success:
             return EffectResult(
