@@ -50,6 +50,10 @@ class CoreRuntimeState:
     mode: str = "default"
     compaction_user_turn_count: int = 0
     compaction_tickets: dict[str, CompactionTicket] = field(default_factory=dict)
+    # X10/B09: scope -> source stamp of the last FAILED auto compaction
+    # attempt. An unchanged source is not re-compacted until new input
+    # changes the stamp; a success clears the entry.
+    compaction_no_progress: dict[str, str] = field(default_factory=dict)
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
 

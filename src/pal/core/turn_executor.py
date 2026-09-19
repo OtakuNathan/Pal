@@ -352,6 +352,28 @@ class TurnExecutor:
         gate_lock = (
             getattr(gate, "lock", None) if gate is not None else None
         ) or getattr(self.state, "channel_turn_transition_lock", None)
+        no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
+        source_stamp = ""
+        if no_progress_stamps is not None:
+            stamp_reader = getattr(memory_service, "l1_source_stamp", None)
+            if callable(stamp_reader):
+                source_stamp = str(stamp_reader() or "")
+            if (
+                source_stamp
+                and no_progress_stamps.get(self._compaction_scope) == source_stamp
+            ):
+                # X10/B09 no-progress suppression: this exact source already
+                # burned a failed auto attempt; compacting it unchanged can
+                # only hot-loop. The claim is refused BEFORE any ticket is
+                # taken, so queued input and control events stay free to
+                # run; the per-turn 3-attempt cap is untouched.
+                return EffectResult(
+                    status=RuntimeStatus.ERROR,
+                    text=(
+                        "Memory compaction made no progress on the current "
+                        "source; waiting for new input before retrying."
+                    ),
+                )
         ticket = None
         if gate is not None:
             async with gate_lock:
@@ -393,6 +415,10 @@ class TurnExecutor:
             if ticket is not None and run_result.success:
                 async with gate_lock:
                     gate.advance(ticket, CompactionPhase.COMMITTED)
+                if no_progress_stamps is not None:
+                    # The source progressed (B09): a fresh stamp may compact
+                    # again; the per-turn 3-attempt cap still bounds loops.
+                    no_progress_stamps.pop(self._compaction_scope, None)
         finally:
             if ticket is not None:
                 # Identity-checked release: cancellation or failure removes
@@ -400,6 +426,10 @@ class TurnExecutor:
                 async with gate_lock:
                     gate.release(ticket)
         if not run_result.success:
+            if no_progress_stamps is not None and source_stamp:
+                # Remember the failed source so an unchanged stamp cannot
+                # trigger another auto attempt (X10).
+                no_progress_stamps[self._compaction_scope] = source_stamp
             return EffectResult(
                 status=RuntimeStatus.ERROR,
                 text="Memory compaction failed; memory and the active tool RPC were left unchanged.",
