@@ -363,7 +363,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         repr=False,
     )
     _turn_stream_text: dict[tuple[str, str, str, str], str] = field(default_factory=dict, init=False, repr=False)
-    _tagged_message_targets: dict[tuple[str, str, str], dict[str, int]] = field(
+    _tagged_message_targets: dict[tuple[str, str, str], dict[str, Any]] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -786,11 +786,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         if update.kind == ChannelStreamUpdateKind.DONE:
             buffered = self._turn_stream_text.pop(key, "")
-            if str(update.finish_reason or "") in {
-                LLMFinishReason.TOOL_CALLS.value,
-                LLMFinishReason.COMPACT_REQUIRED.value,
-            }:
+            if str(update.finish_reason or "") == LLMFinishReason.COMPACT_REQUIRED.value:
+                # Compaction is an internal control-flow round; its text is a
+                # system-generated notice, not a user answer.
                 return None
+            # Tool-call round text is still user-visible assistant content: it
+            # may carry the real answer that happens to be paired with tool
+            # calls.  Deliver it instead of discarding it silently.
             text = str(update.text or buffered).strip()
             if text:
                 return self._schedule_ordered_send(
@@ -823,13 +825,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         )
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
-        # Core marks the assistant text attached to a tool-call round
-        # explicitly. This is the only reply Telegram suppresses. A tool echo
-        # is also non-terminal, but is independent user-visible progress and
-        # must still be delivered. Terminal replies always win regardless of
-        # stream flush timing.
-        if bool(response_handle.reply_target.get("_pal_stream_companion")):
-            return None
+        # Tool-call round assistant text must stay user-visible: it may carry
+        # the real answer.  Dedup against stream-delivered text is handled by
+        # the base class; non-terminal tool echoes are independent progress
+        # and are also delivered.
         return text
 
     def apply_auth_material(self, material: dict[str, Any]) -> dict[str, Any]:
@@ -1511,6 +1510,21 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return
         await self._send_checklist_message_async(response_handle, message)
 
+    async def _pin_checklist_message_async(self, target: dict[str, Any]) -> bool:
+        """Pin the checklist message best-effort so it stays visible while it exists."""
+        if self.application is None:
+            return False
+        try:
+            await self.application.bot.pin_chat_message(
+                chat_id=int(target["chat_id"]),
+                message_id=int(target["message_id"]),
+                disable_notification=True,
+            )
+        except Exception as exc:
+            logger.debug("telegram checklist pin failed: %s", exc)
+            return False
+        return True
+
     async def _send_checklist_message_async(
         self,
         response_handle: ResponseHandle,
@@ -1538,6 +1552,14 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if target is None:
                 await self._send_reply_async(response_handle, message.text)
                 return
+            # Checklist is going away: drop the pin first, best-effort.
+            try:
+                await self.application.bot.unpin_chat_message(
+                    chat_id=int(target["chat_id"]),
+                    message_id=int(target["message_id"]),
+                )
+            except Exception as exc:
+                logger.debug("telegram checklist unpin failed: %s", exc)
             try:
                 await self.application.bot.delete_message(
                     chat_id=int(target["chat_id"]),
@@ -1573,10 +1595,14 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     message_id=int(target["message_id"]),
                     text=text,
                 )
+                if not target.get("pinned"):
+                    target["pinned"] = await self._pin_checklist_message_async(target)
                 self.last_delivery_error = ""
                 return
             except Exception as exc:
                 if _telegram_message_is_not_modified(exc):
+                    if not target.get("pinned"):
+                        target["pinned"] = await self._pin_checklist_message_async(target)
                     self.last_delivery_error = ""
                     return
                 if not _telegram_interaction_target_is_stale(exc):
@@ -1602,10 +1628,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             ) from exc
         message_id = _safe_int(getattr(sent, "message_id", None))
         if message_id is not None:
-            self._tagged_message_targets[key] = {
+            new_target: dict[str, Any] = {
                 "chat_id": chat_id,
                 "message_id": message_id,
             }
+            new_target["pinned"] = await self._pin_checklist_message_async(new_target)
+            self._tagged_message_targets[key] = new_target
         self.last_delivery_error = ""
 
     async def _send_attachment_async(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:

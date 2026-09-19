@@ -704,8 +704,6 @@ class TurnExecutor:
         if not effect.terminal:
             reply_target = dict(binding.response_handle.reply_target)
             reply_target["_pal_turn_continues"] = True
-            if effect.stream_companion:
-                reply_target["_pal_stream_companion"] = True
             binding = replace(
                 binding,
                 response_handle=replace(

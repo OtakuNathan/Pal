@@ -3062,7 +3062,7 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         self.assertEqual(len(endpoint.outbox), 1)
         self.assertEqual(endpoint.outbox[0].text, "pong")
 
-    def test_telegram_buffers_tool_rounds_and_delivers_only_terminal_answer(self) -> None:
+    def test_telegram_tool_round_done_without_running_loop_is_safe(self) -> None:
         endpoint = TelegramChannelEndpoint(
             endpoint=EndpointConfig(
                 endpoint_id="telegram_main",
@@ -3085,6 +3085,8 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
                 tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
             ),
         )
+        # No running loop: ordered delivery is skipped, but the buffered
+        # round text must still be retired without raising.
         endpoint.send_stream_update(
             handle,
             ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
@@ -3169,6 +3171,34 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         self.assertEqual(
             [item.text for item in endpoint.outbox],
             ["Checklist: 1/3 complete"],
+        )
+
+    def test_telegram_nonstream_tool_round_companion_text_remains_user_visible(self) -> None:
+        # Without an active stream the companion text has no other delivery
+        # channel: it rides the plain queue_reply path like a tool echo.
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={
+                "chat_id": "42",
+                "_pal_turn_continues": True,
+            },
+        )
+
+        endpoint.queue_reply(
+            "Full answer paired with a tool call.",
+            response_handle=handle,
+        )
+
+        self.assertEqual(
+            [item.text for item in endpoint.outbox],
+            ["Full answer paired with a tool call."],
         )
 
     def test_telegram_interrupt_retires_batched_stream_text(self) -> None:
@@ -3680,6 +3710,8 @@ class _FakeTelegramBot:
         self.actions: list[tuple[str, dict[str, object]]] = []
         self.files: dict[str, _FakeTelegramFile] = {}
         self.message_delays: dict[str, float] = {}
+        self.pin_error: BaseException | None = None
+        self.unpin_error: BaseException | None = None
         self._next_message_id = 1000
 
     async def set_message_reaction(self, **kwargs):
@@ -3708,6 +3740,16 @@ class _FakeTelegramBot:
 
     async def delete_message(self, **kwargs):
         self.actions.append(("delete_message", dict(kwargs)))
+
+    async def pin_chat_message(self, **kwargs):
+        if self.pin_error is not None:
+            raise self.pin_error
+        self.actions.append(("pin_chat_message", dict(kwargs)))
+
+    async def unpin_chat_message(self, **kwargs):
+        if self.unpin_error is not None:
+            raise self.unpin_error
+        self.actions.append(("unpin_chat_message", dict(kwargs)))
 
     async def get_file(self, file_id: str):
         return self.files[file_id]
@@ -3854,6 +3896,53 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             pass
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    async def test_telegram_delivers_tool_round_text_then_terminal_answer(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "42"},
+        )
+
+        # Tool round: text + TOOL_CALL + DONE(tool_calls).  Assistant text
+        # paired with tool calls may carry the real answer; it must reach the
+        # user instead of being silently discarded.
+        self.endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Full answer now."),
+        )
+        self.endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
+            ),
+        )
+        delivery = self.endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
+        )
+        if delivery is not None:
+            await delivery
+
+        # Final round: DONE(stop) delivers the terminal answer after it.
+        self.endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Done."),
+        )
+        delivery = self.endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+        )
+        if delivery is not None:
+            await delivery
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        # Telegram MarkdownV2 escapes '.' in delivered text.
+        self.assertEqual(
+            [str(item.get("text")) for item in messages],
+            ["Full answer now\\.", "Done\\."],
+        )
+        self.assertFalse(self.endpoint._turn_stream_text)
+        self.assertFalse(self.endpoint.outbox)
+
     async def test_checklist_tag_sends_edits_and_clears_one_native_message(self) -> None:
         handle = self.endpoint.build_response_handle(
             reply_target={"chat_id": "42", "thread_id": "7"},
@@ -3892,6 +3981,97 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         deletes = [payload for kind, payload in self.fake_bot.actions if kind == "delete_message"]
         self.assertEqual(deletes, [{"chat_id": 42, "message_id": target["message_id"]}])
         self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+
+    async def test_checklist_message_pins_once_and_unpins_on_clear(self) -> None:
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "42", "thread_id": "7"},
+        )
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        target = self.endpoint._tagged_message_targets[("42", "7", "checklist")]
+        pins = [payload for kind, payload in self.fake_bot.actions if kind == "pin_chat_message"]
+        self.assertEqual(
+            pins,
+            [{"chat_id": 42, "message_id": target["message_id"], "disable_notification": True}],
+        )
+
+        checked = ChannelMessage(
+            text="Checklist progress 1/1\n✅ step",
+            tag="checklist",
+            payload={"action": "check", "active": True, "done": 1, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, checked)
+        # Already pinned: the edit round must not pin again.
+        self.assertEqual(
+            len([1 for kind, _ in self.fake_bot.actions if kind == "pin_chat_message"]),
+            1,
+        )
+
+        cleared = ChannelMessage(
+            text="Checklist cleared.",
+            tag="checklist",
+            payload={"action": "clear", "active": False},
+        )
+        await self.endpoint._send_channel_message_async(handle, cleared)
+        order = [kind for kind, _ in self.fake_bot.actions]
+        self.assertLess(order.index("unpin_chat_message"), order.index("delete_message"))
+        unpins = [payload for kind, payload in self.fake_bot.actions if kind == "unpin_chat_message"]
+        self.assertEqual(unpins, [{"chat_id": 42, "message_id": target["message_id"]}])
+        self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+
+    async def test_checklist_pin_failure_is_tolerated_and_retried_on_next_update(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        self.fake_bot.pin_error = RuntimeError("not enough rights")
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        target = self.endpoint._tagged_message_targets[("42", "", "checklist")]
+        self.assertIs(target["pinned"], False)
+        self.assertFalse(self.endpoint.last_delivery_error)
+
+        self.fake_bot.pin_error = None
+        checked = ChannelMessage(
+            text="Checklist progress 1/1\n✅ step",
+            tag="checklist",
+            payload={"action": "check", "active": True, "done": 1, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, checked)
+        pins = [payload for kind, payload in self.fake_bot.actions if kind == "pin_chat_message"]
+        self.assertEqual(
+            pins,
+            [{"chat_id": 42, "message_id": target["message_id"], "disable_notification": True}],
+        )
+        self.assertIs(
+            self.endpoint._tagged_message_targets[("42", "", "checklist")]["pinned"],
+            True,
+        )
+
+    async def test_checklist_unpin_failure_still_deletes_message(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        created = ChannelMessage(
+            text="Checklist progress 0/1\n⬜ step",
+            tag="checklist",
+            payload={"action": "upsert", "active": True, "done": 0, "total": 1},
+        )
+        await self.endpoint._send_channel_message_async(handle, created)
+        self.fake_bot.unpin_error = RuntimeError("message to unpin not found")
+        cleared = ChannelMessage(
+            text="Checklist cleared.",
+            tag="checklist",
+            payload={"action": "clear", "active": False},
+        )
+        await self.endpoint._send_channel_message_async(handle, cleared)
+        deletes = [payload for kind, payload in self.fake_bot.actions if kind == "delete_message"]
+        self.assertEqual(len(deletes), 1)
+        self.assertNotIn(("42", "", "checklist"), self.endpoint._tagged_message_targets)
+        self.assertFalse(self.endpoint.last_delivery_error)
 
     async def test_unknown_message_tag_falls_back_to_ordinary_text(self) -> None:
         handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
@@ -4242,7 +4422,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.endpoint.queue_stream_update(
                 ChannelStreamUpdate(
                     kind=ChannelStreamUpdateKind.TEXT_DELTA,
-                    text=f"discarded draft {index}",
+                    text=f"tool round text {index}",
                 ),
                 response_handle=handle,
             )
@@ -4293,7 +4473,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         expected = [
             text
             for index in range(turn_count)
-            for text in (f"progress {index}", f"final {index}")
+            for text in (f"tool round text {index}", f"progress {index}", f"final {index}")
         ]
         self.assertEqual(sent_texts, expected)
         self.assertFalse(self.endpoint._turn_stream_text)
