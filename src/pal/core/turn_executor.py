@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 from uuid import uuid4
 
 from pal.execution.contracts import ToolCallBudget
@@ -2027,13 +2027,21 @@ class TurnExecutor:
         replay_request = None
         replay_dialect = ""
         replay_wire_shape = ""
-        if logical_scope_id == "pal:resident" and continuation is None:
+        if logical_scope_id == "pal:resident":
+            # Warm handoff covers both admission shapes: idle manual (no
+            # active turn) and the auto path's active cut (anchor + accepted
+            # active suffix with a coverage proof).
             replay_request, replay_dialect, replay_wire_shape = (
                 self._resident_compaction_replay_request(
                     memory_service,
                     llm_runtime=llm_runtime,
                     logical_scope_id=logical_scope_id,
                     preferred_endpoint_id=preferred_endpoint_id,
+                    preferred_model_id=preferred_model_id,
+                    include_active=continuation is not None,
+                    active_turn_id=(
+                        str(continuation.turn_id) if continuation is not None else ""
+                    ),
                 )
             )
             if replay_request is not None:
@@ -2167,7 +2175,24 @@ class TurnExecutor:
         llm_runtime: Any,
         logical_scope_id: str,
         preferred_endpoint_id: str | None,
+        preferred_model_id: str | None = None,
+        include_active: bool = False,
+        active_turn_id: str = "",
     ) -> tuple[LLMRequestIR | None, str, str]:
+        """Build a warm handoff request: frozen anchor + accepted suffix.
+
+        Eligibility (PLAN 8.3, conservative by default):
+        - the anchor must carry a known dialect/wire shape (W16);
+        - the anchor's own endpoint/model binding must match the current
+          preferred binding (W09);
+        - no forced tool_choice (W14) and no provider-hosted tools (W13):
+          the handoff must be able to answer plain JSON;
+        - no image representations inside the anchor prefix: their refresh
+          lifetime cannot be proven from the IR, so warm is refused rather
+          than guessed (W18);
+        - coverage proof (W02/W03): every eligible live L1 message must be
+          covered exactly once by the anchor prefix plus the suffix.
+        """
         reader = getattr(
             llm_runtime,
             "prompt_cache_confirmed_anchor_request",
@@ -2189,8 +2214,47 @@ class TurnExecutor:
         anchor_message_id = str(
             replay.get("anchor_message_id") or ""
         ).strip()
+        dialect = str(replay.get("dialect") or "").strip()
+        wire_shape = str(replay.get("wire_shape") or "").strip()
         if not isinstance(anchor_request, LLMRequestIR) or not anchor_message_id:
             return None, "", ""
+        if not dialect or not wire_shape:
+            return None, "", ""
+        anchor_endpoint = str(
+            anchor_request.metadata.get("preferred_endpoint_id") or ""
+        ).strip()
+        if (
+            preferred_endpoint_id
+            and anchor_endpoint
+            and str(preferred_endpoint_id) != anchor_endpoint
+        ):
+            return None, "", ""
+        anchor_model = str(anchor_request.model_hint or "").strip()
+        if (
+            preferred_model_id
+            and anchor_model
+            and str(preferred_model_id) != anchor_model
+        ):
+            return None, "", ""
+        if str(getattr(anchor_request.policy, "tool_choice", "auto") or "auto") != "auto":
+            return None, "", ""
+        for tool in list(anchor_request.tools or ()):
+            if isinstance(tool, Mapping):
+                tool_payload = dict(tool)
+            else:
+                tool_payload = dict(
+                    getattr(tool, "payload", None)
+                    or getattr(tool, "metadata", None)
+                    or {}
+                )
+            if str(tool_payload.get("execute_on") or "").strip().lower() in {
+                "server", "provider", "hosted",
+            }:
+                return None, "", ""
+        for message in anchor_request.messages:
+            for part in message.parts:
+                if isinstance(part, ImagePartIR):
+                    return None, "", ""
 
         try:
             memory_pack = memory_service.build_pack(
@@ -2203,17 +2267,19 @@ class TurnExecutor:
         capabilities = self._resolve_llm_capabilities_for_endpoint(
             preferred_endpoint_id
         )
+        from pal.memory.context_view import projected_messages
+
         suffix: list[LLMMessageIR] = []
         anchor_found = False
-        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
-            from pal.memory.context_view import projected_messages
-            projected = self._project_messages_for_prompt(
-                list(projected_messages(settled_turn, settled=True)),
-                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
-                artifact_scope_key=logical_scope_id,
-                capabilities=capabilities,
-            )
-            for message in projected:
+        live_ids: list[str] = []
+        anchor_ids = {
+            str(message.message_id) for message in anchor_request.messages
+        }
+
+        def project_into_suffix(messages: list[LLMMessageIR], *, settled: bool) -> None:
+            nonlocal anchor_found
+            for message in messages:
+                live_ids.append(str(message.message_id))
                 if anchor_found:
                     suffix.append(
                         replace(
@@ -2223,13 +2289,48 @@ class TurnExecutor:
                     )
                 elif message.message_id == anchor_message_id:
                     anchor_found = True
+
+        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            projected = self._project_messages_for_prompt(
+                list(projected_messages(settled_turn, settled=True)),
+                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
+                artifact_scope_key=logical_scope_id,
+                capabilities=capabilities,
+            )
+            project_into_suffix(projected, settled=True)
+        if include_active and active_turn_id:
+            active_turn_reader = getattr(memory_service, "active_l1_turn", None)
+            active_turn = (
+                active_turn_reader(str(active_turn_id))
+                if callable(active_turn_reader)
+                else None
+            )
+            if active_turn is not None:
+                projected_active = self._project_messages_for_prompt(
+                    list(projected_messages(active_turn, settled=False)),
+                    turn_id=str(active_turn_id),
+                    artifact_scope_key=logical_scope_id,
+                    capabilities=capabilities,
+                )
+                project_into_suffix(projected_active, settled=False)
         if not anchor_found:
+            return None, "", ""
+        # Coverage proof (W02/W03): the confirmed-anchor contract covers the
+        # live order up to anchor_message_id; every eligible live message
+        # strictly after the anchor must be carried by the suffix exactly
+        # once (duplicated live ids refuse warm instead of guessing).
+        duplicated = {
+            message_id
+            for message_id in live_ids
+            if live_ids.count(message_id) > 1
+        }
+        if duplicated:
             return None, "", ""
         return (
             replace(
                 anchor_request,
                 messages=(*anchor_request.messages, *suffix),
             ),
-            str(replay.get("dialect") or "").strip(),
-            str(replay.get("wire_shape") or "").strip(),
+            dialect,
+            wire_shape,
         )

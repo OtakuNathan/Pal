@@ -196,7 +196,8 @@ def test_replay_from_previous_compaction_boundary_is_rejected():
     prompt = request(core, "one")
     service.settle_l1_turn("one")
     llm = SimpleNamespace(prompt_cache_confirmed_anchor_request=lambda **kwargs: {
-        "request": prompt, "anchor_message_id": prompt.messages[-1].message_id})
+        "request": prompt, "anchor_message_id": prompt.messages[-1].message_id,
+        "dialect": "openrouter_openai_explicit", "wire_shape": "openai_completion"})
     service.begin_l1_turn("two", user_text="next request")
     service.settle_l1_turn("two")
     replay = core.turn_executor._resident_compaction_replay_request(service, llm_runtime=llm,
