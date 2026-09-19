@@ -1453,6 +1453,12 @@ class PalCore(MemoryMaintenanceMixin):
         )
 
     async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:
+        # A confirmed endpoint/settings switch revokes any live
+        # compaction ticket's commit eligibility first, so a warm generate
+        # candidate can never install onto — or carry native cache
+        # toward — the new endpoint (X07).
+        async with self.state.channel_turn_transition_lock:
+            self._compaction_gate().cancel_all(reason="llm_endpoint_refresh")
         llm_runtime = self.context.require_port("llm:llm")
         refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
         if callable(refresh):

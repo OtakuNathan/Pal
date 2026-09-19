@@ -251,6 +251,7 @@ class CompactionEngine:
         memory_service: Any,
         after_commit: Callable[[], None] | None = None,
         replay_guard: Callable[[], bool] | None = None,
+        commit_guard: Callable[[], bool] | None = None,
     ) -> CompactionRunResult:
         snapshot = _scope_safe_snapshot(snapshot)
         units = list(build_compaction_units(snapshot))
@@ -492,6 +493,18 @@ class CompactionEngine:
                     output_target = max(1, (output_target or visible_limit) // 2)
                 continue
 
+            if commit_guard is not None and not commit_guard():
+                # Cancel/sweep safety (X03/X06/X07): a ticket that lost
+                # commit eligibility must never install; memory and the
+                # receipt ledger stay exactly as they were.
+                failures.append("ticket_cancelled")
+                return finish(
+                    snapshot,
+                    status="ticket_cancelled",
+                    attempts=attempts,
+                    source_sizes=source_sizes,
+                    failures=failures,
+                )
             committed = await self._commit(
                 snapshot,
                 memory_service=memory_service,

@@ -51,7 +51,7 @@ class _BarrierEngine:
         self.policy = PalCompactionPolicy()
 
     async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
-                  after_commit=None, replay_guard=None):
+                  after_commit=None, replay_guard=None, commit_guard=None):
         self.calls += 1
         self.entered.set()
         await self.release.wait()
@@ -219,6 +219,92 @@ class RealFileRecoveryTests(unittest.TestCase):
             # checkpoint would also suppress the channel redelivery that is
             # the only way to recover that append. Closing that window needs
             # receipt/checkpoint sequencing (outbox), tracked for P4+.
+
+
+class ShutdownTwoSidedRecoveryTests(unittest.TestCase):
+    """X09: shutdown once before the commit and once after it; each reboot
+    restores its own legal root, pending input survives, and no old mutation
+    is auto-resent."""
+
+    def test_x09_both_sides_recover_legal_roots_pending_survives(self) -> None:
+        import tempfile
+
+        from pal.memory.contracts import MemoryCompactRequest
+        from pal.memory.runtime_state import MemoryRuntimeStatePort
+        from tests.test_compaction_gate import _envelope
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, turn_id, _ = _service_with_active()
+            staging = IngressStagingStore(Path(tmp) / "staging.json")
+            staging.enqueue(StagedIngressRecord.from_channel_envelope(
+                _envelope("m-x09", "PENDING_INPUT_X09"), scope="s"
+            ))
+
+            # Side A: shutdown before the commit — old root must return.
+            port = MemoryRuntimeStatePort(service)
+            payload_a = dict(port.snapshot_state())
+            restored_a = MemoryService()
+            restored_a_port = MemoryRuntimeStatePort(restored_a)
+            restored_a_port.install_prepared_state(
+                restored_a_port.prepare_restore_state(payload_a)
+            )
+            self.assertEqual(restored_a.context_epoch, 0)
+            self.assertEqual(restored_a.compaction_receipts, {})
+            records_a = IngressStagingStore(Path(tmp) / "staging.json").pending_records()
+            self.assertEqual([r.event_id for r in records_a], ["m-x09"])
+            self.assertIn("PENDING_INPUT_X09", json.dumps(records_a[0].payload))
+
+            # Side B: a real commit, then shutdown — new root must return.
+            engine = CompactionEngine(PalCompactionPolicy())
+            from pal.core.compaction import CompactionClockKind, CompactionSnapshot
+            snapshot = CompactionSnapshot.capture(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
+                clock_kind=CompactionClockKind.USER_TURN,
+                clock_value=1,
+                metadata={"compaction_op_id": "op-x09"},
+                source_epoch=service.context_epoch,
+            )
+            result = asyncio.run(engine.run(
+                snapshot,
+                llm_runtime=_ScriptedLLM([
+                    generation_result_from_values(text=_valid_pal_payload("x09 seed"))
+                ]),
+                memory_service=service,
+            ))
+            self.assertTrue(result.success, result.failures)
+
+            payload_b = dict(MemoryRuntimeStatePort(service).snapshot_state())
+            restored_b = MemoryService()
+            restored_b_port = MemoryRuntimeStatePort(restored_b)
+            restored_b_port.install_prepared_state(
+                restored_b_port.prepare_restore_state(payload_b)
+            )
+            self.assertEqual(restored_b.context_epoch, 1)
+            self.assertEqual(restored_b.compaction_receipts["op-x09"].status, "committed")
+            self.assertEqual(
+                [turn.turn_id for turn in restored_b.l1_store.turns.turns],
+                ["compact-summary", turn_id],
+            )
+            # Pending input still reachable after the second reboot.
+            records_b = IngressStagingStore(Path(tmp) / "staging.json").pending_records()
+            self.assertEqual([r.event_id for r in records_b], ["m-x09"])
+            # No auto-resend of the old mutation: exactly one receipt and
+            # the replay stays idempotent without a second install.
+            self.assertEqual(len(restored_b.compaction_receipts), 1)
+            replay_entry = PalCompactionPolicy().validate_checkpoint(
+                _valid_pal_payload("x09 seed"), snapshot
+            )
+            replayed = restored_b.compact(MemoryCompactRequest(
+                target_input_budget=8_192, reserved_output_tokens=2_048,
+                summary_entry=replay_entry, op_id="op-x09",
+                source_stamp=snapshot.source_stamp,
+                active_turn_id=snapshot.active_turn_ids[0],
+                expected_epoch=snapshot.source_epoch,
+            ))
+            self.assertTrue(replayed.metadata.get("compaction_replayed"))
+            self.assertEqual(restored_b.context_epoch, 1)
 
 
 class CancellationTests(unittest.TestCase):

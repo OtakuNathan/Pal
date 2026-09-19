@@ -1,0 +1,331 @@
+"""P6 second-batch matrix-gap tests: Q09, B07, A12, I11.
+
+- Q09: mixed-type queued input — only the supported contiguous prefix is
+  consumed by one interjection batch; the first unsupported entry and its
+  successors stay FIFO-queued for normal turn processing.
+- B07: bounded failure — the engine's attempt loop is capped (per-attempt
+  timeout does not restart forever), and an expired ticket's deadline is
+  the total bound that frees the gate via sweep.
+- A12: a turn whose LLM already produced the final answer never compacts
+  on its way out, even with history across the auto threshold; the next
+  input's preflight decides again.
+- I11: after an auto compaction the turn's final reply is the real final
+  answer — the handoff JSON is never the final reply, old transcript text
+  is not re-emitted, and routing stays with the opening turn.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+from pal.channel import ChannelRuntime, register_with_core as register_channel_with_core
+from pal.core import register_with_core as register_core_with_core
+from pal.core.compaction import CompactionEngine
+from pal.core.pal_compaction import PalCompactionPolicy
+from pal.core.runtime import PalCore
+from pal.foundation.io import EventEnvelope
+from pal.llm import generation_result_from_values
+from pal.llm.contracts import LLMPreflightAdvice
+from pal.memory import (
+    L1TranscriptMessage,
+    L3ProviderSelector,
+    MemoryService,
+    register_with_core as register_memory_with_core,
+)
+from pal.memory.turn_ir import L1TurnIR, L1TurnState
+from pal.shared import EventKind, SourceKind
+from pal.shared.agent_io import ChannelEnvelope, EndpointConfig, ResponseHandle
+
+from tests.test_cache_warm_deadline import _route
+from tests.test_compaction_cancel_control import _build_core
+from tests.test_compaction_gate import _envelope, _run
+from tests.test_runtime_compaction import (
+    _ScriptedLLM,
+    _memory_with_turns,
+    _valid_pal_payload,
+)
+
+
+# ── Q09 · mixed-type prefix consumption ─────────────────────────────────
+
+
+def test_q09_mixed_queue_consumes_supported_prefix_only(tmp_path):
+    async def scenario():
+        core, service, _engine, _replies = _build_core(tmp_path)
+        from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, TextPartIR
+
+        service.l1_store.turns.append(L1TurnIR(
+            turn_id="turn-live",
+            state=L1TurnState.ACTIVE,
+            messages=[LLMMessageIR(
+                role=MessageRole.USER,
+                parts=(TextPartIR("opening question"),),
+                message_id="u1",
+                state=MessageState.COMPLETE,
+            )],
+        ))
+        text_one = _envelope("m-1", "first correction")
+        text_two = _envelope("m-2", "second correction")
+        unsupported = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"file_id": "att-1"},  # no text -> not interjectable
+                correlation_id="m-3",
+                event_id="m-3",
+            ),
+            endpoint=text_one.endpoint,
+            response_handle=text_one.response_handle,
+        )
+        core.state.pending_channel_turns.extend([text_one, text_two, unsupported])
+
+        appended: list[object] = []
+        original = service.append_l1_user
+
+        def recording_append(turn_id, message):
+            appended.append(message)
+            return original(turn_id, message)
+
+        service.append_l1_user = recording_append
+        continuation = SimpleNamespace(turn_id="turn-live", delivery_binding=None)
+        from pal.core.interjection import inject_pending_interjection_async
+
+        await inject_pending_interjection_async(
+            context=core.context, state=core.state, continuation=continuation,
+        )
+
+        assert len(appended) == 1
+        batch_text = "".join(
+            part.text for part in appended[0].parts
+            if hasattr(part, "text")
+        )
+        assert "first correction" in batch_text and "second correction" in batch_text
+        # The unsupported entry was neither consumed nor skipped past.
+        remaining = list(core.state.pending_channel_turns)
+        assert [env.event.event_id for env in remaining] == ["m-3"]
+    _run(scenario())
+
+
+# ── B07 · bounded attempts + total deadline frees the gate ──────────────
+
+
+def test_b07_attempt_loop_bounded_and_expired_ticket_swept(tmp_path):
+    async def scenario():
+        service = _memory_with_turns(2)
+        engine = CompactionEngine(PalCompactionPolicy())
+        bad_llm = _ScriptedLLM([
+            generation_result_from_values(text="not json at all"),
+            generation_result_from_values(text="still not json"),
+            generation_result_from_values(text="{broken"),
+        ])
+        from pal.core.compaction import CompactionClockKind, CompactionSnapshot
+
+        snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+            metadata={"compaction_op_id": "op-b07"},
+            source_epoch=service.context_epoch,
+        )
+        result = await engine.run(
+            snapshot, llm_runtime=bad_llm, memory_service=service,
+        )
+        # The attempt loop is capped at the configured retry budget; a
+        # per-attempt timeout never restarts an unbounded total budget.
+        assert not result.success
+        assert result.attempts <= 3
+        assert service.context_epoch == 0  # nothing installed
+
+        # Total deadline: the ticket that owned the failed run expires and
+        # is swept on the next claim instead of pinning the scope.
+        core, _svc, _eng, _replies = _build_core(tmp_path)
+        from pal.core.compaction_coordinator import CompactionGate, CompactionTrigger
+
+        gate = CompactionGate(
+            core.state,
+            transition_lock=core.state.channel_turn_transition_lock,
+        )
+        async with core.state.channel_turn_transition_lock:
+            ticket = gate.claim(
+                "pal:resident",
+                trigger=CompactionTrigger.AUTO,
+                deadline_seconds=0.05,
+            )
+            assert ticket is not None
+        core.state.compaction_tickets["pal:resident"] = replace(
+            ticket,
+            claimed_at_monotonic=time.monotonic() - 1.0,
+        )
+        async with core.state.channel_turn_transition_lock:
+            fresh = gate.claim("pal:resident", trigger=CompactionTrigger.AUTO)
+            assert fresh is not None and fresh.op_id != ticket.op_id
+    _run(scenario())
+
+
+# ── A12 / I11 · full-lane turn shapes ───────────────────────────────────
+
+
+class _CountingCompactEngine:
+    """Real-shaped stub: counts runs, installs nothing."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.policy = PalCompactionPolicy()
+
+    async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
+                  after_commit=None, replay_guard=None, commit_guard=None):
+        self.calls += 1
+        from pal.core.compaction import CompactionRunResult
+
+        return CompactionRunResult(
+            status="compacted",
+            attempts=1,
+            memory_result=SimpleNamespace(
+                summary="s",
+                projected_entries=[],
+                metadata={"projected_entry_count": 0,
+                          "compact_summary_count": 1, "retired_count": 0},
+            ),
+        )
+
+
+def _turn_envelope(text: str = "hello") -> ChannelEnvelope:
+    return ChannelEnvelope(
+        event=EventEnvelope(
+            event_kind="user.message",
+            source_kind="channel",
+            payload={"text": text},
+        ),
+        endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
+        response_handle=ResponseHandle(endpoint_id="stdio"),
+    )
+
+
+def _core_with_llm(llm, engine) -> tuple[PalCore, MemoryService]:
+    core = PalCore()
+    register_core_with_core(core)
+    channel_runtime = ChannelRuntime()
+    register_channel_with_core(core.context, channel_runtime)
+    memory_service = MemoryService(
+        l3_selector=L3ProviderSelector(
+            resolver=core.context.execution_runtime.l3_plugin_registry.require
+        )
+    )
+    memory_service.l1_store.append([
+        L1TranscriptMessage(
+            role="user",
+            content="Older context that sits across the auto threshold.",
+        )
+    ])
+    register_memory_with_core(core.context, memory_service)
+    core.context.port_registry["llm:llm"] = llm
+    core.turn_executor._compaction_engine = engine
+    return core, memory_service
+
+
+class _FinalAnswerLLM:
+    def preflight(self, request) -> LLMPreflightAdvice:
+        return LLMPreflightAdvice(
+            status="ready",
+            active_model=request.request.model_hint or "stub-model",
+            fallback_chain=[],
+            target_input_budget=2048,
+            reserved_output_tokens=request.request.policy.max_output_tokens,
+        )
+
+    def generate(self, request):
+        return generation_result_from_values(
+            text="the final answer", tool_calls=[], finish_reason="stop",
+        )
+
+    async def agenerate(self, request):
+        return self.generate(request)
+
+
+def test_a12_final_answer_turn_never_compacts():
+    engine = _CountingCompactEngine()
+    core, _service = _core_with_llm(_FinalAnswerLLM(), engine)
+    outcome = core.process_channel_turn(_turn_envelope())
+    assert outcome.final_reply == "the final answer"
+    # The answer already existed: no compaction on the way out, no ticket.
+    assert engine.calls == 0
+    assert not core.state.compaction_tickets
+
+
+class _CompactThenFinalLLM:
+    """First generate asks for compaction; after install, real final."""
+
+    def __init__(self) -> None:
+        self.generate_count = 0
+
+    def preflight(self, request) -> LLMPreflightAdvice:
+        return LLMPreflightAdvice(
+            status="ready",
+            active_model=request.request.model_hint or "stub-model",
+            fallback_chain=[],
+            target_input_budget=2048,
+            reserved_output_tokens=request.request.policy.max_output_tokens,
+        )
+
+    def generate(self, request):
+        self.generate_count += 1
+        if self.generate_count == 1:
+            return generation_result_from_values(
+                text="", tool_calls=[], finish_reason="compact_required",
+                target_input_budget=512, reserved_output_tokens=64,
+            )
+        return generation_result_from_values(
+            text="final after compaction", tool_calls=[], finish_reason="stop",
+        )
+
+    async def agenerate(self, request):
+        purpose = str(request.metadata.get("purpose") or "")
+        if "compaction" in purpose:
+            return generation_result_from_values(
+                text=json.dumps({
+                    "schema": "pal.compaction.pal.v2",
+                    "kind": "pal",
+                    "summary": {
+                        "summary": "I11 handoff summary.",
+                        "search_text": "I11 handoff summary.",
+                    },
+                    "continuity": {
+                        "current_focus": "finish the turn",
+                        "primary_request_and_intent": "reply normally",
+                        "active_operating_instructions": [],
+                        "active_requests": [],
+                        "temporary_task_state": [],
+                        "key_decisions": [],
+                        "pending_questions": [],
+                        "recent_raw_turns": [],
+                        "warm_compressed_turns": [],
+                        "retired_or_superseded_context": [],
+                        "optional_next_step": "emit the final answer",
+                    },
+                    "memory_candidates": [],
+                }),
+                tool_calls=[], finish_reason="stop",
+            )
+        return self.generate(request)
+
+
+def test_i11_final_reply_is_real_answer_not_handoff_json():
+    llm = _CompactThenFinalLLM()
+    core, service = _core_with_llm(llm, CompactionEngine(PalCompactionPolicy()))
+    outcome = core.process_channel_turn(_turn_envelope())
+    # The handoff JSON was never the final reply...
+    assert outcome.final_reply == "final after compaction"
+    assert "pal.compaction.pal.v2" not in outcome.final_reply
+    # ...old transcript text was not re-emitted...
+    assert "Older context" not in outcome.final_reply
+    assert all("Older context" not in str(t) for t in outcome.reply_texts)
+    # ...and exactly one compaction ran with a clean gate afterwards.
+    assert llm.generate_count == 2
+    assert not core.state.compaction_tickets
+    assert service.context_epoch == 1

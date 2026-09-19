@@ -328,6 +328,20 @@ class TurnExecutor:
                     status=RuntimeStatus.ERROR,
                     text="Memory compaction is already in progress for this scope.",
                 )
+        def commit_eligible() -> bool:
+            # Commit eligibility (X03/X06/X07): install only while this
+            # exact ticket is still the scope's current, uncancelled
+            # holder. A cancel (refresh/reset/interrupt), a deadline sweep,
+            # or a successor claim all revoke it; memory stays unchanged.
+            if ticket is None or gate is None:
+                return True
+            current = gate.ticket_for(self._compaction_scope)
+            return (
+                current is not None
+                and current.op_id == ticket.op_id
+                and not bool(current.cancelled)
+            )
+
         run_result = None
         try:
             run_result = await self.compact_memory_async(
@@ -336,6 +350,7 @@ class TurnExecutor:
                 reserved_output_tokens=effect.reserved_output_tokens,
                 assembly_context=effect.assembly_context,
                 continuation=continuation,
+                commit_guard=commit_eligible,
             )
             if ticket is not None and run_result.success:
                 async with gate_lock:
@@ -1973,6 +1988,7 @@ class TurnExecutor:
         max_attempts: int | None = None,
         timeout_seconds: float | None = None,
         cache_epoch: str = "",
+        commit_guard: Any = None,
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -2172,6 +2188,7 @@ class TurnExecutor:
             memory_service=memory_service,
             after_commit=after_compact,
             replay_guard=replay_guard if cache_epoch else None,
+            commit_guard=commit_guard,
         )
         if not run_result.success or continuation is None:
             return run_result

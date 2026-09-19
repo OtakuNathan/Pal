@@ -148,7 +148,14 @@ class CompactionGate:
         scope_key = str(scope)
         current = tickets.get(scope_key)
         if current is not None and current.phase != CompactionPhase.RELEASED:
-            return None
+            if not current.expired:
+                return None
+            # Deadline sweep (X06): a non-terminal ticket past its
+            # deadline no longer holds the gate. The late holder's
+            # release/advance fail the identity check and its commit is
+            # rejected by the commit guard, so a hung provider coroutine
+            # cannot pin the scope forever.
+            del tickets[scope_key]
         ticket = CompactionTicket(
             scope=scope_key,
             trigger=CompactionTrigger(trigger),
