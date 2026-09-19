@@ -249,7 +249,9 @@ class TurnExecutor:
                 continuation.prompt_budget_snapshot = dict(getattr(advice, "breakdown", {}) or {})
         return EffectResult(status=RuntimeStatus.OK, payload=advice)
 
-    def _round_safe_for_compaction(self, continuation) -> bool:
+    def _round_safe_for_compaction(
+        self, continuation, *, reasons: list[str] | None = None,
+    ) -> bool:
         """Round-safety evidence for auto compaction admission (A01-A05).
 
         HTTP completion alone is not proof: require no in-progress/
@@ -262,27 +264,46 @@ class TurnExecutor:
         terminal provider response on the real auto path, so it must not
         gate admission here either; message-state closure below is the
         boundary that matters.
+
+        ``reasons`` (A04), when provided, collects a structured cause per
+        rejection so an unknown/unreconciled effect is explicitly visible
+        as reconcile-required instead of a silent bool.
         """
+
+        def _note(reason: str) -> None:
+            if reasons is not None:
+                reasons.append(reason)
+
         memory_service = self.context.port_registry.get("memory:memory")
         if memory_service is None:
+            _note("memory_service_unavailable")
             return False
         turn_id = str(continuation.turn_id)
         active_turn_reader = getattr(memory_service, "active_l1_turn", None)
         turn = active_turn_reader(turn_id) if callable(active_turn_reader) else None
         if turn is None:
+            _note("no_active_l1_turn")
             return False
         calls: set[str] = set()
         results: set[str] = set()
         for message in turn.messages:
             message_state = str(getattr(message, "state", "") or "")
             if message_state in {"in_progress", "incomplete"}:
+                _note(f"open_message:{message_state}")
                 return False
             for part in message.parts:
                 if isinstance(part, ToolCallIR):
                     calls.add(str(part.call_id))
                 elif isinstance(part, ToolResultIR):
                     results.add(str(part.call_id))
-        return calls == results
+        if calls != results:
+            # A04: a mutation whose effect ledger entry is unknown (result
+            # not closed) is never deleted to fake closure and never
+            # re-run; the claim must wait for reconciliation.
+            unpaired = sorted(calls.symmetric_difference(results))
+            _note("reconcile_required:unpaired_tool_protocol:" + ",".join(unpaired))
+            return False
+        return True
 
     @_dispatch_effect.register(MemoryCompactEffect)
     async def _handle_memory_compact(self, effect, continuation):
@@ -299,9 +320,26 @@ class TurnExecutor:
                     "be committed."
                 ),
             )
-        if not self._round_safe_for_compaction(continuation):
+        round_reasons: list[str] = []
+        if not self._round_safe_for_compaction(
+            continuation, reasons=round_reasons,
+        ):
             # Round-safety proof (A01-A05): HTTP completion alone is not a
             # safe boundary. The claim waits until the round is closed.
+            # A04: the rejection is structured evidence — an unknown or
+            # unreconciled mutation is explicitly reconcile-required, never
+            # silently deleted to fake closure and never re-run.
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "compaction_round_unsafe",
+                    "turn_id": str(continuation.turn_id),
+                    "reasons": list(round_reasons),
+                    "reconcile_required": any(
+                        reason.startswith("reconcile_required")
+                        for reason in round_reasons
+                    ),
+                })
             return EffectResult(
                 status=RuntimeStatus.ERROR,
                 text=(

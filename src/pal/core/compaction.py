@@ -211,6 +211,7 @@ class CompactionRunResult:
     failures: tuple[str, ...] = ()
     clock_kind: CompactionClockKind = CompactionClockKind.USER_TURN
     clock_value: int = 0
+    usage: dict[str, Any] | None = None
 
     @property
     def success(self) -> bool:
@@ -528,6 +529,7 @@ class CompactionEngine:
                 memory_result=committed,
                 source_sizes=source_sizes,
                 failures=failures,
+                usage=_usage_snapshot(outcome),
             )
 
         return finish(
@@ -818,6 +820,7 @@ class CompactionEngine:
         memory_result: MemoryCompactResult | None = None,
         source_sizes: Sequence[int] = (),
         failures: Sequence[str] = (),
+        usage: dict[str, Any] | None = None,
     ) -> CompactionRunResult:
         return CompactionRunResult(
             status=status,
@@ -828,7 +831,37 @@ class CompactionEngine:
             failures=tuple(str(item) for item in failures if str(item)),
             clock_kind=snapshot.clock_kind,
             clock_value=snapshot.clock_value,
+            usage=dict(usage) if usage else None,
         )
+
+
+def _usage_snapshot(outcome: Any) -> dict[str, Any] | None:
+    """Structured usage from the successful attempt's provider outcome.
+
+    B10/W11: cached-token misses are recorded exactly as the provider
+    reported them instead of being assumed cheap, and a usage-less
+    outcome yields None rather than misleading zeros. This is billing
+    evidence, never a savings promise.
+    """
+    if outcome is None:
+        return None
+    token_fields = (
+        "input_tokens",
+        "uncached_input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+    )
+    values: dict[str, Any] = {
+        **{field: int(getattr(outcome, field, 0) or 0) for field in token_fields},
+        "cost": float(getattr(outcome, "cost", 0.0) or 0.0),
+        "usage_reported": bool(getattr(outcome, "usage_reported", False)),
+    }
+    if not values["usage_reported"] and not any(
+        values[field] for field in token_fields
+    ):
+        return None
+    return values
 
 
 def build_compaction_units(

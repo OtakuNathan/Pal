@@ -329,3 +329,70 @@ def test_i11_final_reply_is_real_answer_not_handoff_json():
     assert llm.generate_count == 2
     assert not core.state.compaction_tickets
     assert service.context_epoch == 1
+
+
+# ── A04 · unknown/unreconciled effect is explicit reconcile-required ────
+
+
+def test_a04_unknown_mutation_rejected_as_reconcile_required():
+    async def scenario():
+        from pal.core.turns import MemoryCompactEffect
+        from pal.llm.ir import (
+            LLMMessageIR,
+            MessageRole,
+            MessageState,
+            TextPartIR,
+        )
+        from pal.shared.tool_protocol import new_tool_call
+
+        core = PalCore()
+        service = _memory_with_turns(1)
+        core.context.port_registry["memory:memory"] = service
+        core.context.port_registry["llm:llm"] = object()
+        # A mutation was dispatched but its effect ledger entry is unknown:
+        # the call is COMPLETE yet no result ever closed it.
+        call = new_tool_call(
+            call_id="call_a04", name="run_shell", args={"cmd": "touch x"}
+        )
+        assistant = LLMMessageIR(
+            role=MessageRole.ASSISTANT,
+            parts=(TextPartIR("mutating"), call),
+            message_id="a1",
+            state=MessageState.COMPLETE,
+        )
+        from pal.memory.turn_ir import L1TurnIR, L1TurnState
+
+        service.l1_store.turns.append(L1TurnIR(
+            turn_id="t-a04", state=L1TurnState.ACTIVE, messages=[assistant],
+        ))
+        continuation = SimpleNamespace(
+            turn_id="t-a04", waiting_effect_id=None,
+            interrupted=False, interrupt_reason="",
+        )
+        effect = MemoryCompactEffect(
+            assembly_context=None, target_input_budget=512, reserved_output_tokens=64,
+        )
+        result = await core.turn_executor.execute_turn_effect_async(
+            continuation, effect,
+        )
+        # Not admitted: no fake closure, no re-run, no install.
+        from pal.shared import RuntimeStatus
+
+        assert result.status == RuntimeStatus.ERROR
+        diags = [
+            d for d in core.state.diagnostics
+            if d.get("kind") == "compaction_round_unsafe"
+        ]
+        assert diags, "A04 requires an explicit reconcile-required record"
+        assert diags[-1]["reconcile_required"] is True
+        assert any("call_a04" in reason for reason in diags[-1]["reasons"])
+        # The call itself is untouched and no summary landed.
+        turn = service.active_l1_turn("t-a04")
+        part_ids = [
+            str(getattr(part, "call_id", "")) for m in turn.messages for part in m.parts
+        ]
+        assert "call_a04" in part_ids
+        assert service.context_epoch == 0
+        assert service.compaction_receipts == {}
+        assert not core.state.compaction_tickets
+    _run(scenario())

@@ -416,5 +416,49 @@ class _Advice:
         return getattr(self._advice, item)
 
 
+class WarmUsageAccountingTests(unittest.TestCase):
+    """W11/B10: a warm handoff the provider reports as a cache miss is
+    billed exactly as reported — no invented savings, no retry chasing a
+    hit — and the valid content still installs normally."""
+
+    def test_w11_b10_cache_miss_recorded_as_reported_no_retry(self) -> None:
+        service, anchor_id, _ = _warm_service(rounds_after_anchor=1)
+        llm = _anchor_llm(
+            anchor_id,
+            outcomes=[
+                generation_result_from_values(
+                    text=_valid_pal_payload("w11 miss seed"),
+                    input_tokens=900,
+                    uncached_input_tokens=900,
+                    cached_input_tokens=0,
+                    cache_write_input_tokens=0,
+                    output_tokens=120,
+                    usage_reported=True,
+                ),
+            ],
+        )
+        snapshot = _capture_warm(service, llm)
+        self.assertIsNotNone(snapshot.replay_request)
+        result = asyncio.run(
+            CompactionEngine(PalCompactionPolicy()).run(
+                snapshot, llm_runtime=llm, memory_service=service
+            )
+        )
+        # One summary request, no retry chasing a cache hit.
+        self.assertTrue(result.success, result.failures)
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(len(llm.generate_requests), 1)
+        # The miss is recorded exactly as the provider reported it.
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(result.usage["cached_input_tokens"], 0)
+        self.assertEqual(result.usage["uncached_input_tokens"], 900)
+        self.assertEqual(result.usage["input_tokens"], 900)
+        self.assertEqual(result.usage["output_tokens"], 120)
+        self.assertTrue(result.usage["usage_reported"])
+        # Valid content installed normally despite the miss.
+        self.assertEqual(service.context_epoch, 1)
+        self.assertIn("op-warm", service.compaction_receipts)
+
+
 if __name__ == "__main__":
     unittest.main()
