@@ -354,6 +354,29 @@ class TurnExecutor:
         ) or getattr(self.state, "channel_turn_transition_lock", None)
         no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
         self._drain_compaction_candidate_outbox(memory_service)
+        # Q12 lease: artifacts referenced by durably staged pending events
+        # keep their hot TTL refreshed while this compaction holds the
+        # gate across ordinary reap ticks, so the drained message still
+        # finds its content. References only — bytes never enter staging.
+        try:
+            from pal.core.artifact_lease import (
+                artifact_ids_from_staged_records,
+                touch_artifacts,
+            )
+
+            staged = getattr(self.state, "ingress_staging", None)
+            if staged is not None:
+                pending_ids = artifact_ids_from_staged_records(
+                    staged.pending_records()
+                )
+                if pending_ids:
+                    touch_artifacts(
+                        self.context,
+                        pending_ids,
+                        str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
+                    )
+        except Exception:
+            pass
         source_stamp = ""
         if no_progress_stamps is not None:
             stamp_reader = getattr(memory_service, "l1_source_stamp", None)
@@ -499,6 +522,28 @@ class TurnExecutor:
             # next preflight (PLAN section 4 default order).
             self._drain_compaction_candidate_outbox(memory_service)
             await self._after_compaction(continuation)
+        # R08 lease: artifacts referenced by the committed L1 (seed plus
+        # active input) keep their TTL refreshed after the install, so a
+        # restart still finds the owner-scoped content and never treats a
+        # live handle as a new resource to request or delete.
+        try:
+            from pal.core.artifact_lease import (
+                artifact_ids_from_l1_turns,
+                touch_artifacts,
+            )
+
+            turns_reader = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+            turns = getattr(turns_reader, "turns", None) if turns_reader is not None else None
+            if turns:
+                live_ids = artifact_ids_from_l1_turns(list(turns or ()))
+                if live_ids:
+                    touch_artifacts(
+                        self.context,
+                        live_ids,
+                        str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
+                    )
+        except Exception:
+            pass
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
 
     def _drain_compaction_candidate_outbox(self, memory_service) -> int:
