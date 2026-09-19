@@ -314,6 +314,18 @@ review 自带验收：B2/B3/B4 六项原样通过；B1 按其文件头说明需 
 - 性能 A/B：prepare@800 项 14.33/19.68/18.22ms vs 基线 14.5/20.1/18.7——
   持平零回退（C1 为 begin_round 一次 dict 查询，C2 仅恢复路径）。
 
+## 第八轮外部 review（2026-09-19，pal_projection_review_c73a285）：通过，无新发现
+
+结论：**C1、C2 关闭；本次增量审阅未发现新的阻塞问题，无新增 Request
+changes 项**。独立执行 source_probe 8 项全过（已提交 ID 同/高 fence 均拒且
+fixture 状态不变、新 draft 可开可取消不动旧 native、stale owner 拒、非法
+fence 全拒、缺字段兼容回退含空 ledger 归零、合法 fence 单调、admission
+拒 6 受 7）。完整 restore 安装顺序为源码审阅结论（非简化 wrapper 验证）。
+
+review 重申的三个交付边界（与 DELIVERY 既有一致）：C1/C2 修复源码复审可
+关闭；合并当前 main 需隔离 worktree 真实合并+组合回归；启用新热路径/上线
+需完成既有集成与验收 gate。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径尚未接线（离线集成与上线 canary 分离）**：resident LLMRuntime 仍走
