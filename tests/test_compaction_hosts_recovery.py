@@ -113,6 +113,133 @@ class BunshinScopeGateTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+class BunshinCheckpointRecoveryTests(unittest.TestCase):
+    """R06: an encrypted logical-coroutine checkpoint taken mid-Bunshin-
+    shaped work (assignment/response_keys/operation receipts completed)
+    survives the scoped compaction and restarts into a fresh worker with
+    identity, counters, and receipts intact; the manager-visible file
+    never carries plaintext, and completed mutations cannot replay."""
+
+    def test_r06_encrypted_checkpoint_restore_across_scoped_compact(self) -> None:
+        import tempfile
+
+        from pal.bunshin.checkpoint import (
+            AgentSessionCheckpointError,
+            LogicalCoroutineCheckpointStore,
+            open_agent_session_checkpoint,
+            seal_agent_session_checkpoint,
+        )
+        from pal.core.runtime_state import RUNTIME_SNAPSHOT_SCHEMA_VERSION
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = LogicalCoroutineCheckpointStore(runtime_root=root)
+            identity = {
+                "logical_coroutine_id": "lc-r06",
+                "workflow_id": "wf-r06",
+                "stage_key": "coder",
+                "sequence": 2,
+                "producer_fencing_token": 1,
+                "runtime_spec_hash": "spec-hash-r06",
+            }
+            payload = {
+                **identity,
+                "coroutine_state": {
+                    "role_identity": "bunshin.coder.v1",
+                    "llm_round_count": 7,
+                    "tool_call_count": 12,
+                    "assignment": {"work_order": "wo-1", "tasks": ["t1", "t2"]},
+                    "response_keys": ["rk-1", "rk-2"],
+                    "operation_receipts": [
+                        {"operation_id": "op-1", "status": "completed"},
+                        {"operation_id": "op-2", "status": "completed"},
+                    ],
+                },
+                "runtime_snapshot": {
+                    **identity,
+                    "schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                    "modules": {},
+                },
+            }
+            sealed = seal_agent_session_checkpoint(root, payload)
+            store.publish(
+                sealed,
+                expected_logical_coroutine_id="lc-r06",
+                current_fencing_token=1,
+            )
+
+            # A Bunshin-shaped scoped compaction runs to completion; the
+            # checkpoint store keeps its own durability, untouched by L1.
+            async def scoped_compact():
+                core = PalCore()
+                service, turn_id, _ = _service_with_active()
+                engine = _BarrierEngine()
+                core.context.port_registry["memory:memory"] = service
+                core.context.port_registry["llm:llm"] = object()
+                core.turn_executor._compaction_engine = engine
+                core.turn_executor.state = SimpleNamespace(pending_channel_turns=None)
+                carrier = CoreRuntimeState()
+                core.turn_executor._compaction_gate = CompactionGate(
+                    carrier, transition_lock=carrier.channel_turn_transition_lock,
+                )
+                core.turn_executor._compaction_scope = f"bunshin:{identity['workflow_id']}"
+                task = asyncio.create_task(core.turn_executor.execute_turn_effect_async(
+                    SimpleNamespace(
+                        turn_id=turn_id, waiting_effect_id=None,
+                        interrupted=False, interrupt_reason="",
+                    ),
+                    MemoryCompactEffect(
+                        assembly_context=None,
+                        target_input_budget=8_192,
+                        reserved_output_tokens=2_048,
+                    ),
+                ))
+                await engine.entered.wait()
+                engine.release.set()
+                result = await task
+                return result
+
+            result = asyncio.run(scoped_compact())
+            self.assertEqual(result.status.name, "OK")
+
+            # Manager view: the on-disk envelope routes on public metrics
+            # only — role/assignment/receipts never appear in plaintext.
+            raw_text = store.current_path("lc-r06").read_text(encoding="utf-8")
+            for secret in ("bunshin.coder.v1", "op-1", "rk-1", "wo-1"):
+                self.assertNotIn(secret, raw_text)
+            raw = json.loads(raw_text)
+            self.assertTrue(str(raw["ciphertext"]).strip())
+            self.assertEqual(raw["metrics"]["tool_call_count"], 12)
+            self.assertEqual(raw["metrics"]["llm_round_count"], 7)
+
+            # Fresh worker restore: identity, counters, and receipts intact.
+            restored = open_agent_session_checkpoint(root, store.read("lc-r06"))
+            state = restored["coroutine_state"]
+            self.assertEqual(state["role_identity"], "bunshin.coder.v1")
+            self.assertEqual(state["tool_call_count"], 12)
+            self.assertEqual(state["response_keys"], ["rk-1", "rk-2"])
+            self.assertEqual(
+                [r["operation_id"] for r in state["operation_receipts"]],
+                ["op-1", "op-2"],
+            )
+
+            # Completed mutations never re-run: replaying the same sequence
+            # or publishing under a stale fencing token is rejected.
+            replay = seal_agent_session_checkpoint(root, dict(payload))
+            with self.assertRaises(AgentSessionCheckpointError):
+                store.publish(
+                    replay,
+                    expected_logical_coroutine_id="lc-r06",
+                    current_fencing_token=1,
+                )
+            with self.assertRaises(AgentSessionCheckpointError):
+                store.publish(
+                    replay,
+                    expected_logical_coroutine_id="lc-r06",
+                    current_fencing_token=2,
+                )
+
+
 class RealFileRecoveryTests(unittest.TestCase):
     def test_r01_pending_and_old_root_survive_restore(self) -> None:
         service, turn_id, _ = _service_with_active()
