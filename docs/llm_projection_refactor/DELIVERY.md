@@ -288,6 +288,32 @@ review 自带验收：B2/B3/B4 六项原样通过；B1 按其文件头说明需 
   anthropic_messages 18.69ms vs 基线 14.5/20.1/18.7——持平（±1% 噪声内），
   零回退。B1 改动为每 prepare 一次 context 构造（引用传递），无热路径开销。
 
+## 第七轮外部 review（2026-09-19，pal_projection_review_4c20311）：C1/C2 已修
+
+两条窄生命周期与恢复校验问题（均 P2），probe 实证后修复：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| C1 | begin_round 不拒绝已 committed 的 attempt ID：重复投递可把已完成 attempt 重新授予 draft 生命周期，close/reject 随即删掉已提交 native 而 receipt/chunk 仍在；重开后再 attach 会覆盖原记录，且 snapshot 只查 ledger 成员资格会把未接受的新候选当 committed native 导出 | begin_round 在 identity 检查后、fence/_active 推进前拒绝已 committed 的 attempt ID（committed ledger 即终态记录，不加新状态机）；重复 receipt 走既有 observe_commit 幂等；同源覆盖链在入口断开 |
+| C2 | restore 的 fence 分支把「旧格式缺字段」（→兼容回退，合理）与「字段存在但非法」（null/bool/负数/float/str/list/dict，也应拒绝）合并处理，且校验位于安装边界之后——末尾 raise 会留下半恢复 target | 用字段存在性（`in`）三分：缺失→已声明兼容回退；存在且合法→max(persisted, source-max)；存在但非法→ProjectionCheckpointError；校验前置到 session.bind() 与一切状态安装之前 |
+
+影响范围声明（同 review）：C1 需重复投递/调度重发/上层误复用 attempt ID 才触发，
+非正常唯一 ID 路径；frozen chunk 仍在，不构成下一份请求立即丢历史。C2 是恢复
+入口 fail-closed 缺口，无证据表明实际 checkpoint 已损坏。
+
+新增测试：`tests/test_projection_c_review.py`（**7 项 + 12 subtests**，场景与
+断言与 review 附件一致，含四条对照：receipt 重投幂等、不同 ID draft 取消
+不动 committed native、旧格式缺失回退、合法 fence 存活）。review 附件测试
+原样跑通：**7 passed + 12 subtests**。
+
+### 本轮回归与性能
+
+- llm 全族 32 文件（含新增 c_review）分文件隔离：**383 passed + 122
+  subtests + 6 skipped 零失败**（real-integration 按设计跳过，无付费调用；
+  日志 /tmp/proj7_regress.log，ALL_DONE）。
+- 性能 A/B：prepare@800 项 14.33/19.68/18.22ms vs 基线 14.5/20.1/18.7——
+  持平零回退（C1 为 begin_round 一次 dict 查询，C2 仅恢复路径）。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径尚未接线（离线集成与上线 canary 分离）**：resident LLMRuntime 仍走

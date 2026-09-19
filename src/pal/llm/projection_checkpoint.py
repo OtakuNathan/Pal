@@ -426,6 +426,33 @@ def restore_projection(
             "restore a projection that claims coverage it cannot rebuild"
         )
 
+    # CURRENT write fence (review B4/C2), validated BEFORE any state is
+    # installed: FIELD PRESENCE distinguishes a legacy snapshot from a
+    # corrupt new-format one.  Missing → the declared compatibility
+    # fallback (highest committed SOURCE fence); present but malformed →
+    # the snapshot is corrupt, fail closed here — raising after the install
+    # block would leave a half-restored target behind the exception.
+    legacy_fence = max(
+        (receipt.attempt.owner_fence.fence for receipt in committed_attempts.values()),
+        default=0,
+    )
+    if "owner_fence" in section:
+        persisted_fence = section["owner_fence"]
+        if (
+            not isinstance(persisted_fence, int)
+            or isinstance(persisted_fence, bool)
+            or persisted_fence < 0
+        ):
+            raise ProjectionCheckpointError(
+                f"projection owner_fence is present but invalid: "
+                f"{persisted_fence!r}"
+            )
+        restored_owner_fence = max(persisted_fence, legacy_fence)
+    else:
+        # Pre-B4 snapshot: the field did not exist; the most faithful
+        # reconstruction is still the highest committed source fence.
+        restored_owner_fence = legacy_fence
+
     # Install atomically: everything validated above; these assignments are
     # the only visible restore boundary.
     capabilities_raw = section.get("capabilities")
@@ -459,23 +486,6 @@ def restore_projection(
     # ones stay refused (PLAN §8.2, review R6).  The new worker's write
     # permission is a separate, higher fence it brings itself.
     session._committed_attempts = committed_attempts
-    # CURRENT write authority is restored from its own persisted field
-    # (review B4), never derived from historical receipt source fences
-    # alone: cancelled rounds advance the current fence without leaving a
-    # receipt, and letting it fall back to max(source fences) would
-    # re-authorize a worker that was already stale before the snapshot.
-    # Snapshots written before B4 lack the field; their most faithful
-    # reconstruction is still the highest committed source fence.
-    legacy_fence = max(
-        (receipt.attempt.owner_fence.fence for receipt in committed_attempts.values()),
-        default=0,
-    )
-    persisted_fence = section.get("owner_fence")
-    if (
-        not isinstance(persisted_fence, int)
-        or isinstance(persisted_fence, bool)
-        or persisted_fence < 0
-    ):
-        persisted_fence = legacy_fence
-    session._owner_fence = max(persisted_fence, legacy_fence)
+    # Pre-validated above the install boundary (review C2).
+    session._owner_fence = restored_owner_fence
     return True

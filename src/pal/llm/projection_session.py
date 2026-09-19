@@ -305,6 +305,20 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("a round is already open for this session")
         if attempt.identity != identity:
             raise ProjectionSessionError("attempt identity does not match the session binding")
+        if attempt.attempt_id in self._committed_attempts:
+            # Committed attempts are TERMINAL (review C1): the idempotent
+            # path for a finished attempt is replaying its receipt, never
+            # reopening it as a draft.  Reopening would hand the cancel path
+            # back to a finished attempt — close/reject would then drop its
+            # already-committed native from the authoritative store while
+            # receipt and chunk stay, and a re-attached replacement draft
+            # could be exported as committed native by the snapshot filter
+            # (which trusts ledger membership).  Checked before the fence
+            # and _active move, so refusal leaves the session untouched.
+            raise ProjectionSessionError(
+                "attempt is already committed; replay its receipt instead of "
+                "reopening the round"
+            )
         if attempt.owner_fence.fence < self._owner_fence:
             # Owner fences move forward only: a stale worker cannot reopen
             # rounds after a reown (review R7).
