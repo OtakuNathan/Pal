@@ -1,12 +1,12 @@
 # DELIVERY — refactor/full-context-compaction-v2（pal_compaction_handoff_v2 全量 compact 改造）
 
-日期：2026-09-19 ｜ 状态：**交付待审（未合 main、未部署、未推送）**
+日期：2026-09-20 ｜ 状态：**交付待审（未合 main、未部署、未推送）**
 
 ## 1. 交付物
 
 - 分支：`refactor/full-context-compaction-v2`（worktree `~/Documents/coding/Pal-full-compaction-v2`）
 - 基线：交接包基线 `0e33220` + 真实合并 main `4daab5f` = `614529e`（零冲突），本地未推送
-- 提交链（6 个）：
+- 提交链（P0-P5 共 7 个 + P6 共 11 个）：
 
 | 提交 | 阶段 | 内容 |
 |---|---|---|
@@ -15,21 +15,35 @@
 | `cfa76c8` | P2 | 完整源 capture（include_active）+ 原子安装（epoch/receipt/后继段）、memory runtime state schema v2（fail-closed+迁移）、S/I/E01-cold 验收 |
 | `4cd4103` | P3 | warm handoff 覆盖 active cut、资格门、coverage proof（12 条 W 类测试） |
 | `7dadb6b` | P4 | Bunshin scoped gate（专用 carrier）、真实文件恢复（R01-R03）、取消语义（X01）、修两个接线真 bug（属性名下划线、waiting_effect_id 自我拒绝） |
-| `61c87db` | P5 | 修两个全链路真 bug：has_open_round 自我拒绝、首 preflight burst 吸收（详见 §4） |
+| `61c87db` | P5 | 修两个全链路真 bug：has_open_round 自我拒绝、首 preflight burst 吸收 |
+| `2e48153` | P5 | 组合回归结果 + E06 + DELIVERY |
+| `c47d79c` | P6(a) | commit-eligibility 边界（engine commit_guard/executor 闭包/gate 过期 sweep/refresh 先撤票）+ X03/X06×2/X07/X08/X09/Q09/B07/A12/I11 |
+| `32ec58f` | P6(b) | 结构化 usage 记账（B10/W11）+ round-safe reconcile_required 证据（A04） |
+| `3e6484b` | P6(c) | B03/B04 预算边界数学钉子 |
+| `26e7f06` | P6(d) | no-progress 抑制（X10/B09） |
+| `b715e2c` | P6(e) | post-commit 候选 outbox 重试（I08） |
+| `c508dc2` | P6(f) | attachment/artifact lease（Q12/R08） |
+| `ae23218` | P6(g) | next-request fit 预检 + headroom（I14/B05） |
+| `1cd46b2` | P6(h) | 加密 Bunshin checkpoint 恢复验收（R06） |
+| `67a68ff` | P6(i) | E03 故障注入矩阵（6 案） |
+| `33571a0` | P6(j) | E04 Direct/ManagerProxy 真实 transport 泳道 |
+| `14a3918` | P6(k) | E05 同机基线 A/B（数字，不承诺） |
 
 - 设计文档：`BASELINE.md`、`P1_DESIGN.md`、`P2_DESIGN.md`（worktree 内）
-- 验收账本：`acceptance_status.json`（worktree 根 + 交接包目录双份同步）
+- 验收账本：`acceptance_status.json`（worktree 根 + 交接包目录双份同步，108/108 PASS）
 
 ## 2. 验收账本（108 项）
 
-**83 PASS / 25 NOT_RUN（全部带具体理由）**，无 FAIL、无假 PASS（acceptance 只填真实跑绿的 node）。
+**108/108 全 PASS**（P5 交付时 83 PASS/25 NOT_RUN；P6 按用户指示「一起清理掉」把 25 项全部实现或钉测完毕，逐项带证据与提交号）。
 
-NOT_RUN 主要缺口分类（诚实声明，非遗漏）：
-1. receipt/checkpoint 崩溃窗口：需 outbox 机制，未实现
-2. E03/E04 全故障矩阵：未跑（按计划 deferred）
-3. attachment lease、deadline sweep、usage 记账：未实现
-4. E05 性能 A/B（no-compact 热路径、capture/assembly、install RSS）：deferred 到交付评审
-5. 真实 transport 直连/ManagerProxy 泳道：本轮未跑
+P6 新增实现面（不是只补测试）：
+- commit-eliginess 边界：engine `commit_guard` + executor `commit_eligible` 闭包 + gate 过期 sweep + refresh 先撤票（X03/X06/X07）
+- no-progress 抑制：`compaction_no_progress` 同源失败 stamp 台账（X10/B09）
+- post-commit 候选 outbox：stage 失败不回滚 seed，重试留 draft（I08；内存态，崩溃窗口仍由 receipt 抑制兼评审流兜底）
+- attachment lease：TTL 刷新即租约，staged/L1 引用跨 compact 存活（Q12/R08）
+- next-request fit 预检 + headroom（I14/B05）
+- 结构化 usage 记账：`CompactionRunResult.usage`（B10/W11）
+- round-safe 拒绝结构化 reconcile_required（A04）
 
 ## 3. 全量组合回归（E06，BASELINE.md §6）
 
@@ -59,4 +73,4 @@ NOT_RUN 主要缺口分类（诚实声明，非遗漏）：
 
 1. 本分支是否推送（含 4245512 旧全量回归记录，projection 分支遗留）
 2. 旧 projection 分支大项：冻结边界重设计、resident/Bunshin 真实链路集成、benchmark 重测、P7 canary、write_busy 租约粒度提级
-3. §2 缺口的排期（outbox / 故障矩阵 / 性能 A/B / lease 等）
+3. E05 数字仅单机单次（Pi 5 上）：是否要在目标机重测一组再定性能结论；durable outbox（崩溃窗口完全封闭）是否排期

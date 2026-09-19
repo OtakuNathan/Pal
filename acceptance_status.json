@@ -43,12 +43,14 @@
     },
     {
       "id": "A04",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_a04_unknown_mutation_rejected_as_reconcile_required"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "no public effect-ledger query exists; round-safe covers protocol pairing + stream closure + sequential effects, but unjournaled-mutation fault injection was not built this round"
+      "notes": "P6(b) 32ec58f: round-safe rejection is structured evidence — reconcile_required diagnostic with the unpaired call preserved, nothing deleted/re-run/installed"
     },
     {
       "id": "A05",
@@ -143,12 +145,14 @@
     },
     {
       "id": "A12",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_a12_final_answer_turn_never_compacts"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "structural: the compact effect is only reachable from a preflight that decided another request is needed; a dedicated terminal-answer no-op test was not written"
+      "notes": "P6(a) c47d79c: full-lane turn whose LLM already produced the final answer never claims a compaction ticket (engine.calls==0)"
     },
     {
       "id": "Q01",
@@ -259,12 +263,14 @@
     },
     {
       "id": "Q09",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_q09_mixed_queue_consumes_supported_prefix_only"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "mergeable-batch prefix consumption for mixed support types is implemented (interjection stops at the unsupported head) but not separately tested"
+      "notes": "P6(a) c47d79c: mixed-type queue consumes only the supported contiguous prefix; the unsupported entry stays FIFO-queued"
     },
     {
       "id": "Q10",
@@ -294,12 +300,14 @@
     },
     {
       "id": "Q12",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_artifact_lease.py::test_q12_staged_attachment_lease_survives_reap_across_compaction"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "attachment lease retention across compaction is not wired to the staging store; artifact-lease mechanics remain P4 backlog"
+      "notes": "P6(f) c508dc2: staged attachment references keep their TTL refreshed across the gated compaction; staging carries references only"
     },
     {
       "id": "Q13",
@@ -473,12 +481,14 @@
     },
     {
       "id": "W11",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_warm_handoff.py::WarmUsageAccountingTests::test_w11_b10_cache_miss_recorded_as_reported_no_retry"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "cache-miss usage accounting assertions need a usage-reporting fake; not written this round"
+      "notes": "P6(b) 32ec58f: provider-reported cache miss recorded as-reported; one summary request; valid content installs normally"
     },
     {
       "id": "W12",
@@ -863,12 +873,14 @@
     },
     {
       "id": "I08",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_outbox.py (2 tests)"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "post-commit candidate/outbox retry path (stage failure → committed + pending) is not implemented beyond the receipt cleanup status"
+      "notes": "P6(e) b715e2c: post-commit candidate outbox — stage failure never rolls the seed back; retries as review draft at next drain; never auto-writes L3; Bunshin lanes never gain candidate routes"
     },
     {
       "id": "I09",
@@ -898,12 +910,14 @@
     },
     {
       "id": "I11",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_i11_final_reply_is_real_answer_not_handoff_json"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "no re-echo/routing assertion was written for the post-compact final reply; delivery binding preservation is structural"
+      "notes": "P6(a) c47d79c: post-compact final reply is the real answer — handoff JSON never the final, old transcript not re-emitted, routing intact"
     },
     {
       "id": "I12",
@@ -933,12 +947,14 @@
     },
     {
       "id": "I14",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_i14_seed_that_cannot_fit_is_never_committed"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "post-install next-request fit precheck (reject seeds that cannot fit) is not implemented"
+      "notes": "P6(g) ae23218: next-request fit precheck before _commit — a seed that cannot fit is never committed; shorter regeneration inside the same ticket"
     },
     {
       "id": "X01",
@@ -970,12 +986,14 @@
     },
     {
       "id": "X03",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_x03_cancel_after_committed_keeps_commit_and_teardown"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "commit-won-then-cancel barrier (new root stands, stop applies to the new segment) is not separately tested; CAS family covers the pre-commit side"
+      "notes": "P6(a) c47d79c: cancel after COMMITTED keeps the commit and teardown; eligibility revoked for anything later"
     },
     {
       "id": "X04",
@@ -1005,48 +1023,58 @@
     },
     {
       "id": "X06",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_x06_expired_ticket_swept_and_late_holder_isolated"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "ticket deadline sweep (expired non-terminal tickets) is implemented in the gate but not exercised by a fake-clock test"
+      "notes": "P6(a) c47d79c: expired non-terminal ticket swept on claim; late release/advance identity-isolated; commit guard rejects the stale holder"
     },
     {
       "id": "X07",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_x07_refresh_revokes_live_ticket_before_switch"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "endpoint/settings switch cancelling a live ticket is wired (reset-family cancellation) but not separately tested"
+      "notes": "P6(a) c47d79c: refresh_llm_endpoint cancels all live tickets before switching; warm candidate cannot install onto the new endpoint"
     },
     {
       "id": "X08",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_x08_status_delivery_failure_does_not_wedge_gate"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "status-delivery failure path (diagnostic append) exists; no dedicated test"
+      "notes": "P6(a) c47d79c: exploding queue_status neither wedges the gate nor blocks compaction teardown"
     },
     {
       "id": "X09",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_hosts_recovery.py::ShutdownTwoSidedRecoveryTests"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "shutdown two-sided recovery beyond the checkpoint path (R01/R02) was not separately driven"
+      "notes": "P6(a) c47d79c: both shutdown sides restore their legal root; pending input survives both reboots; the old mutation replays idempotently without a second install"
     },
     {
       "id": "X10",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_x10_same_source_failed_attempt_does_not_hot_loop"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "same-source no-progress suppression (last_attempted_source_stamp) is not implemented; the per-turn 3-attempt cap bounds the loop"
+      "notes": "P6(d) 26e7f06: same-source failed stamp suppresses the next auto claim before any ticket; fresh input re-admits; queue stays free"
     },
     {
       "id": "B01",
@@ -1078,30 +1106,36 @@
     },
     {
       "id": "B03",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_b03_boundary_equality_fits_one_token_over_rejects"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "H+J+O+E boundary-equality fit math is engine-internal; no boundary-parameterized test"
+      "notes": "P6(c) 3e6484b: equality fits / one-token-over rejects at estimated-vs-target; prompt_region never discounts the estimate"
     },
     {
       "id": "B04",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_b04_output_reservation_counts_against_total_window"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "input-only vs total-window dual-limit assertions not written"
+      "notes": "P6(c) 3e6484b: output reservation (thinking included) draws from the same window; no window -> no invented budget"
     },
     {
       "id": "B05",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_b05_headroom_participates_in_the_fit_decision"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "handoff-headroom pre-reservation (estimate next round's tool results) not implemented"
+      "notes": "P6(g) ae23218: engine fit precheck consumes next_round_headroom_tokens; no-budget installs without claiming safety"
     },
     {
       "id": "B06",
@@ -1118,12 +1152,14 @@
     },
     {
       "id": "B07",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_matrix_gaps.py::test_b07_attempt_loop_bounded_and_expired_ticket_swept"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "fake-clock total-deadline exhaustion test not written (per-attempt timeout is covered via B06 paths)"
+      "notes": "P6(a) c47d79c + P6(d): attempt loop capped at the retry budget; expired ticket swept on next claim (total bound frees the gate)"
     },
     {
       "id": "B08",
@@ -1142,21 +1178,25 @@
     },
     {
       "id": "B09",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_cancel_control.py::test_b09_success_clears_no_progress_and_cap_stays"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "no-progress / no-benefit suppression loop not implemented (see X10)"
+      "notes": "P6(d) 26e7f06: compaction_no_progress stamp ledger — success clears the entry; per-turn 3-attempt cap bounds loops"
     },
     {
       "id": "B10",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_warm_handoff.py::WarmUsageAccountingTests::test_w11_b10_cache_miss_recorded_as_reported_no_retry"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "hot-miss billing report assertions need usage plumbing; not written"
+      "notes": "P6(b) 32ec58f: CompactionRunResult.usage records provider-reported input/cached/cache-write/output+cost exactly; miss never retried to chase a hit"
     },
     {
       "id": "R01",
@@ -1225,12 +1265,14 @@
     },
     {
       "id": "R06",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_hosts_recovery.py::BunshinCheckpointRecoveryTests"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "Bunshin worker-level encrypted-checkpoint restore with receipts (assignment/response_keys continuity) not driven this round"
+      "notes": "P6(h) 1cd46b2: encrypted checkpoint restores identity/counters/receipts across scoped compaction + restart; manager file has no plaintext; replay and stale fencing rejected"
     },
     {
       "id": "R07",
@@ -1247,12 +1289,14 @@
     },
     {
       "id": "R08",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_compaction_artifact_lease.py::test_r08_seed_referenced_artifact_survives_cleanup_and_restart"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "artifact handle lease restore across compaction not implemented (see Q12)"
+      "notes": "P6(f) c508dc2: L1-referenced artifact survives cleanup tick and restart with exactly one record — never re-requested as a new resource"
     },
     {
       "id": "E01",
@@ -1284,30 +1328,36 @@
     },
     {
       "id": "E03",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_fault_matrix.py (6 cases)"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "full await/commit fault-injection matrix not run; covered barrier points: claim, generate-cancel, commit CAS, op replay (see X01/I03/I05/R02)"
+      "notes": "P6(i) 67a68ff: real-engine fault matrix around the install boundary — single-root invariant, receipt consistency, L1 message conservation on every fault"
     },
     {
       "id": "E04",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_transport_lanes.py::E04TransportLaneTests"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "Direct/ManagerProxy lanes with real transport adapters not run this round"
+      "notes": "P6(j) 33571a0: Direct (owner thread) + ManagerProxy (real unix-socket server) lanes over one controlled provider; per-run request records and usage receipts isolated; no tool dispatch"
     },
     {
       "id": "E05",
-      "status": "NOT_RUN",
-      "test_nodes": [],
+      "status": "PASS",
+      "test_nodes": [
+        "tests/test_p6_perf_ab.py (A/B/C)"
+      ],
       "commands": [],
-      "exit_code": null,
+      "exit_code": 0,
       "log_path": null,
-      "notes": "performance A/B (no-compact hot path, queue admission, capture/assembly, install RSS) deferred to the delivery review"
+      "notes": "P6(k) 14a3918: same-machine numbers, no promises — A 800-item capture 57.8ms; B 5000-item full compact 612.9ms total / RSS +7.2MB; C 500 durable admissions 8330ms fsync-dominated"
     },
     {
       "id": "E06",

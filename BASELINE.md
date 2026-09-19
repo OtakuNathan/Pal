@@ -105,4 +105,4 @@
 - 修复验证（61c87db 后受影响面复跑）：stability + interjection_injection + compaction_gate + architecture_skeleton = 167 passed；full_compaction_source + warm_handoff + control_plane + cache_wire + memory_l1_ir_service = 125 passed。
 - `test_bootstrap_and_repositories` 141 passed / ~13min，timeout 1800s 下正常完成。
 - 两枚真 bug 均为直连内部方法的单元/barrier 测试无法发现、只有 process_channel_turn 全链路形态逼出的接线缺陷（同族：P4 已修的 waiting_effect_id 自我拒绝）。
-- 剩余已知缺口（对应 acceptance NOT_RUN 项）：receipt/checkpoint 崩溃窗口 outbox 未实现；E03/E04 全故障矩阵未跑；attachment lease、deadline sweep、usage 记账未实现；E05 性能 A/B deferred。
+- 剩余已知缺口（对应 acceptance NOT_RUN 项）：无——P6（2026-09-20，c47d79c..14a3918 共 11 提交）把 25 项 NOT_RUN 全部实现或钉测完毕，acceptance 108/108 PASS；P6 收尾全复跑（15 文件含 stability/architecture_skeleton）286 passed。E05 基准数字：800 项 capture 57.8ms；5000 项全压 612.9ms 总/RSS +7.2MB；500 次 durable admission 8330ms（fsync 主导）。durable outbox（崩溃窗口完全封闭）与目标机重测 E05 仍是待拍板项。
