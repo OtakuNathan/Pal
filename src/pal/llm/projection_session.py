@@ -32,6 +32,7 @@ from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
     MessageRole,
+    TextPartIR,
 )
 from pal.llm.projection_contracts import (
     AttemptKey,
@@ -348,8 +349,14 @@ class EndpointProjectionSession:
             materialized.extend(
                 dict(item) for item in self._encode_messages(tuple(accepted_messages))
             )
-        self._active.prepared_items.extend(materialized)
-        items = tuple(self._active.prepared_items[self._frontier_item_count :])
+        # Everything below is computed on LOCAL candidates and installed in
+        # ONE block at the very end (review H1): a refusal must leave every
+        # piece of session-visible state untouched, so neither a replayed
+        # receipt nor a tail re-supplied from the unchanged frontier can ever
+        # double content.  The open round's prepared_items is never mutated
+        # either — a failed observe_commit can be retried deterministically.
+        extended = [*self._active.prepared_items, *materialized]
+        items = tuple(extended[self._frontier_item_count :])
         if not items:
             raise ProjectionSessionError(
                 "no prepared items beyond the frontier; commit has nothing to seal"
@@ -359,22 +366,22 @@ class EndpointProjectionSession:
         # request's encoder would merge it with the following user message.
         # Trim trailing mergeable items back into the unfrozen tail; they are
         # re-encoded (bounded cost) until a later commit freezes past them.
-        frozen_item_count = len(self._active.prepared_items)
+        frozen_item_count = len(extended)
         unfrozen_suffix: list[dict] = []
         if self.binding.wire_shape.value == "anthropic_messages":
             while items and isinstance(items[-1], dict) and items[-1].get("role") == "user":
                 unfrozen_suffix.insert(0, items[-1])
                 items = items[:-1]
                 frozen_item_count -= 1
-        # The trimmed suffix stays session-owned instead of vanishing (review
-        # F2): semantic coverage moved past it, but the wire has not frozen
-        # it.  Every later prepare re-injects it until a commit freezes past
-        # it — callers never re-supply already-accepted results by hand.
-        self._pending_wire_tail = [dict(item) for item in unfrozen_suffix]
-        if not items:
-            raise ProjectionSessionError(
-                "round produced no prefix-stable items to freeze"
-            )
+        # A zero-freeze commit is ACCEPTED, not refused (review H1): Anthropic
+        # can legitimately close a round whose items beyond the frontier are
+        # ALL user-role (every unstarted call pruned, no preserved assistant
+        # contribution).  Semantic coverage advances with the trusted receipt
+        # while the full item span stays in the session-owned open tail — the
+        # same rule F2 already applies to trailing user items — and the round
+        # is sealed as an empty chunk so the chunk chain still ends at the
+        # frontier for checkpoint/restore.  Refusing here instead would leave
+        # the projection lineage permanently behind the durable L1 cursor.
         chunk = ProjectionChunk(
             round_attempt_id=receipt.attempt.attempt_id,
             cursor_before=self.frontier,
@@ -384,6 +391,9 @@ class EndpointProjectionSession:
             items=tuple(freeze_json_mapping(item) for item in items),
             prefix_digest=receipt.append.after.prefix_digest,
         )
+        head_system_transfer = [dict(part) for part in self._active.prepared_head_system]
+        # -- single install boundary: no session-visible failure past here --
+        self._pending_wire_tail = [dict(item) for item in unfrozen_suffix]
         self.chunks = (*self.chunks, chunk)
         # The private amortized prefix keeps the mutable dicts; it is never
         # exposed and shares nothing with the frozen chunk snapshot above.
@@ -392,9 +402,7 @@ class EndpointProjectionSession:
         # Request-head content hoisted to top-level system this round becomes
         # session-owned exactly like the wire tail (review G2 persistence):
         # the frozen chunk cannot carry it, but later requests must keep it.
-        self._committed_head_system.extend(
-            dict(part) for part in self._active.prepared_head_system
-        )
+        self._committed_head_system.extend(head_system_transfer)
         self.frontier = receipt.append.after
         self._frontier_item_count = frozen_item_count
         if not receipt.native_committed:
@@ -659,20 +667,29 @@ class EndpointProjectionSession:
                 raise ContinuationUnavailable("repaired round lost its native material")
             self.attach_native(closed.attempt, _candidate_from(material))
         accepted: list[LLMMessageIR] = []
-        if not has_native and closed.calls:
-            accepted.append(
-                LLMMessageIR(
-                    role=MessageRole.ASSISTANT,
-                    parts=tuple(
-                        ToolCallIR(
-                            call.call_id,
-                            call.name,
-                            json.loads(call.arguments_json),
-                        )
-                        for call in closed.calls
-                    ),
+        if not has_native:
+            # The repaired round's preserved assistant contribution (review
+            # H2): texts first, then calls, in one assistant message.  A
+            # text-only repair (all calls pruned) materializes the text alone;
+            # an inventory-only repair keeps the previous behavior.
+            assistant_parts = [
+                TextPartIR(text) for text in closed.assistant_texts
+            ]
+            assistant_parts.extend(
+                ToolCallIR(
+                    call.call_id,
+                    call.name,
+                    json.loads(call.arguments_json),
                 )
+                for call in closed.calls
             )
+            if assistant_parts:
+                accepted.append(
+                    LLMMessageIR(
+                        role=MessageRole.ASSISTANT,
+                        parts=tuple(assistant_parts),
+                    )
+                )
         if closed.results:
             names = {call.call_id: call.name for call in closed.calls}
             accepted.append(

@@ -52,6 +52,11 @@ class ProjectionContractError(ValueError):
     """A projection contract was violated at construction time."""
 
 
+# Distinguishes an absent JSON field from an explicit JSON null (review H3):
+# neither is an empty object, and replay keeps the raw field unchanged.
+_MISSING = object()
+
+
 def _require_non_empty(value: str, what: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ProjectionContractError(f"{what} must be a non-empty string")
@@ -384,12 +389,22 @@ class ClosedRound:
     ``closed`` means: item order finalized, call/result sets exactly paired,
     no unknown side effects, and (when required) native material bound to the
     same attempt with a matching call sequence (PLAN §4.1/§6).
+
+    ``assistant_texts`` (review H2) carries the repaired round's PRESERVED
+    assistant text — the conclusions a legally pruned round must keep beyond
+    its tool inventory.  Without this channel a no-native repair could only
+    materialize calls/results, and the accepted text would never reach later
+    requests: the frontier-based tail can only re-supply what it was handed.
+    One representation per assistant contribution still holds — when native
+    material carries the assistant turn, semantic texts are refused instead
+    of duplicated.  Materialization order is texts first, then calls.
     """
 
     attempt: AttemptKey
     calls: tuple[ToolCallRecord, ...]
     results: tuple[ToolResultRecord, ...]
     continuation: NativeContinuation
+    assistant_texts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt, AttemptKey):
@@ -398,6 +413,10 @@ class ClosedRound:
             raise ProjectionContractError("closed round items must be tuples")
         if not isinstance(self.continuation, NativeContinuation):
             raise ProjectionContractError("closed round needs a NativeContinuation")
+        if not isinstance(self.assistant_texts, tuple):
+            raise ProjectionContractError("assistant texts must be a tuple")
+        for text in self.assistant_texts:
+            _require_non_empty(text, "assistant text")
         call_ids = tuple(call.call_id for call in self.calls)
         result_ids = tuple(result.call_id for result in self.results)
         if len(set(call_ids)) != len(call_ids):
@@ -414,6 +433,10 @@ class ClosedRound:
             )
         material = self.continuation.material
         if material is not None:
+            if self.assistant_texts:
+                raise ProjectionContractError(
+                    "assistant texts duplicate the native material's assistant turn"
+                )
             if material.origin != self.attempt:
                 raise ProjectionContractError(
                     "native material belongs to a different attempt/owner/scope"
@@ -654,13 +677,19 @@ def _json_values_equal(left: Any, right: Any) -> bool:
 
 
 def _native_arguments_match(native_args: Any, semantic_json: str) -> bool:
+    """Semantic JSON equality between a native argument field and the record.
+
+    An ABSENT or EXPLICIT-NULL native field is never an empty object (review
+    H3): replay keeps the raw field unchanged, so validation must not promote
+    it to ``{}`` either.  ``bool`` stays distinct from numbers and ``int``/
+    ``float`` compare by numeric value (see ``_json_values_equal``).
+    """
+
     if isinstance(native_args, str):
         try:
             native_args = json.loads(native_args)
         except (TypeError, json.JSONDecodeError):
             return False
-    elif native_args is None:
-        native_args = {}
     if not isinstance(native_args, Mapping):
         return False
     try:
@@ -690,6 +719,9 @@ def _native_call_inventory_mismatch(
         return f"native payload is not valid JSON: {exc}"
     if not isinstance(payload, Mapping):
         return "native payload is not a JSON object"
+    # The argument field's PRESENCE is tracked with a sentinel (review H3):
+    # ``.get()`` alone cannot distinguish a missing field from an explicit
+    # JSON null, and neither is an empty object.
     native: list[tuple[str, str, Any]] = []
     if shape_value == "openai_completion":
         message = payload.get("message")
@@ -705,9 +737,9 @@ def _native_call_inventory_mismatch(
                             str(function.get("name") or "")
                             if isinstance(function, Mapping)
                             else "",
-                            function.get("arguments")
+                            function.get("arguments", _MISSING)
                             if isinstance(function, Mapping)
-                            else None,
+                            else _MISSING,
                         )
                     )
     elif shape_value == "openai_response":
@@ -722,7 +754,7 @@ def _native_call_inventory_mismatch(
                         (
                             str(item.get("call_id") or ""),
                             str(item.get("name") or ""),
-                            item.get("arguments"),
+                            item.get("arguments", _MISSING),
                         )
                     )
     elif shape_value == "anthropic_messages":
@@ -737,7 +769,7 @@ def _native_call_inventory_mismatch(
                         (
                             str(block.get("id") or ""),
                             str(block.get("name") or ""),
-                            block.get("input"),
+                            block.get("input", _MISSING),
                         )
                     )
     else:
@@ -747,6 +779,11 @@ def _native_call_inventory_mismatch(
             f"native call count {len(native)} does not match the accepted "
             f"semantic records {len(calls)}"
         )
+    # The two OpenAI shapes carry arguments as a JSON STRING; Anthropic
+    # carries tool input as a JSON OBJECT (review H3): the raw wire type is
+    # validated per shape before semantic comparison, never silently coerced
+    # into whichever type happens to compare equal.
+    arguments_are_strings = shape_value in ("openai_completion", "openai_response")
     for (native_id, native_name, native_args), call in zip(native, calls):
         if native_id != call.call_id:
             return (
@@ -757,6 +794,26 @@ def _native_call_inventory_mismatch(
             return (
                 f"native call {call.call_id!r} name {native_name!r} does not "
                 f"match the accepted name {call.name!r}"
+            )
+        if native_args is _MISSING:
+            return (
+                f"native call {call.call_id!r} has no arguments field; a missing "
+                "field is not an empty object"
+            )
+        if native_args is None:
+            return (
+                f"native call {call.call_id!r} has an explicit null arguments "
+                "field; null is not an empty object"
+            )
+        if arguments_are_strings and not isinstance(native_args, str):
+            return (
+                f"native call {call.call_id!r} arguments must be a JSON string "
+                f"on {shape_value}"
+            )
+        if not arguments_are_strings and not isinstance(native_args, Mapping):
+            return (
+                f"native call {call.call_id!r} tool input must be a JSON object "
+                f"on {shape_value}"
             )
         if not _native_arguments_match(native_args, call.arguments_json):
             return (

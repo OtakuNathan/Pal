@@ -195,6 +195,45 @@ tool_use——G3 后 ID 声明必须被载荷内容背书）。
   （real-integration 按设计跳过，无付费调用），零失败。
 - 受影响面之外未跑全量 146 文件套件（本轮改动仅触及 llm/projection 面）。
 
+## 第四轮外部 review 修正（2026-09-19，针对 422c7ba）
+
+`pal_projection_review_422c7ba` 三项发现（H1/H2 P1 级 + H3 P2 级）逐条源码核实
+**全部属实**，已修。review 同时确认了第三轮 G1-G4 修复本身成立；本轮三项
+均为修复生命周期与既有残留（H1/H2 为检查修复生命周期时确认的既有残留，
+H3 位于本轮新增的 native 参数兼容性检查中）：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| H1 | `observe_commit` 拒绝发生在 pending 安装之后：`_pending_wire_tail` 已被改写而 frontier/台账未推进，close_round 不还原——按旧 frontier 重喂 tail 会双倍内容（review 隔离 probe 实证） | 原子化重写：全部验证/裁剪/chunk 构造在本地候选变量完成，单一安装块一次性提交（拒绝路径零 session 可见变更，同 receipt 重试确定性，prepared_items 不再被预改）；零可冻结提交（anthropic 全 user 项）改为接受语义提交——frontier 随 receipt 推进、全跨度进 open tail（F2 同规则）、以空 chunk 封口使链仍止于 frontier（restore 零改动） |
+| H2 | `ClosedRound` 只有 attempt/calls/results/continuation，无 native 修复时保留的 assistant 正文没有输入通道——helper 只能从 calls 重建工具清单，正文永不回投影（frontier 取 tail 补不回来） | `ClosedRound.assistant_texts` 新通道（非空字符串元组）；native material 在场时拒绝 semantic texts（每份 assistant contribution 单一表示）；`accept_repaired_round` 无 native 时物化为单条 assistant 消息（texts 先、calls 后）；text-only 修复（全调用剪除）单独可表示 |
+| H3 | `_native_arguments_match` 把 None 补成 `{}` 参与比对但重放不补；三 shape 提取全用 `.get()` 无法区分缺字段/null；参数字段 wire 类型未按 shape 校验（OpenAI 字符串 vs Anthropic 对象混为任意值） | contracts 层：`_MISSING` 哨兵区分缺字段/显式 null/空对象，各自独立拒绝文案；比对前按 shape 校验原始 wire 类型（openai×2 必须 JSON 字符串、anthropic 必须对象，不能验证时补值重放时保持原值）；continuation_policy 层：三个 validator 增参数字段结构校验（缺字段/null/错型 → Degraded → attach_native 显式 ContinuationUnavailable，覆盖不经 ClosedRound 的直连 attach 路径），contract 版本 bump 至 *-2 |
+
+**策略选择（H1，review 给了两条一致策略任选其一）：** 选「接受语义提交 +
+持有 open tail」而非「拒绝但状态不变」——receipt 是 durable L1 提交的证据，
+拒绝会把 projection lineage 永久留在 L1 之后，只能靠昂贵的 rebind 全量重建
+恢复；接受路径复用 F2 已有的 pending 机制，restore 零改动。唯一保留的拒绝
+（nothing to seal：frontier 之外零项）现在完全原子（快照级断言钉住）。
+
+**SCENARIOS.md 三变体全部钉住（三 shape 参数化）：** 正文+部分调用保留
+（B 剪除，A call/result 对应）、纯正文修复（全调用剪除）、零内容修复
+（触达 H1 零冻结路径）；均含 checkpoint/restore 后重复断言与
+增量==全量编码逐字节相等。
+
+新增测试：`tests/test_projection_fourth_review.py`（**16 项 + 20 subtests**）。
+review 自带的 7 项验收草案（含 H1 双分支兼容写法、H3 验收、head-system
+生命周期 positive controls）在修复后代码上原样跑通：**7 passed + 9 subtests**。
+
+### 本轮回归与性能
+
+- llm 全族 30 文件（含新增 fourth_review）分文件隔离：**363 passed +
+  100 subtests + 6 skipped 零失败**（real-integration 按设计跳过，无付费调用；
+  日志 /tmp/proj4_regress.log，ALL_DONE）。
+- 性能 A/B（Nathan 要求看住回退，同机同脚本 /tmp/pal_bench_prepare.py，
+  prepare@800 前缀项、尾部 1 条、50 轮）：openai_completion 14.5→**14.34ms**、
+  openai_response 20.1→**19.52ms**、anthropic_messages 18.7→**18.15ms**
+  （基线 422c7ba vs 修复后）——持平略优，零回退。本轮改动均在 commit/构造
+  路径（每轮一次）与 ClosedRound 构造期，prepare 热路径未触碰。
+
 ## 未覆盖 / 明确未做
 
 1. **热路径切换未执行**：resident LLMRuntime 仍走 per-message ReplayEnvelope

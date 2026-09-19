@@ -35,9 +35,9 @@ __all__ = [
     "validate_candidate",
 ]
 
-_ANTHROPIC_CONTRACT_VERSION = "anthropic-structural-1"
-_OPENAI_RESPONSE_CONTRACT_VERSION = "openai-response-structural-1"
-_OPENAI_COMPLETION_CONTRACT_VERSION = "openai-completion-verbatim-1"
+_ANTHROPIC_CONTRACT_VERSION = "anthropic-structural-2"
+_OPENAI_RESPONSE_CONTRACT_VERSION = "openai-response-structural-2"
+_OPENAI_COMPLETION_CONTRACT_VERSION = "openai-completion-verbatim-2"
 
 
 class ContinuationDecisionKind(Enum):
@@ -137,6 +137,24 @@ def _validate_anthropic(candidate: NativeCandidate) -> ContinuationDecision:
                 )
             else:
                 tool_ids.append(call_id)
+            # [H3] tool input must be PRESENT and an object: a missing field
+            # or an explicit null is not an empty object, and the replay keeps
+            # the raw field unchanged — degrade instead of comparing a value
+            # the wire never carried.
+            if "input" not in block:
+                issues.append(
+                    _issue(
+                        "tool_use_missing_input",
+                        f"content[{index}] tool_use has no input field",
+                    )
+                )
+            elif not isinstance(block["input"], Mapping):
+                issues.append(
+                    _issue(
+                        "tool_use_input_not_object",
+                        f"content[{index}] tool_use input is not a JSON object",
+                    )
+                )
         elif block_type in {"text"}:
             continue
         else:
@@ -203,6 +221,21 @@ def _validate_openai_response(candidate: NativeCandidate) -> ContinuationDecisio
                 )
             else:
                 call_ids.append(call_id)
+            # [H3] arguments must be PRESENT and a JSON string on this shape.
+            if "arguments" not in item:
+                issues.append(
+                    _issue(
+                        "function_call_missing_arguments",
+                        f"output[{index}] function_call has no arguments field",
+                    )
+                )
+            elif not isinstance(item["arguments"], str):
+                issues.append(
+                    _issue(
+                        "function_call_arguments_not_string",
+                        f"output[{index}] function_call arguments is not a JSON string",
+                    )
+                )
         elif item_type in {"message", "summary"}:
             continue
         else:
@@ -260,6 +293,22 @@ def _validate_openai_completion(candidate: NativeCandidate) -> ContinuationDecis
                 )
             else:
                 call_ids.append(call_id)
+            # [H3] arguments must be PRESENT and a JSON string on this shape.
+            if isinstance(function, Mapping):
+                if "arguments" not in function:
+                    issues.append(
+                        _issue(
+                            "tool_call_missing_arguments",
+                            f"tool_calls[{index}] function has no arguments field",
+                        )
+                    )
+                elif not isinstance(function["arguments"], str):
+                    issues.append(
+                        _issue(
+                            "tool_call_arguments_not_string",
+                            f"tool_calls[{index}] function arguments is not a JSON string",
+                        )
+                    )
     if tuple(call_ids) != candidate.call_ids:
         issues.append(
             _issue(
