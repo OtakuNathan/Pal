@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
+from pal.core.compaction_coordinator import compaction_gate_active
 from pal.shared.payloads import extract_text_from_payload
 
 
@@ -27,6 +28,11 @@ async def inject_pending_interjection_async(
         return
     async with state.channel_turn_transition_lock:
         if not state.pending_channel_turns:
+            return
+        # Compaction admission door 1 (snapshot point): while a compaction
+        # ticket holds this scope, queued input stays queued (Q03). It will
+        # be admitted after release, before the next ordinary LLM request.
+        if compaction_gate_active(state):
             return
         snapshot = tuple(state.pending_channel_turns)
 
@@ -81,6 +87,11 @@ async def inject_pending_interjection_async(
 
         async def append_and_acknowledge() -> bool:
             async with state.channel_turn_transition_lock:
+                # Compaction admission door 2 (final append+ack): a ticket
+                # claimed after the snapshot must block this append; the
+                # batch stays queued and enters the compacted context later.
+                if compaction_gate_active(state):
+                    return False
                 if (
                     len(state.pending_channel_turns) < len(batch)
                     or any(current is not expected for current, expected in
@@ -99,12 +110,35 @@ async def inject_pending_interjection_async(
                     )
                     if not committed:
                         raise
+                # Event receipts are durable and independent of the
+                # transcript: dedup must survive the original text being
+                # compacted away (Q08). Receipt failure keeps the batch
+                # queued; the idempotent append retries on the next drain.
+                staging = getattr(state, "ingress_staging", None)
+                if staging is not None:
+                    for envelope in batch:
+                        event_id = str(
+                            getattr(getattr(envelope, "event", None), "event_id", "")
+                            or ""
+                        )
+                        if event_id:
+                            staging.record_receipt(
+                                event_id, turn_id=str(continuation.turn_id)
+                            )
                 # Append and acknowledgement share the channel transition
                 # lock. A cancelled caller may leave this task running, but
                 # the normal next-turn path cannot dequeue the same envelope
                 # between the durable L1 write and this acknowledgement.
                 for _ in batch:
                     state.pending_channel_turns.popleft()
+                if staging is not None:
+                    for envelope in batch:
+                        event_id = str(
+                            getattr(getattr(envelope, "event", None), "event_id", "")
+                            or ""
+                        )
+                        if event_id:
+                            staging.remove(event_id)
                 return True
 
         commit = asyncio.create_task(append_and_acknowledge())

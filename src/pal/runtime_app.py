@@ -19,6 +19,7 @@ from pal.core.resident_checkpoint import (
     ResidentCheckpointError,
     ResidentCheckpointStore,
 )
+from pal.core.ingress_staging import IngressStagingError, IngressStagingStore
 from pal.core.runtime_state import (
     RuntimeSnapshotCoordinator,
     RuntimeSnapshotIdentity,
@@ -115,6 +116,7 @@ class PalRuntimeApp:
             except (NotImplementedError, RuntimeError, ValueError):
                 debug_signal = None
         await self._restore_checkpoint_async()
+        self._wire_ingress_staging()
         await self.handle.channel_runtime.start_async()
         self.handle.core.bind_async_wakeup_sources()
         publish_catalog = getattr(self.handle.core, "publish_control_catalog_async", None)
@@ -144,6 +146,48 @@ class PalRuntimeApp:
             with contextlib.suppress(Exception):
                 await self._shutdown_task
             await self.handle.stop_async()
+
+    def _wire_ingress_staging(self) -> None:
+        """Attach the durable ingress staging store and restore its queue.
+
+        Pending records survive restarts as rebuilt channel envelopes; the
+        receipt ledger survives with them so post-compaction dedup does not
+        depend on the original transcript text (Q08). Envelope decode
+        failures are recorded and skipped, never silently replayed.
+        """
+        core = self.handle.core
+        if getattr(core.state, "ingress_staging", None) is not None:
+            return
+        store = IngressStagingStore(self._runtime_root() / "ingress_staging.json")
+        try:
+            records = store.pending_records()
+        except IngressStagingError as exc:
+            core.state.diagnostics.append(
+                {
+                    "kind": "ingress.staging_restore_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            records = ()
+        core.state.ingress_staging = store
+        for record in records:
+            try:
+                envelope = record.to_channel_envelope()
+            except IngressStagingError as exc:
+                core.state.diagnostics.append(
+                    {
+                        "kind": "ingress.staging_record_invalid",
+                        "event_id": record.event_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            if not any(
+                str(getattr(getattr(item, "event", None), "event_id", "") or "")
+                == record.event_id
+                for item in core.state.pending_channel_turns
+            ):
+                core.state.pending_channel_turns.append(envelope)
 
     async def _restore_checkpoint_async(self) -> None:
         store = ResidentCheckpointStore(self._runtime_root())

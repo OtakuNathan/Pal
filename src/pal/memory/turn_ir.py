@@ -456,6 +456,14 @@ class L1TurnStore:
         self._rounds.pop(turn.turn_id, None)
         self._invalidate_view()
 
+    def has_open_round(self, turn_id: str) -> bool:
+        """True while an assistant streaming round is live for this turn.
+
+        Round-safety evidence for compaction admission: an open round means
+        the provider stream or its decoder bookkeeping has not closed yet.
+        """
+        return turn_id in self._rounds
+
     def replace_all(self, turns: Iterable[L1TurnIR]) -> None:
         values = list(turns)
         positions = {turn.turn_id: i for i, turn in enumerate(values)}

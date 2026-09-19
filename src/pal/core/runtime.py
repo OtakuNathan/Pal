@@ -13,6 +13,19 @@ from uuid import uuid4
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.core.memory_maintenance import MemoryMaintenanceMixin, SLEEP_REPLY
+from pal.core.compaction_coordinator import (
+    CompactionGate,
+    CompactionPhase,
+    CompactionTrigger,
+    compaction_gate_active,
+)
+from pal.core.ingress_staging import (
+    IngressStagingError,
+    IngressStagingFull,
+    StagedIngressRecord,
+)
+
+RESIDENT_COMPACTION_SCOPE = "pal:resident"
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.core.agent_turn_runtime import AgentTurnRuntime
 from pal.core.cache_warm_deadline import (
@@ -526,6 +539,13 @@ class PalCore(MemoryMaintenanceMixin):
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
+        # P1 compaction admission wiring: the executor claims the scope's
+        # ticket for auto compaction; queued interjection admission moved
+        # from the post-batch hook to the preflight effect.
+        self.turn_executor.compaction_gate = self._compaction_gate()
+        self.turn_executor.compaction_scope = RESIDENT_COMPACTION_SCOPE
+        self.turn_executor.inject_pending = self._inject_pending_for_executor_async
+        self.turn_executor.after_compaction = self._after_compaction_async
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
         self.cache_warm_deadline = CacheWarmDeadlineManager(
             cache_snapshot=self._prompt_cache_warm_deadline_snapshot,
@@ -583,13 +603,47 @@ class PalCore(MemoryMaintenanceMixin):
         )
 
     async def _after_tool_batch_async(self, continuation: TurnContinuation) -> None:
+        # Ordering (P1): batch results are already committed to L1 when this
+        # hook runs. Queued interjections are no longer admitted here; the
+        # preflight effect admits them only when the next ordinary request
+        # is real and no compaction ticket is held, so fresh user input is
+        # never fed into an imminent compaction source (PLAN section 4).
+        return
+
+    def _compaction_gate(self) -> CompactionGate:
+        return CompactionGate(
+            self.state,
+            transition_lock=self.state.channel_turn_transition_lock,
+        )
+
+    def _compaction_gate_active(self) -> bool:
+        return compaction_gate_active(self.state)
+
+    def _stage_pending_channel_turn_locked(self, channel_envelope) -> None:
+        """Durably stage one queued envelope before any queued acknowledgement."""
+        staging = getattr(self.state, "ingress_staging", None)
+        if staging is None:
+            return
+        scope = self._derive_channel_control_scope_key(channel_envelope)
+        staging.enqueue(
+            StagedIngressRecord.from_channel_envelope(channel_envelope, scope=scope)
+        )
+
+    async def _inject_pending_for_executor_async(self, continuation) -> bool:
         from pal.core.interjection import inject_pending_interjection_async
 
+        before = len(self.state.pending_channel_turns)
         await inject_pending_interjection_async(
             context=self.context,
             state=self.state,
             continuation=continuation,
         )
+        return len(self.state.pending_channel_turns) < before
+
+    async def _after_compaction_async(self, continuation) -> None:
+        # Drain queued input into the fresh context before the next
+        # ordinary LLM request (PLAN section 4 default order).
+        await self._inject_pending_for_executor_async(continuation)
 
     def event_loop(self) -> MainLoop:
         return self.main_loop
@@ -792,7 +846,7 @@ class PalCore(MemoryMaintenanceMixin):
 
     async def _start_next_queued_turn_async(self) -> None:
         async with self.state.channel_turn_transition_lock:
-            if self.state.resident_quiescing:
+            if self.state.resident_quiescing or self._compaction_gate_active():
                 return
             if self.turn_manager.latest_active_turn_id() is not None:
                 return
@@ -816,6 +870,22 @@ class PalCore(MemoryMaintenanceMixin):
             return
         try:
             await self._schedule_admitted_channel_turn_async(channel_envelope)
+        except IngressStagingFull:
+            # Bounded queue is full: the message was NOT accepted and must
+            # not be acknowledged as queued (Q10). Never drop the oldest.
+            self._queue_channel_status(
+                channel_envelope,
+                "ingress_full",
+                payload={"reason": "pending input queue is full; message not accepted"},
+            )
+        except IngressStagingError as exc:
+            # Durable staging failed: no queued acknowledgement, silent
+            # loss is forbidden (Q11); the transport can redeliver.
+            self._queue_channel_status(
+                channel_envelope,
+                "ingress_unavailable",
+                payload={"reason": str(exc)},
+            )
         finally:
             self.state.memory_ingress_reservations -= 1
             self.state.memory_maintenance_changed.set()
@@ -832,13 +902,20 @@ class PalCore(MemoryMaintenanceMixin):
                 # already queued: nothing to do. The active turn's
                 # working/typing status must keep running.
                 return
-            if self.state.resident_quiescing or self.turn_manager.latest_active_turn_id() is not None:
-                # Busy: queue the envelope. The active turn keeps its typing
-                # status; working_stop is only emitted when that turn actually
-                # ends (turn.end / runner finally). An interjection may later
-                # be injected from this queue without ever starting its own
-                # turn, so stopping typing here would leave the chat silently
-                # idle while the tool chain is still running.
+            if (
+                self.state.resident_quiescing
+                or self._compaction_gate_active()
+                or self.turn_manager.latest_active_turn_id() is not None
+            ):
+                # Busy: queue the envelope. Durable staging happens first;
+                # a queued acknowledgement may only follow a durable write.
+                # The active turn keeps its typing status; working_stop is
+                # only emitted when that turn actually ends (turn.end /
+                # runner finally). An interjection may later be injected
+                # from this queue without ever starting its own turn, so
+                # stopping typing here would leave the chat silently idle
+                # while the tool chain is still running.
+                self._stage_pending_channel_turn_locked(channel_envelope)
                 self.state.pending_channel_turns.append(channel_envelope)
                 return
             self._start_channel_turn_task_locked(channel_envelope)
@@ -851,8 +928,14 @@ class PalCore(MemoryMaintenanceMixin):
         channel_envelope: ChannelEnvelope,
     ) -> TurnOutcome:
         async with self.state.channel_turn_transition_lock:
-            if self.state.resident_quiescing or self.state.memory_maintenance:
-                raise RuntimeError("resident runtime is quiescing or dreaming")
+            if (
+                self.state.resident_quiescing
+                or self.state.memory_maintenance
+                or self._compaction_gate_active()
+            ):
+                raise RuntimeError(
+                    "resident runtime is quiescing, dreaming, or compacting"
+                )
             self.state.memory_ingress_reservations += 1
         try:
             return await self._process_admitted_channel_turn_async(channel_envelope)
@@ -1573,6 +1656,16 @@ class PalCore(MemoryMaintenanceMixin):
             return
         interrupted = await self.turn_manager.interrupt_active_turn(reason="interrupted")
         message = "Interrupted the current turn." if interrupted else "No active turn to interrupt."
+        # Interrupt must also reach a compaction ticket that has no active
+        # turn of its own (X05), and must revoke commit eligibility of a
+        # ticket held by an interrupted turn (X01).
+        gate = self._compaction_gate()
+        async with self.state.channel_turn_transition_lock:
+            ticket = gate.ticket_for(RESIDENT_COMPACTION_SCOPE)
+            if ticket is not None and not ticket.cancelled:
+                gate.cancel(RESIDENT_COMPACTION_SCOPE, reason="interrupt")
+                if not interrupted:
+                    message = "Cancelled the running context compaction."
         await self._complete_action_reply_async(action, message)
 
     async def _handle_open_reset_confirm_async(self, action: ControlAction) -> None:
@@ -1646,6 +1739,9 @@ class PalCore(MemoryMaintenanceMixin):
             if self.state.resident_quiescing:
                 return False
             self.state.resident_quiescing = True
+            # A confirmed reset seizes the gate: any live compaction ticket
+            # loses commit eligibility before reset proceeds (X04).
+            self._compaction_gate().cancel_all(reason="reset")
             self.state.resident_drained_event = asyncio.Event()
             current_turn_id = self.turn_manager.latest_active_turn_id()
             if current_turn_id is None:
@@ -1687,52 +1783,101 @@ class PalCore(MemoryMaintenanceMixin):
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
-        if self.turn_manager.latest_active_turn_id() is not None:
-            await self._complete_compact_reply_async(
-                action,
-                "Compaction is unavailable while a conversation turn is active. Try again after the current turn finishes.",
-            )
-            return
         cache_epoch = str(action.args.get("cache_epoch") or "").strip()
-        if cache_epoch:
-            if not self.cache_warm_deadline.claim_compaction(cache_epoch):
-                await self._complete_compact_reply_async(
-                    action,
-                    "这条热缓存 compact 提醒已经处理或失效。",
+        gate = self._compaction_gate()
+        busy_reply: str | None = None
+        ticket = None
+        # Admission is one critical section: no active turn, no unfinished
+        # turn teardown, no earlier pending input, no other quiesce owner,
+        # and the hot-cache epoch claim all precede the ticket claim. The
+        # manual intent is never scheduled for later (A06/A08/A10).
+        async with self.state.channel_turn_transition_lock:
+            if self.turn_manager.latest_active_turn_id() is not None:
+                busy_reply = (
+                    "Compaction is unavailable while a conversation turn is active. "
+                    "Try again after the current turn finishes."
                 )
-                return
-            await self._deliver_control_delivery_async(
-                control_interactions.terminal_delivery_for_action(
-                    action,
-                    "正在利用热缓存 Compact…",
-                    delivery_kind="interactive_update",
+            elif any(not task.done() for task in self.state.turn_tasks.values()):
+                busy_reply = (
+                    "Compaction is unavailable while a previous turn is still "
+                    "finishing. Try again in a moment."
                 )
-            )
-            await self._flush_control_status_async(action.route)
-        else:
-            await self.cache_warm_deadline.clear_for_compaction()
-        if self.turn_manager.latest_active_turn_id() is not None:
+            elif self.state.pending_channel_turns:
+                busy_reply = (
+                    "Compaction is postponed: earlier incoming messages are "
+                    "waiting and will be handled first."
+                )
+            elif self.state.resident_quiescing or self.state.memory_maintenance:
+                busy_reply = (
+                    "Compaction is unavailable while the runtime is quiescing "
+                    "or dreaming."
+                )
+            elif cache_epoch and not self.cache_warm_deadline.claim_compaction(cache_epoch):
+                busy_reply = "这条热缓存 compact 提醒已经处理或失效。"
+            else:
+                ticket = gate.claim(
+                    RESIDENT_COMPACTION_SCOPE,
+                    trigger=(
+                        CompactionTrigger.MANUAL_HOT
+                        if cache_epoch
+                        else CompactionTrigger.MANUAL
+                    ),
+                )
+                if ticket is None:
+                    busy_reply = "A context compaction is already in progress."
+        if ticket is None:
             await self._complete_compact_reply_async(
-                action,
-                "Compaction is unavailable while a conversation turn is active. Try again after the current turn finishes.",
+                action, busy_reply or "Compaction is unavailable."
             )
             return
-        memory_service = self.context.require_port("memory:memory")
-        l1_items = list(
-            getattr(getattr(memory_service, "l1_store", None), "items", ())
-            or ()
-        )
-        if not l1_items:
-            await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
-            return
-        run_result = await self.turn_executor.compact_memory_async(
-            memory_service,
-            # Resolve the actual endpoint budget during compaction preflight.
-            target_input_budget=0,
-            reserved_output_tokens=0,
-            max_attempts=3 if cache_epoch else None,
-            cache_epoch=cache_epoch,
-        )
+        try:
+            if cache_epoch:
+                try:
+                    await self._deliver_control_delivery_async(
+                        control_interactions.terminal_delivery_for_action(
+                            action,
+                            "正在利用热缓存 Compact…",
+                            delivery_kind="interactive_update",
+                        )
+                    )
+                    await self._flush_control_status_async(action.route)
+                except Exception:
+                    # A presentation failure must not release the gate or
+                    # authorize a second claim (X08).
+                    self.state.diagnostics.append(
+                        {"kind": "compact.status_delivery_failed"}
+                    )
+            else:
+                await self.cache_warm_deadline.clear_for_compaction()
+            memory_service = self.context.require_port("memory:memory")
+            l1_items = list(
+                getattr(getattr(memory_service, "l1_store", None), "items", ())
+                or ()
+            )
+            if not l1_items:
+                await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
+                return
+            async with self.state.channel_turn_transition_lock:
+                gate.advance(ticket, CompactionPhase.GENERATING)
+            run_result = await self.turn_executor.compact_memory_async(
+                memory_service,
+                # Resolve the actual endpoint budget during compaction preflight.
+                target_input_budget=0,
+                reserved_output_tokens=0,
+                max_attempts=3 if cache_epoch else None,
+                cache_epoch=cache_epoch,
+            )
+            if run_result.success:
+                async with self.state.channel_turn_transition_lock:
+                    gate.advance(ticket, CompactionPhase.COMMITTED)
+        finally:
+            # Identity-checked: this ticket can never release a successor's
+            # gate, and cancellation cannot skip this release (F07/Q14).
+            async with self.state.channel_turn_transition_lock:
+                gate.release(ticket)
+            # Release follow-up (success or failure): queued input resumes
+            # under whichever context is now authoritative (Q05/Q06).
+            await self._start_next_queued_turn_async()
         if not run_result.success:
             message = "Compaction failed - memory state was left unchanged."
             if cache_epoch:

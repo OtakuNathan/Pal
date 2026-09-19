@@ -18,6 +18,11 @@ from pal.core.compaction import (
     CompactionRunResult,
     CompactionSnapshot,
 )
+from pal.core.compaction_coordinator import (
+    CompactionPhase,
+    CompactionTrigger,
+    compaction_gate_active,
+)
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -115,6 +120,10 @@ class TurnExecutor:
         compaction_engine: CompactionEngine | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
         after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
+        compaction_gate: Any | None = None,
+        compaction_scope: str = "pal:resident",
+        inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
+        after_compaction: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self.context = context
         self.state = state
@@ -136,6 +145,10 @@ class TurnExecutor:
             compaction_clock_provider or (lambda: 0)
         )
         self._after_tool_batch = after_tool_batch
+        self._compaction_gate = compaction_gate
+        self._compaction_scope = str(compaction_scope or "pal:resident")
+        self._inject_pending = inject_pending
+        self._after_compaction = after_compaction
 
     # ── public entry point ──────────────────────────────────────────────
 
@@ -199,7 +212,68 @@ class TurnExecutor:
             )
             continuation.budget_failure_feedback_text = self._render_failure_feedback_text(failure_result.user_feedback)
             advice = replace(advice, status=LLMPreflightStatus.READY)
+        elif (
+            self._inject_pending is not None
+            and str(getattr(advice, "status", "")) == LLMPreflightStatus.READY
+            and getattr(self.state, "pending_channel_turns", None)
+            and not compaction_gate_active(self.state)
+        ):
+            # Queued interjection admission point (P1 ordering): input is
+            # admitted only when the next ordinary request is real and no
+            # compaction ticket holds the scope, so fresh user input is
+            # never fed into an imminent compaction source. The prompt and
+            # budget advice are recomputed after the append (one bounded
+            # second pass; no further injection inside this effect).
+            injected = await self._inject_pending(continuation)
+            if injected:
+                prompt = self.build_turn_prompt(
+                    continuation,
+                    effect.assembly_context,
+                    max_output_tokens=effect.max_output_tokens,
+                    tools=tools,
+                )
+                advice = await self._call_port_async(
+                    llm_runtime,
+                    "apreflight",
+                    "preflight",
+                    LLMPreflightRequest(request=prompt)
+                )
+                continuation.prompt_budget_snapshot = dict(getattr(advice, "breakdown", {}) or {})
         return EffectResult(status=RuntimeStatus.OK, payload=advice)
+
+    def _round_safe_for_compaction(self, continuation) -> bool:
+        """Round-safety evidence for auto compaction admission (A01-A05).
+
+        HTTP completion alone is not proof: require no in-flight effect, no
+        live assistant streaming round, no in-progress/incomplete message,
+        and a fully paired tool protocol on the active L1 turn.
+        """
+        if getattr(continuation, "waiting_effect_id", None) is not None:
+            return False
+        memory_service = self.context.port_registry.get("memory:memory")
+        if memory_service is None:
+            return False
+        turn_id = str(continuation.turn_id)
+        active_turn_reader = getattr(memory_service, "active_l1_turn", None)
+        turn = active_turn_reader(turn_id) if callable(active_turn_reader) else None
+        if turn is None:
+            return False
+        turns_store = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        has_open_round = getattr(turns_store, "has_open_round", None)
+        if callable(has_open_round) and has_open_round(turn_id):
+            return False
+        calls: set[str] = set()
+        results: set[str] = set()
+        for message in turn.messages:
+            message_state = str(getattr(message, "state", "") or "")
+            if message_state in {"in_progress", "incomplete"}:
+                return False
+            for part in message.parts:
+                if isinstance(part, ToolCallIR):
+                    calls.add(str(part.call_id))
+                elif isinstance(part, ToolResultIR):
+                    results.add(str(part.call_id))
+        return calls == results
 
     @_dispatch_effect.register(MemoryCompactEffect)
     async def _handle_memory_compact(self, effect, continuation):
@@ -216,14 +290,50 @@ class TurnExecutor:
                     "be committed."
                 ),
             )
+        if not self._round_safe_for_compaction(continuation):
+            # Round-safety proof (A01-A05): HTTP completion alone is not a
+            # safe boundary. The claim waits until the round is closed.
+            return EffectResult(
+                status=RuntimeStatus.ERROR,
+                text=(
+                    "Memory compaction requires a closed round: a provider "
+                    "stream, tool protocol, or result commit is still open."
+                ),
+            )
         memory_service = self.context.require_port("memory:memory")
-        run_result = await self.compact_memory_async(
-            memory_service,
-            target_input_budget=effect.target_input_budget,
-            reserved_output_tokens=effect.reserved_output_tokens,
-            assembly_context=effect.assembly_context,
-            continuation=continuation,
-        )
+        gate = self._compaction_gate
+        ticket = None
+        if gate is not None:
+            async with self.state.channel_turn_transition_lock:
+                ticket = gate.claim(
+                    self._compaction_scope,
+                    trigger=CompactionTrigger.AUTO,
+                )
+                if ticket is not None:
+                    ticket = gate.advance(ticket, CompactionPhase.GENERATING)
+            if ticket is None:
+                return EffectResult(
+                    status=RuntimeStatus.ERROR,
+                    text="Memory compaction is already in progress for this scope.",
+                )
+        run_result = None
+        try:
+            run_result = await self.compact_memory_async(
+                memory_service,
+                target_input_budget=effect.target_input_budget,
+                reserved_output_tokens=effect.reserved_output_tokens,
+                assembly_context=effect.assembly_context,
+                continuation=continuation,
+            )
+            if ticket is not None and run_result.success:
+                async with self.state.channel_turn_transition_lock:
+                    gate.advance(ticket, CompactionPhase.COMMITTED)
+        finally:
+            if ticket is not None:
+                # Identity-checked release: cancellation or failure removes
+                # only this ticket; a successor's gate survives (F07/Q14).
+                async with self.state.channel_turn_transition_lock:
+                    gate.release(ticket)
         if not run_result.success:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
@@ -265,6 +375,10 @@ class TurnExecutor:
                 # leaves the draft reachable through /memory_review.
                 memory_service.reviews.stage_payload(batch, route)
             continuation.pending_compact_memory_candidate_batches.append(batch)
+        if self._after_compaction is not None:
+            # Drain queued input into the fresh context before the loop's
+            # next preflight (PLAN section 4 default order).
+            await self._after_compaction(continuation)
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
 
     @_dispatch_effect.register(LLMRequestEffect)

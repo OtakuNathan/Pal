@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pal.control.contracts import ControlRoute
+from pal.core.compaction_coordinator import CompactionTicket
 from pal.foundation import utc_now
 
 
@@ -48,6 +49,7 @@ class CoreRuntimeState:
     prompt_log_enabled: bool = False
     mode: str = "default"
     compaction_user_turn_count: int = 0
+    compaction_tickets: dict[str, CompactionTicket] = field(default_factory=dict)
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
