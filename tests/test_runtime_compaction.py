@@ -558,7 +558,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             llm.generate_requests[1].messages[-1].text,
         )
 
-    def test_preflight_shrinks_without_spending_model_attempts(self) -> None:
+    def test_preflight_over_budget_full_source_fails_without_spending_attempts(self) -> None:
         service = _memory_with_turns(6)
         compact_sources: list[int] = []
 
@@ -585,20 +585,22 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.attempts, 1)
-        self.assertEqual(len(llm.generate_requests), 1)
+        # Full-source mode: an oversized source is an explicit failure with
+        # zero model attempts and no committed summary (S03/S04).
+        self.assertEqual(result.status, "source_too_large")
+        self.assertEqual(result.attempts, 0)
+        self.assertEqual(llm.generate_requests, [])
         self.assertGreaterEqual(len(compact_sources), 1)
-        self.assertTrue(
-            all(
-                left > right
-                for left, right in zip(
-                    compact_sources,
-                    compact_sources[1:],
-                )
+        self.assertEqual(len(service.l1_store.items), 7)
+        self.assertFalse(
+            any(
+                message.kind == L1MessageKind.RUNTIME_CONTEXT_SUMMARY
+                for transcript in service.l1_store.items
+                for message in transcript
             )
         )
 
-    def test_endpoint_compact_required_retries_with_strictly_smaller_source(self) -> None:
+    def test_endpoint_compact_required_full_source_refuses_shrink(self) -> None:
         service = _memory_with_turns(5)
         llm = _ScriptedLLM(
             [
@@ -609,7 +611,6 @@ class SharedCompactionEngineTests(unittest.TestCase):
                     preferred_endpoint_id="small-endpoint",
                     preferred_model_id="small-model",
                 ),
-                generation_result_from_values(text=_valid_pal_payload()),
             ]
         )
 
@@ -621,23 +622,13 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, "compacted")
-        self.assertEqual(result.attempts, 2)
-        self.assertLess(result.source_sizes[1], result.source_sizes[0])
-        retry = llm.generate_requests[1]
-        self.assertEqual(
-            retry.metadata["preferred_endpoint_id"],
-            "small-endpoint",
-        )
-        self.assertEqual(retry.model_hint, "small-model")
-        self.assertEqual(retry.policy.max_output_tokens, 2304)
-        self.assertEqual(retry.policy.thinking_selection, "lowest_supported")
-        self.assertEqual(
-            retry.messages[0].text,
-            llm.generate_requests[0].messages[0].text,
-        )
-        self.assertNotIn("256 tokens", retry.messages[0].text)
-        self.assertIn("must not exceed 256 tokens", retry.messages[-1].text)
+        # Full-source mode never shrinks history to satisfy a smaller
+        # endpoint budget: the endpoint's compact-required verdict ends the
+        # run explicitly with the original history untouched.
+        self.assertEqual(result.status, "source_too_large")
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(len(llm.generate_requests), 1)
+        self.assertEqual(len(service.l1_store.items), 6)
 
     def test_compactor_reserves_summary_headroom_instead_of_provider_ceiling(self) -> None:
         service = _memory_with_turns(2)
@@ -904,14 +895,15 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(service.l1_store.items, before_l1)
         self.assertEqual(service.l2_store.items, before_l2)
 
-    def test_closed_failed_mutation_can_be_dropped_to_fit_compaction(self) -> None:
+    def test_oversized_source_with_droppable_failure_refuses_silent_drop(self) -> None:
         service = _memory_with_turns(1)
         def preflight(request):
             source = request.request.messages[-1].text
+            unit_count = source.count("### memory:")
             return LLMPreflightAdvice(
                 status=(
                     LLMPreflightStatus.COMPACT_REQUIRED
-                    if len(source) > 1_000
+                    if unit_count > 0
                     else LLMPreflightStatus.READY
                 )
             )
@@ -958,16 +950,21 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, "compacted")
-        self.assertEqual(result.attempts, 1)
-        self.assertEqual(len(llm.generate_requests), 1)
-        self.assertEqual(len(service.l1_store.items), 1)
-        self.assertEqual(
-            service.l1_store.items[0][0].kind,
-            L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+        self.assertEqual(result.status, "source_too_large")
+        self.assertEqual(result.attempts, 0)
+        self.assertEqual(llm.generate_requests, [])
+        # The original history is untouched: no unit was dropped, no summary
+        # installed, both captured turns still present verbatim.
+        self.assertEqual(len(service.l1_store.items), 2)
+        self.assertFalse(
+            any(
+                message.kind == L1MessageKind.RUNTIME_CONTEXT_SUMMARY
+                for transcript in service.l1_store.items
+                for message in transcript
+            )
         )
 
-    def test_atomic_l1_unit_includes_unknown_effect_and_ignores_active_batch(self) -> None:
+    def test_atomic_l1_unit_includes_unknown_effect_and_replaces_active_batch(self) -> None:
         service = _memory_with_turns(1)
         unknown_protocol = [
             {
@@ -1067,10 +1064,12 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
         )
         self.assertTrue(result.success)
-        self.assertEqual(
-            incomplete_service.active_l1_turn("corrupted-active-tool-call").pending_call_ids,
-            frozenset({"read-2"}),
-        )
+        successor = incomplete_service.active_l1_turn("corrupted-active-tool-call")
+        self.assertIsNotNone(successor)
+        # Full-source install replaces the active turn with an empty
+        # successor segment: same logical id, no pending call carried over.
+        self.assertEqual(successor.pending_call_ids, frozenset())
+        self.assertTrue(dict(successor.metadata or {}).get("compact_successor"))
 
     def test_closed_tool_body_is_bounded_but_visible_to_compaction(self) -> None:
         service = _memory_with_turns(1)

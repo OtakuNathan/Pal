@@ -192,6 +192,39 @@ class MemoryCompactRequest:
     reserved_output_tokens: int
     summary_entry: L2Entry | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Full-source install fields (P2). Absent/empty values keep the legacy
+    # partial-compaction semantics for direct callers.
+    op_id: str = ""            # install idempotency key (receipt primary key)
+    source_stamp: str = ""     # owner-issued digest; non-empty selects full mode
+    active_turn_id: str = ""   # logical turn receiving a fresh empty segment
+    expected_epoch: int = 0    # memory context epoch observed at capture
+
+
+class StaleCompactionSource(ValueError):
+    """The captured compaction source no longer matches live memory.
+
+    Raised on source stamp or epoch mismatch, or when the successor active
+    turn changed. Callers must not restore their captured snapshot over the
+    newer live state (I03/I12/F18).
+    """
+
+
+@dataclass(frozen=True)
+class CompactionReceipt:
+    """The single durable install fact for one compaction transaction."""
+
+    op_id: str
+    status: str
+    epoch_before: int
+    epoch_after: int
+    summary_source_id: str
+    source_stamp: str
+    successor_turn_id: str
+    successor_revision: int
+    removed_turn_ids: tuple[str, ...]
+    removed_result_refs: tuple[str, ...]
+    cleanup_status: str = "ok"
+    created_at: str = ""
 
 
 @dataclass(frozen=True)

@@ -1,19 +1,80 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping
 
 from pal.foundation import HeatLevel, HeatState
 from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, ReasoningPartIR
 from pal.llm.serde import message_from_payload, message_to_payload
-from pal.memory.contracts import L2Entry
+from pal.memory.contracts import CompactionReceipt, L2Entry
 from pal.memory.service import MemoryService
 from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
 
-MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "1"
+MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "2"
+
+_RECEIPT_FIELDS = (
+    "op_id", "status", "epoch_before", "epoch_after", "summary_source_id",
+    "source_stamp", "successor_turn_id", "successor_revision",
+    "removed_turn_ids", "removed_result_refs", "cleanup_status", "created_at",
+)
+
+
+def _receipt_to_payload(receipt: CompactionReceipt) -> dict[str, Any]:
+    return {
+        "op_id": receipt.op_id,
+        "status": receipt.status,
+        "epoch_before": receipt.epoch_before,
+        "epoch_after": receipt.epoch_after,
+        "summary_source_id": receipt.summary_source_id,
+        "source_stamp": receipt.source_stamp,
+        "successor_turn_id": receipt.successor_turn_id,
+        "successor_revision": receipt.successor_revision,
+        "removed_turn_ids": list(receipt.removed_turn_ids),
+        "removed_result_refs": list(receipt.removed_result_refs),
+        "cleanup_status": receipt.cleanup_status,
+        "created_at": receipt.created_at,
+    }
+
+
+def _receipt_from_payload(value: Mapping[str, Any]) -> CompactionReceipt:
+    item = dict(value)
+    if extras := sorted(set(item) - set(_RECEIPT_FIELDS)):
+        raise ValueError(f"compaction receipt has unknown fields: {extras}")
+    op_id = str(item.get("op_id") or "").strip()
+    status = str(item.get("status") or "").strip()
+    stamp = str(item.get("source_stamp") or "").strip()
+    if not op_id or not status or not stamp:
+        raise ValueError("compaction receipt is missing required identity fields")
+    integers: dict[str, int] = {}
+    for key in ("epoch_before", "epoch_after", "successor_revision"):
+        raw = item.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError(f"compaction receipt field {key} is invalid")
+        integers[key] = raw
+    for key in ("removed_turn_ids", "removed_result_refs"):
+        raw = item.get(key)
+        if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+            raise ValueError(f"compaction receipt field {key} is invalid")
+    cleanup = str(item.get("cleanup_status") or "ok")
+    if cleanup not in {"ok", "pending"}:
+        raise ValueError("compaction receipt cleanup_status is invalid")
+    return CompactionReceipt(
+        op_id=op_id,
+        status=status,
+        epoch_before=integers["epoch_before"],
+        epoch_after=integers["epoch_after"],
+        summary_source_id=str(item.get("summary_source_id") or ""),
+        source_stamp=stamp,
+        successor_turn_id=str(item.get("successor_turn_id") or ""),
+        successor_revision=integers["successor_revision"],
+        removed_turn_ids=tuple(str(x) for x in item["removed_turn_ids"]),
+        removed_result_refs=tuple(str(x) for x in item["removed_result_refs"]),
+        cleanup_status=cleanup,
+        created_at=str(item.get("created_at") or ""),
+    )
 
 
 @dataclass(frozen=True)
@@ -22,6 +83,8 @@ class _PreparedMemoryState:
     entries: dict[str, L2Entry]
     top_of_mind_refs: tuple[str, ...]
     heat: dict[str, HeatState]
+    context_epoch: int = 0
+    compaction_receipts: dict[str, CompactionReceipt] = field(default_factory=dict)
 
 
 @dataclass
@@ -55,6 +118,13 @@ class MemoryRuntimeStatePort:
                 }
                 for key, state in self.service.l2_store.heat_registry.items()
             },
+            "context_epoch": int(getattr(self.service, "context_epoch", 0) or 0),
+            "compaction_receipts": {
+                receipt.op_id: _receipt_to_payload(receipt)
+                for receipt in getattr(
+                    self.service, "compaction_receipts", {}
+                ).values()
+            },
         }
 
     def prepare_restore_state(self, payload: Mapping[str, Any]) -> _PreparedMemoryState:
@@ -64,11 +134,41 @@ class MemoryRuntimeStatePort:
             "l2_entries",
             "l2_top_of_mind_refs",
             "l2_heat",
+            "context_epoch",
+            "compaction_receipts",
         }
         if extras := sorted(set(value) - allowed_fields):
             raise ValueError(
                 f"memory runtime snapshot has unknown fields: {extras}"
             )
+        # R04/R05: a present-but-invalid epoch/receipt fails closed; a
+        # genuinely old snapshot without these fields migrates explicitly.
+        raw_epoch = value.get("context_epoch")
+        if raw_epoch is None:
+            context_epoch = 0
+        elif isinstance(raw_epoch, bool) or not isinstance(raw_epoch, int) or raw_epoch < 0:
+            raise ValueError("memory runtime snapshot context_epoch is invalid")
+        else:
+            context_epoch = raw_epoch
+        receipts: dict[str, CompactionReceipt] = {}
+        raw_receipts = value.get("compaction_receipts")
+        if raw_receipts is None:
+            raw_receipts = {}
+        if not isinstance(raw_receipts, Mapping):
+            raise ValueError(
+                "memory runtime snapshot compaction_receipts is invalid"
+            )
+        for key, raw in raw_receipts.items():
+            if not isinstance(raw, Mapping):
+                raise ValueError(
+                    "memory runtime snapshot contains an invalid compaction receipt"
+                )
+            receipt = _receipt_from_payload(raw)
+            if receipt.op_id != str(key):
+                raise ValueError(
+                    "memory runtime snapshot receipt identity mismatch"
+                )
+            receipts[receipt.op_id] = receipt
         turns = L1TurnStore()
         turn_ids: set[str] = set()
         for raw in list(value.get("l1_turns") or ()):
@@ -123,6 +223,8 @@ class MemoryRuntimeStatePort:
             entries=entries,
             top_of_mind_refs=top_of_mind_refs,
             heat=heat,
+            context_epoch=context_epoch,
+            compaction_receipts=receipts,
         )
 
     def install_prepared_state(self, prepared: _PreparedMemoryState) -> None:
@@ -132,6 +234,8 @@ class MemoryRuntimeStatePort:
         self.service.l2_store.items = prepared.entries
         self.service.l2_store.top_of_mind_refs = list(prepared.top_of_mind_refs)
         self.service.l2_store.heat_registry = prepared.heat
+        self.service.context_epoch = int(prepared.context_epoch)
+        self.service.compaction_receipts = dict(prepared.compaction_receipts)
 
     def reset_state(self, reason: str) -> None:
         _ = reason

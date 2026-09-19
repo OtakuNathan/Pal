@@ -79,6 +79,11 @@ class CompactionSnapshot:
     replay_dialect: str = ""
     replay_wire_shape: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Full-source mode (P2): owner-issued stamp/epoch over the captured turns.
+    # Empty source_stamp keeps the legacy settled-only semantics.
+    source_stamp: str = ""
+    source_epoch: int = 0
+    active_turn_ids: tuple[str, ...] = ()
 
     @classmethod
     def capture(
@@ -93,28 +98,52 @@ class CompactionSnapshot:
         replay_request: LLMRequestIR | None = None,
         replay_dialect: str = "",
         replay_wire_shape: str = "",
+        include_active: bool = True,
+        source_epoch: int = 0,
     ) -> "CompactionSnapshot":
         l1_store = getattr(memory_service, "l1_store", None)
-        raw_items = list(getattr(l1_store, "items", ()) or ())
-        turns = list(
-            getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
-        )
-        if len(turns) == len(raw_items):
-            raw_items = [
-                transcript
-                for turn, transcript in zip(turns, raw_items)
-                if str(
-                    getattr(
-                        getattr(turn, "state", ""),
-                        "value",
-                        getattr(turn, "state", ""),
-                    )
-                ) != "active"
-            ]
-        memory_items = tuple(
-            tuple(_copy_l1_message(item) for item in list(transcript or ()))
-            for transcript in raw_items
-        )
+        source_stamp = ""
+        active_turn_ids: tuple[str, ...] = ()
+        if include_active:
+            # Full-source capture: every turn (settled and active) from the
+            # same ordered revision set; the stamp is issued by the L1 owner's
+            # own digest so install verification cannot be spoofed (S01).
+            from pal.memory.turn_ir import source_stamp_for_turns
+
+            turns = list(
+                getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
+            )
+            source_stamp = source_stamp_for_turns(turns)
+            active_turn_ids = tuple(
+                turn.turn_id
+                for turn in turns
+                if str(getattr(turn.state, "value", turn.state)) == "active"
+            )
+            memory_items = tuple(
+                tuple(_copy_l1_message(item) for item in transcript)
+                for transcript in list(getattr(l1_store, "items", ()) or ())
+            )
+        else:
+            raw_items = list(getattr(l1_store, "items", ()) or ())
+            turns = list(
+                getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
+            )
+            if len(turns) == len(raw_items):
+                raw_items = [
+                    transcript
+                    for turn, transcript in zip(turns, raw_items)
+                    if str(
+                        getattr(
+                            getattr(turn, "state", ""),
+                            "value",
+                            getattr(turn, "state", ""),
+                        )
+                    ) != "active"
+                ]
+            memory_items = tuple(
+                tuple(_copy_l1_message(item) for item in list(transcript or ()))
+                for transcript in raw_items
+            )
         return cls(
             target_input_budget=max(0, int(target_input_budget or 0)),
             reserved_output_tokens=max(0, int(reserved_output_tokens or 0)),
@@ -125,6 +154,9 @@ class CompactionSnapshot:
             replay_dialect=str(replay_dialect or "").strip(),
             replay_wire_shape=str(replay_wire_shape or "").strip(),
             metadata=deepcopy(metadata or {}),
+            source_stamp=source_stamp,
+            source_epoch=max(0, int(source_epoch or 0)),
+            active_turn_ids=active_turn_ids,
         )
 
     @property
@@ -324,6 +356,34 @@ class CompactionEngine:
                         replay_wire_shape="",
                     )
                     continue
+                if snapshot.source_stamp:
+                    # Full-source mode never trades coverage for fit (S03/
+                    # S04), but it must still separate an oversized source
+                    # from an incompressible base that overflows on its own
+                    # (B02): probe the request with an empty source once.
+                    empty_source = self.policy.build_source(
+                        snapshot,
+                        [],
+                        validation_error=validation_error,
+                    ).strip()
+                    empty_request = self._request(
+                        snapshot,
+                        empty_source,
+                        attempt=attempts + 1,
+                        validation_error=validation_error,
+                    )
+                    empty_advice = await _preflight(llm_runtime, empty_request)
+                    if not _preflight_requires_compaction(empty_advice):
+                        log_failure("input:source_too_large")
+                        return finish(
+                            snapshot,
+                            status="source_too_large",
+                            attempts=attempts,
+                            source_sizes=source_sizes,
+                            failures=failures,
+                        )
+                    log_failure("input:base_context_over_budget")
+                    break
                 previous_size = len(source)
                 snapshot = _snapshot_for_budget_advice(snapshot, advice)
                 shrunk = self._shrink(
@@ -369,6 +429,15 @@ class CompactionEngine:
                     validation_error = ""
                     repair_output = ""
                     continue
+                if snapshot.source_stamp:
+                    # Same full-source rule on the endpoint's own verdict.
+                    return finish(
+                        snapshot,
+                        status="source_too_large",
+                        attempts=attempts,
+                        source_sizes=source_sizes,
+                        failures=failures,
+                    )
                 snapshot = _snapshot_for_outcome(snapshot, outcome)
                 shrunk = self._shrink(
                     snapshot,
@@ -681,6 +750,15 @@ class CompactionEngine:
                 "compaction_clock_kind": snapshot.clock_kind.value,
                 "compaction_clock_value": snapshot.clock_value,
             },
+            op_id=(
+                str(snapshot.metadata.get("compaction_op_id") or "").strip()
+                or uuid4().hex
+            ),
+            source_stamp=snapshot.source_stamp,
+            active_turn_id=(
+                snapshot.active_turn_ids[0] if snapshot.active_turn_ids else ""
+            ),
+            expected_epoch=snapshot.source_epoch,
         )
         try:
             if after_commit is not None:

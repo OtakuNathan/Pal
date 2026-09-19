@@ -507,6 +507,27 @@ class L1TurnStore:
         self.replace_all(())
 
 
+def source_stamp_for_turns(turns: Iterable["L1TurnIR"]) -> str:
+    """Owner-issued digest over the ordered L1 turn identities.
+
+    Capture and install verification share this function so a caller can
+    never substitute a self-reported block count for the real stamp.
+    """
+    import hashlib
+
+    parts: list[str] = []
+    for turn in turns:
+        state = str(getattr(turn.state, "value", turn.state) or "")
+        message_ids = ";".join(
+            str(message.message_id or "") for message in turn.messages
+        )
+        parts.append(
+            f"{turn.turn_id}:{state}:{int(turn.revision)}:"
+            f"{len(turn.messages)}:{message_ids}"
+        )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:
     if message.role == MessageRole.ASSISTANT:
         # Keep the wire replay envelope across settlement: same-endpoint replays

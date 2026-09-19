@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from pal.execution.contracts import ToolCallBudget
 from pal.core.compaction import (
@@ -2071,10 +2072,13 @@ class TurnExecutor:
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "preferred_model_id": preferred_model_id,
                 "prompt_cache_scope_id": logical_scope_id,
+                "compaction_op_id": uuid4().hex,
             },
             replay_request=replay_request,
             replay_dialect=replay_dialect,
             replay_wire_shape=replay_wire_shape,
+            include_active=True,
+            source_epoch=max(0, int(getattr(memory_service, "context_epoch", 0) or 0)),
         )
         execution_runtime = getattr(self.context, "execution_runtime", None)
         def current_l1_result_ids() -> tuple[str, ...]:
@@ -2083,15 +2087,19 @@ class TurnExecutor:
                 "turns",
                 (),
             )
-            return tuple(
-                dict.fromkeys(
-                    part.call_id
-                    for turn in list(turns or ())
-                    for message in turn.messages
-                    for part in message.parts
-                    if isinstance(part, ToolResultIR)
-                )
-            )
+            ids: list[str] = []
+            for turn in list(turns or ()):
+                for message in turn.messages:
+                    for part in message.parts:
+                        if isinstance(part, ToolResultIR):
+                            ids.append(part.call_id)
+                # Successor segments keep logical references for results the
+                # compaction carried forward: they are not removable (F25).
+                for ref in dict(turn.metadata or {}).get(
+                    "compact_retained_result_refs", ()
+                ) or ():
+                    ids.append(str(ref))
+            return tuple(dict.fromkeys(ids))
 
         result_ids_before_compact = current_l1_result_ids()
 
