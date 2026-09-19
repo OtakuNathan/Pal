@@ -94,4 +94,15 @@
 
 命令：per-file 隔离 `PYTHONPATH=$PWD/src python3 -m pytest tests/test_<name>.py -q`，每文件 timeout 600s（bootstrap 1800s），日志 `/tmp/fullcomp_v2_baseline.log`。
 
-状态：**DEFERRED（用户决定，2026-09-19）**。后台运行已取消：基线参照 0e33220 全量回归（153 文件零回归，2680 passed+461 subtests，仅两枚基线已知环境项）+ 本次合并为 5 文件无冲突且与被改面无交集。组合树回归未在 P0 执行，按 PLAN §13 P5/E06 完成定义在交付前补跑；此前不得声称「合并树已跑」。
+状态：**DONE（2026-09-19，套件在 61c87db 修复前跑完，修复后受影响面复跑全绿）**。
+
+- 157 文件全部执行完毕：**2743 passed + 461 subtests passed，3 failed**。
+- 非 PASS 文件 4 个，全部可归因：
+  1. `test_architecture_skeleton`（1 failed）→ 真 bug①：`_round_safe_for_compaction` 的 `has_open_round` 检查在真实 auto 路径上永真（L1 流式簿记在终端响应后仍开）→ auto claim 永拒。**61c87db 修复**（删该准入检查，保留 store 方法），复跑绿。
+  2. `test_runtime_stability`（1 failed）→ 真 bug②：P1 注入在 turn 首个 preflight 即吸干同 scope burst 队列（与 `inject_pending_interjection_async` docstring 的 "after a tool batch" 语义不符），合成 prompt 触发 compact_required，stub 端点无法产出 compact JSON → 单条 recovery 回复。**61c87db 修复**（注入 admission 加 `llm_round_index >= 1`；compact 后 `_after_compaction` drain 不变），复跑绿。
+  3. `test_package_installation`（1 failed）→ §5 环境项①，基线已知。
+  4. `test_tool_schema_properties`（EXIT 5）→ §5 环境项②，基线已知（缺 hypothesis_jsonschema，收集失败不计 failed）。
+- 修复验证（61c87db 后受影响面复跑）：stability + interjection_injection + compaction_gate + architecture_skeleton = 167 passed；full_compaction_source + warm_handoff + control_plane + cache_wire + memory_l1_ir_service = 125 passed。
+- `test_bootstrap_and_repositories` 141 passed / ~13min，timeout 1800s 下正常完成。
+- 两枚真 bug 均为直连内部方法的单元/barrier 测试无法发现、只有 process_channel_turn 全链路形态逼出的接线缺陷（同族：P4 已修的 waiting_effect_id 自我拒绝）。
+- 剩余已知缺口（对应 acceptance NOT_RUN 项）：receipt/checkpoint 崩溃窗口 outbox 未实现；E03/E04 全故障矩阵未跑；attachment lease、deadline sweep、usage 记账未实现；E05 性能 A/B deferred。
