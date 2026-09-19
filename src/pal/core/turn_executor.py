@@ -353,6 +353,7 @@ class TurnExecutor:
             getattr(gate, "lock", None) if gate is not None else None
         ) or getattr(self.state, "channel_turn_transition_lock", None)
         no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
+        self._drain_compaction_candidate_outbox(memory_service)
         source_stamp = ""
         if no_progress_stamps is not None:
             stamp_reader = getattr(memory_service, "l1_source_stamp", None)
@@ -467,14 +468,58 @@ class TurnExecutor:
                     control_scope_key=binding.control_scope_key, correlation_id=binding.correlation_id)
                 batch["source_ref"] = batch["candidate_batch_id"]
                 # Persist before resuming the turn. Delivery can wait; a crash
-                # leaves the draft reachable through /memory_review.
-                memory_service.reviews.stage_payload(batch, route)
+                # leaves the draft reachable through /memory_review. A stage
+                # failure here must NOT roll back the committed compact
+                # (I08): the batch goes to the retry outbox instead and
+                # stays a draft — never an automatic L3 write, and Bunshin
+                # lanes never gain a candidate route (their policy rejects
+                # candidates upstream).
+                try:
+                    memory_service.reviews.stage_payload(batch, route)
+                except Exception as exc:
+                    outbox = getattr(
+                        self.state, "compaction_candidate_outbox", None,
+                    )
+                    if outbox is not None:
+                        outbox.append({
+                            "batch": dict(batch),
+                            "route": route,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        })
+                    diagnostics = getattr(self.state, "diagnostics", None)
+                    if diagnostics is not None:
+                        diagnostics.append({
+                            "kind": "compaction_candidate_outbox",
+                            "candidate_batch_id": batch.get("candidate_batch_id"),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        })
             continuation.pending_compact_memory_candidate_batches.append(batch)
         if self._after_compaction is not None:
             # Drain queued input into the fresh context before the loop's
             # next preflight (PLAN section 4 default order).
+            self._drain_compaction_candidate_outbox(memory_service)
             await self._after_compaction(continuation)
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
+
+    def _drain_compaction_candidate_outbox(self, memory_service) -> int:
+        """Retry outboxed candidate batches (I08): committed compacts whose
+        stage/approval-notify failed. The seed is never rolled back; the
+        drafts stay reachable only through the review flow."""
+        outbox = getattr(self.state, "compaction_candidate_outbox", None)
+        if not outbox:
+            return 0
+        remaining: list[dict[str, Any]] = []
+        drained = 0
+        for entry in list(outbox):
+            try:
+                memory_service.reviews.stage_payload(
+                    entry["batch"], entry["route"],
+                )
+                drained += 1
+            except Exception:
+                remaining.append(entry)
+        outbox[:] = remaining
+        return drained
 
     @_dispatch_effect.register(LLMRequestEffect)
     async def _handle_llm_request(self, effect, continuation):

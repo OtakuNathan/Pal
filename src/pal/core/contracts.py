@@ -54,6 +54,10 @@ class CoreRuntimeState:
     # attempt. An unchanged source is not re-compacted until new input
     # changes the stamp; a success clears the entry.
     compaction_no_progress: dict[str, str] = field(default_factory=dict)
+    # I08: candidate batches whose stage/approval-notify failed AFTER a
+    # committed compact. Retried by the executor on the next drain; the
+    # committed seed is never rolled back for them.
+    compaction_candidate_outbox: list[dict[str, Any]] = field(default_factory=list)
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
