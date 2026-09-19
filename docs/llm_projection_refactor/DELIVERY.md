@@ -234,11 +234,29 @@ review 自带的 7 项验收草案（含 H1 双分支兼容写法、H3 验收、
   （基线 422c7ba vs 修复后）——持平略优，零回退。本轮改动均在 commit/构造
   路径（每轮一次）与 ClosedRound 构造期，prepare 热路径未触碰。
 
+## 第五轮外部 review（2026-09-19，针对 82a2311）：修复级通过，无新阻塞项
+
+`pal_projection_review_82a2311` 结论：**H1-H3 全部关闭；在本增量的检查范围内
+未确认新的阻塞性缺陷**（隔离 probe 9 项全过：零冻结接受/幂等/拒绝可重复/
+候选失败不污染 active+pending+head/pending 后续封存/head 只转移一次等）。
+两条非阻塞性文档整理已本轮处理：
+
+1. projection_session.py 模块头 chunks 描述统一（commit 时冻结 = 末次请求
+   frontier 之外项 + 本轮新接受输出；零冻结 chunk 记录语义跨度）；
+2. DELIVERY 未完成项措辞统一（resident/Bunshin 离线接线属于实施与集成，
+   P7 是另行批准的上线 canary，两者分离）。
+
+review 同时明确了下一阶段 gate（非本轮范围）：稳定冻结 cut/完整工具组、
+真实 runtime 接受与 durable checkpoint、resident/Bunshin 共享实现；live canary
+不能替代离线集成。
+
 ## 未覆盖 / 明确未做
 
-1. **热路径切换未执行**：resident LLMRuntime 仍走 per-message ReplayEnvelope
-   编码（原路径未动，全部新组件旁路就绪）。真正切换 = P7 级变更，需你手动
-   restart + canary 批准。这是有意的安全边界，不是遗漏。
+1. **热路径尚未接线（离线集成与上线 canary 分离）**：resident LLMRuntime 仍走
+   per-message ReplayEnvelope 编码（原路径未动，全部新组件旁路就绪）。
+   resident/Bunshin 的真实接线属于实施与集成阶段（P4/P5 的集成部分）；
+   P7 是另行批准的上线 canary（手动 restart + canary），两者不是同一件事。
+   这是有意的安全边界，不是遗漏。
 2. **矩阵 TBD 未销账**：GLM 系（openai_completion）与 DeepSeek 网关 signature
    下发行为仍是 synthetic-opaque 级验证；provider-real fixture 需你授权的脱敏
    日志或 P7 canary。

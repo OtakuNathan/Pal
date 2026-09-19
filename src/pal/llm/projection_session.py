@@ -5,9 +5,12 @@ owns:
 
 - the active EndpointBinding and its projection generation,
 - the frontier cursor, advanced ONLY by trusted HistoryCommitReceipts,
-- immutable projection chunks carved from requests that were actually sent
-  (a chunk is the wire items beyond the previous frontier in the last
-  prepared request of the round — byte-true by construction),
+- immutable projection chunks frozen at commit time: the wire items beyond
+  the previous frontier in the round's last prepared request PLUS the
+  round's newly accepted output (byte-true native assistant items or
+  IR-encoded acceptance, review R3); a zero-freeze commit seals an EMPTY
+  chunk that records the semantic span while its items stay in the open
+  tail (review H1),
 - the NativeContinuationStore for the active binding (destroyed on switch).
 
 prepare() never re-normalizes; repair outcomes arrive as repaired
