@@ -1,1380 +1,718 @@
 {
-  "schema": "pal.compaction.v2.acceptance-results/1",
-  "product_commit": "7dadb6b565425e4b085bf5504366ad32c85524c8",
-  "results": [
+  "schema": "pal.two-segment.results/3",
+  "product_sha": null,
+  "cases": [
     {
       "id": "A01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_round_safe_requires_paired_tool_protocol"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "unpaired tool protocol refuses the auto claim (predicate level)"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "A02",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_round_safe_rejects_open_streaming_round_and_in_progress"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "IN_PROGRESS assistant message or a live streaming round refuses the claim; HTTP DONE alone is not safe proof"
+      "evidence": [
+        {
+          "node": "tests/test_builder_mode_contract.py::BuilderModeContractTests::test_mode_is_public_and_validated",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_builder_mode_contract.py::BuilderModeContractTests::test_mode_is_public_and_validated -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "mode is a public validated constructor param; builder forwards (post-build private writes removed in 939db45)"
+        }
+      ]
     },
     {
       "id": "A03",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_claim_waits_for_inflight_interjection_commit"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "effects are strictly sequential in the turn program; the same-lock serialization test pins the short-commit boundary"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::PartitionTests::test_left_plus_right_partitions_store_exactly",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::PartitionTests::test_left_plus_right_partitions_store_exactly -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "left+right partition the single store exactly, no mirror history"
+        }
+      ]
     },
     {
       "id": "A04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_a04_unknown_mutation_rejected_as_reconcile_required"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(b) 32ec58f: round-safe rejection is structured evidence — reconcile_required diagnostic with the unpaired call preserved, nothing deleted/re-run/installed"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "A05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_runtime_compaction.py::RuntimeCompactionIntegrationTests::test_compaction_does_not_reproject_retained_active_results"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "retained result refs + observation coverage migration keep execution-runtime deliveries alive across compaction"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "A06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_manual_busy_with_active_turn_no_engine_no_ticket"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "busy reply, zero engine calls, no ticket, no reservation"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "A07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_manual_busy_while_previous_turn_teardown_unfinished"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "unfinished teardown producer blocks manual admission"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "A08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_claim_waits_for_transition_lock_and_is_atomic"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "admission checks and claim share one critical section"
-    },
-    {
-      "id": "A09",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_duplicate_manual_single_ticket_single_generate"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "single ticket, single generate, second request gets the busy state"
-    },
-    {
-      "id": "A10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_manual_busy_when_earlier_input_already_queued"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "earlier queued input wins; manual is postponed without swallowing it"
-    },
-    {
-      "id": "A11",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_manual_no_op_on_minimal_memory_zero_engine"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "minimal memory is a no-op with zero provider calls"
-    },
-    {
-      "id": "A12",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_a12_final_answer_turn_never_compacts"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: full-lane turn whose LLM already produced the final answer never claims a compaction ticket (engine.calls==0)"
-    },
-    {
-      "id": "Q01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_gate_holds_new_messages_out_of_live_l1_durable_pending"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "durable pending, frozen L1, no new turn while GENERATING"
-    },
-    {
-      "id": "Q02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_gate_holds_new_messages_out_of_live_l1_durable_pending",
-        "tests/test_compaction_gate.py::test_interjection_doors_blocked_while_gate_held"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "input stays queued and is admitted only before the next ordinary request"
-    },
-    {
-      "id": "Q03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_interjection_doors_blocked_while_gate_held"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "both admission doors check the ticket; the batch stays queued"
-    },
-    {
-      "id": "Q04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_claim_waits_for_inflight_interjection_commit"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "claim waits for the in-flight append+ack; capture observes the accepted message"
-    },
-    {
-      "id": "Q05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_queue_drains_fifo_after_manual_success"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "FIFO drain after release; the earliest event starts first"
-    },
-    {
-      "id": "Q06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_failed_compaction_keeps_history_and_queue"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "failure keeps the old context; queued input proceeds, exactly once"
-    },
-    {
-      "id": "Q07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_staging_dedup_is_by_event_id_not_content"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "dedup keys on the source event id, pending or receipted"
-    },
-    {
-      "id": "Q08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_staging_dedup_is_by_event_id_not_content",
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r03_receipt_suppresses_redelivery_after_removal"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "receipts are independent of the transcript text (API level)"
-    },
-    {
-      "id": "Q09",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_q09_mixed_queue_consumes_supported_prefix_only"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: mixed-type queue consumes only the supported contiguous prefix; the unsupported entry stays FIFO-queued"
-    },
-    {
-      "id": "Q10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_staging_full_refuses_without_ack_or_eviction"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "full queue refuses; oldest never evicted; no queued ack"
-    },
-    {
-      "id": "Q11",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_staging_write_failure_no_queue_no_ack"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "staging write failure means not accepted; nothing acknowledged"
-    },
-    {
-      "id": "Q12",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_artifact_lease.py::test_q12_staged_attachment_lease_survives_reap_across_compaction"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(f) c508dc2: staged attachment references keep their TTL refreshed across the gated compaction; staging carries references only"
-    },
-    {
-      "id": "Q13",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_compaction_release_never_clears_other_quiesce_owners"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "release removes only the ticket; the dream owner survives"
-    },
-    {
-      "id": "Q14",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_late_release_cannot_release_successor_ticket"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "identity-checked release; a late finally cannot release the successor"
-    },
-    {
-      "id": "Q15",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::BunshinScopeGateTests::test_bunshin_shaped_gate_is_scoped_and_lock_free"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "per-scope tickets on dedicated carriers; resident scope untouched"
-    },
-    {
-      "id": "W01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w01_frozen_prefix_plus_suffix_tools_system_intact"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "frozen anchor prefix + accepted suffix; tools byte-equal"
-    },
-    {
-      "id": "W02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w02_anchor_behind_two_rounds_suffix_carries_both"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "stale anchor is caught up by the suffix with the coverage proof"
-    },
-    {
-      "id": "W03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w03_active_cut_covered_exactly_once_in_auto_shape"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "active cut rides the suffix exactly once in the auto shape"
-    },
-    {
-      "id": "W04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w01_frozen_prefix_plus_suffix_tools_system_intact"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "the replay keeps the anchor's tools verbatim; current tool drift cannot touch the prefix"
-    },
-    {
-      "id": "W05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "frozen prefix byte-equal; compaction-call sampling envelope documented as the shipped v1 hot-path behavior"
-    },
-    {
-      "id": "W06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "handoff instruction rides exactly one trailing message"
-    },
-    {
-      "id": "W07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "hook marker appears exactly once (model_hooks_already_applied)"
-    },
-    {
-      "id": "W08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "purpose-tagged request; the result lands only via the compact install path"
-    },
-    {
-      "id": "W09",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w09_cross_endpoint_or_model_binding_refused"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "cross-binding anchors refuse warm"
-    },
-    {
-      "id": "W10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_hot_cache_compaction.py::test_expired_hot_compact_never_generates_a_cold_request",
-        "tests/test_hot_cache_compaction.py::test_claim_rechecks_lifetime_and_does_not_consume_invalid_notice"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_hot_cache_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "hot-gated expiry stops with zero generates and no cold fallback"
-    },
-    {
-      "id": "W11",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmUsageAccountingTests::test_w11_b10_cache_miss_recorded_as_reported_no_retry"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(b) 32ec58f: provider-reported cache miss recorded as-reported; one summary request; valid content installs normally"
-    },
-    {
-      "id": "W12",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w12_tool_call_response_is_never_dispatched"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "tool-call answer fails schema and is retried as text; nothing dispatches"
-    },
-    {
-      "id": "W13",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w13_provider_hosted_tool_refuses_warm"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "provider-hosted tools in the anchor envelope refuse warm"
-    },
-    {
-      "id": "W14",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w14_forced_tool_choice_refuses_warm"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "forced tool_choice cannot answer free JSON; warm refused"
-    },
-    {
-      "id": "W15",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w15_expired_instruction_drops_replay_to_scope_safe_cold"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "expired authored instruction drops the replay to a scope-safe cold run"
-    },
-    {
-      "id": "W16",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w16_unknown_wire_shape_refuses_warm"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "unknown dialect/wire shape refuses warm"
-    },
-    {
-      "id": "W17",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w01_frozen_prefix_plus_suffix_tools_system_intact"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "messages are carried as frozen IR objects; no parse/dump rewrite"
-    },
-    {
-      "id": "W18",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w18_image_in_anchor_prefix_refuses_warm"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "image representations in the frozen prefix refuse warm (refresh lifetime unprovable)"
-    },
-    {
-      "id": "W19",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_round_safe_rejects_open_streaming_round_and_in_progress"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "partial/unaccepted streams block compaction before capture"
-    },
-    {
-      "id": "W20",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmBuilderTests::test_w03_active_cut_covered_exactly_once_in_auto_shape"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "suffix preserves per-message boundaries; no flattening"
-    },
-    {
-      "id": "W21",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w21_replay_budget_drop_falls_back_same_stamp"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "budget drop falls back to cold on the same source stamp"
-    },
-    {
-      "id": "W22",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "retries share the identical frozen prefix within the shared budget"
-    },
-    {
-      "id": "W23",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmEngineTests::test_w05_w06_w07_w22_w23_tail_retry_and_invariance"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_warm_handoff.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "no eager cache-write markers added by the compactor"
-    },
-    {
-      "id": "S01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s01_capture_includes_seed_settled_and_active_once"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "seed once, settled and active content covered once each"
-    },
-    {
-      "id": "S02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s02_active_only_source_still_compacts"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "active-only sources compact; no no-op"
-    },
-    {
-      "id": "S03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s03_oversized_source_fails_without_dropping_units",
-        "tests/test_runtime_compaction.py::SharedCompactionEngineTests::test_preflight_over_budget_full_source_fails_without_spending_attempts"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "source_too_large without dropping units; history and epoch untouched"
-    },
-    {
-      "id": "S04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s04_middle_of_long_result_is_visible_to_source",
-        "tests/test_runtime_compaction.py::SharedCompactionEngineTests::test_oversized_source_with_droppable_failure_refuses_silent_drop"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "middle content is visible within budget; oversized refuses instead of truncating"
-    },
-    {
-      "id": "S05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s05_s06_snapshot_is_frozen_against_live_mutation"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "live mutation after capture cannot change the source"
-    },
-    {
-      "id": "S06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s05_s06_snapshot_is_frozen_against_live_mutation"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "metadata deepcopy keeps the snapshot immutable"
-    },
-    {
-      "id": "S07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s07_second_compact_seeds_once_and_advances_epoch"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "previous seed is one input; epoch and receipt identity advance"
-    },
-    {
-      "id": "S08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s08_expired_authored_context_is_excluded_from_source"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "expired authored context excluded; user corrections kept"
-    },
-    {
-      "id": "S09",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s09_multi_owner_active_source_is_rejected"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "multi-owner active sources are rejected explicitly"
-    },
-    {
-      "id": "S10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s10_interrupt_closed_round_keeps_alive_protocol_only"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "closed rounds keep text plus live protocol; pruned calls do not leak"
-    },
-    {
-      "id": "I01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i01_install_seed_successor_epoch_receipt"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "seed + empty successor, same logical id, revision/epoch bump, receipt"
-    },
-    {
-      "id": "I02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i02_idle_install_seed_only_no_ghost_turn"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "idle manual installs only a seed; the next real event starts normally"
-    },
-    {
-      "id": "I03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i03_stale_source_cas_rejects_install"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "stale stamp refuses; the newer live state survives"
-    },
-    {
-      "id": "I04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i04_generation_failure_installs_nothing"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "generation failure leaves history/epoch/receipt untouched"
-    },
-    {
-      "id": "I05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i05_same_op_id_replay_is_idempotent"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "op_id replay returns the recorded result without a second install"
-    },
-    {
-      "id": "I06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i06_same_op_id_different_source_is_refused"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "a different candidate under the same op_id is refused"
-    },
-    {
-      "id": "I07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i07_cleanup_failure_stays_committed_pending"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "cleanup failure keeps the install committed with receipt pending"
-    },
-    {
-      "id": "I08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_outbox.py (2 tests)"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(e) b715e2c: post-commit candidate outbox — stage failure never rolls the seed back; retries as review draft at next drain; never auto-writes L3; Bunshin lanes never gain candidate routes"
-    },
-    {
-      "id": "I09",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::E01ColdVerticalTests::test_e01_cold_resident_lane"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "budget/guard counters survive the handoff (continuation fields asserted)"
-    },
-    {
-      "id": "I10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i10_successor_segment_never_replays_opening_event"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "begin_l1_turn returns the empty successor; the opening event never replays"
-    },
-    {
-      "id": "I11",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_i11_final_reply_is_real_answer_not_handoff_json"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: post-compact final reply is the real answer — handoff JSON never the final, old transcript not re-emitted, routing intact"
-    },
-    {
-      "id": "I12",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i12_epoch_fence_rejects_late_candidate_after_reset"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "epoch fencing rejects late candidates after reset"
-    },
-    {
-      "id": "I13",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r02_committed_root_restores_without_recompaction"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "restore confirms the durable new root before work resumes (port level)"
-    },
-    {
-      "id": "I14",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_i14_seed_that_cannot_fit_is_never_committed"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(g) ae23218: next-request fit precheck before _commit — a seed that cannot fit is never committed; shorter regeneration inside the same ticket"
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "L01",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L01_open_group_stays_whole_in_right",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L01_open_group_stays_whole_in_right -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L02",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L02_settle_does_not_auto_promote",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L02_settle_does_not_auto_promote -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L03",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L03_compact_original_L_latest_R_not_moved",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L03_compact_original_L_latest_R_not_moved -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L04",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L04_promote_preserves_content_and_order",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L04_promote_preserves_content_and_order -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L05",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L05_result_arriving_during_compact_lands_in_R_once",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L05_result_arriving_during_compact_lands_in_R_once -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L06",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L06_result_and_commit_commute",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L06_result_and_commit_commute -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L07",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L07_cut_frozen_while_compact_live",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L07_cut_frozen_while_compact_live -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "L08",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::LPromoteTests::test_L08_minimal_left_refuses_recompaction",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L08_minimal_left_refuses_recompaction -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C01",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C01_snapshot_reads_left_only",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C01_snapshot_reads_left_only -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C02",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C02_install_replaces_only_left",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C02_install_replaces_only_left -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C03",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C03_failure_keeps_current_R_additions",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C03_failure_keeps_current_R_additions -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C04",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C04_validator_rejection_never_installs",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C04_validator_rejection_never_installs -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "owner-level terminal side; engine validator rejection pinned by inherited v2 schema tests"
+        }
+      ]
+    },
+    {
+      "id": "C05",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C05_construction_failure_does_not_half_publish",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C05_construction_failure_does_not_half_publish -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C06",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C06_duplicate_completion_installs_once",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C06_duplicate_completion_installs_once -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C07",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C07_conflicting_candidate_rejected",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C07_conflicting_candidate_rejected -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "C08",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::CCompactTests::test_C08_full_left_source_is_not_truncated",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C08_full_left_source_is_not_truncated -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X01",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::CancellationTests::test_x01_cancel_during_generate_releases_and_installs_nothing"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "cancel mid-generate releases the ticket and installs nothing"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X01_cancel_wins_then_late_summary_rejected",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X01_cancel_wins_then_late_summary_rejected -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X02",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::InstallTests::test_i03_stale_source_cas_rejects_install",
-        "tests/test_compaction_hosts_recovery.py::CancellationTests::test_x01_cancel_during_generate_releases_and_installs_nothing"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "cancel-before-commit lands in the same CAS rejection family; nothing installs"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X02_commit_wins_interrupt_keeps_new_left",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X02_commit_wins_interrupt_keeps_new_left -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X03",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_x03_cancel_after_committed_keeps_commit_and_teardown"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: cancel after COMMITTED keeps the commit and teardown; eligibility revoked for anything later"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X03_idle_manual_is_not_a_turn",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X03_idle_manual_is_not_a_turn -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X04",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_confirmed_reset_revokes_tickets"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "confirmed reset seizes the gate before resetting"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X04_old_run_events_cannot_touch_new_run",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X04_old_run_events_cannot_touch_new_run -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X05",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_interrupt_cancels_idle_manual_ticket"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "interrupt reaches an idle manual ticket without an active turn"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X05_reset_fences_old_incarnation_producers",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X05_reset_fences_old_incarnation_producers -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X06",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_x06_expired_ticket_swept_and_late_holder_isolated"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: expired non-terminal ticket swept on claim; late release/advance identity-isolated; commit guard rejects the stale holder"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X06_left_rebase_does_not_fence_producers",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X06_left_rebase_does_not_fence_producers -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X07",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_x07_refresh_revokes_live_ticket_before_switch"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: refresh_llm_endpoint cancels all live tickets before switching; warm candidate cannot install onto the new endpoint"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X07_interrupt_never_touches_left",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X07_interrupt_never_touches_left -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "X08",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_x08_status_delivery_failure_does_not_wedge_gate"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: exploding queue_status neither wedges the gate nor blocks compaction teardown"
+      "evidence": [
+        {
+          "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X08_deadline_failure_beats_late_network_success",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X08_deadline_failure_beats_late_network_success -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
-      "id": "X09",
+      "id": "P01",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::ShutdownTwoSidedRecoveryTests"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c: both shutdown sides restore their legal root; pending input survives both reboots; the old mutation replays idempotently without a second install"
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P01_incremental_equals_full_across_shapes_and_rebase",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P01_incremental_equals_full_across_shapes_and_rebase -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
-      "id": "X10",
+      "id": "P02",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_x10_same_source_failed_attempt_does_not_hot_loop"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(d) 26e7f06: same-source failed stamp suppresses the next auto claim before any ticket; fresh input re-admits; queue stays free"
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P02_preamble_once_and_never_frozen",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P02_preamble_once_and_never_frozen -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "P03",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P03_anthropic_user_seam_survives_rebase",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P03_anthropic_user_seam_survives_rebase -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "P04",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "explicit node not authored; native one-representation pinned by inherited projection suites, two-segment rebase covered by P05"
+        }
+      ]
+    },
+    {
+      "id": "P05",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P05_rebase_keeps_right_wire_and_native",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P05_rebase_keeps_right_wire_and_native -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "P06",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P06_endpoint_switch_differs_from_rebase",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P06_endpoint_switch_differs_from_rebase -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "P07",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P07_empty_tail_and_seed_only_view",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P07_empty_tail_and_seed_only_view -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "P08",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P08_handoff_leaves_normal_lineage_untouched",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P08_handoff_leaves_normal_lineage_untouched -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "W01",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_two_segment_executor_flow.py::TwoSegmentExecutorFlowTests::test_capture_left_and_engine_install_left_only",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_executor_flow.py::TwoSegmentExecutorFlowTests::test_capture_left_and_engine_install_left_only -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "single generation, no confirmation wait, no prewarm (structural)"
+        }
+      ]
+    },
+    {
+      "id": "W02",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "marker attribution is engine/cache-layer; session test asserts content-only left; NOT honestly claimable"
+        }
+      ]
+    },
+    {
+      "id": "W03",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "W04",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W04_shell_policy_carried_verbatim",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W04_shell_policy_carried_verbatim -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "W05",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W05_tools_schema_stays_in_envelope",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W05_tools_schema_stays_in_envelope -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "W06",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W_left_only_with_instruction",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W_left_only_with_instruction -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "cold-left full encode: no prewarm, no cached-prefix assumptions"
+        }
+      ]
+    },
+    {
+      "id": "W07",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "W08",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q01",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q02",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q03",
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_Q03_queued_input_never_enters_the_left_source",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_Q03_queued_input_never_enters_the_left_source -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "id": "Q04",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "two_segment BUSY routing at runtime level not wired"
+        }
+      ]
+    },
+    {
+      "id": "Q05",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q06",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q07",
+      "status": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "Q08",
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B01",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_runtime_compaction.py::SharedCompactionEngineTests::test_base_context_over_budget_fails_without_committing",
-        "tests/test_full_compaction_source.py::SourceCoverageTests::test_s03_oversized_source_fails_without_dropping_units"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "incompressible-base overflow is separated from active-history overflow by the empty-source probe"
+      "evidence": [
+        {
+          "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B01_local_history_may_exceed_any_window",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B01_local_history_may_exceed_any_window -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "B02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_runtime_compaction.py::SharedCompactionEngineTests::test_base_context_over_budget_fails_without_committing"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "base-context overflow fails without committing or looping"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B03",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_b03_boundary_equality_fits_one_token_over_rejects"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(c) 3e6484b: equality fits / one-token-over rejects at estimated-vs-target; prompt_region never discounts the estimate"
+      "evidence": [
+        {
+          "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B03_handoff_source_must_fit_the_visible_budget",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B03_handoff_source_must_fit_the_visible_budget -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": ""
+        }
+      ]
     },
     {
       "id": "B04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_b04_output_reservation_counts_against_total_window"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(c) 3e6484b: output reservation (thinking included) draws from the same window; no window -> no invented budget"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_b05_headroom_participates_in_the_fit_decision"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(g) ae23218: engine fit precheck consumes next_round_headroom_tokens; no-budget installs without claiming safety"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_hot_cache_compaction.py::test_hot_compact_stops_after_three_failures_without_changing_memory"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_hot_cache_compaction.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "shared per-ticket attempt budget across warm/cold/repair paths"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_matrix_gaps.py::test_b07_attempt_loop_bounded_and_expired_ticket_swept"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(a) c47d79c + P6(d): attempt loop capped at the retry budget; expired ticket swept on next claim (total bound frees the gate)"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
       "id": "B08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_diagnostics.py::test_schema_retry_logs_reason_and_recovery_without_source",
-        "tests/test_runtime_compaction.py::SharedCompactionEngineTests::test_output_truncation_preserves_source_and_requests_shorter_complete_output"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_runtime_compaction.py -q",
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_diagnostics.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "truncated/invalid JSON retries completely; no partial installs"
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
-      "id": "B09",
+      "id": "H01",
       "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_cancel_control.py::test_b09_success_clears_no_progress_and_cap_stays"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(d) 26e7f06: compaction_no_progress stamp ledger — success clears the entry; per-turn 3-attempt cap bounds loops"
+      "evidence": [
+        {
+          "node": "tests/test_h01_combination_matrix.py::H01CombinationMatrixTests::test_H01_matrix",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_h01_combination_matrix.py::H01CombinationMatrixTests::test_H01_matrix -q",
+          "exit": 0,
+          "product_sha": "0bb2b31fc1bb0a4e2c034f781e01d30f67de1ae3",
+          "note": "12 combinations (2 hosts x 3 shapes x 2 modes); warm column = honest cold fallback"
+        }
+      ]
     },
     {
-      "id": "B10",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_warm_handoff.py::WarmUsageAccountingTests::test_w11_b10_cache_miss_recorded_as_reported_no_retry"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(b) 32ec58f: CompactionRunResult.usage records provider-reported input/cached/cache-write/output+cost exactly; miss never retried to chase a hit"
+      "id": "H02",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "root snapshot persistence not implemented (see DELIVERY §4)"
+        }
+      ]
     },
     {
-      "id": "R01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r01_pending_and_old_root_survive_restore"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "real-file staging + old-root restore; no half summary"
+      "id": "H03",
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
-      "id": "R02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r02_committed_root_restores_without_recompaction"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "committed root restores; op replay does not recompact"
+      "id": "H04",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "old-schema explicit migration not implemented"
+        }
+      ]
     },
     {
-      "id": "R03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r03_receipt_suppresses_redelivery_after_removal"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "receipt-driven dedup after queue removal (API level; crash-window gap documented)"
+      "id": "H05",
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
-      "id": "R04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::RuntimeStateRoundTripTests::test_corrupt_epoch_fails_closed"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "present-but-invalid epoch/receipts fail closed"
+      "id": "H06",
+      "status": "NOT_RUN",
+      "evidence": [
+        {
+          "note": "staging gate UX: staging auto-wire off in two_segment, no files can exist"
+        }
+      ]
     },
     {
-      "id": "R05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::RuntimeStateRoundTripTests::test_legacy_payload_without_epoch_migrates_to_zero"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "genuinely old payloads migrate explicitly to epoch 0"
+      "id": "H07",
+      "status": "NOT_RUN",
+      "evidence": []
     },
     {
-      "id": "R06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::BunshinCheckpointRecoveryTests"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(h) 1cd46b2: encrypted checkpoint restores identity/counters/receipts across scoped compaction + restart; manager file has no plaintext; replay and stale fencing rejected"
-    },
-    {
-      "id": "R07",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_hosts_recovery.py::RealFileRecoveryTests::test_r02_committed_root_restores_without_recompaction"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_hosts_recovery.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "terminal tickets do not reopen; usage stays attributed to the old attempt"
-    },
-    {
-      "id": "R08",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_artifact_lease.py::test_r08_seed_referenced_artifact_survives_cleanup_and_restart"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(f) c508dc2: L1-referenced artifact survives cleanup tick and restart with exactly one record — never re-requested as a new resource"
-    },
-    {
-      "id": "E01",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_full_compaction_source.py::E01ColdVerticalTests::test_e01_cold_resident_lane"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_full_compaction_source.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "cold resident lane, E2E recipe steps 1-8 (restart/replay and provider-lane breadth below)"
-    },
-    {
-      "id": "E02",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_compaction_gate.py::test_claim_waits_for_transition_lock_and_is_atomic",
-        "tests/test_compaction_gate.py::test_manual_busy_when_earlier_input_already_queued",
-        "tests/test_compaction_gate.py::test_queue_drains_fifo_after_manual_success"
-      ],
-      "commands": [
-        "PYTHONPATH=$PWD/src python3 -m pytest tests/test_compaction_gate.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_phase_tests.log",
-      "notes": "both interleavings: input-first busy, manual-first queues then drains"
-    },
-    {
-      "id": "E03",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_fault_matrix.py (6 cases)"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(i) 67a68ff: real-engine fault matrix around the install boundary — single-root invariant, receipt consistency, L1 message conservation on every fault"
-    },
-    {
-      "id": "E04",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_transport_lanes.py::E04TransportLaneTests"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(j) 33571a0: Direct (owner thread) + ManagerProxy (real unix-socket server) lanes over one controlled provider; per-run request records and usage receipts isolated; no tool dispatch"
-    },
-    {
-      "id": "E05",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_p6_perf_ab.py (A/B/C)"
-      ],
-      "commands": [],
-      "exit_code": 0,
-      "log_path": null,
-      "notes": "P6(k) 14a3918: same-machine numbers, no promises — A 800-item capture 57.8ms; B 5000-item full compact 612.9ms total / RSS +7.2MB; C 500 durable admissions 8330ms fsync-dominated"
-    },
-    {
-      "id": "E06",
-      "status": "PASS",
-      "test_nodes": [
-        "tests/test_runtime_stability.py::RuntimeStabilitySoakTests::test_burst_same_scope_channel_turns_queue_and_drain_without_watchdog",
-        "tests/test_runtime_stability.py::RuntimeStabilitySoakTests::test_many_sequential_channel_turns_drain_without_watchdog",
-        "tests/test_architecture_skeleton.py::PalV2ArchitectureSkeletonTests::test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint"
-      ],
-      "commands": [
-        "/tmp/fullcomp_v2_runner.sh (per-file isolated pytest over tests/, log /tmp/fullcomp_v2_baseline.log)",
-        "PYTHONPATH=$PWD/src python -m pytest tests/test_runtime_stability.py tests/test_interjection_injection.py tests/test_compaction_gate.py tests/test_architecture_skeleton.py -q",
-        "PYTHONPATH=$PWD/src python -m pytest tests/test_full_compaction_source.py tests/test_warm_handoff.py tests/test_control_plane.py tests/test_cache_wire.py tests/test_memory_l1_ir_service.py -q"
-      ],
-      "exit_code": 0,
-      "log_path": "/tmp/fullcomp_v2_baseline.log",
-      "notes": "Combined-tree full regression DONE: 157 files, 2743 passed + 461 subtests, 3 failed, all attributable (2 real bugs fixed in 61c87db and rerun green — has_open_round self-rejection on the real auto path; first-preflight burst absorption — 1 known baseline env item test_package_installation; test_tool_schema_properties EXIT 5 known env). Post-fix reruns: 167 + 125 passed across all affected families. bootstrap 141 passed/~13min."
+      "id": "H08",
+      "status": "NOT_RUN",
+      "evidence": []
     }
   ]
 }

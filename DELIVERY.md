@@ -1,76 +1,56 @@
-# DELIVERY — refactor/full-context-compaction-v2（pal_compaction_handoff_v2 全量 compact 改造）
+# DELIVERY — pal-two-segment-v3 (refactor/two-segment-session-v3)
 
-日期：2026-09-20 ｜ 状态：**交付待审（未合 main、未部署、未推送）**
+状态：**v3 双段实现交付（dual-mode）**。基线 `7e6773f`（= origin/refactor/full-context-compaction-v2 tip，main 是其祖先；v2 的交付事实由该基线携带并仍可在 git 历史查阅，本文档按 MIGRATION.md 取代其作为本分支交付标准）。未 push、未合 main、未部署。
 
-## 1. 交付物
+## 1. Formal gate（G0）
 
-- 分支：`refactor/full-context-compaction-v2`（worktree `~/Documents/coding/Pal-full-compaction-v2`）
-- 基线：交接包基线 `0e33220` + 真实合并 main `4daab5f` = `614529e`（零冲突），本地未推送
-- 提交链（P0-P5 共 7 个 + P6 共 11 个）：
+- tla2tools.jar SHA `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`（官方 v1.7.4 release 与本地副本字节一致）
+- 真实 SANY / TLC safety / liveness / 大参数正例 + 6 mutant 反例：**10/10 PASS**（`~/Documents/coding/pal_two_segment_v3_20260920/logs/tlc_results.json`）
+- `implementation_gate.py` exit 0；TLC 2923 distinct states 与包内 Python 参考模型一致
 
-| 提交 | 阶段 | 内容 |
+## 2. 提交链（基线之上）
+
+| Commit | Gate | 内容 |
 |---|---|---|
-| `c42aad9` | P0 | 基线合并 + BASELINE.md（接线地图、已知失败、P0 五问） |
-| `fbb83f9` | P1 | CompactionTicket/Gate（身份校验 claim/cancel/release）、三查门、manual 准入原子化、round-safe 判定、插话注入、IngressStagingStore+receipts、interrupt/reset 到 ticket、release 后 drain（Q05/Q06） |
-| `cfa76c8` | P2 | 完整源 capture（include_active）+ 原子安装（epoch/receipt/后继段）、memory runtime state schema v2（fail-closed+迁移）、S/I/E01-cold 验收 |
-| `4cd4103` | P3 | warm handoff 覆盖 active cut、资格门、coverage proof（12 条 W 类测试） |
-| `7dadb6b` | P4 | Bunshin scoped gate（专用 carrier）、真实文件恢复（R01-R03）、取消语义（X01）、修两个接线真 bug（属性名下划线、waiting_effect_id 自我拒绝） |
-| `61c87db` | P5 | 修两个全链路真 bug：has_open_round 自我拒绝、首 preflight burst 吸收 |
-| `2e48153` | P5 | 组合回归结果 + E06 + DELIVERY |
-| `c47d79c` | P6(a) | commit-eligibility 边界（engine commit_guard/executor 闭包/gate 过期 sweep/refresh 先撤票）+ X03/X06×2/X07/X08/X09/Q09/B07/A12/I11 |
-| `32ec58f` | P6(b) | 结构化 usage 记账（B10/W11）+ round-safe reconcile_required 证据（A04） |
-| `3e6484b` | P6(c) | B03/B04 预算边界数学钉子 |
-| `26e7f06` | P6(d) | no-progress 抑制（X10/B09） |
-| `b715e2c` | P6(e) | post-commit 候选 outbox 重试（I08） |
-| `c508dc2` | P6(f) | attachment/artifact lease（Q12/R08） |
-| `ae23218` | P6(g) | next-request fit 预检 + headroom（I14/B05） |
-| `1cd46b2` | P6(h) | 加密 Bunshin checkpoint 恢复验收（R06） |
-| `67a68ff` | P6(i) | E03 故障注入矩阵（6 案） |
-| `33571a0` | P6(j) | E04 Direct/ManagerProxy 真实 transport 泳道 |
-| `14a3918` | P6(k) | E05 同机基线 A/B（数字，不承诺） |
+| `04da350` | G1 | `memory/history_root.py` 两段 authority：cut/promote/replace-left/终态仲裁/producer token；L/C/X 全族 owner 级 33 测试 |
+| `45e1623` | G2 | projection 两段化：`semantic_span`、`prepare_handoff`、`on_left_replaced`、`rebind`；三 shape codec oracle（P01-P08 + W 侧） |
+| `cb39341` | G3(a) | MemoryService facade：`history_root`（惰性自愈）/`left_transcripts`/`begin_left_compaction`/`compact_left` |
+| `939db45` | G3(b) | I18：builder 公开转发 compaction 四参数，删 runtime/bunshin build 后私有写 |
+| `7aa4030` | G3(c)-1 | executor `compaction_mode='two_segment'` 左段流：promote→begin→capture_left→engine→compact_left（cold-left） |
+| `eb25fdc` | G3(c)-2 | interrupt/reset 双模式路由（two_segment 走 root 仲裁）；root 自愈升级 |
+| `352d831` | G3(c)-3 | 准入分支：v2 ticket/ledger/outbox/lease 机器只留在 full_source；staging 自动接线按模式关断 |
+| `0695976` | G3(d) | H01 十二组合（2 宿主×3 shape×2 模式）真实 executor 链路 + retire 钩子共享修复（逮住 UnboundLocalError 真 bug） |
+| `0bb2b31` | G4 | owner 级 B01/B03/Q03 钉测 |
 
-- 设计文档：`BASELINE.md`、`P1_DESIGN.md`、`P2_DESIGN.md`（worktree 内）
-- 验收账本：`acceptance_status.json`（worktree 根 + 交接包目录双份同步，108/108 PASS）
+## 3. 设计要点
 
-## 2. 验收账本（108 项）
+- **单一物理历史**：L/R 是 L1TurnStore 上的逻辑 cut 视图，无镜像历史（A03）
+- **Compact 只替左**：capture_left 只读左段（I10），install 单段无 await 发布、R 逐字保留（I05/F04，活动 round 内容折入物理记录而非拒绝）
+- **身份分离**：left_revision 不 fence R producer，仅 session incarnation（reset）fence（I09/X05/X06）
+- **准入**：two_segment 模式下 owner 即仲裁者（单活 run / 终态互斥 / L08 最小种子防环）；full_source 模式保留 v2 gate 全套——**双模式并存，v2 行为零破坏**
+- **projection rebase**：chunk 绑 semantic span，替换左段按 span 保/删，R 原 wire/native 字节保留；anthropic 用户接缝退 pending tail 复用 F2 机制
 
-**108/108 全 PASS**（P5 交付时 83 PASS/25 NOT_RUN；P6 按用户指示「一起清理掉」把 25 项全部实现或钉测完毕，逐项带证据与提交号）。
+## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
-P6 新增实现面（不是只补测试）：
-- commit-eliginess 边界：engine `commit_guard` + executor `commit_eligible` 闭包 + gate 过期 sweep + refresh 先撤票（X03/X06/X07）
-- no-progress 抑制：`compaction_no_progress` 同源失败 stamp 台账（X10/B09）
-- post-commit 候选 outbox：stage 失败不回滚 seed，重试留 draft（I08；内存态，崩溃窗口仍由 receipt 抑制兼评审流兜底）
-- attachment lease：TTL 刷新即租约，staged/L1 引用跨 compact 存活（Q12/R08）
-- next-request fit 预检 + headroom（I14/B05）
-- 结构化 usage 记账：`CompactionRunResult.usage`（B10/W11）
-- round-safe 拒绝结构化 reconcile_required（A04）
+1. **warm anchor 未接入双段流**：handoff 走 cold-left 全量编码；H01 warm 列验证的是「资格不可用时诚实回退 cold」。warm 拆分（cached L 前缀 + 未缓存后缀直发）是后续项
+2. **compaction_coordinator 未物理拆除**：full_source 模式仍在用；文件级删除等 two_segment 转默认后进行。two_segment 路径零依赖它
+3. **ingress_staging / artifact_lease**：自动接线已按模式关断（two_segment 下永不构造）；模块文件保留至模式翻转，届时随 v2 专用测试一并移出
+4. **H 族运行时项**：H02（root 快照持久化）、H04（旧 schema 显式迁移）、H06（staging gate UX）、Q04（two_segment 的 BUSY 路由）、B04-B08（发送门矩阵）未实现——账本 NOT_RUN
+5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律）；证据见回归日志与账本
 
-## 3. 全量组合回归（E06，BASELINE.md §6）
+## 5. 验收证据
 
-- 157 文件：**2743 passed + 461 subtests passed，3 failed**
-- 3 失败全部可归因：2 真 bug（61c87db 修复，受影响面复跑 167+125 全绿）、1 基线环境项（setuptools）
-- `test_tool_schema_properties` EXIT 5（缺 hypothesis_jsonschema，基线已知）
-- bootstrap 141 passed / ~13min 正常完成
+- v3 新测试族（终 HEAD 复跑）：history_root 33 / projection_two_segment 14+12sub / memory facade 7 / executor flow 3 / builder 2 / H01 1+12sub / budget facts 3——全绿
+- 继承族逐 gate 抽查：runtime_compaction / full_compaction_source / hot_cache / memory / history / projection 全系 / bunshin harnesses / hosts_recovery——绿
+- 全量回归：终 HEAD 启动 nohup 全套（含 bootstrap，预计 30-40 分钟），日志 `/tmp/v3_full_regression.log`（含 REGRESSION_EXIT 终态行）；受影响族已逐 gate 复绿
+- acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）
 
-## 4. 全链路逼出的真 bug（4 个，两族）
+## 6. 全链路逼出的真 bug（本任务）
 
-**族一：准入谓词读「运行时自感标志」→ 真实路径永久自我拒绝**（单元/barrier 测试全绿，只有 process_channel_turn 全链路形态能逼出）：
-1. `waiting_effect_id`：TurnExecutor dispatch 本 effect 前已设 → 永远看到自己（P4 修，7dadb6b）
-2. `has_open_round`：L1 流式簿记在终端响应后仍开 → auto claim 永拒（P5 修，61c87db）
-   修法：round-safe 判定只看协议配对 + 消息状态闭合（顺序 effect 模型的结构性保证）
+1. `compact_memory_async` two_segment 分支引用定义在其后的 `after_compact`（UnboundLocalError）——此前无测试真正驱动该入口，H01 矩阵首跑即暴露；retire 钩子移到模式分支前共享（`0695976`）
+2. `right_turns()` intra==len 时把边界 turn 重复放回 R（G1 自审发现）
+3. anthropic rebase 后 prefix 尾部 user 接缝不合并 → 退 pending tail 复用 F2（G2）
 
-**族二：接线属性/时机错位**：
-3. PalCore/Bunshin post-build 设公共属性名，executor 读下划线私有名 → auto gate 和 preflight 注入整体关闭（P4 修，7dadb6b）
-4. P1 注入接在 turn 首个 preflight：同 scope burst 队列被整批吸入 turn 1（与 inject docstring "after a tool batch" 语义不符）→ 合成 prompt 触发 compact_required → stub 无法产 compact JSON → 单条 recovery 回复（P5 修，61c87db：注入 admission 加 `llm_round_index >= 1`，compact 后 `_after_compaction` drain 不变）
+## 7. 回退
 
-## 5. 记录在案的偏差
-
-1. P3：engine compaction-call 采样 envelope 不变（记入 4cd4103 commit message）
-2. P0 组合基线 DEFERRED（用户决定）→ P5 全量补跑取代（BASELINE §6 DONE）
-3. stub LLM 端点无法产出 compact 生成 JSON（`stub_llm_default` 三次 `schema:output is not valid JSON`）——真 stub 环境下 auto compact 必失败并走 recovery 路径；wiring 层语义已由 fake compactor 家族覆盖，stub JSON 支持留作测试基建后续项
-
-## 6. 待 Nathan 拍板
-
-1. 本分支是否推送（含 4245512 旧全量回归记录，projection 分支遗留）
-2. 旧 projection 分支大项：冻结边界重设计、resident/Bunshin 真实链路集成、benchmark 重测、P7 canary、write_busy 租约粒度提级
-3. E05 数字仅单机单次（Pi 5 上）：是否要在目标机重测一组再定性能结论；durable outbox（崩溃窗口完全封闭）是否排期
+分支独立，未动 main / v2 分支；worktree 删除即回退。runtime 默认 `llm_compaction_mode='full_source'`，v3 行为需显式配置开启。
