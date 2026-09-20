@@ -460,6 +460,22 @@ class MemoryService(MemoryServicePort):
         return self.l1_store.turns.context_view(active_turn_id, settled_turns)
 
     def project_continuity(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
+        # v3 N11 (review NEXT_STEPS §3.2): when the cut already owns the
+        # summary seed — the two-segment state after an install — project
+        # it as its OWN L-owned settled reference, never bound into a
+        # right-side user message.  Normal and handoff then share one L
+        # projection and the summary cannot be doubled.  full_source keeps
+        # the v2 anchor behavior (the cut never covers the seed there).
+        summary_turn_id = self.l1_store.turns.summary_turn_id
+        if summary_turn_id:
+            root = self.history_root
+            if any(
+                turn.turn_id == summary_turn_id
+                for turn in root.left_turns()
+            ):
+                continuity = self.l1_store.turns.continuity
+                if continuity is not None:
+                    return continuity.project_standalone(messages)
         return self.l1_store.turns.project_continuity(messages)
 
     def stream_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> None:

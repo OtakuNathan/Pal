@@ -68,3 +68,30 @@ class Continuity:
             semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
             metadata={"continuity_id": self.source_id, "continuity_part_index": 0}))
         return messages
+
+    def project_standalone(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
+        """L-owned placement (v3 N11, review NEXT_STEPS §3.2).
+
+        When the cut already owns the summary seed — the two-segment state
+        after an install — the seed rides as its OWN settled historical
+        reference and is never bound into a right-side user message.  The
+        model view of L is then the same message the handoff sends: one L
+        projection shared by normal and handoff, no summary text parked in
+        an R message identity, no second injection if a summary projection
+        is already present.
+        """
+
+        from pal.memory.continuity import is_summary_projection
+
+        messages = list(messages)
+        if any(message.message_id == self.standalone_id for message in messages):
+            return messages
+        if any(is_summary_projection(message) for message in messages):
+            return messages
+        index = next((i for i, m in enumerate(messages)
+                      if m.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER}), len(messages))
+        messages.insert(index, LLMMessageIR(
+            role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
+            semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            metadata={"continuity_id": self.source_id, "continuity_part_index": 0}))
+        return messages

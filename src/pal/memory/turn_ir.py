@@ -369,6 +369,11 @@ class L1TurnStore:
     def turns(self) -> tuple[L1TurnIR, ...]:
         return tuple(self.get(turn.turn_id) for turn in self._turns)
 
+    @property
+    def summary_turn_id(self) -> str:
+        """Turn owning the compact seed, if any (v3 N11 read)."""
+        return self._summary_turn_id
+
     def append(self, turn: L1TurnIR) -> None:
         if turn.turn_id in self._positions:
             raise L1TurnProtocolError(f"L1 turn already exists: {turn.turn_id}")
