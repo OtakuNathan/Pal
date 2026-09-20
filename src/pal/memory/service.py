@@ -330,8 +330,16 @@ class MemoryService(MemoryServicePort):
         from pal.memory.history_root import HistoryRoot
 
         root = self._history_root
-        if root is None or root.store is not self.l1_store.turns:
-            root = HistoryRoot(store=self.l1_store.turns)
+        turns = self.l1_store.turns
+        if (
+            root is None
+            or root.store is not turns
+            # External wholesale clears (soft reset) mutate the same store
+            # object: a cut pointing past the shrunken history is a stale
+            # root, heal onto a fresh one.
+            or root.cut.turn_count > len(turns.turns)
+        ):
+            root = HistoryRoot(store=turns)
             self._history_root = root
         return root
 

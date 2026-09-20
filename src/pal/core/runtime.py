@@ -540,6 +540,13 @@ class PalCore(MemoryMaintenanceMixin):
             compaction_scope=RESIDENT_COMPACTION_SCOPE,
             inject_pending=self._inject_pending_for_executor_async,
             after_compaction=self._after_compaction_async,
+            compaction_mode=str(
+                getattr(self.config, "llm_compaction_mode", "full_source")
+                or "full_source"
+            ),
+        )
+        self._two_segment_compaction = (
+            self.agent_turn_runtime.executor._compaction_mode == "two_segment"
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
@@ -1657,8 +1664,26 @@ class PalCore(MemoryMaintenanceMixin):
         route = action.route
         if route is None:
             return
+        active_turn_id = self.turn_manager.latest_active_turn_id()
         interrupted = await self.turn_manager.interrupt_active_turn(reason="interrupted")
         message = "Interrupted the current turn." if interrupted else "No active turn to interrupt."
+        # Two-segment admission: /interrupt arbitrates against the compact
+        # run on the history OWNER.  An idle manual run has no parent turn
+        # and is never fake-cancelled (X03); a run whose parent turn was
+        # interrupted loses commit eligibility before its summary returns
+        # (X01); an install that already won stays (X02).
+        if getattr(self, "_two_segment_compaction", False):
+            memory_service = self.context.get_port("memory:memory")
+            root = getattr(memory_service, "history_root", None)
+            run = getattr(root, "active_run", None) if root is not None else None
+            if run is not None:
+                verdict = root.interrupt_compaction_for_turn(
+                    str(active_turn_id or run.parent_turn_id or "")
+                )
+                if verdict == "cancelled" and not interrupted:
+                    message = "Cancelled the running context compaction."
+            await self._complete_action_reply_async(action, message)
+            return
         # Interrupt must also reach a compaction ticket that has no active
         # turn of its own (X05), and must revoke commit eligibility of a
         # ticket held by an interrupted turn (X01).
@@ -1742,6 +1767,19 @@ class PalCore(MemoryMaintenanceMixin):
             if self.state.resident_quiescing:
                 return False
             self.state.resident_quiescing = True
+            # Two-segment admission: a confirmed reset seizes the history
+            # root's live run first (X04/X05); the owner cancels it before
+            # any history is cleared, so a late summary cannot publish into
+            # the new session.
+            if getattr(self, "_two_segment_compaction", False):
+                try:
+                    memory_service = self.context.get_port("memory:memory")
+                    root = getattr(memory_service, "history_root", None)
+                    run = getattr(root, "active_run", None) if root is not None else None
+                    if run is not None:
+                        root.cancel(run.run_id, reason="reset")
+                except Exception:
+                    pass
             # A confirmed reset seizes the gate: any live compaction ticket
             # loses commit eligibility before reset proceeds (X04).
             self._compaction_gate().cancel_all(reason="reset")

@@ -42,6 +42,10 @@ class RuntimeConfig:
     # this is deliberately not the whole-round deadline.
     llm_request_timeout_seconds: float = 600.0
     llm_compaction_timeout_seconds: float = 180.0
+    # v3 two-segment admission: 'full_source' keeps the v2 whole-source
+    # path (gate admission); 'two_segment' routes compact runs through the
+    # history root owner (promote/begin/cancel arbitration).
+    llm_compaction_mode: str = "full_source"
     llm_stream_wall_timeout_seconds: float = 1_800.0
     llm_stream_cleanup_timeout_seconds: float = 2.0
     llm_wait_status_seconds: tuple[float, ...] = (120.0, 300.0, 600.0, 1_200.0)
@@ -100,6 +104,7 @@ class RuntimeConfig:
             "max_output_recovery_attempts": ("llm_max_output_recovery_attempts", int),
             "request_timeout_seconds": ("llm_request_timeout_seconds", float),
             "compaction_timeout_seconds": ("llm_compaction_timeout_seconds", float),
+            "compaction_mode": ("llm_compaction_mode", str),
             "stream_wall_timeout_seconds": ("llm_stream_wall_timeout_seconds", float),
             "stream_cleanup_timeout_seconds": ("llm_stream_cleanup_timeout_seconds", float),
         })
