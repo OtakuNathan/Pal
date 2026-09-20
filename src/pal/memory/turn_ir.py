@@ -234,12 +234,21 @@ class L1TurnIR:
             )
         )
 
-    def settle(self) -> "L1TurnIR":
+    def settle(self, *, keep_prefix: int = 0) -> "L1TurnIR":
+        """Close the turn, optionally freezing a cut-covered prefix verbatim.
+
+        ``keep_prefix`` head messages keep their exact IR objects — no
+        reasoning strip, no closure rewrite: once the root's cut covers them
+        they are immutable left-span content and must survive R-side
+        settlement byte-for-byte (F2).
+        """
         self._require_active()
         if self.pending_call_ids:
             raise L1TurnProtocolError("cannot settle L1 turn with unresolved tool calls")
+        frozen = max(0, min(int(keep_prefix), len(self.messages)))
         messages = _ensure_assistant_closure(
-            tuple(_close_message(message) for message in self.messages)
+            (*self.messages[:frozen],
+             *(_close_message(message) for message in self.messages[frozen:]))
         )
         return replace(
             self,
@@ -526,6 +535,28 @@ def source_stamp_for_turns(turns: Iterable["L1TurnIR"]) -> str:
             f"{len(turn.messages)}:{message_ids}"
         )
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
+    """Owner-issued digest over immutable left-span message content (F2).
+
+    Unlike :func:`source_stamp_for_turns` (whole-history identity including
+    per-turn state/revision), this basis is invariant to legal right-side
+    growth inside the boundary turn — revision bumps and R-side settlement
+    cannot invalidate a captured left — while any same-id content change
+    still rewrites the digest.
+    """
+    import hashlib
+
+    lines: list[str] = []
+    for turn in turns:
+        lines.append(turn.turn_id)
+        for message in turn.messages:
+            content = hashlib.sha256(
+                f"{message.role}|{message.parts!r}".encode("utf-8")
+            ).hexdigest()
+            lines.append(f"{message.message_id}:{content}")
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:

@@ -27,16 +27,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
-from pal.llm.ir import LLMMessageIR, MessageRole
+from pal.llm.ir import LLMMessageIR, MessageRole, MessageState
 from pal.memory.turn_ir import (
     L1TurnIR,
     L1TurnState,
     L1TurnStore,
     _protocol_ids,
-    source_stamp_for_turns,
+    left_span_stamp,
 )
 from pal.shared.tool_protocol import ToolResultIR
 
@@ -325,7 +326,7 @@ class HistoryRoot:
         return tuple(m for t in self.right_turns() for m in t.messages)
 
     def _left_stamp(self) -> str:
-        return source_stamp_for_turns(self.left_turns())
+        return left_span_stamp(self.left_turns())
 
     # ------------------------------------------------------------------
     # R production — owner-only writes (§3.2)
@@ -357,9 +358,20 @@ class HistoryRoot:
         self.store.replace(updated)
         return updated
 
+    def boundary_keep_prefix(self, turn_id: str) -> int:
+        """Intra-cut message count ``turn_id`` must freeze at settlement (F2)."""
+
+        if self._cut.intra_messages <= 0:
+            return 0
+        turns = self._ordered_turns()
+        index = self._cut.turn_count
+        if index < len(turns) and turns[index].turn_id == str(turn_id):
+            return self._cut.intra_messages
+        return 0
+
     def settle_right_turn(self, turn_id: str) -> L1TurnIR:
         turn = self.store.require_active(str(turn_id))
-        updated = turn.settle()
+        updated = turn.settle(keep_prefix=self.boundary_keep_prefix(turn_id))
         self.store.replace(updated)
         return updated
 
@@ -425,8 +437,13 @@ class HistoryRoot:
         """Length of the longest closed-group message prefix (I03)."""
 
         messages = turn.messages
+        limit = len(messages)
+        for index, message in enumerate(messages):
+            if message.state == MessageState.IN_PROGRESS:
+                limit = index
+                break
         best = 0
-        for size in range(len(messages), 0, -1):
+        for size in range(limit, 0, -1):
             calls, results = _protocol_ids(messages[:size])
             if calls == results:
                 best = size
@@ -544,6 +561,24 @@ class HistoryRoot:
         run.candidate = candidate
         run.candidate_id = str(candidate_id or "")
 
+    def _retire_run(self, run: CompactRun) -> None:
+        """Store a terminal record without pinning retired content (F5).
+
+        The archive keeps identity, cut/stamp, candidate id, and committed
+        revision — enough for replayed outcomes and duplicate-delivery
+        arbitration — and releases the captured left turns and the candidate
+        object so compacted history can actually be collected.
+        """
+
+        run.snapshot = LeftSnapshot(
+            run_id=run.snapshot.run_id,
+            cut=run.snapshot.cut,
+            turns=(),
+            stamp=run.snapshot.stamp,
+        )
+        run.candidate = None
+        self._runs[run.run_id] = run
+
     def cancel(self, run_id: str, *, reason: str = "") -> CompactOutcome:
         key = str(run_id or "")
         recorded = self._runs.get(key)
@@ -562,7 +597,7 @@ class HistoryRoot:
         run.phase = CompactPhase.CANCELLED
         run.winner = "cancelled"
         run.terminal_detail = str(reason or "cancelled")
-        self._runs[key] = run
+        self._retire_run(run)
         return CompactOutcome(
             run_id=key,
             status="cancelled",
@@ -585,7 +620,7 @@ class HistoryRoot:
         run.phase = CompactPhase.FAILED
         run.winner = "failed"
         run.terminal_detail = str(reason or "failed")
-        self._runs[key] = run
+        self._retire_run(run)
         return CompactOutcome(
             run_id=key,
             status="failed",
@@ -632,6 +667,15 @@ class HistoryRoot:
                 run_id=key,
                 phase=run.phase.value,
             )
+        if run.deadline_at is not None and time.monotonic() > float(run.deadline_at):
+            # F1/N03: an expired run loses commit eligibility; the terminal
+            # record is the sweep, and no second claimant is needed.
+            self.fail(key, reason="deadline")
+            raise HistoryRootError(
+                "compact run deadline expired before commit",
+                run_id=key,
+                phase="failed",
+            )
         # ---- local construction first; anything below may throw without
         # touching the root (I08 / C05).
         seed_turn = build_summary_turn(run.candidate)
@@ -657,7 +701,7 @@ class HistoryRoot:
         run.phase = CompactPhase.COMMITTED
         run.winner = "committed"
         run.committed_left_revision = self._cut.revision
-        self._runs[key] = run
+        self._retire_run(run)
         return CompactOutcome(
             run_id=key,
             status="committed",
@@ -736,6 +780,7 @@ class HistoryRoot:
         if run is not None:
             self.cancel(run.run_id, reason="reset")
         self.store.clear()
+        self._runs.clear()
         self._incarnation = f"inc-{uuid4().hex[:12]}"
         self._cut = CutPosition(turn_count=0, intra_messages=0, revision=0,
                                 cut_id=f"cut-{uuid4().hex[:12]}")

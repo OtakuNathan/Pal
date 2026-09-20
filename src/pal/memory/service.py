@@ -563,9 +563,12 @@ class MemoryService(MemoryServicePort):
         *,
         after_commit: Callable[[], None] | None = None,
     ) -> L1TurnIR:
+        # F2: settlement must not rewrite messages the root's cut already
+        # froze into L; consult the owner for the boundary freeze count.
+        keep_prefix = self.history_root.boundary_keep_prefix(turn_id)
         return self._close_l1_turn_transactionally(
             turn_id,
-            close=lambda current: current.settle(),
+            close=lambda current: current.settle(keep_prefix=keep_prefix),
             after_commit=after_commit,
         )
 

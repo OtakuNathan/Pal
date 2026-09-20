@@ -2358,6 +2358,14 @@ class TurnExecutor:
             if not run_id:
                 run_id = uuid4().hex
                 metadata["compaction_op_id"] = run_id
+            # One absolute deadline spans preflight, generation, repair, and
+            # the install gate (F1/N03): the run never resets its clock, and
+            # commit eligibility is checked on the owner, not trusted from
+            # engine internals.
+            deadline_at = (
+                _time.monotonic()
+                + engine.timeout_seconds * max(1, engine.max_attempts)
+            )
             try:
                 left_snapshot = memory_service.begin_left_compaction(
                     run_id,
@@ -2365,10 +2373,7 @@ class TurnExecutor:
                     parent_turn_id=(
                         str(continuation.turn_id) if continuation is not None else ""
                     ),
-                    deadline_at=(
-                        _time.monotonic()
-                        + engine.timeout_seconds * max(1, engine.max_attempts)
-                    ),
+                    deadline_at=deadline_at,
                 )
             except Exception as exc:
                 # NoBeneficialCompaction (minimal seed / empty left) and
@@ -2382,22 +2387,69 @@ class TurnExecutor:
                     clock_kind=engine.policy.clock_kind,
                     clock_value=clock_value,
                 )
-            snapshot = CompactionSnapshot.capture_left(
-                memory_service,
-                left_snapshot,
-                target_input_budget=target_input_budget,
-                reserved_output_tokens=reserved_output_tokens,
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-                metadata=metadata,
-            )
-            run_result = await engine.run(
-                snapshot,
-                llm_runtime=llm_runtime,
-                memory_service=memory_service,
-                after_commit=after_compact,
-            )
-            if run_result.success:
+
+            def close_run_terminal(*, cancel: bool, reason: str) -> None:
+                """End OUR run — never one the engine already committed (F1)."""
+
+                last = getattr(root, "last_run", None)
+                if (
+                    last is not None
+                    and last.run_id == run_id
+                    and last.terminal
+                ):
+                    return
+                if cancel:
+                    root.cancel(run_id, reason=reason)
+                else:
+                    root.fail(run_id, reason=reason)
+
+            try:
+                snapshot = CompactionSnapshot.capture_left(
+                    memory_service,
+                    left_snapshot,
+                    target_input_budget=target_input_budget,
+                    reserved_output_tokens=reserved_output_tokens,
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                    metadata=metadata,
+                )
+                run_result = await asyncio.wait_for(
+                    engine.run(
+                        snapshot,
+                        llm_runtime=llm_runtime,
+                        memory_service=memory_service,
+                        after_commit=after_compact,
+                    ),
+                    timeout=max(deadline_at - _time.monotonic(), 0.05),
+                )
+            except asyncio.CancelledError:
+                close_run_terminal(cancel=True, reason="orchestration_cancelled")
+                raise
+            except TimeoutError:
+                close_run_terminal(cancel=False, reason="deadline")
+                return CompactionRunResult(
+                    status="error",
+                    failures=("deadline: compaction run exceeded its absolute "
+                              "time budget",),
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                )
+            except Exception as exc:
+                close_run_terminal(cancel=False,
+                                   reason=f"orchestration_error:{type(exc).__name__}")
+                return CompactionRunResult(
+                    status="error",
+                    failures=(f"{type(exc).__name__}: {exc}",),
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                )
+            if not run_result.success:
+                # The engine returns instead of raising on generation
+                # failure; the owner run must still reach a terminal state
+                # or the next compact hits FrozenLeftDuringCompact forever.
+                close_run_terminal(cancel=False,
+                                   reason=f"engine:{run_result.status}")
+            else:
                 # The install already won: rebasing the hosted projection
                 # session is post-commit work (F13) — a failure here is
                 # recorded, never a rollback of the new left.

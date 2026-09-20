@@ -1,0 +1,53 @@
+N1 pre-fix red run — review package regressions ported to tests/test_v3_n1_root_lifecycle.py
+==============================================================================
+
+Command (worktree @ 2014db4, before any N1 fix):
+  PYTHONPATH=$PWD/src:$PWD python -m pytest tests/test_v3_n1_root_lifecycle.py -q
+
+Result: 9 failed, 1 passed (3.76s)
+
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_expired_run_cannot_commit_without_an_explicit_sweep
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_intra_turn_right_result_does_not_invalidate_left_snapshot
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_left_content_mutation_without_revision_bump_is_rejected
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_settlement_of_boundary_turn_does_not_rewrite_cut_covered_left
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_streaming_text_without_calls_is_not_a_closed_group
+FAILED tests/test_v3_n1_root_lifecycle.py::RootContractTests::test_terminal_bookkeeping_does_not_pin_retired_left_turn
+FAILED tests/test_v3_n1_root_lifecycle.py::ExecutorFailureTests::test_cancelled_orchestration_closes_its_own_uncommitted_run
+FAILED tests/test_v3_n1_root_lifecycle.py::ExecutorFailureTests::test_deadline_expiry_fails_run_and_next_attempt_is_eligible
+FAILED tests/test_v3_n1_root_lifecycle.py::ExecutorFailureTests::test_schema_failure_terminates_run_and_allows_later_attempt
+
+(passed pre-fix: test_reset_releases_old_run_archive — it pinned the F5 reset
+change, not the current behavior; the assertion set was tightened post-fix to
+require the cleared archive.)
+
+Failure modes captured (summary of pytest output):
+- schema failure: result.success False but memory.history_root.active_run was
+  still a RUNNING CompactRun (F1) — engine failure never reached root.fail.
+- intra-turn: LeftChangedSinceCapture / commit rejected after R-side
+  append_right_tool_result bumped the shared turn revision inside the stamp
+  (F2), while left_messages() were byte-identical.
+- settlement: settle_right_turn rewrote cut-covered prefix messages via
+  _close_message (F2 companion defect).
+- content mutation: same-id rewrite with revision+1 passed the id/revision
+  stamp and committed (F2 negative control).
+- streaming: IN_PROGRESS assistant with empty protocol ids was admitted to L
+  by _closed_prefix_length (F6).
+- weakref: terminal _runs entry kept snapshot.turns; old left turn never
+  collected (F5).
+- deadline: commit installed although deadline_at had passed (F1 gate).
+
+Post-fix: 10 passed (same command). Regression around the fixes:
+  tests/test_l1_turn_ir.py tests/test_memory_l1_ir_service.py
+  tests/test_history_root_authority.py tests/test_memory_two_segment_service.py
+  tests/test_two_segment_executor_flow.py tests/test_two_segment_budget_facts.py
+  tests/test_full_compaction_source.py tests/test_runtime_compaction.py
+  tests/test_compaction_cancel_control.py tests/test_projection_two_segment.py
+  tests/test_projection_live_integration.py tests/test_h01_combination_matrix.py
+    -> 153 passed, 24 subtests passed
+  tests/test_compaction_artifact_lease.py tests/test_compaction_diagnostics.py
+  tests/test_compaction_gate.py tests/test_compaction_hosts_recovery.py
+  tests/test_compaction_outbox.py tests/test_hot_cache_compaction.py
+    -> 55 passed
+  tests/test_compact_continuity.py tests/test_interrupt_backpressure.py
+  tests/test_l1_context_index.py
+    -> 28 passed
