@@ -1,0 +1,52 @@
+N2 pre-fix red run — F3/F4/W2 draft regressions on the pre-N2 tree (7cf1d2d)
+==============================================================================
+
+Command (src changes stashed; worktree code == 7cf1d2d, tests/test_v3_n2_projection_fixes.py present):
+  PYTHONPATH=$PWD/src:$PWD python -m pytest tests/test_v3_n2_projection_fixes.py -q
+
+Result: 7 failed, 2 passed, 1 subtest passed (3.25s)
+
+Failed (post fixture-drift fix — the first run had 2 import errors from the
+test file itself, which are NOT product evidence):
+- HandoffBaseTests::test_handoff_keeps_nonempty_base_for_all_shapes
+  (all 3 shapes): OpenAI shapes lost the in-container system preamble
+  (shell_fields excluded the container key); F3.
+- HandoffBaseTests::test_handoff_carries_full_wire_contract:
+  PreparedRequest had no message_spans/extra_body/breakpoint fields; W2.
+- RebaseKeeperTests::test_left_replacement_replays_kept_native_not_just_kept_ir:
+  on_left_replaced rebuilt the prefix from an IR re-encode — native-only
+  material (reasoning_content) vanished from the next prepared payload; F4.
+- RebaseKeeperTests::test_executor_rebase_keeps_already_populated_right_native:
+  executor passed kept_frozen_messages=() — every old chunk died; F4.
+- RebaseKeeperTests::test_rebase_head_system_re_owns_to_surviving_rounds:
+  committed head-system parts had no span attribution — retired left
+  rounds kept hoisted content alive; F4.
+- (subtest-level) handoff oracle inequality per shape.
+
+Passed pre-fix (2): positive controls that don't exercise the defects.
+
+Fixes:
+- F3: prepare_handoff is ONE full encode of base(preamble)+L+instruction;
+  payload byte-equals a whole-history encode for all three shapes.
+- W2: PreparedRequest carries message_spans / extra_body /
+  applied_cache_breakpoint_message_ids from the same codec encode
+  (populated for single-encode prepares; assembled normal prepares get
+  them at the N3 invoker seam).
+- F4: on_left_replaced replays surviving chunks' ORIGINAL wire items
+  (thawed mutable copies) plus the session-owned pending tail; only the
+  seed pays a fresh encode; head-system parts are span-attributed
+  (_HeadSystemEntry) and re-owned to surviving rounds; left_revision is
+  validated monotonic and recorded; executor passes the session's real
+  frozen right side (session.frozen_message_ids ∩ root.right_messages)
+  and builds cursor_after.history_epoch from root.left_revision.
+- checkpoint: chunks persist semantic_span (pre-F4 snapshots restore as
+  legacy spanless); committed_head_system persists span-attributed
+  entries with legacy flat-list restore.
+- Regression caught by P03 during development: the pending wire tail is
+  right-side territory and survives the rebase wholesale (an empty-items
+  chunk's content lives there).
+
+Post-fix: 5 passed + 5 subtests (same file). Projection family + two
+segment + N1/N1.1 suites: 172 passed + 91 subtests. Broad surface
+(75 files incl. all new suites): 1242 passed + 290 subtests, zero
+failures (5:54).

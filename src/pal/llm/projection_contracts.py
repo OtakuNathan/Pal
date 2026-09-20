@@ -830,12 +830,22 @@ class PreparedRequest:
     Transport accepts only PreparedRequest instances: no DraftRound or
     hand-assembled mutable payloads (PLAN §4.1).  The payload is canonical
     JSON; the digest is checked at construction so mutation is detectable.
+
+    W2 (review NEXT_STEPS §3.1): the derived wire contract travels WITH the
+    payload — message spans, extra body params, and applied cache
+    breakpoints from the same codec encode — so the send seam can consume
+    the full EncodedRequest contract without re-encoding.  Assembled normal
+    prepares fill these when their seams land (N3 invoker wiring); a
+    single-encode prepare (handoff) is always complete.
     """
 
     attempt: AttemptKey
     base_cursor: HistoryCursor
     payload_json: str
     payload_digest: str
+    message_spans: tuple = ()
+    extra_body: Mapping[str, Any] = field(default_factory=dict)
+    applied_cache_breakpoint_message_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt, AttemptKey):
@@ -864,6 +874,10 @@ class PreparedRequest:
         attempt: AttemptKey,
         base_cursor: HistoryCursor,
         payload: Mapping[str, Any],
+        *,
+        message_spans: tuple = (),
+        extra_body: Mapping[str, Any] | None = None,
+        applied_cache_breakpoint_message_ids: tuple[str, ...] = (),
     ) -> "PreparedRequest":
         # Build is the single controlled entry: protocol legality (no pending
         # tool calls) is checked here, not left to caller discipline.
@@ -876,4 +890,9 @@ class PreparedRequest:
             base_cursor=base_cursor,
             payload_json=payload_json,
             payload_digest=hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            message_spans=tuple(message_spans),
+            extra_body=dict(extra_body or {}),
+            applied_cache_breakpoint_message_ids=tuple(
+                applied_cache_breakpoint_message_ids
+            ),
         )

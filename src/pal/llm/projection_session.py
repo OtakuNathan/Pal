@@ -51,7 +51,7 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
-from pal.shared.json_values import freeze_json_mapping
+from pal.shared.json_values import freeze_json_mapping, thaw_json
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
 __all__ = [
@@ -126,6 +126,19 @@ class LeftReplacement:
     left_revision: int = 0
 
 
+@dataclass(frozen=True)
+class _HeadSystemEntry:
+    """Session-owned head system parts attributed to their round span (F4).
+
+    Re-ownership after a left replacement is decided per entry from the
+    surviving spans — retired left rounds cannot keep hoisted content
+    alive in later requests.
+    """
+
+    span_ids: tuple[str, ...]
+    parts: tuple[Mapping[str, Any], ...]
+
+
 @dataclass
 class _ActiveRound:
     attempt: AttemptKey
@@ -175,7 +188,10 @@ class EndpointProjectionSession:
         # chunks cannot carry it; the session re-merges these parts into
         # every request after the fresh shell preamble, keeping the
         # incremental lineage equal to whole-history encoding.
-        self._committed_head_system: list[dict] = []
+        self._committed_head_system: list[_HeadSystemEntry] = []
+        # Monotonic history-authority revision seen by this lineage (F4):
+        # each left replacement must advance it, mirroring the root's cut.
+        self._left_revision = 0
         self._owner_fence = 0
         self.retired = False
 
@@ -227,6 +243,7 @@ class EndpointProjectionSession:
         self._prefix_items = []
         self._pending_wire_tail = []
         self._committed_head_system = []
+        self._left_revision = 0
         self._active = None
 
     def retire(self) -> None:
@@ -483,7 +500,7 @@ class EndpointProjectionSession:
             prefix_digest=receipt.append.after.prefix_digest,
             semantic_span=span_ids,
         )
-        head_system_transfer = [dict(part) for part in self._active.prepared_head_system]
+        head_system_parts = [dict(part) for part in self._active.prepared_head_system]
         # -- single install boundary: no session-visible failure past here --
         self._pending_wire_tail = [dict(item) for item in unfrozen_suffix]
         self.chunks = (*self.chunks, chunk)
@@ -492,9 +509,18 @@ class EndpointProjectionSession:
         self._prefix_items.extend(items)
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
         # Request-head content hoisted to top-level system this round becomes
-        # session-owned exactly like the wire tail (review G2 persistence):
-        # the frozen chunk cannot carry it, but later requests must keep it.
-        self._committed_head_system.extend(head_system_transfer)
+        # session-owned exactly like the wire tail (review G2 persistence),
+        # attributed to the round's span so a left replacement can re-own
+        # it (review F4).
+        if head_system_parts:
+            self._committed_head_system.append(
+                _HeadSystemEntry(
+                    span_ids=tuple(span_ids),
+                    parts=tuple(
+                        freeze_json_mapping(part) for part in head_system_parts
+                    ),
+                )
+            )
         self.frontier = receipt.append.after
         self._frontier_item_count = frozen_item_count
         if not receipt.native_committed:
@@ -558,9 +584,15 @@ class EndpointProjectionSession:
         Independent-purpose view (PLAN §6.2): this encode never touches the
         normal round, the native store, the pending tail, or the accepted
         cursor — a failed or retried handoff leaves no trace in the normal
-        lineage (P08).  The whole left side is encoded in one codec call so
-        position-sensitive projections see a coherent conversation; the
-        instruction rides as the trailing user message.
+        lineage (P08).
+
+        F3 (review): the base preamble — shell-owned system/developer
+        heads, in-container for the OpenAI shapes, hoisted to the top level
+        by the Anthropic codec — is part of ONE full encode of
+        ``base + L + instruction``.  The payload is therefore byte-equal to
+        a whole-history encode for every shape; no in-container preamble
+        and no body-hoisted system is dropped on the floor.  The instruction
+        rides as the trailing user message.
         """
 
         self._require_identity()
@@ -574,42 +606,57 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("handoff instruction must be a user message")
         codec = codec_for_shape(self.binding.wire_shape)
         context = self._shape_context()
-        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         shell = request_shell or LLMRequestIR(
             messages=(),
             tools=(),
             policy=GenerationPolicyIR(max_output_tokens=4096),
         )
-        encoded_shell = codec.encode(shell, context)
-        shell_payload = dict(encoded_shell.payload)
-        shell_fields = {
-            key: value for key, value in shell_payload.items() if key != container
-        }
-        body = (*left_messages, instruction)
-        encoded_body = codec.encode(replace(shell, messages=body), context)
-        body_items = [
-            dict(item) for item in (dict(encoded_body.payload).get(container) or [])
-        ]
-        payload: dict[str, Any] = {**shell_fields, container: body_items}
+        preamble = tuple(
+            message
+            for message in shell.messages
+            if message.role.value in self._PREAMBLE_ROLES
+        )
+        body = (*preamble, *left_messages, instruction)
+        encoded = codec.encode(replace(shell, messages=body), context)
+        payload: dict[str, Any] = dict(encoded.payload)
         if controls:
             payload["controls"] = dict(controls)
-        return PreparedRequest.build(attempt=attempt, base_cursor=self.frontier, payload=payload)
+        return PreparedRequest.build(
+            attempt=attempt,
+            base_cursor=self.frontier,
+            payload=payload,
+            message_spans=encoded.message_spans,
+            extra_body=encoded.extra_body,
+            applied_cache_breakpoint_message_ids=(
+                encoded.applied_cache_breakpoint_message_ids
+            ),
+        )
 
     def on_left_replaced(self, change: LeftReplacement) -> None:
         """Rebase the lineage after a committed compact install (§6.3).
 
-        Old-L chunks and their native material die; right-side chunks, wire
-        items, and native originals survive untouched in the same binding.
-        The frozen prefix is rebuilt as ONE fresh encode of seed + surviving
-        frozen messages (the generation-change cost, not a per-round path).
-        A chunk whose span straddles the replacement boundary is an illegal
-        cut and fails loudly instead of corrupting the prefix.
+        Old-L chunks and their native material die; right-side chunks keep
+        their ORIGINAL frozen wire items — the native-fidelity bytes carved
+        at commit time — so the rebuilt prefix replays exactly what the
+        provider saw (review F4), never an IR re-encode that silently drops
+        native-only material.  Only the new seed pays a fresh encode (the
+        generation-change cost, not a per-round path).  A chunk whose span
+        straddles the replacement boundary is an illegal cut and fails
+        loudly instead of corrupting the prefix.  Head-system parts
+        re-own to their surviving rounds, and the history-authority
+        revision must advance monotonically.
         """
 
         self._require_identity()
         if self._active is not None:
             raise ProjectionSessionError(
                 "on_left_replaced cannot run inside an open normal round"
+            )
+        if int(change.left_revision) < self._left_revision:
+            raise ProjectionSessionError(
+                "left replacement does not advance the history authority "
+                f"revision (have {self._left_revision}, "
+                f"got {int(change.left_revision)})"
             )
         kept_ids = tuple(m.message_id for m in change.kept_frozen_messages)
         if len(set(kept_ids)) != len(kept_ids):
@@ -638,19 +685,38 @@ class EndpointProjectionSession:
         codec = codec_for_shape(self.binding.wire_shape)
         context = self._shape_context()
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
-        rebuilt_source = (*change.seed_messages, *change.kept_frozen_messages)
-        if rebuilt_source:
+        rebuilt_items: list[dict] = []
+        if change.seed_messages:
             encoded = codec.encode(
                 LLMRequestIR(
-                    messages=rebuilt_source,
+                    messages=tuple(change.seed_messages),
                     tools=(),
                     policy=GenerationPolicyIR(max_output_tokens=4096),
                 ),
                 context,
             )
-            rebuilt_items = [dict(i) for i in (dict(encoded.payload).get(container) or [])]
-        else:
-            rebuilt_items = []
+            rebuilt_items = [
+                dict(thaw_json(item))
+                for item in (dict(encoded.payload).get(container) or [])
+            ]
+        # F4: surviving right chunks replay their ORIGINAL wire items —
+        # byte-true native material included — instead of an IR re-encode.
+        # thaw_json: the private prefix owns MUTABLE copies; the chunk's
+        # public snapshot is deep-frozen and must not leak proxies into
+        # later encodes.
+        rebuilt_items.extend(
+            dict(thaw_json(item))
+            for chunk in surviving_chunks
+            for item in chunk.items
+        )
+        # The session-owned pending tail is right-side territory by
+        # definition (items trimmed from commits that are not yet frozen):
+        # it survives the left replacement wholesale and stays ahead of the
+        # incoming tail (review F4 — keep the unfrozen right representation
+        # too, not just chunk-frozen bytes).
+        rebuilt_items.extend(
+            dict(thaw_json(item)) for item in self._pending_wire_tail
+        )
         # Anthropic merges adjacent user-role wire messages, so a rebuilt
         # prefix ending in role "user" is not a stable freeze point (the
         # same rule commit-time trimming applies).  Hand the trailing user
@@ -674,8 +740,31 @@ class EndpointProjectionSession:
         self.chunks = tuple(surviving_chunks)
         self._prefix_items = rebuilt_items
         self._pending_wire_tail = unfrozen_tail
+        # F4: head-system parts re-own to their surviving rounds; entries
+        # attributed to retired left rounds die with them.
+        self._committed_head_system = [
+            entry for entry in self._committed_head_system
+            if set(entry.span_ids) <= kept_set
+        ]
         self.frontier = change.cursor_after
         self._frontier_item_count = len(rebuilt_items)
+        self._left_revision = int(change.left_revision)
+
+    def frozen_message_ids(self) -> tuple[str, ...]:
+        """Semantic message ids already frozen into committed chunks (read).
+
+        The history owner's rebase caller uses this to pass exactly the
+        frozen right-side messages as ``kept_frozen_messages`` — unfrozen
+        right messages stay in the open tail and must not claim survival.
+        """
+
+        return tuple(
+            dict.fromkeys(
+                message_id
+                for chunk in self.chunks
+                for message_id in chunk.semantic_span
+            )
+        )
 
     # -- preparation ---------------------------------------------------------
 
@@ -864,7 +953,8 @@ class EndpointProjectionSession:
             ]
         self._active.prepared_head_system = tail_system_parts
         merged_system: list[dict] = [
-            *(dict(part) for part in self._committed_head_system),
+            *(dict(thaw_json(part)) for entry in self._committed_head_system
+              for part in entry.parts),
             *tail_system_parts,
         ]
         if merged_system:

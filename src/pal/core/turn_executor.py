@@ -2601,19 +2601,36 @@ class TurnExecutor:
             from pal.llm.projection_session import LeftReplacement
 
             seed_messages = root.left_messages()
+            # F4 (review): the keeper is the session's ACTUAL frozen right
+            # side — unfrozen right messages stay in the open tail and must
+            # not claim chunk survival; a session with no committed chunks
+            # keeps nothing.  The cursor epoch comes from the history
+            # authority's own left revision, never a hardcoded constant.
+            frozen_reader = getattr(session, "frozen_message_ids", None)
+            frozen_ids = (
+                set(frozen_reader()) if callable(frozen_reader) else set()
+            )
+            kept = tuple(
+                message
+                for message in root.right_messages()
+                if message.message_id in frozen_ids
+            )
+            left_revision = int(getattr(root, "left_revision", 0) or 0)
             digest = _hashlib.sha256(
-                "".join(m.message_id for m in seed_messages).encode("utf-8")
+                "".join(
+                    m.message_id for m in (*seed_messages, *kept)
+                ).encode("utf-8")
             ).hexdigest()
             rebase(
                 LeftReplacement(
                     seed_messages=seed_messages,
-                    kept_frozen_messages=(),
+                    kept_frozen_messages=kept,
                     cursor_after=HistoryCursor(
-                        history_epoch=1,
+                        history_epoch=left_revision,
                         block_sequence=1,
                         prefix_digest=digest or "0" * 64,
                     ),
-                    left_revision=root.left_revision,
+                    left_revision=left_revision,
                 )
             )
         except Exception as exc:

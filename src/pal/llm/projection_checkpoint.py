@@ -92,7 +92,13 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         # without ever producing a receipt, so it must be persisted itself.
         "owner_fence": session._owner_fence,
         "pending_wire_tail": thaw_json(list(session._pending_wire_tail)),
-        "committed_head_system": thaw_json(list(session._committed_head_system)),
+        "committed_head_system": [
+            {
+                "span_ids": list(entry.span_ids),
+                "parts": thaw_json(list(entry.parts)),
+            }
+            for entry in session._committed_head_system
+        ],
         "chunks": [
             {
                 "attempt_id": chunk.round_attempt_id,
@@ -100,6 +106,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "cursor_after": _cursor_fields(chunk.cursor_after),
                 "items": thaw_json(list(chunk.items)),
                 "prefix_digest": chunk.prefix_digest,
+                "semantic_span": list(chunk.semantic_span),
             }
             for chunk in session.chunks
         ],
@@ -380,6 +387,11 @@ def restore_projection(
         # letting post-restore mutations rewrite the private prefix while
         # frontier/digest stay unchanged.
         items = tuple(json.loads(json.dumps(list(items_raw))))
+        span_raw = raw.get("semantic_span") or ()
+        if not isinstance(span_raw, (list, tuple)) or not all(
+            isinstance(mid, str) for mid in span_raw
+        ):
+            raise ProjectionCheckpointError("chunk semantic_span is invalid")
         chunks.append(
             ProjectionChunk(
                 round_attempt_id=str(raw.get("attempt_id") or ""),
@@ -387,6 +399,10 @@ def restore_projection(
                 cursor_after=cursor_after,
                 items=tuple(freeze_json_mapping(item) for item in items),
                 prefix_digest=str(raw.get("prefix_digest") or ""),
+                # Pre-F4 snapshots lack the span: () restores the legacy
+                # spanless semantics (the chunk can no longer survive a left
+                # replacement, same as an in-memory legacy chunk).
+                semantic_span=tuple(str(mid) for mid in span_raw),
             )
         )
         # The restored private prefix holds the deep-copied owned dicts (the
@@ -402,11 +418,54 @@ def restore_projection(
     # reconstruction (the prototype never persisted hoisted head parts).
     if head_system_raw is None:
         head_system_raw = ()
-    if not isinstance(head_system_raw, (list, tuple)) or not all(
-        isinstance(part, Mapping) for part in head_system_raw
-    ):
+    if not isinstance(head_system_raw, (list, tuple)):
         raise ProjectionCheckpointError("committed_head_system section is invalid")
-    committed_head_system = json.loads(json.dumps(list(head_system_raw)))
+    from pal.llm.projection_session import _HeadSystemEntry
+
+    committed_head_system: list[_HeadSystemEntry] = []
+    for entry_raw in head_system_raw:
+        if not isinstance(entry_raw, Mapping):
+            raise ProjectionCheckpointError(
+                "committed_head_system section is invalid"
+            )
+        if "parts" in entry_raw and "span_ids" in entry_raw:
+            # F4+ snapshot: span-attributed entry.
+            span_ids_raw = entry_raw["span_ids"] or ()
+            parts_raw = entry_raw["parts"] or ()
+            if not isinstance(span_ids_raw, (list, tuple)) or not all(
+                isinstance(mid, str) for mid in span_ids_raw
+            ):
+                raise ProjectionCheckpointError(
+                    "committed_head_system span_ids are invalid"
+                )
+            if not isinstance(parts_raw, (list, tuple)) or not all(
+                isinstance(part, Mapping) for part in parts_raw
+            ):
+                raise ProjectionCheckpointError(
+                    "committed_head_system parts are invalid"
+                )
+            committed_head_system.append(
+                _HeadSystemEntry(
+                    span_ids=tuple(str(mid) for mid in span_ids_raw),
+                    parts=tuple(
+                        freeze_json_mapping(part)
+                        for part in json.loads(json.dumps(list(parts_raw)))
+                    ),
+                )
+            )
+        else:
+            # Pre-F4 snapshot: flat part dicts with no span attribution.
+            # An empty span survives every later rebase — the legacy
+            # behavior this snapshot was written under.
+            committed_head_system.append(
+                _HeadSystemEntry(
+                    span_ids=(),
+                    parts=(
+                        freeze_json_mapping(part)
+                        for part in [json.loads(json.dumps(dict(entry_raw)))]
+                    ),
+                )
+            )
     if chunks:
         if expected_before != frontier:
             raise ProjectionCheckpointError(
