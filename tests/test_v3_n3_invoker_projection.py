@@ -145,6 +145,29 @@ def _context_for(model: LLMEndpointModel):
         capabilities=dict(model.capabilities_blob or {}),
     )
 
+class EndpointMatchTests(unittest.TestCase):
+    def test_runtime_drops_projection_for_other_endpoint(self):
+        from tests.test_prompt_cache_v2_runtime import endpoint as astra_endpoint
+        from tests.test_prompt_cache_v2_runtime import runtime as build_runtime
+        import tempfile
+
+        projection, session = prepared_projection()
+        # A runtime whose resolved endpoint differs from the projection's
+        # binding must drop it (cold codec path), never send a prefix that
+        # was prepared against another endpoint (W3/N13).
+        other = astra_endpoint()
+        transport = CapturingTransport([{
+            "choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }])
+        rt = build_runtime(other, transport, tempfile.mkdtemp())
+        self.assertIsNone(
+            rt._projection_for_endpoint(other, projection, session.binding))
+        self.assertIs(
+            rt._projection_for_endpoint(endpoint(), projection, session.binding),
+            projection)
+
 
 if __name__ == '__main__':
     unittest.main()

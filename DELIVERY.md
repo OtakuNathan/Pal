@@ -28,6 +28,8 @@
 | `a8530e7` | N2 | review F3/F4/W2：handoff 改 base+L+instruction 单次全量编码（三 shape oracle 对齐，不再丢 in-container preamble）；rebase 重放幸存 chunk 原始 wire（native 保真）+ pending tail 全保留 + head-system 按 span 归属 + left_revision 单调校验；executor 传真实冻结 R（frozen_message_ids）+ epoch 来自 root；PreparedRequest 携带完整 wire 契约（spans/extra_body/breakpoints）；checkpoint 补 semantic_span；红→5+5sub 绿，75 文件 1242+290 零失败 |
 | `702f1bc` | N2/N11 | cut 拥有的 seed 走 project_standalone 独立 L reference（永不绑进 R 用户消息），normal/handoff 共享同一 L 投影，已有 summary 投影不双注；full_source anchor 行为不变；1红→3绿，13 文件 186+17sub 零失败 |
 | `7d75ddb` | N3 切片 1 | invoker encode 点接受 owner 备好的不可变 projection（类型化参数，非 metadata 夹带）；无 projection 时 codec 路径字节不变；2 新测试 + 受影响 97 文件 1443+347sub 零失败；剩余 N3：runtime owner 侧准备（W3）、accept→observe_commit 闭环（W5）、完整纵向 trace |
+| `5642542` | N3 主体 | **ordinary 轮真正走投影**：executor owner 侧 prepare（durable-id 过滤，瞬态内容冷回退永不冻结）→ 类型化不可变 (EncodedRequest+Binding) 下沉 → runtime W3 端点匹配（不符即冷）→ invoker 发送 → 真实 decode/accept → observe_commit 冻结（ERROR 轮 reject 不冻结）；`test_v3_n3_vertical_trace.py` 两轮 trace：冻结块 span 覆盖 q+a、第二轮 payload 每条内容恰好一次；98 文件 1445+347sub 零失败 |
+| `695efbc` | N4 切片 | W1/N20：请求边界 promote 闭合旧组（长活 turn 不再永久 no_benefit）；cut 规则修正：闭合前缀不得以悬空 user 结尾（L01 旧断言与其名义矛盾，已对齐 PLAN §3.3）；J7 过期守卫：root.left_generation（仅 install 跳）vs session.history_left_revision，rebase 未消费即冷回退不重播已退休历史 |
 
 ## 3. 设计要点
 
@@ -63,3 +65,36 @@
 ## 7. 回退
 
 分支独立，未动 main / v2 分支；worktree 删除即回退。runtime 默认 `llm_compaction_mode='full_source'`，v3 行为需显式配置开启。
+
+## 8. 28 项收口矩阵实况（2026-09-21，对照 pal_v3_review_2014db4/TEST_MATRIX）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| N01 失败后可再试 | PASS | test_v3_n1_root_lifecycle（schema failure） |
+| N02 取消只收自己的 run | PASS | 同上（cancel barrier） |
+| N03 超期不安装 | PASS | 同上 + N1.1 构造期过期/等号边界 |
+| N04 同 turn R 增长不死 L | PASS | 同上（intra-turn） |
+| N05 真改 L 拒绝 | PASS | 同上（正文/元数据两负例） |
+| N06 IN_PROGRESS 不入 L | PASS | 同上 |
+| N07 旧 L 可回收 | PASS | 同上（weakref） |
+| N08 handoff 保留 base | PASS | test_v3_n2_projection_fixes（三 shape oracle） |
+| N09 native 原件重放 | PASS | 同上（kept native） |
+| N10 executor 真实 keeper | PASS | 同上（populated R + epoch） |
+| N11 共享 L reference | PASS | test_v3_n2_continuity_lview |
+| N12 实际 profile 编码 | PASS(component) | projection_session B1 能力套件 |
+| N13 端点不符冷回退 | PASS | test_v3_n3_invoker_projection（mismatch drop） |
+| N14 fallback/spec refresh 切换 | NOT_RUN | 需双端点 fallback fixture |
+| N15 spans/extra_body 保留 | PASS | n2 handoff wire-contract 对拍 |
+| N16 不预填未来 A | PASS | vertical trace（冻结在 accept 后） |
+| N17 工具结果 commit 故障不冻结 | NOT_RUN | 待接 tool-delivery 接受路径 |
+| N18 stream partial/length 不冻结 | PARTIAL | ERROR 轮 reject 已测；stream 细分 NOT_RUN |
+| N19 handoff 输出只进 validator | PASS(component) | engine 套件（I14 既有） |
+| N20 长活 turn 能压 | PASS | test_v3_n3_vertical_trace（promote→compact 全链） |
+| N21 发送预算门 | PASS(component) | G4 B01/B03/Q03；B04-B08 NOT_RUN |
+| N22 无预热/miss 不重发 | PASS(component) | hot_cache 套件；warm 拆分 NOT_RUN |
+| N23 interrupt vs commit 竞争 | PASS | N1 cancel + compact_cancel_control |
+| N24 rebase 失败禁旧投影 | PASS | stale-left 守卫测试 |
+| N25 worker/owner 单写者 | PASS(design) | owner 侧 prepare + 类型化下沉；barrier 专项测试未写 |
+| N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
+| N27 宿主×shape×warm 真实 E2E | PARTIAL | H01 组件矩阵；真 provider E2E NOT_RUN |
+| N28 最终矩阵+全量 | 本表+全量日志 | logs_full_regression_n4head.txt（见下） |
