@@ -316,6 +316,93 @@ class MemoryService(MemoryServicePort):
     def __post_init__(self) -> None:
         if self.l3_selector is None:
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
+        self._history_root: Any = None
+
+    @property
+    def history_root(self) -> Any:
+        """Two-segment authority over the live L1 turns (v3 PLAN §3.1).
+
+        Attached lazily and healed when the underlying L1TurnStore object is
+        swapped (e.g. legacy transcript setters): the store remains the only
+        physical history; the root only owns the cut and run arbitration.
+        """
+
+        from pal.memory.history_root import HistoryRoot
+
+        root = self._history_root
+        if root is None or root.store is not self.l1_store.turns:
+            root = HistoryRoot(store=self.l1_store.turns)
+            self._history_root = root
+        return root
+
+    def left_transcripts(self) -> list[list[L1TranscriptMessage]]:
+        """Transcript view of the compressible left segment only (v3 I10)."""
+
+        return [_transcript_from_turn(turn) for turn in self.history_root.left_turns()]
+
+    def begin_left_compaction(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        parent_turn_id: str = "",
+        deadline_at: float | None = None,
+    ) -> Any:
+        """Open a v3 compact run over the current left segment."""
+
+        return self.history_root.begin_compact(
+            run_id, reason=reason, parent_turn_id=parent_turn_id,
+            deadline_at=deadline_at,
+        )
+
+    def compact_left(
+        self,
+        run_id: str,
+        summary_entry: L2Entry,
+        *,
+        candidate_id: str = "",
+        after_commit: Callable[[], None] | None = None,
+    ) -> Any:
+        """Install a validated summary as the new left segment (v3).
+
+        Unlike the whole-source path, only L is replaced: R turns, their
+        messages, identities, and metadata survive untouched (I05).  All
+        throwing validation happens before READY; the publish itself is the
+        root's single non-awaiting section.  An ``after_commit`` failure is
+        recorded and never rolls the installed left back (F13).
+        """
+
+        from pal.memory.history_root import CompactPhase
+
+        if not isinstance(summary_entry, L2Entry):
+            raise ValueError(
+                "left compaction requires a validated and rendered summary_entry"
+            )
+        if not str(summary_entry.summary or "").strip():
+            raise ValueError("left compaction summary_entry is empty")
+        if not str(summary_entry.rendered or "").strip():
+            raise ValueError("left compaction summary_entry is not rendered")
+        root = self.history_root
+        run = root.run_record(run_id)
+        same_ready = (
+            run is not None
+            and run.candidate_id == str(candidate_id or "")
+            and run.phase in (CompactPhase.READY, CompactPhase.COMMITTED)
+        )
+        if not same_ready:
+            # Raises StaleRun / TerminalClosed / CandidateConflict with the
+            # offending identities for any illegal delivery.
+            root.mark_ready(run_id, summary_entry, candidate_id=candidate_id)
+        outcome = root.commit(run_id)
+        if after_commit is not None:
+            try:
+                after_commit()
+            except Exception:
+                # F13/I07: a committed generation change is never rolled back
+                # because dependent cleanup failed; the outcome already
+                # records the terminal state.
+                self.failed_retirements.append(summary_entry)
+        return outcome
 
     def clear_generation_projection(self) -> None:
         """Drop this runtime's L2 after reconnecting, preserving its L1."""
