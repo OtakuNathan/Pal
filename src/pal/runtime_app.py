@@ -154,8 +154,15 @@ class PalRuntimeApp:
         receipt ledger survives with them so post-compaction dedup does not
         depend on the original transcript text (Q08). Envelope decode
         failures are recorded and skipped, never silently replayed.
+
+        v3 two-segment admission does not stage: the mode keeps queued
+        input in memory and answers BUSY during compaction, so the store
+        is never constructed and every downstream getattr path no-ops
+        (MIGRATION: remove the auto-wire from this task's runtime).
         """
         core = self.handle.core
+        if getattr(core, "_two_segment_compaction", False):
+            return
         if getattr(core.state, "ingress_staging", None) is not None:
             return
         store = IngressStagingStore(self._runtime_root() / "ingress_staging.json")

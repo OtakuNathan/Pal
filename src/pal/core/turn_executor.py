@@ -356,83 +356,96 @@ class TurnExecutor:
                 ),
             )
         memory_service = self.context.require_port("memory:memory")
-        gate = self._compaction_gate
-        gate_lock = (
-            getattr(gate, "lock", None) if gate is not None else None
-        ) or getattr(self.state, "channel_turn_transition_lock", None)
-        no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
-        self._drain_compaction_candidate_outbox(memory_service)
-        # Q12 lease: artifacts referenced by durably staged pending events
-        # keep their hot TTL refreshed while this compaction holds the
-        # gate across ordinary reap ticks, so the drained message still
-        # finds its content. References only — bytes never enter staging.
-        try:
-            from pal.core.artifact_lease import (
-                artifact_ids_from_staged_records,
-                touch_artifacts,
-            )
-
-            staged = getattr(self.state, "ingress_staging", None)
-            if staged is not None:
-                pending_ids = artifact_ids_from_staged_records(
-                    staged.pending_records()
-                )
-                if pending_ids:
-                    touch_artifacts(
-                        self.context,
-                        pending_ids,
-                        str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
-                    )
-        except Exception:
-            pass
-        source_stamp = ""
-        if no_progress_stamps is not None:
-            stamp_reader = getattr(memory_service, "l1_source_stamp", None)
-            if callable(stamp_reader):
-                source_stamp = str(stamp_reader() or "")
-            if (
-                source_stamp
-                and no_progress_stamps.get(self._compaction_scope) == source_stamp
-            ):
-                # X10/B09 no-progress suppression: this exact source already
-                # burned a failed auto attempt; compacting it unchanged can
-                # only hot-loop. The claim is refused BEFORE any ticket is
-                # taken, so queued input and control events stay free to
-                # run; the per-turn 3-attempt cap is untouched.
-                return EffectResult(
-                    status=RuntimeStatus.ERROR,
-                    text=(
-                        "Memory compaction made no progress on the current "
-                        "source; waiting for new input before retrying."
-                    ),
-                )
         ticket = None
-        if gate is not None:
-            async with gate_lock:
-                ticket = gate.claim(
-                    self._compaction_scope,
-                    trigger=CompactionTrigger.AUTO,
+        source_stamp = ""
+        commit_eligible = None
+        gate = None
+        gate_lock = None
+        no_progress_stamps = None
+        if self._compaction_mode != "two_segment":
+            # v2 admission: scope ticket, no-progress ledger, candidate
+            # outbox, artifact lease — the whole pre-v3 machinery stays on
+            # the full-source path exactly as reviewed.
+            gate = self._compaction_gate
+            gate_lock = (
+                getattr(gate, "lock", None) if gate is not None else None
+            ) or getattr(self.state, "channel_turn_transition_lock", None)
+            no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
+            self._drain_compaction_candidate_outbox(memory_service)
+            # Q12 lease: artifacts referenced by durably staged pending events
+            # keep their hot TTL refreshed while this compaction holds the
+            # gate across ordinary reap ticks, so the drained message still
+            # finds its content. References only — bytes never enter staging.
+            try:
+                from pal.core.artifact_lease import (
+                    artifact_ids_from_staged_records,
+                    touch_artifacts,
                 )
-                if ticket is not None:
-                    ticket = gate.advance(ticket, CompactionPhase.GENERATING)
-            if ticket is None:
-                return EffectResult(
-                    status=RuntimeStatus.ERROR,
-                    text="Memory compaction is already in progress for this scope.",
+
+                staged = getattr(self.state, "ingress_staging", None)
+                if staged is not None:
+                    pending_ids = artifact_ids_from_staged_records(
+                        staged.pending_records()
+                    )
+                    if pending_ids:
+                        touch_artifacts(
+                            self.context,
+                            pending_ids,
+                            str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
+                        )
+            except Exception:
+                pass
+            if no_progress_stamps is not None:
+                stamp_reader = getattr(memory_service, "l1_source_stamp", None)
+                if callable(stamp_reader):
+                    source_stamp = str(stamp_reader() or "")
+                if (
+                    source_stamp
+                    and no_progress_stamps.get(self._compaction_scope) == source_stamp
+                ):
+                    # X10/B09 no-progress suppression: this exact source already
+                    # burned a failed auto attempt; compacting it unchanged can
+                    # only hot-loop. The claim is refused BEFORE any ticket is
+                    # taken, so queued input and control events stay free to
+                    # run; the per-turn 3-attempt cap is untouched.
+                    return EffectResult(
+                        status=RuntimeStatus.ERROR,
+                        text=(
+                            "Memory compaction made no progress on the current "
+                            "source; waiting for new input before retrying."
+                        ),
+                    )
+            if gate is not None:
+                async with gate_lock:
+                    ticket = gate.claim(
+                        self._compaction_scope,
+                        trigger=CompactionTrigger.AUTO,
+                    )
+                    if ticket is not None:
+                        ticket = gate.advance(ticket, CompactionPhase.GENERATING)
+                if ticket is None:
+                    return EffectResult(
+                        status=RuntimeStatus.ERROR,
+                        text="Memory compaction is already in progress for this scope.",
+                    )
+
+            def commit_eligible() -> bool:
+                # Commit eligibility (X03/X06/X07): install only while this
+                # exact ticket is still the scope's current, uncancelled
+                # holder. A cancel (refresh/reset/interrupt), a deadline sweep,
+                # or a successor claim all revoke it; memory stays unchanged.
+                if ticket is None or gate is None:
+                    return True
+                current = gate.ticket_for(self._compaction_scope)
+                return (
+                    current is not None
+                    and current.op_id == ticket.op_id
+                    and not bool(current.cancelled)
                 )
-        def commit_eligible() -> bool:
-            # Commit eligibility (X03/X06/X07): install only while this
-            # exact ticket is still the scope's current, uncancelled
-            # holder. A cancel (refresh/reset/interrupt), a deadline sweep,
-            # or a successor claim all revoke it; memory stays unchanged.
-            if ticket is None or gate is None:
-                return True
-            current = gate.ticket_for(self._compaction_scope)
-            return (
-                current is not None
-                and current.op_id == ticket.op_id
-                and not bool(current.cancelled)
-            )
+        # two_segment admission: the history owner IS the arbiter — one live
+        # run per session (CompactLaneBusy), owner-side terminal arbitration,
+        # and the minimal-seed guard already refuses re-compacting an
+        # unchanged left segment (L08).  No tickets, no ledger, no staging.
 
         run_result = None
         try:
