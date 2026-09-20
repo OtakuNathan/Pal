@@ -2275,6 +2275,60 @@ class TurnExecutor:
             )
         except Exception:
             clock_value = 0
+        execution_runtime = getattr(self.context, "execution_runtime", None)
+
+        def current_l1_result_ids() -> tuple[str, ...]:
+            turns = getattr(
+                getattr(getattr(memory_service, "l1_store", None), "turns", None),
+                "turns",
+                (),
+            )
+            ids: list[str] = []
+            for turn in list(turns or ()):
+                for message in turn.messages:
+                    for part in message.parts:
+                        if isinstance(part, ToolResultIR):
+                            ids.append(part.call_id)
+                # Successor segments keep logical references for results the
+                # compaction carried forward: they are not removable (F25).
+                for ref in dict(turn.metadata or {}).get(
+                    "compact_retained_result_refs", ()
+                ) or ():
+                    ids.append(str(ref))
+            return tuple(dict.fromkeys(ids))
+
+        result_ids_before_compact = current_l1_result_ids()
+
+        after_compact = None
+        retire_tool_results = getattr(
+            execution_runtime,
+            "retire_tool_results",
+            None,
+        )
+        if callable(retire_tool_results) and result_ids_before_compact:
+            def retire_compacted_l1_results() -> None:
+                remaining_ids = set(current_l1_result_ids())
+                removed = tuple(
+                    result_id
+                    for result_id in result_ids_before_compact
+                    if result_id not in remaining_ids
+                )
+                if removed:
+                    retirement_turn_id = (
+                        str(continuation.turn_id)
+                        if continuation is not None
+                        else None
+                    )
+                    retire_tool_results(
+                        turn_id=retirement_turn_id,
+                        result_ids=removed,
+                        execution_lifetime_id=(
+                            "" if retirement_turn_id else logical_scope_id
+                        ),
+                    )
+
+            after_compact = retire_compacted_l1_results
+
         run_id = str(metadata.get("compaction_op_id") or "").strip()
         if self._compaction_mode == "two_segment":
             # v3: compact the LEFT segment only.  Closed history is promoted
@@ -2366,59 +2420,6 @@ class TurnExecutor:
             include_active=True,
             source_epoch=max(0, int(getattr(memory_service, "context_epoch", 0) or 0)),
         )
-        execution_runtime = getattr(self.context, "execution_runtime", None)
-        def current_l1_result_ids() -> tuple[str, ...]:
-            turns = getattr(
-                getattr(getattr(memory_service, "l1_store", None), "turns", None),
-                "turns",
-                (),
-            )
-            ids: list[str] = []
-            for turn in list(turns or ()):
-                for message in turn.messages:
-                    for part in message.parts:
-                        if isinstance(part, ToolResultIR):
-                            ids.append(part.call_id)
-                # Successor segments keep logical references for results the
-                # compaction carried forward: they are not removable (F25).
-                for ref in dict(turn.metadata or {}).get(
-                    "compact_retained_result_refs", ()
-                ) or ():
-                    ids.append(str(ref))
-            return tuple(dict.fromkeys(ids))
-
-        result_ids_before_compact = current_l1_result_ids()
-
-        after_compact = None
-        retire_tool_results = getattr(
-            execution_runtime,
-            "retire_tool_results",
-            None,
-        )
-        if callable(retire_tool_results) and result_ids_before_compact:
-            def retire_compacted_l1_results() -> None:
-                remaining_ids = set(current_l1_result_ids())
-                removed = tuple(
-                    result_id
-                    for result_id in result_ids_before_compact
-                    if result_id not in remaining_ids
-                )
-                if removed:
-                    retirement_turn_id = (
-                        str(continuation.turn_id)
-                        if continuation is not None
-                        else None
-                    )
-                    retire_tool_results(
-                        turn_id=retirement_turn_id,
-                        result_ids=removed,
-                        execution_lifetime_id=(
-                            "" if retirement_turn_id else logical_scope_id
-                        ),
-                    )
-
-            after_compact = retire_compacted_l1_results
-
         def replay_guard() -> bool:
             reader = getattr(llm_runtime, "prompt_cache_warm_deadline_snapshot", None)
             if not callable(reader):
