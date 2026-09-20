@@ -51,9 +51,10 @@
 ## 5. 验收证据
 
 - v3 新测试族（终 HEAD 复跑）：history_root 33 / projection_two_segment 14+12sub / memory facade 7 / executor flow 3 / builder 2 / H01 1+12sub / budget facts 3——全绿
+- N1→N4 新增套件：n1_root_lifecycle 12 / n11_followup 12 / n2_projection_fixes 5+5sub / n2_continuity 3 / n3_invoker 3 / n3_vertical 4（含 promote→compact 全链与 stale-left）——全绿
 - 继承族逐 gate 抽查：runtime_compaction / full_compaction_source / hot_cache / memory / history / projection 全系 / bunshin harnesses / hosts_recovery——绿
-- 全量回归（HEAD `3575e48`，26:15）：**3050 passed + 486 subtests + 7 skipped，22 failed**。归因：19 个可提取失败节点（bootstrap/telegram keyboard、browser LRU、bunshin sandbox/v2public/verification、control_plane 键盘渲染）**单独复跑全部 PASS（0 复现）**，涉事文件批跑亦无失败复现——判为长时间全量运行下的资源争用/时序 flake（与 v3 改动面零交集：不触及任何失败断言所在路径）；另 3 个失败未产出可提取节点行。不宣称全量全绿；需干净环境重跑全套作最终归因
-- acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）
+- 全量回归（HEAD `695efbc`，26:17）：**3124 passed + 491 subtests + 7 skipped，22 failed**。与前两次全量（3575e48、29a879f）同族同数：19 个可提取失败节点**单跑 19/19 PASS 零复现**（logs_n4_flake_rerun.txt，bunshin v2public/verification、control_plane 键盘渲染等），归因长跑资源争用/时序，与 v3 改动面零交集；另 3 个无节点行。不宣称全量全绿，干净环境重跑仍为最终归因步
+- acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）；28 项收口矩阵实况见 §8
 
 ## 6. 全链路逼出的真 bug（本任务）
 
@@ -97,4 +98,4 @@
 | N25 worker/owner 单写者 | PASS(design) | owner 侧 prepare + 类型化下沉；barrier 专项测试未写 |
 | N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
 | N27 宿主×shape×warm 真实 E2E | PARTIAL | H01 组件矩阵；真 provider E2E NOT_RUN |
-| N28 最终矩阵+全量 | 本表+全量日志 | logs_full_regression_n4head.txt（见下） |
+| N28 最终矩阵+全量 | 本表+全量日志 | 695efbc 全量 3124+491+7sk/22f，19 节点单跑 19/19 零复现（logs_n4_flake_rerun.txt） |
