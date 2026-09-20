@@ -25,6 +25,9 @@
 | `e58d1cd` | N1 | review 包 F1/F2/F5/F6 修复：root 终态收口（失败/取消/超时/deadline 门）、左 stamp 改不可变内容基 + settlement 不改写 cut 覆盖消息、终态记录瘦身 + reset 清档案、IN_PROGRESS 不入闭合组；`tests/test_v3_n1_root_lifecycle.py` 9红→10绿，红证据 `logs_n1_prefix_red.txt` |
 | `5a7258a` | N1收紧 | 对照 origin 包 PLAN §5.2 自审：stamp 覆盖全部消息身份字段（parts/semantic_kind/prompt_region/replay/metadata）并绑定 owner-issued cut 版本；补 metadata 篡改负例，N1 套件 11/11；73 文件 1225+285 subtests 零失败 |
 | `7d6eb0d` | N1.1 | review 包 pal_v3_n1_review_29a879f 四项：R1 promote 封口（冻结前完成 neutral reasoning 退休，settle/interrupt 不再冲突）、R2 单一终态出口（提交后打包故障按 owner 终态归类，success+memory_result+rebase；reset 后迟到收尾幂等 close_run）、R3 发布前最终门（READY/身份/deadline 重验，>= 统一）、R4 stamp 补 message.state；12 新测试 7红→12绿，74 文件 1237+285 零失败 |
+| `a8530e7` | N2 | review F3/F4/W2：handoff 改 base+L+instruction 单次全量编码（三 shape oracle 对齐，不再丢 in-container preamble）；rebase 重放幸存 chunk 原始 wire（native 保真）+ pending tail 全保留 + head-system 按 span 归属 + left_revision 单调校验；executor 传真实冻结 R（frozen_message_ids）+ epoch 来自 root；PreparedRequest 携带完整 wire 契约（spans/extra_body/breakpoints）；checkpoint 补 semantic_span；红→5+5sub 绿，75 文件 1242+290 零失败 |
+| `702f1bc` | N2/N11 | cut 拥有的 seed 走 project_standalone 独立 L reference（永不绑进 R 用户消息），normal/handoff 共享同一 L 投影，已有 summary 投影不双注；full_source anchor 行为不变；1红→3绿，13 文件 186+17sub 零失败 |
+| `7d75ddb` | N3 切片 1 | invoker encode 点接受 owner 备好的不可变 projection（类型化参数，非 metadata 夹带）；无 projection 时 codec 路径字节不变；2 新测试 + 受影响 97 文件 1443+347sub 零失败；剩余 N3：runtime owner 侧准备（W3）、accept→observe_commit 闭环（W5）、完整纵向 trace |
 
 ## 3. 设计要点
 
