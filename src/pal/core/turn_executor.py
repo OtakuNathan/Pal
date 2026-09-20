@@ -623,16 +623,31 @@ class TurnExecutor:
             metadata=dict(prompt.metadata),
         )
         self._debug_log_prompt(continuation, request)
+        # N3 (review §4): the projection is prepared owner-side for THIS
+        # round — typed immutable input, never a session in metadata — and
+        # the accept side closes the loop (observe_commit).  None everywhere
+        # means the honest cold codec path.
+        projection_pack = self._prepare_turn_projection(llm_runtime, request)
         if self._llm_runtime_supports_streaming(llm_runtime, request):
-            outcome = await self.stream_llm_request_async(continuation, llm_runtime, request)
+            outcome = await self.stream_llm_request_async(
+                continuation, llm_runtime, request, projection_pack=projection_pack)
         else:
-            outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
+            if projection_pack is not None:
+                outcome = await llm_runtime.agenerate(
+                    request,
+                    projection=projection_pack[0],
+                    projection_binding=projection_pack[1],
+                )
+            else:
+                outcome = await self._call_port_async(
+                    llm_runtime, "agenerate", "generate", request)
             # An endpoint error is transport/recovery state, not an assistant
             # message.  Persisting it into L1 makes a later retry replay a
             # synthetic assistant turn and, for strict providers such as
             # Anthropic thinking mode, can produce an ill-formed protocol.
             if outcome.response.finish_reason != LLMFinishReason.ERROR:
                 await self._upsert_l1_assistant_async(continuation, outcome.response.message)
+        self._observe_turn_projection(projection_pack, continuation, outcome)
         self._debug_log_outcome(continuation, outcome)
         refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
         if refresh is not None:
@@ -1084,6 +1099,8 @@ class TurnExecutor:
         continuation: Any,
         llm_runtime: Any,
         request: LLMRequestIR,
+        *,
+        projection_pack: tuple | None = None,
     ) -> LLMGenerationResult:
         final_response: LLMResponseIR | None = None
         stream = getattr(llm_runtime, "astream", None)
@@ -1092,7 +1109,14 @@ class TurnExecutor:
         continuation.channel_stream_active = self._channel_supports_stream_delivery(
             continuation
         )
-        iterator = stream(request).__aiter__()
+        if projection_pack is not None:
+            iterator = stream(
+                request,
+                projection=projection_pack[0],
+                projection_binding=projection_pack[1],
+            ).__aiter__()
+        else:
+            iterator = stream(request).__aiter__()
         schedule = self._llm_wait_status_schedule()
         schedule_index = 0
         started_at = asyncio.get_running_loop().time()
@@ -2577,6 +2601,172 @@ class TurnExecutor:
 
         self.clear_execution_cursors(continuation)
         return run_result
+
+    def _prepare_turn_projection(
+        self, llm_runtime: Any, request: LLMRequestIR
+    ) -> tuple | None:
+        """Owner-side projection prepare for one ordinary LLM round (N3).
+
+        Returns ``(EncodedRequest, EndpointBinding, handle)`` or None —
+        None everywhere means the honest cold codec path.  The view is the
+        request's non-preamble messages not yet frozen in the session; a
+        message without a durable identity aborts the projection (transient
+        compiler content must never freeze into the prefix).  Preparation
+        happens here, on the owner, before any worker thread touches the
+        session (J5).
+        """
+
+        if getattr(self, "_compaction_mode", "") != "two_segment":
+            return None
+        provider = getattr(llm_runtime, "endpoint_projection_session", None)
+        if not callable(provider):
+            return None
+        scope_id = str(request.metadata.get("prompt_cache_scope_id") or "").strip()
+        if not scope_id:
+            return None
+        try:
+            session = provider(scope_id)
+        except Exception:
+            return None
+        binding = getattr(session, "binding", None)
+        identity = getattr(session, "identity", None)
+        if binding is None or identity is None:
+            return None
+        if getattr(session, "_active", None) is not None:
+            # A round is already open (retry/reentry); do not interleave a
+            # second prepare on one lineage.
+            return None
+        frozen_reader = getattr(session, "frozen_message_ids", None)
+        frozen = set(frozen_reader()) if callable(frozen_reader) else set()
+        # Durable identity = present in the L1 store (or the L-owned
+        # continuity reference).  A request message whose id is NOT durable
+        # is transient compiler content: it must never freeze into the
+        # prefix, so the whole round falls back to the cold codec path.
+        durable_ids: set[str] = set()
+        memory_service = self.context.port_registry.get("memory:memory")
+        turns_reader = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        if turns_reader is not None:
+            for turn in getattr(turns_reader, "turns", ()) or ():
+                for message in turn.messages:
+                    durable_ids.add(str(message.message_id))
+            continuity = getattr(turns_reader, "continuity", None)
+            if continuity is not None:
+                durable_ids.add(str(continuity.standalone_id))
+        preamble_roles = {"system", "developer"}
+        tail: list[LLMMessageIR] = []
+        for message in request.messages:
+            if message.role.value in preamble_roles:
+                continue
+            message_id = str(message.message_id or "")
+            if not message_id or message_id not in durable_ids:
+                return None  # transient identity: cold fallback
+            if message_id in frozen:
+                continue
+            tail.append(message)
+        try:
+            import json as _json
+
+            from pal.llm.projection_contracts import AttemptKey, OwnerFence
+            from pal.llm.projection_session import HistoryView
+            from pal.llm.shapes.base import EncodedRequest
+
+            attempt = AttemptKey(
+                identity,
+                OwnerFence(int(getattr(session, "_owner_fence", 0) or 0)),
+                f"turn-{uuid4().hex[:12]}",
+            )
+            session.begin_round(attempt, requires_native=False)
+            prepared = session.prepare_normal(
+                HistoryView(cursor=session.frontier, messages=tuple(tail)),
+                request_shell=request,
+            )
+            encoded = EncodedRequest(
+                payload=_json.loads(prepared.payload_json),
+                message_spans=tuple(prepared.message_spans),
+                extra_body=dict(prepared.extra_body),
+                applied_cache_breakpoint_message_ids=tuple(
+                    prepared.applied_cache_breakpoint_message_ids
+                ),
+            )
+        except Exception as exc:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_turn_projection_prepare_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            try:
+                reject = getattr(session, "reject_commit", None)
+                if callable(reject) and getattr(session, "_active", None) is not None:
+                    reject(attempt.attempt_id, reason="prepare_failed")
+            except Exception:
+                pass
+            return None
+        return (encoded, binding, {"session": session, "attempt": attempt,
+                                   "tail_ids": tuple(m.message_id for m in tail)})
+
+    def _observe_turn_projection(
+        self, projection_pack: tuple | None, continuation: Any, outcome: Any
+    ) -> None:
+        """Close the accept loop for one projected round (N3 / W5).
+
+        Only a semantically accepted outcome freezes: the chunk carries the
+        round's tail items plus the accepted assistant message; failures and
+        errors reject the round so the next request re-sends the tail cold
+        instead of freezing an answer that never happened.  Projection
+        bookkeeping is diagnostic-only here — it never alters the outcome
+        the caller already holds.
+        """
+
+        if projection_pack is None:
+            return
+        session = projection_pack[2]["session"]
+        attempt = projection_pack[2]["attempt"]
+        tail_ids = projection_pack[2]["tail_ids"]
+        accepted = getattr(getattr(outcome, "response", None), "message", None)
+        finish_reason = getattr(getattr(outcome, "response", None), "finish_reason", None)
+        from pal.shared import LLMFinishReason as _FinishReason
+
+        if accepted is None or finish_reason == _FinishReason.ERROR:
+            try:
+                session.reject_commit(attempt.attempt_id, reason="round_failed")
+            except Exception:
+                pass
+            return
+        try:
+            import hashlib as _hashlib
+
+            from pal.llm.projection_contracts import (
+                AppendReceipt, HistoryCommitReceipt, HistoryCursor,
+            )
+
+            before = session.frontier
+            accepted_id = str(getattr(accepted, "message_id", "") or "")
+            span_ids = (*tail_ids, accepted_id) if accepted_id else tail_ids
+            after = HistoryCursor(
+                history_epoch=before.history_epoch,
+                block_sequence=before.block_sequence + 1,
+                prefix_digest=_hashlib.sha256(
+                    "".join(span_ids).encode("utf-8")
+                ).hexdigest(),
+            )
+            session.observe_commit(
+                HistoryCommitReceipt(
+                    attempt=attempt,
+                    append=AppendReceipt(
+                        before=before, after=after, block_count=1),
+                    closed_call_ids=(), native_committed=False,
+                ),
+                accepted_messages=(accepted,) if accepted.parts else (),
+                span_message_ids=span_ids,
+            )
+        except Exception as exc:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_turn_projection_commit_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     def _rebase_projection_after_left_install(
         self, llm_runtime: Any, scope_id: str, root: Any

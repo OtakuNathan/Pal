@@ -489,14 +489,23 @@ class LLMRuntime(LLMRuntimePort):
         endpoint = endpoints[0] if endpoints else None
         return bool(endpoint and endpoint.supports_streaming)
 
-    def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
-        return self._generate(request, allow_stale_refresh=True)
+    def generate(
+        self, request: LLMRequestIR, *,
+        projection: "EncodedRequest | None" = None,
+        projection_binding: "EndpointBinding | None" = None,
+    ) -> LLMGenerationResult:
+        return self._generate(
+            request, allow_stale_refresh=True,
+            projection=projection, projection_binding=projection_binding,
+        )
 
     def _generate(
         self,
         request: LLMRequestIR,
         *,
         allow_stale_refresh: bool,
+        projection: "EncodedRequest | None" = None,
+        projection_binding: "EndpointBinding | None" = None,
     ) -> LLMGenerationResult:
         self.last_request = request
         try:
@@ -531,11 +540,17 @@ class LLMRuntime(LLMRuntimePort):
                 return self._success(endpoint, response)
             for attempt in range(self.endpoint_retry_attempts):
                 try:
+                    invoke_kwargs: dict[str, Any] = {
+                        "stream": False,
+                        "timeout_seconds": self._timeout_seconds(effective),
+                    }
+                    if isinstance(self._invoker(), ShapeEndpointInvoker):
+                        invoke_kwargs["projection"] = self._projection_for_endpoint(
+                            endpoint, projection, projection_binding)
                     response, _ = self._invoker().invoke(
                         endpoint,
                         effective,
-                        stream=False,
-                        timeout_seconds=self._timeout_seconds(effective),
+                        **invoke_kwargs,
                     )
                     if response.finish_reason == LLMFinishReason.LENGTH:
                         response = self._recover_length(endpoint, effective, response)
@@ -596,8 +611,45 @@ class LLMRuntime(LLMRuntimePort):
             exc=last_error,
         )
 
-    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
-        return await asyncio.to_thread(self.generate, request)
+    def _projection_for_endpoint(
+        self,
+        endpoint: LLMEndpointModel,
+        projection: "EncodedRequest | None",
+        binding: "EndpointBinding | None",
+    ) -> "EncodedRequest | None":
+        """W3 (review): a projection is usable only on the endpoint it was
+        prepared against.  The owner prepared it for ``binding``; if THIS
+        resolved endpoint (including fallback) differs, drop the projection
+        and let the codec encode cold — correct, just without the cached
+        prefix benefit."""
+
+        if projection is None or binding is None:
+            return None
+        try:
+            from pal.llm.projection_contracts import EndpointBinding as _Binding
+
+            if not isinstance(binding, _Binding):
+                return None
+            if (
+                str(binding.endpoint_id) == str(endpoint.endpoint_id)
+                and str(binding.model_id) == str(endpoint.model_id)
+                and str(getattr(binding.wire_shape, "value", binding.wire_shape))
+                == str(endpoint.wire_shape)
+            ):
+                return projection
+        except Exception:
+            return None
+        return None
+
+    async def agenerate(
+        self, request: LLMRequestIR, *,
+        projection: "EncodedRequest | None" = None,
+        projection_binding: "EndpointBinding | None" = None,
+    ) -> LLMGenerationResult:
+        return await asyncio.to_thread(
+            self.generate, request,
+            projection=projection, projection_binding=projection_binding,
+        )
 
     def _iter_stream_updates(
         self,
@@ -605,6 +657,8 @@ class LLMRuntime(LLMRuntimePort):
         *,
         stream_control: LLMStreamControl | None = None,
         allow_stale_refresh: bool = True,
+        projection: "EncodedRequest | None" = None,
+        projection_binding: "EndpointBinding | None" = None,
     ) -> Iterator[LLMResponseUpdate]:
         self.last_request = request
         try:
@@ -652,6 +706,10 @@ class LLMRuntime(LLMRuntimePort):
                     }
                     if isinstance(self._invoker(), ShapeEndpointInvoker):
                         invoke_kwargs["stream_control"] = stream_control
+                        attempt_projection = self._projection_for_endpoint(
+                            endpoint, projection, projection_binding)
+                        if attempt_projection is not None:
+                            invoke_kwargs["projection"] = attempt_projection
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,
@@ -708,6 +766,8 @@ class LLMRuntime(LLMRuntimePort):
                             request,
                             stream_control=stream_control,
                             allow_stale_refresh=False,
+                            projection=projection,
+                            projection_binding=projection_binding,
                         )
                         return
                     last_error = exc
@@ -769,7 +829,11 @@ class LLMRuntime(LLMRuntimePort):
         ).response
         yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
 
-    async def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
+    async def astream(
+        self, request: LLMRequestIR, *,
+        projection: "EncodedRequest | None" = None,
+        projection_binding: "EndpointBinding | None" = None,
+    ) -> AsyncIterator[LLMResponseUpdate]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
         done = object()
@@ -791,6 +855,8 @@ class LLMRuntime(LLMRuntimePort):
                 for update in self._iter_stream_updates(
                     request,
                     stream_control=stream_control,
+                    projection=projection,
+                    projection_binding=projection_binding,
                 ):
                     enqueue(update)
             except BaseException as exc:  # noqa: BLE001
