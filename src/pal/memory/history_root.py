@@ -36,6 +36,7 @@ from pal.memory.turn_ir import (
     L1TurnIR,
     L1TurnState,
     L1TurnStore,
+    _close_message,
     _protocol_ids,
     left_span_stamp,
 )
@@ -476,7 +477,41 @@ class HistoryRoot:
         if budget_guard is not None and not budget_guard(candidate):
             return self._cut
         self._cut = candidate
+        self._seal_frozen_boundary_prefix()
         return self._cut
+
+    def _seal_frozen_boundary_prefix(self) -> None:
+        """Closed-group sealing at the cut (review N1-R1).
+
+        Assistant messages the cut freezes into L receive the existing
+        neutral-reasoning retirement (``_close_message``) exactly once, at
+        the moment the group closes — before any compact run can capture
+        them.  After this the frozen prefix is representation-final:
+        settlement and interrupt of the boundary turn reuse the same sealed
+        objects (F2: L is never rewritten), and non-ACTIVE validation stays
+        legal because no neutral reasoning remains under a closing turn.
+        """
+
+        if self._cut.intra_messages <= 0:
+            return
+        turns = self._ordered_turns()
+        index = self._cut.turn_count
+        if index >= len(turns):
+            return
+        boundary = turns[index]
+        prefix = boundary.messages[: self._cut.intra_messages]
+        sealed = tuple(_close_message(message) for message in prefix)
+        if sealed == prefix:
+            return
+        updated = replace(
+            boundary,
+            messages=(
+                *sealed,
+                *boundary.messages[self._cut.intra_messages:],
+            ),
+            revision=boundary.revision + 1,
+        )
+        self.store.replace(updated)
 
     # ------------------------------------------------------------------
     # Compact runs — open, ready, terminal arbitration (§5)
@@ -586,6 +621,49 @@ class HistoryRoot:
         run.candidate = None
         self._runs[run.run_id] = run
 
+    def close_run(
+        self, run_id: str, *, cancelled: bool, reason: str = ""
+    ) -> CompactOutcome | None:
+        """Idempotent terminal close for one operation handle (review R2-b).
+
+        Acts only while ``run_id`` is still the live current run.  A run
+        that already reached a terminal state returns its recorded outcome;
+        a run this root no longer knows (retired by reset, or superseded by
+        a newer run) returns None — a vanished run is terminal by
+        construction, and a late cleanup must not raise StaleRun out of its
+        own finally path or disturb whatever run now owns the lane.
+        """
+
+        key = str(run_id or "")
+        recorded = self._runs.get(key)
+        if recorded is not None:
+            left_revision = (
+                int(recorded.committed_left_revision)
+                if recorded.committed_left_revision is not None
+                else self._cut.revision
+            )
+            return CompactOutcome(
+                run_id=key,
+                status=recorded.phase.value,
+                left_revision=left_revision,
+                replayed=True,
+                detail=recorded.terminal_detail,
+            )
+        run = self._run
+        if run is None or run.run_id != key:
+            return None
+        if run.terminal:
+            return CompactOutcome(
+                run_id=key,
+                status=run.phase.value,
+                left_revision=self._cut.revision,
+                replayed=True,
+                detail=run.terminal_detail,
+            )
+        if cancelled:
+            return self.cancel(key, reason=reason or "cancelled")
+        return self.fail(key, reason=reason or "failed")
+
     def cancel(self, run_id: str, *, reason: str = "") -> CompactOutcome:
         key = str(run_id or "")
         recorded = self._runs.get(key)
@@ -674,9 +752,10 @@ class HistoryRoot:
                 run_id=key,
                 phase=run.phase.value,
             )
-        if run.deadline_at is not None and time.monotonic() > float(run.deadline_at):
+        if run.deadline_at is not None and time.monotonic() >= float(run.deadline_at):
             # F1/N03: an expired run loses commit eligibility; the terminal
-            # record is the sweep, and no second claimant is needed.
+            # record is the sweep, and no second claimant is needed.  `>=`
+            # matches expire_deadline's expiry semantics.
             self.fail(key, reason="deadline")
             raise HistoryRootError(
                 "compact run deadline expired before commit",
@@ -697,6 +776,32 @@ class HistoryRoot:
                 actual_stamp=self._left_stamp(),
             )
         right = self._physical_right_for_install()
+        # ---- final admission, immediately before the non-awaiting publish
+        # (review N1-R3): all expensive local construction is complete; the
+        # run must still be ours and READY, the captured left identity must
+        # still match, and the absolute deadline must not have passed.
+        # A deadline crossed after a linearized success never rolls it back.
+        current = self._require_current_run(key)
+        if current is not run or current.phase is not CompactPhase.READY:
+            raise HistoryRootError(
+                "run lost commit eligibility during construction",
+                run_id=key,
+                phase=current.phase.value,
+            )
+        if self._left_stamp() != run.snapshot.stamp:
+            raise LeftChangedSinceCapture(
+                "left changed since capture",
+                run_id=key,
+                expected_stamp=run.snapshot.stamp,
+                actual_stamp=self._left_stamp(),
+            )
+        if run.deadline_at is not None and time.monotonic() >= float(run.deadline_at):
+            self.fail(key, reason="deadline")
+            raise HistoryRootError(
+                "compact run deadline expired before publish",
+                run_id=key,
+                phase="failed",
+            )
         # ---- single non-awaiting publish section (I08).
         self.store.replace_all([seed_turn, *right])
         self._cut = CutPosition(

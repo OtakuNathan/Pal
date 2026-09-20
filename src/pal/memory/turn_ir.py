@@ -543,9 +543,10 @@ def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
     Unlike :func:`source_stamp_for_turns` (whole-history identity including
     per-turn state/revision), this basis is invariant to legal right-side
     growth inside the boundary turn — revision bumps and R-side settlement
-    cannot invalidate a captured left — while any same-id content change
-    (parts, semantic kind, replay envelope, delivery metadata) still
-    rewrites the digest.
+    cannot invalidate a captured left — while any same-id change (parts,
+    message state, semantic kind, replay envelope, delivery metadata)
+    still rewrites the digest.  Whole-turn state/revision stay excluded so
+    legal R growth never re-enters the identity.
     """
     import hashlib
 
@@ -554,7 +555,8 @@ def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
         lines.append(turn.turn_id)
         for message in turn.messages:
             content = hashlib.sha256(
-                f"{message.role}|{message.parts!r}|{message.semantic_kind}"
+                f"{message.role}|{message.state}|{message.parts!r}"
+                f"|{message.semantic_kind}"
                 f"|{message.prompt_region}|{message.replay!r}"
                 f"|{message.metadata!r}".encode("utf-8")
             ).hexdigest()

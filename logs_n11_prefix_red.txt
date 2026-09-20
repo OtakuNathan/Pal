@@ -1,0 +1,51 @@
+N1.1 pre-fix red run — review package pal_v3_n1_review_29a879f draft tests
+========================================================================
+
+Command (worktree @ 29a879f, before any N1.1 fix):
+  PYTHONPATH=$PWD/src:$PWD python -m pytest tests/test_v3_n11_followup.py -q
+
+Result: 7 failed, 5 passed (5.46s)
+
+FAILED tests/test_v3_n11_followup.py::PrefixSettlementTests::test_real_reasoning_prefix_can_settle_without_rewriting_frozen_left
+FAILED tests/test_v3_n11_followup.py::PrefixSettlementTests::test_memory_service_settlement_uses_same_consistent_contract
+FAILED tests/test_v3_n11_followup.py::FinalPublicationDeadlineTests::test_deadline_crossing_during_local_construction_does_not_publish
+FAILED tests/test_v3_n11_followup.py::FinalPublicationDeadlineTests::test_exact_deadline_matches_expire_deadline_boundary
+FAILED tests/test_v3_n11_followup.py::SettlementOutcomeTests::test_post_commit_result_error_cannot_be_reported_as_uncommitted_failure
+FAILED tests/test_v3_n11_followup.py::SettlementOutcomeTests::test_reset_during_generation_does_not_make_old_cleanup_raise_staleRun
+FAILED tests/test_v3_n11_followup.py::LeftIdentityTighteningTests::test_state_only_change_is_part_of_selected_left_identity
+
+(passed pre-fix: legacy no-cut reasoning retirement T03, TextPart positive
+control T04, unexpired commit T07, generation-failure T10, revision-only
+digest invariance T12 — existing/positive behaviors.)
+
+Failure modes captured:
+- N1-R1: real ReasoningPartIR frozen into L by promote, then settle() flips
+  the turn SETTLED -> L1TurnIR.__post_init__ rejects "settled L1 turn
+  retains provider-neutral reasoning parts" (turn_ir.py:53-59). The earlier
+  N1 test used TextPartIR, which never populates reasoning_text — it was a
+  positive control, not a reasoning regression.
+- N1-R3: commit's deadline gate ran only at entry; a builder that advances
+  the clock past the deadline during local construction still published
+  (t=10 deadline, publish at t=11). Boundary semantics were inconsistent
+  (commit used now>deadline, expire_deadline uses now>=deadline).
+- N1-R2a: post-commit result-packaging fault (engine installed, then
+  CompactionEngine._result raised) was reported as a plain error — callers
+  were told history was unchanged while the root was already COMMITTED, and
+  the projection rebase was skipped.
+- N1-R2b: root.reset() during generation cleared the run archive; the
+  orchestration's late root.fail(old_id) raised StaleRun out of the
+  cleanup path, masking the real terminal outcome.
+- N1-R4: left_span_stamp digest did not include message.state; a state-only
+  flip (COMPLETE -> IN_PROGRESS) on a captured L message passed the stamp.
+
+Post-fix: 12/12 green (same command); N1 suite still 11/11. Broad surface
+regression (74 files incl. both new suites): 1237 passed + 285 subtests,
+zero failures (5:50).
+
+Full-suite regression on 29a879f (logs_full_regression_n1head.txt, 25:12):
+3098 passed + 486 subtests + 7 skipped, 22 failed. All 19 extractable
+failed nodes pass standalone (logs_n1_flake_rerun.txt: 19/19 exit=0, zero
+reproduction); 3 failures left no extractable node line. Same profile and
+attribution as the 3575e48 run — long-run resource contention/timing, zero
+overlap with the v3 change surface; not claimed green, clean-environment
+rerun still the final attribution step.

@@ -2389,19 +2389,75 @@ class TurnExecutor:
                 )
 
             def close_run_terminal(*, cancel: bool, reason: str) -> None:
-                """End OUR run — never one the engine already committed (F1)."""
+                """Idempotent close of OUR run (F1 / review R2-b).
 
-                last = getattr(root, "last_run", None)
-                if (
-                    last is not None
-                    and last.run_id == run_id
-                    and last.terminal
-                ):
-                    return
-                if cancel:
-                    root.cancel(run_id, reason=reason)
-                else:
-                    root.fail(run_id, reason=reason)
+                A run already terminal (e.g. the engine committed), a run
+                retired by reset, or a superseded run is left alone — a
+                vanished run is terminal by construction and late cleanup
+                must never raise StaleRun out of its own finally path.
+                """
+
+                root.close_run(run_id, cancelled=cancel, reason=reason)
+
+            def committed_run_record():
+                record = root.run_record(run_id)
+                if record is not None and record.phase.value == "committed":
+                    return record
+                return None
+
+            def post_commit_result(fault: str) -> CompactionRunResult:
+                """Committed outcome with post-fault diagnostics (review R2-a).
+
+                The install already won; the owner's terminal record is the
+                authority.  The caller gets a success carrying the accepted
+                memory result and the packaging fault — never a fabricated
+                empty success, never a `history unchanged` claim, and the
+                required projection rebase still fires.
+                """
+
+                from pal.memory.service import MemoryCompactResult
+
+                record = committed_run_record()
+                seed_text = ""
+                left_turns = root.left_turns()
+                if left_turns:
+                    seed_text = "".join(
+                        getattr(part, "text", "")
+                        for message in left_turns[0].messages
+                        for part in message.parts
+                    )
+                memory_result = MemoryCompactResult(
+                    summary=seed_text,
+                    projected_entries=[],
+                    metadata={
+                        "two_segment": True,
+                        "run_id": run_id,
+                        "status": "committed",
+                        "left_revision": int(
+                            getattr(record, "committed_left_revision", 0) or 0
+                        ),
+                        "replayed": True,
+                        "reconstructed": "post_commit_packaging_fault",
+                    },
+                )
+                diagnostics = getattr(self.state, "diagnostics", None)
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "kind": "two_segment_post_commit_packaging_fault",
+                        "scope": str(logical_scope_id),
+                        "run_id": run_id,
+                        "error": fault,
+                    })
+                self._rebase_projection_after_left_install(
+                    llm_runtime, logical_scope_id, root)
+                return CompactionRunResult(
+                    status="compacted",
+                    summary_entry=None,
+                    memory_result=memory_result,
+                    failures=(f"post-commit packaging fault: {fault}",),
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                )
 
             try:
                 snapshot = CompactionSnapshot.capture_left(
@@ -2423,9 +2479,19 @@ class TurnExecutor:
                     timeout=max(deadline_at - _time.monotonic(), 0.05),
                 )
             except asyncio.CancelledError:
-                close_run_terminal(cancel=True, reason="orchestration_cancelled")
+                if committed_run_record() is not None:
+                    # Post-commit external cancel (review R2-a): keep the
+                    # COMMITTED fact, mark derived state, then honor the
+                    # stop intent — never swallow the cancellation.
+                    self._rebase_projection_after_left_install(
+                        llm_runtime, logical_scope_id, root)
+                else:
+                    close_run_terminal(cancel=True,
+                                       reason="orchestration_cancelled")
                 raise
             except TimeoutError:
+                if committed_run_record() is not None:
+                    return post_commit_result("deadline exceeded after commit")
                 close_run_terminal(cancel=False, reason="deadline")
                 return CompactionRunResult(
                     status="error",
@@ -2435,18 +2501,24 @@ class TurnExecutor:
                     clock_value=clock_value,
                 )
             except Exception as exc:
+                fault = f"{type(exc).__name__}: {exc}"
+                if committed_run_record() is not None:
+                    # The engine installed and then failed while packaging
+                    # the result; classification follows the owner's terminal
+                    # state, not the await's exception kind.
+                    return post_commit_result(fault)
                 close_run_terminal(cancel=False,
                                    reason=f"orchestration_error:{type(exc).__name__}")
                 return CompactionRunResult(
                     status="error",
-                    failures=(f"{type(exc).__name__}: {exc}",),
+                    failures=(fault,),
                     clock_kind=engine.policy.clock_kind,
                     clock_value=clock_value,
                 )
             if not run_result.success:
                 # The engine returns instead of raising on generation
-                # failure; the owner run must still reach a terminal state
-                # or the next compact hits FrozenLeftDuringCompact forever.
+                # failure; close our run idempotently (reset may already
+                # have retired it — that is a valid terminal outcome).
                 close_run_terminal(cancel=False,
                                    reason=f"engine:{run_result.status}")
             else:
