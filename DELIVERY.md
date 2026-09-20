@@ -1,6 +1,6 @@
 # DELIVERY — pal-two-segment-v3 (refactor/two-segment-session-v3)
 
-状态：**v3 双段实现交付（dual-mode）**。基线 `7e6773f`（= origin/refactor/full-context-compaction-v2 tip，main 是其祖先；v2 的交付事实由该基线携带并仍可在 git 历史查阅，本文档按 MIGRATION.md 取代其作为本分支交付标准）。未 push、未合 main、未部署。
+状态：**v3 双段实现交付（dual-mode）+ N1 收口中**。基线 `7e6773f`（= origin/refactor/full-context-compaction-v2 tip，main 是其祖先；v2 的交付事实由该基线携带并仍可在 git 历史查阅，本文档按 MIGRATION.md 取代其作为本分支交付标准）。未 push 新增 commit、未合 main、未部署。
 
 ## 1. Formal gate（G0）
 
@@ -22,6 +22,7 @@
 | `0695976` | G3(d) | H01 十二组合（2 宿主×3 shape×2 模式）真实 executor 链路 + retire 钩子共享修复（逮住 UnboundLocalError 真 bug） |
 | `0bb2b31` | G4 | owner 级 B01/B03/Q03 钉测 |
 | `5e042c6` | 后置 | **projection session 接入真实链路**：LLMRuntime 托管 per-scope session（活端点 binding、换端点单次 rebind）；two_segment install 后驱动 on_left_replaced（F13 不回滚） |
+| `e58d1cd` | N1 | review 包 F1/F2/F5/F6 修复：root 终态收口（失败/取消/超时/deadline 门）、左 stamp 改不可变内容基 + settlement 不改写 cut 覆盖消息、终态记录瘦身 + reset 清档案、IN_PROGRESS 不入闭合组；`tests/test_v3_n1_root_lifecycle.py` 9红→10绿，红证据 `logs_n1_prefix_red.txt` |
 
 ## 3. 设计要点
 
@@ -33,6 +34,7 @@
 
 ## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
+0. **review 包（pal_v3_review_2014db4，Request changes）收口中**：N1 已修（F1/F2/F5/F6）；**F3（prepare_handoff 丢 in-container base preamble）与 F4（rebase 保留 R 未在真实 helper 成立：空 keeper、IR 重建丢 native、硬编码 epoch）属 N2**；W1-W5 接线缺口按 NEXT_STEPS N2-N6 推进（28 项收口矩阵全 NOT_RUN）
 1. **warm anchor 未接入双段流**：handoff 走 cold-left 全量编码；H01 warm 列验证的是「资格不可用时诚实回退 cold」。warm 拆分（cached L 前缀 + 未缓存后缀直发）是后续项
 2. **compaction_coordinator 未物理拆除**：full_source 模式仍在用；文件级删除等 two_segment 转默认后进行。two_segment 路径零依赖它
 3. **ingress_staging / artifact_lease**：自动接线已按模式关断（two_segment 下永不构造）；模块文件保留至模式翻转，届时随 v2 专用测试一并移出
