@@ -216,6 +216,63 @@ class VerticalTraceTests(unittest.TestCase):
             "TRANSIENT" not in repr(item)
             for chunk in session.chunks for item in chunk.items
         ), "transient content must never freeze into the prefix")
+    def test_long_active_turn_promotes_old_groups_and_compacts(self):
+        from tests.test_runtime_compaction import _valid_pal_payload
+
+        memory = MemoryService()
+        memory.begin_l1_turn("T", user_message=user("Q1", "q1"))
+        memory.stream_l1_assistant("T", assistant("A1 answer", "a1"))
+        memory.append_l1_user("T", user("Q2", "q2"))
+        memory.stream_l1_assistant("T", assistant("A2 answer", "a2"))
+        memory.append_l1_user("T", user("Q3", "q3"))
+        transport = CapturingTransport(
+            ["A3 answer", _valid_pal_payload("SUMMARY SEED")])
+        runtime = _runtime(transport)
+        ex = _executor(memory, runtime)
+        _drive(ex, _request_for(memory, ()))
+
+        root = memory.history_root
+        left_blob = repr(root.left_messages())
+        self.assertIn("Q1", left_blob)
+        self.assertIn("A1", left_blob)
+        self.assertIn("Q3", repr(root.right_messages()),
+                      "the newest work tail stays on the right")
+
+        # Compaction now has benefit and succeeds through the real engine,
+        # the real install, and the post-commit rebase.
+        result = asyncio.run(ex.compact_memory_async(
+            memory, target_input_budget=100_000, reserved_output_tokens=1024,
+            continuation=SimpleNamespace(turn_id="T")))
+        self.assertNotEqual(result.status, "no_benefit")
+        self.assertTrue(result.success)
+
+    def test_stale_left_blocks_projection_until_rebase(self):
+        from tests.test_v3_n1_root_lifecycle import Candidate
+
+        memory = MemoryService()
+        memory.begin_l1_turn("T", user_message=user("Q1", "q1"))
+        transport = CapturingTransport(["A1 answer"])
+        runtime = _runtime(transport)
+        ex = _executor(memory, runtime)
+        _drive(ex, _request_for(memory, ()))
+
+        root = memory.history_root
+        # A left replacement the session never consumes (manual commit,
+        # no rebase driven) must leave the frozen prefix unusable.
+        root.promote(include_active=True)
+        root.begin_compact("manual", reason="test")
+        root.mark_ready("manual", Candidate())
+        root.commit("manual")
+        memory.append_l1_user("T", user("Q2", "q2"))
+        request2 = _request_for(memory, ())
+        self.assertIsNone(ex._prepare_turn_projection(runtime, request2))
+        kinds = [d.get("kind") for d in ex.state.diagnostics]
+        self.assertIn("two_segment_turn_projection_stale_left", kinds)
+
+        # Once the rebase lands, the projection engages again.
+        ex._rebase_projection_after_left_install(runtime, "pal:resident", root)
+        pack = ex._prepare_turn_projection(runtime, request2)
+        self.assertIsNotNone(pack)
 
 
 if __name__ == "__main__":

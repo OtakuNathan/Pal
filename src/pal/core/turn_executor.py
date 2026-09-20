@@ -602,6 +602,7 @@ class TurnExecutor:
             )
         continuation.llm_round_index = getattr(continuation, "llm_round_index", 0) + 1
         llm_runtime = self.context.require_port("llm:llm")
+        self._promote_closed_groups_at_request_boundary()
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -2602,6 +2603,30 @@ class TurnExecutor:
         self.clear_execution_cursors(continuation)
         return run_result
 
+    def _promote_closed_groups_at_request_boundary(self) -> None:
+        """Advance the cut over closed old groups at a request boundary (W1/N20).
+
+        A long-lived active turn accumulates closed rounds; without this the
+        left segment stays empty forever and compaction is permanently
+        no_benefit.  Only CLOSED groups move (protocol-matched, sealed at the
+        cut per N1-R1); the newest work tail and any unclosed group stay on
+        the right.  A live compact run freezes the cut — the refusal is an
+        expected boundary outcome, not an error.
+        """
+
+        if getattr(self, "_compaction_mode", "") != "two_segment":
+            return
+        memory_service = self.context.port_registry.get("memory:memory")
+        root = getattr(memory_service, "history_root", None)
+        if root is None:
+            return
+        try:
+            root.promote(include_active=True)
+        except Exception:
+            # FrozenLeftDuringCompact while a compact run is live: the cut
+            # moves at the next boundary instead.  Never blocks the request.
+            return
+
     def _prepare_turn_projection(
         self, llm_runtime: Any, request: LLMRequestIR
     ) -> tuple | None:
@@ -2636,6 +2661,28 @@ class TurnExecutor:
             # A round is already open (retry/reentry); do not interleave a
             # second prepare on one lineage.
             return None
+        # Staleness guard (J7): a committed left replacement this session
+        # never consumed leaves the frozen prefix replaying retired history.
+        # Compare the root's left-replacement generation; mismatch = cold.
+        memory_service = self.context.port_registry.get("memory:memory")
+        root = getattr(memory_service, "history_root", None)
+        if root is None:
+            return None
+        root_generation = getattr(root, "left_generation", None)
+        if root_generation is None:
+            root_generation = getattr(root, "left_revision", 0)
+        root_generation = int(root_generation or 0)
+        session_generation = int(getattr(session, "history_left_revision", 0) or 0)
+        if root_generation != session_generation:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_turn_projection_stale_left",
+                    "scope": scope_id,
+                    "root_generation": root_generation,
+                    "session_generation": session_generation,
+                })
+            return None
         frozen_reader = getattr(session, "frozen_message_ids", None)
         frozen = set(frozen_reader()) if callable(frozen_reader) else set()
         # Durable identity = present in the L1 store (or the L-owned
@@ -2643,7 +2690,6 @@ class TurnExecutor:
         # is transient compiler content: it must never freeze into the
         # prefix, so the whole round falls back to the cold codec path.
         durable_ids: set[str] = set()
-        memory_service = self.context.port_registry.get("memory:memory")
         turns_reader = getattr(getattr(memory_service, "l1_store", None), "turns", None)
         if turns_reader is not None:
             for turn in getattr(turns_reader, "turns", ()) or ():
@@ -2805,7 +2851,10 @@ class TurnExecutor:
                 for message in root.right_messages()
                 if message.message_id in frozen_ids
             )
-            left_revision = int(getattr(root, "left_revision", 0) or 0)
+            left_revision = getattr(root, "left_generation", None)
+            if left_revision is None:
+                left_revision = getattr(root, "left_revision", 0)
+            left_revision = int(left_revision or 0)
             digest = _hashlib.sha256(
                 "".join(
                     m.message_id for m in (*seed_messages, *kept)

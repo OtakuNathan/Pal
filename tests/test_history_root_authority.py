@@ -212,14 +212,17 @@ class LPromoteTests(_Base):
         root.promote()  # the active turn never moves by default
         self.assertEqual(root.cut, frozen)
         root.promote(include_active=True)
-        # Longest closed prefix of task-T excludes its assistant carrying
-        # open call-B: the cut lands after task-T's user message only.
+        # Longest closed prefix of task-T: the trailing user message is the
+        # pending work tail awaiting its response (PLAN §3.3 keep the newest
+        # work tail), so the whole OPEN group [user, assistant(call-A,
+        # call-B open), result-A] stays in R — the cut does not split it.
         left_kinds = [m.semantic_kind for m in root.left_messages()]
         self.assertEqual(left_kinds,
                          ["runtime_context_summary", "user_request",
-                          "assistant_reply", "user_request"])
+                          "assistant_reply"])
         right_roles = [m.role for m in root.right_messages()]
-        self.assertEqual(right_roles, [MessageRole.ASSISTANT, MessageRole.TOOL])
+        self.assertEqual(right_roles,
+                         [MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL])
         right_text = _visible_text(root.right_messages())
         self.assertIn("A_DECISION", right_text)
         call_ids = [

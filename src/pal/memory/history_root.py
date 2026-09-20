@@ -247,6 +247,11 @@ class HistoryRoot:
                                 cut_id=f"cut-{uuid4().hex[:12]}")
         self._run: CompactRun | None = None
         self._runs: dict[str, CompactRun] = {}
+        # Left REPLACEMENT generation — bumped only by a committed compact
+        # install, never by promote.  Derived projections (e.g. the endpoint
+        # projection session) track this to detect staleness without
+        # conflating ordinary cut movement with a left replacement.
+        self._left_generation = 0
 
     # ------------------------------------------------------------------
     # Views (derived; the store stays the single physical fact — A03)
@@ -263,6 +268,11 @@ class HistoryRoot:
     @property
     def left_revision(self) -> int:
         return self._cut.revision
+
+    @property
+    def left_generation(self) -> int:
+        """Count of committed left replacements (not promote moves)."""
+        return self._left_generation
 
     @property
     def active_run(self) -> CompactRun | None:
@@ -442,7 +452,13 @@ class HistoryRoot:
 
     @staticmethod
     def _closed_prefix_length(turn: L1TurnIR) -> int:
-        """Length of the longest closed-group message prefix (I03)."""
+        """Length of the longest closed-group message prefix (I03).
+
+        A closed group is protocol-complete AND answered: a trailing
+        user-role message is the pending work tail awaiting its response —
+        it stays on the right (PLAN §3.3: keep the newest work tail), never
+        promotes into L just because no tool call is dangling.
+        """
 
         messages = turn.messages
         limit = len(messages)
@@ -456,6 +472,8 @@ class HistoryRoot:
             if calls == results:
                 best = size
                 break
+        while best > 0 and messages[best - 1].role == MessageRole.USER:
+            best -= 1
         return best
 
     def promote(
@@ -813,6 +831,7 @@ class HistoryRoot:
         run.phase = CompactPhase.COMMITTED
         run.winner = "committed"
         run.committed_left_revision = self._cut.revision
+        self._left_generation += 1
         self._retire_run(run)
         return CompactOutcome(
             run_id=key,
@@ -893,6 +912,7 @@ class HistoryRoot:
             self.cancel(run.run_id, reason="reset")
         self.store.clear()
         self._runs.clear()
+        self._left_generation = 0
         self._incarnation = f"inc-{uuid4().hex[:12]}"
         self._cut = CutPosition(turn_count=0, intra_messages=0, revision=0,
                                 cut_id=f"cut-{uuid4().hex[:12]}")

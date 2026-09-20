@@ -766,6 +766,18 @@ class EndpointProjectionSession:
             )
         )
 
+    @property
+    def history_left_revision(self) -> int:
+        """Left-replacement generation this lineage has consumed (read).
+
+        The turn projection compares it against the root's left_generation:
+        a mismatch means a compact install happened whose rebase this
+        session never consumed — the frozen prefix is stale and the next
+        round must fall back cold instead of replaying retired history.
+        """
+
+        return self._left_revision
+
     # -- preparation ---------------------------------------------------------
 
     _PREAMBLE_ROLES = frozenset({"system", "developer"})
