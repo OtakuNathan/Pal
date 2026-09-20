@@ -2397,6 +2397,12 @@ class TurnExecutor:
                 memory_service=memory_service,
                 after_commit=after_compact,
             )
+            if run_result.success:
+                # The install already won: rebasing the hosted projection
+                # session is post-commit work (F13) — a failure here is
+                # recorded, never a rollback of the new left.
+                self._rebase_projection_after_left_install(
+                    llm_runtime, logical_scope_id, root)
             if not run_result.success or continuation is None:
                 return run_result
             self.clear_execution_cursors(continuation)
@@ -2447,6 +2453,53 @@ class TurnExecutor:
 
         self.clear_execution_cursors(continuation)
         return run_result
+
+    def _rebase_projection_after_left_install(
+        self, llm_runtime: Any, scope_id: str, root: Any
+    ) -> None:
+        """Drive on_left_replaced on the runtime-hosted projection session.
+
+        Post-commit only (F13): rebase failures land in diagnostics and never
+        roll back the installed left segment.
+        """
+
+        provider = getattr(llm_runtime, "endpoint_projection_session", None)
+        if not callable(provider):
+            return
+        try:
+            session = provider(scope_id)
+            rebase = getattr(session, "on_left_replaced", None)
+            if not callable(rebase):
+                return
+            import hashlib as _hashlib
+
+            from pal.llm.projection_contracts import HistoryCursor
+            from pal.llm.projection_session import LeftReplacement
+
+            seed_messages = root.left_messages()
+            digest = _hashlib.sha256(
+                "".join(m.message_id for m in seed_messages).encode("utf-8")
+            ).hexdigest()
+            rebase(
+                LeftReplacement(
+                    seed_messages=seed_messages,
+                    kept_frozen_messages=(),
+                    cursor_after=HistoryCursor(
+                        history_epoch=1,
+                        block_sequence=1,
+                        prefix_digest=digest or "0" * 64,
+                    ),
+                    left_revision=root.left_revision,
+                )
+            )
+        except Exception as exc:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_projection_rebase_failed",
+                    "scope": str(scope_id),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     def _resident_compaction_replay_request(
         self,

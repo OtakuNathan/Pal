@@ -38,6 +38,8 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.prompt_cache import CacheProfileError
+from pal.llm.projection_contracts import EndpointBinding, LogicalSessionId
+from pal.llm.projection_session import EndpointProjectionSession
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.models import LLMEndpointModel
 from pal.llm.output_recovery import (
@@ -219,6 +221,15 @@ class LLMRuntime(LLMRuntimePort):
         init=False,
         repr=False,
     )
+    # v3: per-scope endpoint projection owners hosted by this runtime.
+    # Sessions bind lazily to the ACTIVE endpoint; a binding change rebinds
+    # and destroys the old lineage (bind semantics, P06).  Nothing else in
+    # the runtime touches their internals.
+    _projection_sessions: dict[str, EndpointProjectionSession] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
@@ -243,6 +254,36 @@ class LLMRuntime(LLMRuntimePort):
 
     def active_endpoint(self) -> LLMEndpointModel | None:
         return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+
+    def endpoint_projection_session(self, scope_id: str) -> EndpointProjectionSession | None:
+        """Host the per-scope projection owner bound to the active endpoint.
+
+        Returns None while no endpoint is resolvable.  Repeated calls return
+        the same session; a binding change rebinds it (one generation bump)
+        instead of leaking a stale lineage.
+        """
+
+        endpoint = self.active_endpoint()
+        if endpoint is None:
+            return None
+        key = str(scope_id or "pal:resident").strip() or "pal:resident"
+        session = self._projection_sessions.get(key)
+        if session is None:
+            session = EndpointProjectionSession(LogicalSessionId(key))
+            self._projection_sessions[key] = session
+        binding = EndpointBinding(
+            endpoint_id=str(endpoint.endpoint_id),
+            model_id=str(endpoint.model_id),
+            wire_shape=WireShape(str(endpoint.wire_shape)),
+            endpoint_spec_revision=str(
+                getattr(endpoint, "endpoint_spec_revision", "") or "spec-1"
+            ),
+            continuation_policy_version="policy-1",
+            config_fingerprint=f"{endpoint.provider}:{endpoint.base_url}",
+        )
+        if session.binding is None or session.binding != binding:
+            session.rebind(binding)
+        return session
 
     def refresh_runtime_settings(self) -> None:
         previous = self.active_endpoint()
