@@ -1,0 +1,1464 @@
+........................................................................ [  2%]
+..................................................................... [  4%]
+........................................................................ [  6%]
+....................................................... [  8%]
+........................................................................ [ 11%]
+........................................................................ [ 13%]
+..............................................................F......... [ 15%]
+..F....F......F..F...............F...................................... [ 18%]
+...................................................................... [ 20%]
+....F.....F...F......................................................... [ 22%]
+.....F........................................................ [ 24%]
+..F................................................................................................... [ 28%]
+...................................................... [ 29%]
+......F..................................FF.......................... [ 32%]
+...F....................................FF.............................. [ 34%]
+....................................... [ 35%]
+.................................................................. [ 37%]
+..............F.................................................... [ 39%]
+...................................................................... [ 42%]
+........................................................................ [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+...................................................................... [ 51%]
+........................................................................ [ 53%]
+...................................F.................................... [ 56%]
+........................................................................ [ 58%]
+.................................................................... [ 60%]
+...................................................................... [ 63%]
+..................................................... [ 64%]
+.................................................................. [ 66%]
+.......................................................ssssss............................. [ 69%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+...................................................................... [ 76%]
+........................................................................ [ 79%]
+.................................................. [ 80%]
+................................................. [ 82%]
+................................................................................................................... [ 86%]
+...................................................... [ 87%]
+........................................................................ [ 90%]
+........................................................................ [ 92%]
+....................................................... [ 94%]
+...................................................................... [ 96%]
+.................................................................... [ 98%]
+....................................                                     [100%]
+=================================== FAILURES ===================================
+_ PalV2TelegramEndpointTests.test_reopen_interaction_with_already_empty_keyboard_sends_new_card _
+
+self = <tests.test_bootstrap_and_repositories.PalV2TelegramEndpointTests testMethod=test_reopen_interaction_with_already_empty_keyboard_sends_new_card>
+
+    async def test_reopen_interaction_with_already_empty_keyboard_sends_new_card(self) -> None:
+        self.endpoint._interactive_messages["mr_reopen"] = {
+            "chat_id": 42, "message_id": 10,
+            "interaction_kind": "memory_candidate_approval",
+            "expires_at_monotonic": None, "actions": {},
+        }
+        async def already_cleared(**kwargs):
+            raise RuntimeError("Bad Request: Message is not modified")
+        self.fake_bot.edit_message_reply_markup = already_cleared
+        spec = InteractionMessageSpec("mr_reopen", "memory_candidate_approval",
+            text="Review candidate", buttons=((InteractionButtonSpec("Preview", "control.panel.back"),),))
+        await self.endpoint._open_or_update_interaction_async(
+            self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+            spec=spec, allow_update=False)
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+>       self.assertIsNotNone(messages[0]["reply_markup"])
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'reply_markup'
+
+tests/test_bootstrap_and_repositories.py:4802: KeyError
+_ PalV2TelegramEndpointTests.test_telegram_endpoint_observes_get_updates_timeout_as_poll_error _
+
+self = <tests.test_bootstrap_and_repositories.PalV2TelegramEndpointTests testMethod=test_telegram_endpoint_observes_get_updates_timeout_as_poll_error>
+
+    async def test_telegram_endpoint_observes_get_updates_timeout_as_poll_error(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_observed_timeout",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+>       app = endpoint._build_application()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bootstrap_and_repositories.py:5046: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = TelegramChannelEndpoint(endpoint=EndpointConfig(endpoint_id='telegram_observed_timeout', channel_kind='telegram', bind..., _reconnect_attempts=0, _reconnecting=False, _last_get_updates_activity_at=0.0, _get_updates_in_flight_started_at=0.0)
+
+    def _build_application(self):
+>       from telegram.ext import ApplicationBuilder, TypeHandler
+E       ModuleNotFoundError: No module named 'telegram.ext'
+
+providers/telegram/endpoint.py:1088: ModuleNotFoundError
+_ PalV2TelegramEndpointTests.test_telegram_endpoint_reconnects_after_observed_get_updates_timeout _
+
+self = <tests.test_bootstrap_and_repositories.PalV2TelegramEndpointTests testMethod=test_telegram_endpoint_reconnects_after_observed_get_updates_timeout>
+
+    async def test_telegram_endpoint_reconnects_after_observed_get_updates_timeout(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_timeout_retry",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        endpoint._reconnect_delays = (0.01, 0.01)
+        endpoint._poll_error_stale_threshold_seconds = 0.01
+        endpoint._poll_monitor_interval_seconds = 0.01
+        apps = [
+            _FakeTelegramApp(self.fake_bot),
+            _FakeTelegramApp(self.fake_bot),
+        ]
+    
+        def build_app():
+            return apps.pop(0)
+    
+        endpoint._build_application = build_app  # type: ignore[method-assign]
+        await endpoint.start_async()
+        first_app = endpoint.application
+        self.assertIsNotNone(first_app)
+    
+>       from telegram.error import TimedOut
+E       ModuleNotFoundError: No module named 'telegram.error'
+
+tests/test_bootstrap_and_repositories.py:5096: ModuleNotFoundError
+_ PalV2TelegramEndpointTests.test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message _
+
+self = <tests.test_bootstrap_and_repositories.PalV2TelegramEndpointTests testMethod=test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message>
+
+    async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="review_long",
+            interaction_kind="bunshin_v2_architecture_review",
+            text=("architecture contract\n" * 600).strip(),
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Accept",
+                        action_key="control.action.dispatch",
+                        action_args={"decision": "accept"},
+                    ),
+                ),
+            ),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_open",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(
+                reply_target={"chat_id": "42"},
+            ),
+        )
+    
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+    
+        messages = [
+            payload
+            for kind, payload in self.fake_bot.actions
+            if kind == "message"
+        ]
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(len(str(item["text"])) <= 4096 for item in messages))
+        self.assertNotIn("reply_markup", messages[0])
+>       self.assertIn("reply_markup", messages[-1])
+E       AssertionError: 'reply_markup' not found in {'chat_id': 42, 'text': 'architecture contract'}
+
+tests/test_bootstrap_and_repositories.py:4648: AssertionError
+_ PalV2TelegramEndpointTests.test_telegram_endpoint_uses_separate_get_updates_connection_pool _
+
+self = <tests.test_bootstrap_and_repositories.PalV2TelegramEndpointTests testMethod=test_telegram_endpoint_uses_separate_get_updates_connection_pool>
+
+    async def test_telegram_endpoint_uses_separate_get_updates_connection_pool(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_pool",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+            poll_timeout_seconds=30,
+        )
+    
+>       app = endpoint._build_application()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_bootstrap_and_repositories.py:4108: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = TelegramChannelEndpoint(endpoint=EndpointConfig(endpoint_id='telegram_pool', channel_kind='telegram', binding_key='use..., _reconnect_attempts=0, _reconnecting=False, _last_get_updates_activity_at=0.0, _get_updates_in_flight_started_at=0.0)
+
+    def _build_application(self):
+>       from telegram.ext import ApplicationBuilder, TypeHandler
+E       ModuleNotFoundError: No module named 'telegram.ext'
+
+providers/telegram/endpoint.py:1088: ModuleNotFoundError
+__________________ test_profile_pruning_enforces_lru_byte_cap __________________
+
+tmp_path = PosixPath('/tmp/pytest-of-nathan/pytest-167/test_profile_pruning_enforces_0')
+
+    def test_profile_pruning_enforces_lru_byte_cap(tmp_path: Path) -> None:
+        worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+        oldest_key, newest_key = "4" * 64, "5" * 64
+        now = time.time()
+        for key, last_used in ((oldest_key, now - 20), (newest_key, now - 10)):
+            profile = worker.paths.profiles / key
+            profile.mkdir(parents=True)
+            (profile / "payload").write_bytes(b"x" * 64)
+            (profile / "session.json").write_text(
+                json.dumps({"last_used_at": last_used}), encoding="utf-8"
+            )
+    
+        oldest = worker.paths.profiles / oldest_key
+        total = sum(
+            item.stat().st_size
+            for item in worker.paths.profiles.rglob("*")
+            if item.is_file()
+        )
+        oldest_size = sum(
+            item.stat().st_size for item in oldest.rglob("*") if item.is_file()
+        )
+        with patch(
+            "pal.web_fetch.browser_service.PROFILE_MAX_BYTES",
+            total - oldest_size,
+        ):
+            worker._prune_profiles()
+    
+>       assert not oldest.exists()
+E       AssertionError: assert not True
+E        +  where True = exists()
+E        +    where exists = PosixPath('/tmp/pytest-of-nathan/pytest-167/test_profile_pruning_enforces_0/data/web_fetch/profiles/4444444444444444444444444444444444444444444444444444444444444444').exists
+
+tests/test_browser_cli_plugin.py:226: AssertionError
+_ BunshinSandboxTests.test_all_bunshin_execution_fails_closed_without_supported_backend _
+
+self = <tests.test_bunshin_sandbox.BunshinSandboxTests testMethod=test_all_bunshin_execution_fails_closed_without_supported_backend>
+
+    def test_all_bunshin_execution_fails_closed_without_supported_backend(self) -> None:
+        pack = BunshinInvocationPack(invocation_id="no-sandbox", goal="inspect")
+    
+        with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value=""):
+>           with self.assertRaisesRegex(RuntimeError, "requires bubblewrap"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AssertionError: RuntimeError not raised
+
+tests/test_bunshin_sandbox.py:390: AssertionError
+_ BunshinSandboxTests.test_git_shim_delegates_reads_and_rejects_every_other_classification _
+
+self = <tests.test_bunshin_sandbox.BunshinSandboxTests testMethod=test_git_shim_delegates_reads_and_rejects_every_other_classification>
+
+    def test_git_shim_delegates_reads_and_rejects_every_other_classification(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+    
+            def request_sync(self, method: str, params: dict[str, str]) -> dict[str, object]:
+                self.calls.append((method, dict(params)))
+                policy = classify_git_command(params.get("cmd"))
+                if policy.operation_kind != "read":
+                    raise RuntimeError(
+                        "only classified read-only Git commands are allowed: "
+                        + (policy.reason or "blocked")
+                    )
+                return {"returncode": 0, "stdout": " M src/router.py\n", "stderr": ""}
+    
+        client = Client()
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {PAL_BUNSHIN_RUNTIME_ROOT_ENV: "/runtime"}),
+            patch("pal.bunshin.git_shim.role_gateway_client_from_env", return_value=client),
+            patch("pal.bunshin.git_shim.os.getcwd", return_value="/repo"),
+            patch("sys.stdout", stdout),
+        ):
+            returncode = git_shim_main(["status", "--short"])
+    
+>       self.assertEqual(returncode, 0)
+E       AssertionError: 126 != 0
+
+tests/test_bunshin_sandbox.py:598: AssertionError
+----------------------------- Captured stderr call -----------------------------
+read-only Git gateway is unavailable: assignment token is missing
+_ BunshinSandboxTests.test_lightweight_git_shim_uses_role_gateway_wire_protocol _
+
+self = <tests.test_bunshin_sandbox.BunshinSandboxTests testMethod=test_lightweight_git_shim_uses_role_gateway_wire_protocol>
+
+    def test_lightweight_git_shim_uses_role_gateway_wire_protocol(self) -> None:
+        client_socket, server_socket = socket.socketpair()
+        observed: list[dict[str, object]] = []
+    
+        def serve() -> None:
+            try:
+                raw_size = server_socket.recv(4)
+                size = int.from_bytes(raw_size, "big")
+                raw_request = bytearray()
+                while len(raw_request) < size:
+                    raw_request.extend(server_socket.recv(size - len(raw_request)))
+                request = msgpack.unpackb(bytes(raw_request), raw=False)
+                observed.append(dict(request))
+                response = msgpack.packb(
+                    {
+                        "type": "response",
+                        "id": request["id"],
+                        "ok": True,
+                        "result": {"returncode": 0, "stdout": "main\n", "stderr": ""},
+                    },
+                    use_bin_type=True,
+                )
+                server_socket.sendall(len(response).to_bytes(4, "big") + response)
+            finally:
+                server_socket.close()
+    
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            with patch("pal.bunshin.git_shim._open_role_gateway", return_value=client_socket):
+>               result = _RoleGatewayClient(Path("/runtime"), "assignment-token").request_sync(
+                    "git_read",
+                    {"cmd": "status --short", "cwd": "/repo"},
+                )
+
+tests/test_bunshin_sandbox.py:664: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/pal/bunshin/git_shim.py:109: in request_sync
+    with _open_role_gateway(self.runtime_root) as connection:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+runtime_root = PosixPath('/runtime')
+
+    def _open_role_gateway(runtime_root: Path) -> socket.socket:
+        endpoint_root = runtime_root / "data" / "bunshin-role"
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(_ROLE_GATEWAY_TIMEOUT_SECONDS)
+>       connection.connect(str(endpoint_root / "role.sock"))
+E       FileNotFoundError: [Errno 2] No such file or directory
+
+src/pal/bunshin/git_shim.py:135: FileNotFoundError
+____________ test_known_validation_rejection_does_not_query_receipt ____________
+
+    def test_known_validation_rejection_does_not_query_receipt():
+        store = object.__new__(SubmissionDraftStore)
+        store._role_gateway = Mock()
+        error = BunshinManagerRpcError('missing sink', kind='submission_validation')
+        store._role_gateway.request_sync.side_effect = error
+        context = Mock(authoring_contract_version=AUTHORING_CONTRACT_VERSION, role='reviewer', mode='architecture')
+        with pytest.raises(BunshinManagerRpcError) as caught:
+            store.mark_submitted(context, expected_version=1, submission_payload={})
+        assert caught.value is error
+>       store._role_gateway.request_sync.assert_called_once()
+
+tests/test_bunshin_submission_errors.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Mock name='mock.request_sync' id='547162788528'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'request_sync' to have been called once. Called 2 times.
+E           Calls: [call('draft_submit', {'context': <Mock name='mock.to_dict()' id='547162785840'>, 'expected_version': 1, 'submission': {}}),
+E            call('submission_status', {})].
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+__ WorkItemProtocolTests.test_contract_submit_requires_complete_manager_seed ___
+
+self = <tests.test_bunshin_v2_contract_protocol.WorkItemProtocolTests testMethod=test_contract_submit_requires_complete_manager_seed>
+
+    def test_contract_submit_requires_complete_manager_seed(self) -> None:
+        premature = contract_submit_tool_result(
+            new_tool_call(
+                name="op_bunshin_contract_submit",
+                args={},
+                call_id="submit-premature",
+            ),
+            self.workspace,
+        )
+        self.assertFalse(premature.ok)
+        self.assertIn("complete every checklist item", premature.llm_text)
+>       self.assertEqual(premature.invocation_result.kind, "rejected")
+E       AssertionError: 'failed' != 'rejected'
+E       - failed
+E       + rejected
+
+tests/test_bunshin_v2_contract_protocol.py:606: AssertionError
+_ BunshinV2WorkerIdentityTests.test_workspace_holder_check_ignores_only_the_manager_snapshot_lock (label='same process also holds a source file') _
+
+self = <tests.test_bunshin_v2_public.BunshinV2WorkerIdentityTests testMethod=test_workspace_holder_check_ignores_only_the_manager_snapshot_lock>
+
+    def test_workspace_holder_check_ignores_only_the_manager_snapshot_lock(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="pal-v2-holder-filter-"))
+        self.addCleanup(shutil.rmtree, workspace, True)
+        lock_path = workspace / ".git" / "pal-bunshin-v2.snapshot.lock"
+        lock_path.parent.mkdir()
+        lock_path.touch()
+        manager_lock = WorkspaceProcessHolder(
+            pid=os.getpid(),
+            process_group=os.getpgrp(),
+            command="python",
+            write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+        )
+    
+        with patch(
+            "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+            return_value=(manager_lock,),
+        ):
+            _raise_if_workspace_held(
+                workspace,
+                "workspace is held",
+                manager_snapshot_lock=lock_path,
+            )
+    
+        unexpected_holders = {
+            "same process also holds a source file": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(
+                    ".git/pal-bunshin-v2.snapshot.lock",
+                    "src/module.cpp",
+                ),
+            ),
+            "another process holds the lock": WorkspaceProcessHolder(
+                pid=os.getpid() + 1,
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+            "manager cwd remains in the workspace": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                holds_cwd=True,
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+        }
+        for label, holder in unexpected_holders.items():
+            with self.subTest(label=label), patch(
+                "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+                return_value=(holder,),
+            ):
+>               with self.assertRaisesRegex(RuntimeError, "workspace is held"):
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AssertionError: RuntimeError not raised
+
+tests/test_bunshin_v2_public.py:251: AssertionError
+_ BunshinV2WorkerIdentityTests.test_workspace_holder_check_ignores_only_the_manager_snapshot_lock (label='another process holds the lock') _
+
+self = <tests.test_bunshin_v2_public.BunshinV2WorkerIdentityTests testMethod=test_workspace_holder_check_ignores_only_the_manager_snapshot_lock>
+
+    def test_workspace_holder_check_ignores_only_the_manager_snapshot_lock(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="pal-v2-holder-filter-"))
+        self.addCleanup(shutil.rmtree, workspace, True)
+        lock_path = workspace / ".git" / "pal-bunshin-v2.snapshot.lock"
+        lock_path.parent.mkdir()
+        lock_path.touch()
+        manager_lock = WorkspaceProcessHolder(
+            pid=os.getpid(),
+            process_group=os.getpgrp(),
+            command="python",
+            write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+        )
+    
+        with patch(
+            "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+            return_value=(manager_lock,),
+        ):
+            _raise_if_workspace_held(
+                workspace,
+                "workspace is held",
+                manager_snapshot_lock=lock_path,
+            )
+    
+        unexpected_holders = {
+            "same process also holds a source file": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(
+                    ".git/pal-bunshin-v2.snapshot.lock",
+                    "src/module.cpp",
+                ),
+            ),
+            "another process holds the lock": WorkspaceProcessHolder(
+                pid=os.getpid() + 1,
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+            "manager cwd remains in the workspace": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                holds_cwd=True,
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+        }
+        for label, holder in unexpected_holders.items():
+            with self.subTest(label=label), patch(
+                "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+                return_value=(holder,),
+            ):
+>               with self.assertRaisesRegex(RuntimeError, "workspace is held"):
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AssertionError: RuntimeError not raised
+
+tests/test_bunshin_v2_public.py:251: AssertionError
+_ BunshinV2WorkerIdentityTests.test_workspace_holder_check_ignores_only_the_manager_snapshot_lock (label='manager cwd remains in the workspace') _
+
+self = <tests.test_bunshin_v2_public.BunshinV2WorkerIdentityTests testMethod=test_workspace_holder_check_ignores_only_the_manager_snapshot_lock>
+
+    def test_workspace_holder_check_ignores_only_the_manager_snapshot_lock(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="pal-v2-holder-filter-"))
+        self.addCleanup(shutil.rmtree, workspace, True)
+        lock_path = workspace / ".git" / "pal-bunshin-v2.snapshot.lock"
+        lock_path.parent.mkdir()
+        lock_path.touch()
+        manager_lock = WorkspaceProcessHolder(
+            pid=os.getpid(),
+            process_group=os.getpgrp(),
+            command="python",
+            write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+        )
+    
+        with patch(
+            "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+            return_value=(manager_lock,),
+        ):
+            _raise_if_workspace_held(
+                workspace,
+                "workspace is held",
+                manager_snapshot_lock=lock_path,
+            )
+    
+        unexpected_holders = {
+            "same process also holds a source file": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(
+                    ".git/pal-bunshin-v2.snapshot.lock",
+                    "src/module.cpp",
+                ),
+            ),
+            "another process holds the lock": WorkspaceProcessHolder(
+                pid=os.getpid() + 1,
+                process_group=os.getpgrp(),
+                command="python",
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+            "manager cwd remains in the workspace": WorkspaceProcessHolder(
+                pid=os.getpid(),
+                process_group=os.getpgrp(),
+                command="python",
+                holds_cwd=True,
+                write_paths=(".git/pal-bunshin-v2.snapshot.lock",),
+            ),
+        }
+        for label, holder in unexpected_holders.items():
+            with self.subTest(label=label), patch(
+                "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+                return_value=(holder,),
+            ):
+>               with self.assertRaisesRegex(RuntimeError, "workspace is held"):
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               AssertionError: RuntimeError not raised
+
+tests/test_bunshin_v2_public.py:251: AssertionError
+_ BunshinV2PublicSurfaceTests.test_architect_quiesce_releases_managed_lsp_before_holder_check _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_architect_quiesce_releases_managed_lsp_before_holder_check>
+
+    def test_architect_quiesce_releases_managed_lsp_before_holder_check(self) -> None:
+        worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
+        workspace = self.runtime_root / "architecture-worktree"
+        workspace.mkdir()
+        revision = SimpleNamespace(
+            workflow_id="wf-quiesce-lsp",
+            aggregate_id="arch-quiesce-lsp",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            state="ARCHITECT_QUIESCING",
+            version=4,
+            payload={
+                "active_worker_id": "inv-architect",
+                "lease_resource_key": "architecture:arch-quiesce-lsp:writer",
+                "fencing_token": 3,
+                "architecture_workspace_path": str(workspace),
+            },
+        )
+    
+        async def ensure_effect_lease(_snapshot, *, action_type):
+            self.assertEqual(action_type, "REBIND_ARCHITECT_QUIESCER")
+            return revision
+    
+        released: list[Path] = []
+    
+        async def release_lsp(target: Path):
+            released.append(target)
+            return {"status": "ok", "released_count": 1}
+    
+        holder_checks: list[bool] = []
+    
+        def holders(_target: Path):
+            holder_checks.append(bool(released))
+            return ()
+    
+        worker._effect_snapshot = lambda _effect: revision
+        worker._ensure_architecture_effect_lease = ensure_effect_lease  # type: ignore[method-assign]
+        worker._release_managed_lsp_workspace = release_lsp  # type: ignore[method-assign]
+        worker.repository.assert_fencing_token = lambda *_args: None
+        worker.repository.read_lease = lambda _key: {"metadata": {}}
+        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(version=4)
+        actions: list[ActionEnvelope] = []
+        worker.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+    
+        with (
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders", side_effect=holders),
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_content_fingerprint", return_value="tree"),
+        ):
+>           asyncio.run(worker._quiesce_architect_role({"effect_key": "quiesce-lsp"}))
+
+tests/test_bunshin_v2_public.py:4152: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:5338: in _quiesce_architect_role
+    fingerprint = workspace_content_fingerprint(workspace)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/execution.py:2790: in workspace_content_fingerprint
+    paths = _git_bytes(worktree, "ls-files", "-co", "--exclude-standard", "-z").split(b"\0")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/execution.py:3261: in _git_bytes
+    return subprocess.run(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['git', 'ls-files', '-co', '--exclude-standard', '-z'],)
+kwargs = {'cwd': PosixPath('/tmp/pal_bunshin_v2_public_7uzo6uxr/architecture-worktree'), 'stderr': -1, 'stdout': -1}
+process = <Popen: returncode: 128 args: ['git', 'ls-files', '-co', '--exclude-standard...>
+stdout = b''
+stderr = b'fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n'
+retcode = 128
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+    
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+    
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output & stderr attributes if those streams
+        were captured.
+    
+        If timeout (seconds) is given and the process takes too long,
+         a TimeoutExpired exception will be raised.
+    
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+    
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+    
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+    
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+    
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+>               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['git', 'ls-files', '-co', '--exclude-standard', '-z']' returned non-zero exit status 128.
+
+/usr/lib/python3.13/subprocess.py:577: CalledProcessError
+_ BunshinV2PublicSurfaceTests.test_human_edit_closes_previous_architect_session_before_new_revision _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_human_edit_closes_previous_architect_session_before_new_revision>
+
+    def test_human_edit_closes_previous_architect_session_before_new_revision(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        processor = BunshinV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
+        previous = SimpleNamespace(
+            workflow_id="wf-edit",
+            aggregate_id="arch-edit-1",
+            payload={
+                "request_ref": {"sha256": "request"},
+                "requirements_ref": {"sha256": "requirements"},
+                "edit_instruction_ref": {"sha256": "edit"},
+                "architecture_manifest_ref": {"sha256": "skeleton"},
+                "revision_number": 1,
+                "research_mode": "local_only",
+            },
+        )
+        processor._effect_snapshot = lambda _effect: previous
+        completed: list[str] = []
+        processor.repository.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
+            invocation_id
+        ) or True
+        actions: list[ActionEnvelope] = []
+        processor.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor._link_workflow = lambda *_args, **_kwargs: None
+    
+        with patch(
+            "pal.bunshin.v2.orchestration.WorkflowCoordinator.begin_plan_revision"
+        ) as begin_revision:
+>           processor._create_revision({"effect_key": "event-edit:0"})
+
+tests/test_bunshin_v2_public.py:2555: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/pal/bunshin/v2/orchestration.py:1172: in _create_revision
+    WorkflowCoordinator(self.repository).begin_plan_revision(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = WorkflowCoordinator(repository=BunshinV2Repository(runtime_root=PosixPath('/tmp/pal_bunshin_v2_public_08kibgkc'), engine=<pal.bunshin.v2.engine.TransitionEngine object at 0x7f6e42e5d0>))
+
+    def begin_plan_revision(
+        self,
+        *,
+        workflow_id: str,
+        _connection: sqlite3.Connection | None = None,
+    ) -> PlanCycle:
+        cycle = self.ensure_plan_cycle(
+            workflow_id=workflow_id,
+            _connection=_connection,
+        )
+        if cycle.state == PlanCycleState.HUMAN_REVIEW:
+            updated = cycle.transition(CycleAction.HUMAN_EDITED)
+        elif cycle.state == PlanCycleState.ACCEPTED:
+            updated = replace(
+                cycle,
+                generation=cycle.generation + 1,
+                state=PlanCycleState.REPAIR_READY,
+                active_assignment=None,
+                product_ref="",
+                accepted_product_ref="",
+                last_verdict=None,
+            )
+        elif cycle.state == PlanCycleState.REPAIR_READY:
+            return cycle
+        else:
+>           raise RuntimeError(
+                "a new plan revision requires a quiescent accepted or repair cycle"
+            )
+E           RuntimeError: a new plan revision requires a quiescent accepted or repair cycle
+
+src/pal/bunshin/v2/workflow_runtime.py:134: RuntimeError
+_ BunshinV2PublicSurfaceTests.test_human_edit_rebinds_replan_epoch_to_child_revision_atomically _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_human_edit_rebinds_replan_epoch_to_child_revision_atomically>
+
+    def test_human_edit_rebinds_replan_epoch_to_child_revision_atomically(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        processor = BunshinV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
+        previous = SimpleNamespace(
+            workflow_id="wf-replan-edit",
+            aggregate_id="arch-replan-1",
+            payload={
+                "request_ref": {"sha256": "request"},
+                "requirements_ref": {"sha256": "requirements"},
+                "edit_instruction_ref": {"sha256": "edit"},
+                "architecture_manifest_ref": {"sha256": "skeleton"},
+                "architecture_cycle_id": "arch-replan-root",
+                "source_execution_epoch_id": "epoch-replan",
+                "replan_generation": 4,
+                "replan_finding_batch_ref": {"sha256": "findings"},
+                "revision_number": 2,
+                "research_mode": "local_only",
+            },
+        )
+        epoch = SimpleNamespace(
+            workflow_id=previous.workflow_id,
+            aggregate_id="epoch-replan",
+            aggregate_type=AggregateType.EXECUTION_EPOCH,
+            state="REPLAN_REQUIRED",
+            version=7,
+            payload={"active_replan_revision_id": previous.aggregate_id},
+        )
+        processor._effect_snapshot = lambda _effect: previous
+        processor.repository.read_snapshot = lambda *_args, **_kwargs: epoch
+        actions: list[ActionEnvelope] = []
+        processor.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        linked: list[dict[str, str]] = []
+        processor._link_workflow = (
+            lambda _workflow_id, _action_type, payload, *_args, **_kwargs: linked.append(
+                dict(payload)
+            )
+        )
+    
+        with patch(
+            "pal.bunshin.v2.orchestration.WorkflowCoordinator.begin_plan_revision"
+        ):
+>           processor._create_revision({"effect_key": "event-replan-edit:0"})
+
+tests/test_bunshin_v2_public.py:2653: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/pal/bunshin/v2/orchestration.py:1172: in _create_revision
+    WorkflowCoordinator(self.repository).begin_plan_revision(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = WorkflowCoordinator(repository=BunshinV2Repository(runtime_root=PosixPath('/tmp/pal_bunshin_v2_public_zscal_hw'), engine=<pal.bunshin.v2.engine.TransitionEngine object at 0x7f6cb78230>))
+
+    def begin_plan_revision(
+        self,
+        *,
+        workflow_id: str,
+        _connection: sqlite3.Connection | None = None,
+    ) -> PlanCycle:
+        cycle = self.ensure_plan_cycle(
+            workflow_id=workflow_id,
+            _connection=_connection,
+        )
+        if cycle.state == PlanCycleState.HUMAN_REVIEW:
+            updated = cycle.transition(CycleAction.HUMAN_EDITED)
+        elif cycle.state == PlanCycleState.ACCEPTED:
+            updated = replace(
+                cycle,
+                generation=cycle.generation + 1,
+                state=PlanCycleState.REPAIR_READY,
+                active_assignment=None,
+                product_ref="",
+                accepted_product_ref="",
+                last_verdict=None,
+            )
+        elif cycle.state == PlanCycleState.REPAIR_READY:
+            return cycle
+        else:
+>           raise RuntimeError(
+                "a new plan revision requires a quiescent accepted or repair cycle"
+            )
+E           RuntimeError: a new plan revision requires a quiescent accepted or repair cycle
+
+src/pal/bunshin/v2/workflow_runtime.py:134: RuntimeError
+_ BunshinV2PublicSurfaceTests.test_profile_worker_preserves_scheduler_lease_owner_id _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_profile_worker_preserves_scheduler_lease_owner_id>
+
+    def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
+        worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
+        leased_invocation_id = "inv_scheduler_owned"
+        scheduler_lease = worker.repository.claim_lease(
+            "architecture:arch-lease-owner:architect",
+            leased_invocation_id,
+            ttl_seconds=120,
+        )
+        captured: dict[str, object] = {}
+        admission_events: list[str] = []
+        self._create_role_scope(
+            worker.service,
+            workflow_id="wf-lease-owner",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="arch-lease-owner",
+            module_name="lease_owner",
+        )
+    
+        def capture_invocation(**kwargs) -> None:
+            captured["invocation_id"] = str(kwargs["invocation_id"])
+            raise RuntimeError("stop-after-invocation-record")
+    
+        acquire_process_slot = worker._role_supervisor.acquire_process_slot
+        claim_role_assignment = worker.repository.claim_role_assignment
+    
+        async def capture_process_slot(run_id: str):
+            admission_events.append("process_permit")
+            return await acquire_process_slot(run_id)
+    
+        def capture_attempt(*args, **kwargs):
+            admission_events.append("attempt")
+            return claim_role_assignment(*args, **kwargs)
+    
+        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
+            payload={
+                "family_binding_ref": {"sha256": "binding"},
+            }
+        )
+        worker.repository.record_role_invocation = capture_invocation
+        snapshot = SimpleNamespace(
+            workflow_id="wf-lease-owner",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="arch-lease-owner",
+            payload={
+                "research_mode": "local_only",
+                "module_name": "lease_owner",
+                "execution_adapter": "software_git.v2",
+            },
+        )
+        identity = lambda pack, **_kwargs: pack
+    
+        def capture_sandbox_pack(_runtime_root, pack, **_kwargs):
+            captured["control_route"] = dict(
+                dict(pack.metadata.get("bunshin_v2") or {}).get("control_route") or {}
+            )
+            captured["response_key"] = str(
+                dict(pack.metadata.get("agent_session") or {}).get("response_key")
+                or ""
+            )
+            return pack
+    
+        binding = {
+            "schema_version": "7",
+            "family_id": "software_engineering",
+            "execution_adapter": "software_git.v2",
+            "architecture_definition": {
+                "specialization_id": "software_engineering.v1",
+                "family_id": "software_engineering",
+                "generation_hash": "a" * 64,
+                "schema_ref": {"sha256": "schema"},
+                "template_ref": {"sha256": "template"},
+                "satellite_template_ref": {"sha256": "satellite"},
+            },
+            "policies": {},
+            "role_bindings": {
+                role: {
+                    "participant": "profile",
+                    "selector": profile,
+                    "role_profile": {
+                        "profile_id": profile.rsplit(".", 1)[-1],
+                        "profile_group": "software_engineering",
+                        "canonical_profile_id": profile,
+                        "role": {
+                            "kind": role,
+                            "modes": {
+                                "architect": ["author", "revision"],
+                                "reviewer": ["architecture", "standalone"],
+                                "implementation": ["produce", "repair"],
+                                "verifier": ["module", "system"],
+                            }[role],
+                            "playbook": {"steps": []},
+                        },
+                    },
+                }
+                for role, profile in {
+                    "architect": "software_engineering.v2_architect",
+                    "reviewer": "software_engineering.v2_reviewer",
+                    "implementation": "software_engineering.v2_coder",
+                    "verifier": "software_engineering.v2_verifier",
+                }.items()
+            },
+        }
+        with (
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
+            patch.object(
+                worker.service.artifacts,
+                "read_json",
+                return_value=binding,
+            ),
+            patch.object(
+                worker._role_supervisor,
+                "acquire_process_slot",
+                capture_process_slot,
+            ),
+            patch.object(
+                worker.repository,
+                "claim_role_assignment",
+                capture_attempt,
+            ),
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.resolve_pinned_bunshin_pack", lambda pack, **_kwargs: pack),
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
+            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
+            patch(
+                "pal.bunshin.v2.semantic_orchestration.orchestrator.with_bunshin_sandbox_metadata",
+                capture_sandbox_pack,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop-after-invocation-record"):
+>               asyncio.run(
+                    worker._run_profile(
+                        effect={"effect_id": "eff-lease-owner", "effect_key": "event:0"},
+                        snapshot=snapshot,
+                        invocation_id=leased_invocation_id,
+                        lease_resource="architecture:arch-lease-owner:architect",
+                        fencing_token=scheduler_lease.fencing_token,
+                        profile="software_engineering.v2_coder",
+                        activation=RoleActivation(
+                            OrchestrationRole.IMPLEMENTATION,
+                            RoleMode.PRODUCE,
+                        ),
+                        instruction="produce architecture",
+                        reference_refs={},
+                        prepare_workspace=False,
+                    )
+                )
+
+tests/test_bunshin_v2_public.py:4717: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:6305: in _run_profile
+    return await self._run_profile_inner(
+src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:6426: in _run_profile_inner
+    request = workflow_request_from_snapshot(self.service, workflow)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def workflow_request_from_snapshot(
+        service: BunshinV2WorkflowService,
+        workflow: AggregateSnapshot,
+    ) -> dict[str, Any]:
+        request_ref = dict(workflow.payload.get("request_ref") or {})
+        if not request_ref:
+>           raise ValueError("workflow has no request artifact")
+E           ValueError: workflow has no request artifact
+
+src/pal/bunshin/v2/service.py:1831: ValueError
+_ BunshinV2PublicSurfaceTests.test_skeleton_architect_failure_releases_writer_lease _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_skeleton_architect_failure_releases_writer_lease>
+
+    def test_skeleton_architect_failure_releases_writer_lease(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        worker = SemanticOrchestrator(service)
+        requirements_ref = service.task_ledger.publish(
+            title="Routing",
+            task_spec={"objective": "Route requests deterministically."},
+            actor="test",
+            source_channel="test",
+        )
+        snapshot_ref = service.artifacts.put_json({}, artifact_type="WorkspaceSnapshotArtifact")
+        worktree = self.runtime_root / "failed-architecture-worktree"
+        worktree.mkdir()
+        revision = SimpleNamespace(
+            workflow_id="wf-lease-failure",
+            aggregate_id="arch-lease-failure",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            state="ARCHITECT_QUEUED",
+            version=1,
+            payload={"requirements_ref": requirements_ref.to_dict()},
+        )
+        running = SimpleNamespace(**{**revision.__dict__, "state": "ARCHITECT_RUNNING", "version": 2})
+        worker._architecture_worker_suppressed = lambda *_args, **_kwargs: False
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.service.skeleton.provision_architecture_workspace = lambda **_kwargs: ArchitectureWorkspace(
+            worktree=worktree,
+            common_git_dir=self.runtime_root / "failed.git",
+            base_sha="base",
+            base_tree_sha="tree",
+            original_head="",
+            source_fingerprint="source",
+            workspace_snapshot_ref=snapshot_ref,
+        )
+        worker.repository.read_snapshot = lambda aggregate_type, _aggregate_id: (
+            SimpleNamespace(payload={}, state="ACTIVE")
+            if aggregate_type == AggregateType.WORKFLOW
+            else running
+        )
+        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=9)
+        worker.repository.engine.legal_actions = lambda *_args: {"START_ARCHITECT"}
+        worker.repository.dispatch = lambda _action, **_kwargs: SimpleNamespace(
+            snapshot=running
+        )
+        released: list[tuple[object, ...]] = []
+        worker.repository.release_lease = lambda *args: released.append(args)
+    
+        async def fail_profile(**_kwargs):
+            raise RuntimeError("architect failed")
+    
+        worker._run_profile = fail_profile
+        with patch(
+            "pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
+            return_value={"workspace": {"kind": "existing_repo"}, "references": []},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "architect failed"):
+>               asyncio.run(
+                    worker._run_skeleton_architecture_stage(
+                        {"effect_id": "eff-failure", "effect_key": "event:0"}, revision
+                    )
+                )
+
+tests/test_bunshin_v2_public.py:4449: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:4896: in _run_skeleton_architecture_stage
+    request = workflow_request_from_snapshot(self.service, workflow)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def workflow_request_from_snapshot(
+        service: BunshinV2WorkflowService,
+        workflow: AggregateSnapshot,
+    ) -> dict[str, Any]:
+        request_ref = dict(workflow.payload.get("request_ref") or {})
+        if not request_ref:
+>           raise ValueError("workflow has no request artifact")
+E           ValueError: workflow has no request artifact
+
+src/pal/bunshin/v2/service.py:1831: ValueError
+_ BunshinV2PublicSurfaceTests.test_skeleton_architect_submission_hands_live_lease_to_quiescer _
+
+self = <tests.test_bunshin_v2_public.BunshinV2PublicSurfaceTests testMethod=test_skeleton_architect_submission_hands_live_lease_to_quiescer>
+
+    def test_skeleton_architect_submission_hands_live_lease_to_quiescer(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        worker = SemanticOrchestrator(service)
+        requirements_ref = service.task_ledger.publish(
+            title="Routing",
+            task_spec={"objective": "Route requests deterministically."},
+            actor="test",
+            source_channel="test",
+        )
+        workspace_snapshot_ref = service.artifacts.put_json(
+            {"snapshot_commit_sha": "base"}, artifact_type="WorkspaceSnapshotArtifact"
+        )
+        prompt_ref = service.artifacts.put_json({}, artifact_type="RolePromptPackArtifact")
+        terminal_ref = service.artifacts.put_json({}, artifact_type="WorkerResponseArtifact")
+        architecture_worktree = self.runtime_root / "architecture-worktree"
+        architecture_worktree.mkdir()
+        submission_path = self.runtime_root / "architect.yaml"
+        contract_definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        submission_path.write_text(
+            json.dumps(
+                {
+                    "contract_schema": "software_engineering.v1",
+                    "contract": contract_definition.example,
+                    "work_items": [
+                        {
+                            "kind": "phase",
+                            "summary": "contract projection",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        revision = SimpleNamespace(
+            workflow_id="wf-lease-handoff",
+            aggregate_id="arch-lease-handoff",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            state="ARCHITECT_QUEUED",
+            version=1,
+            payload={"requirements_ref": requirements_ref.to_dict()},
+        )
+        running = SimpleNamespace(**{**revision.__dict__, "state": "ARCHITECT_RUNNING", "version": 2})
+        workflow = SimpleNamespace(payload={"request_ref": {}}, state="ACTIVE")
+        worker._architecture_worker_suppressed = lambda *_args, **_kwargs: False
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.service.skeleton.provision_architecture_workspace = lambda **_kwargs: ArchitectureWorkspace(
+            worktree=architecture_worktree,
+            common_git_dir=self.runtime_root / "project.git",
+            base_sha="base",
+            base_tree_sha="tree",
+            original_head="",
+            source_fingerprint="source",
+            workspace_snapshot_ref=workspace_snapshot_ref,
+        )
+        worker.repository.read_snapshot = lambda aggregate_type, _aggregate_id: (
+            workflow if aggregate_type == AggregateType.WORKFLOW else running
+        )
+        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=7)
+        worker.repository.engine.legal_actions = lambda *_args: {"START_ARCHITECT"}
+        actions: list[ActionEnvelope] = []
+    
+        def dispatch(action: ActionEnvelope, **_settlement):
+            actions.append(action)
+            return SimpleNamespace(snapshot=running)
+    
+        worker.repository.dispatch = dispatch
+        worker.repository.read_role_assignment = lambda _assignment_id: {
+            "assignment_id": "assignment-lease-handoff",
+            "state": RoleAssignmentState.RESULT_RECORDED.value,
+            "submission_payload_hash": "lease-handoff-payload",
+        }
+        worker.repository.record_role_turn = lambda **_kwargs: None
+        released: list[tuple[object, ...]] = []
+        worker.repository.release_lease = lambda *args: released.append(args)
+        async def run_profile(**_kwargs):
+            return (
+                {
+                    "payload": {
+                        "artifacts": [
+                            {
+                                "path": str(submission_path),
+                                "role": "primary",
+                            },
+                        ],
+                        "role_assignment_id": "assignment-lease-handoff",
+                        "session_turn_index": 1,
+                    }
+                },
+                prompt_ref,
+                terminal_ref,
+            )
+    
+        worker._run_profile = run_profile
+        with patch(
+            "pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
+            return_value={"workspace": {"kind": "existing_repo"}, "references": []},
+        ):
+>           result = asyncio.run(
+                worker._run_skeleton_architecture_stage(
+                    {"effect_id": "eff-handoff", "effect_key": "event:0"}, revision
+                )
+            )
+
+tests/test_bunshin_v2_public.py:4378: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:4896: in _run_skeleton_architecture_stage
+    request = workflow_request_from_snapshot(self.service, workflow)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+service = BunshinV2WorkflowService(runtime_root=PosixPath('/tmp/pal_bunshin_v2_public_pe6ke428'), repository=BunshinV2Repository...8/data/bunshin/artifacts/sha256'))), task_ledger=<pal.bunshin.v2.task_ledger.TaskLedgerService object at 0x7f66006990>)
+workflow = namespace(payload={'request_ref': {}}, state='ACTIVE')
+
+    def workflow_request_from_snapshot(
+        service: BunshinV2WorkflowService,
+        workflow: AggregateSnapshot,
+    ) -> dict[str, Any]:
+        request_ref = dict(workflow.payload.get("request_ref") or {})
+        if not request_ref:
+>           raise ValueError("workflow has no request artifact")
+E           ValueError: workflow has no request artifact
+
+src/pal/bunshin/v2/service.py:1831: ValueError
+_ BunshinV2VerificationTests.test_rejected_candidate_submit_does_not_publish_primary_report _
+
+self = <tests.test_bunshin_v2_verification.BunshinV2VerificationTests testMethod=test_rejected_candidate_submit_does_not_publish_primary_report>
+
+    def test_rejected_candidate_submit_does_not_publish_primary_report(self) -> None:
+        repo = self.runtime_root / "rejected-candidate-repo"
+        (repo / "src/font").mkdir(parents=True)
+        source = repo / "src/font/backend.cpp"
+        source.write_text("int render() { return 0; }\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Pal Test"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "pal@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        source.write_text("int render() { return 1; }\n", encoding="utf-8")
+        work_view = self.runtime_root / "rejected-candidate-work-view.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "module_name": "font_backend",
+                    "requirements": {"sections": {}},
+                    "implementation_scopes": [{"kind": "directory", "path": "src/font"}],
+                    "verification_corpus": {
+                        "kind": "directory",
+                        "path": "tests/font_backend",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = self.runtime_root / "rejected-candidate-stage"
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "rejected-candidate-artifacts"),
+                "artifact_stage_dir": str(stage_dir),
+                "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
+            },
+            role="implementation",
+        )
+        planned = self._candidate_call(
+            workspace,
+            "op_bunshin_update_checklist",
+            {
+                "plan": [
+                    {
+                        "step": "implement and check the render contract",
+                        "status": "completed",
+                    }
+                ]
+            },
+        )
+        self.assertTrue(planned.ok, planned.text)
+        produced: list[dict[str, object]] = []
+        with (
+            patch(
+                "pal.bunshin.v2.candidate_builder.SubmissionDraftStore.uses_role_gateway",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch(
+                "pal.bunshin.v2.candidate_builder.SubmissionDraftStore.mark_submitted",
+                side_effect=ValueError("role submission is missing required input reads: repair_bill"),
+            ),
+        ):
+            rejected = self._candidate_call(
+                workspace,
+                "op_bunshin_candidate_submit",
+                produced=produced,
+            )
+    
+>       self.assertFalse(rejected.ok)
+E       AssertionError: True is not false
+
+tests/test_bunshin_v2_verification.py:2450: AssertionError
+_ TelegramControlBoundaryTests.test_candidate_items_render_body_and_native_inline_keyboard _
+
+self = <tests.test_control_plane.TelegramControlBoundaryTests testMethod=test_candidate_items_render_body_and_native_inline_keyboard>
+
+    async def test_candidate_items_render_body_and_native_inline_keyboard(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from pal.control.contracts import InteractionItemSpec
+        route = ControlRoute("telegram_main", "telegram", {"chat_id": "100", "user_id": "42"})
+        preview = InteractionButtonSpec("Preview", "control.action.dispatch", {
+            "action_kind": "memory_candidate_decision", "target_scope": "memory",
+            "target_id": "mr_test", "args": {"decision": "view", "revision": "1", "candidate_id": "c1"}})
+        spec = InteractionMessageSpec("mr_test", "memory_candidate_approval", route,
+            "Memory proposals: 1 pending", revision="1", items=(InteractionItemSpec(
+                "c1", "API preference", "Prefer explicit APIs.", "Pending", ((preview,),)),))
+        bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=10)))
+        self.endpoint.application = SimpleNamespace(bot=bot)
+        await self.endpoint._open_or_update_interaction_async(
+            ResponseHandle("telegram_main", route.reply_target), spec=spec, allow_update=False)
+        sent = bot.send_message.call_args.kwargs
+        self.assertIn("Prefer explicit APIs.", sent["text"])
+>       button = sent["reply_markup"].inline_keyboard[0][0]
+                 ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'reply_markup'
+
+tests/test_control_plane.py:2320: KeyError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+tests/test_architecture_skeleton.py: 27 warnings
+tests/test_dreaming_settings.py: 9 warnings
+tests/test_memory_dreaming.py: 9 warnings
+  /home/nathan/.local/lib/python3.13/site-packages/croniter/croniter.py:230: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    result = datetime.datetime.utcfromtimestamp(timestamp)
+
+tests/test_bunshin_sandbox.py::BunshinSandboxTests::test_slim_worker_runtime_publishes_read_only_skill_reference_tools
+  /home/nathan/.local/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-33 (serve)
+  
+  Traceback (most recent call last):
+    File "/usr/lib/python3.13/threading.py", line 1043, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/usr/lib/python3.13/threading.py", line 994, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nathan/Documents/coding/Pal-two-segment-v3/tests/test_bunshin_sandbox.py", line 645, in serve
+      request = msgpack.unpackb(bytes(raw_request), raw=False)
+    File "msgpack/_unpacker.pyx", line 205, in msgpack._cmsgpack.unpackb
+  ValueError: Unpack failed: incomplete input
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_bootstrap_and_repositories.py::PalV2TelegramEndpointTests::test_reopen_interaction_with_already_empty_keyboard_sends_new_card
+FAILED tests/test_bootstrap_and_repositories.py::PalV2TelegramEndpointTests::test_telegram_endpoint_observes_get_updates_timeout_as_poll_error
+FAILED tests/test_bootstrap_and_repositories.py::PalV2TelegramEndpointTests::test_telegram_endpoint_reconnects_after_observed_get_updates_timeout
+FAILED tests/test_bootstrap_and_repositories.py::PalV2TelegramEndpointTests::test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message
+FAILED tests/test_bootstrap_and_repositories.py::PalV2TelegramEndpointTests::test_telegram_endpoint_uses_separate_get_updates_connection_pool
+FAILED tests/test_browser_cli_plugin.py::test_profile_pruning_enforces_lru_byte_cap
+FAILED tests/test_bunshin_sandbox.py::BunshinSandboxTests::test_all_bunshin_execution_fails_closed_without_supported_backend
+FAILED tests/test_bunshin_sandbox.py::BunshinSandboxTests::test_git_shim_delegates_reads_and_rejects_every_other_classification
+FAILED tests/test_bunshin_sandbox.py::BunshinSandboxTests::test_lightweight_git_shim_uses_role_gateway_wire_protocol
+FAILED tests/test_bunshin_submission_errors.py::test_known_validation_rejection_does_not_query_receipt
+FAILED tests/test_bunshin_v2_contract_protocol.py::WorkItemProtocolTests::test_contract_submit_requires_complete_manager_seed
+SUBFAILED(label='same process also holds a source file') tests/test_bunshin_v2_public.py::BunshinV2WorkerIdentityTests::test_workspace_holder_check_ignores_only_the_manager_snapshot_lock
+SUBFAILED(label='another process holds the lock') tests/test_bunshin_v2_public.py::BunshinV2WorkerIdentityTests::test_workspace_holder_check_ignores_only_the_manager_snapshot_lock
+SUBFAILED(label='manager cwd remains in the workspace') tests/test_bunshin_v2_public.py::BunshinV2WorkerIdentityTests::test_workspace_holder_check_ignores_only_the_manager_snapshot_lock
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_architect_quiesce_releases_managed_lsp_before_holder_check
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_human_edit_closes_previous_architect_session_before_new_revision
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_human_edit_rebinds_replan_epoch_to_child_revision_atomically
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_profile_worker_preserves_scheduler_lease_owner_id
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_skeleton_architect_failure_releases_writer_lease
+FAILED tests/test_bunshin_v2_public.py::BunshinV2PublicSurfaceTests::test_skeleton_architect_submission_hands_live_lease_to_quiescer
+FAILED tests/test_bunshin_v2_verification.py::BunshinV2VerificationTests::test_rejected_candidate_submit_does_not_publish_primary_report
+FAILED tests/test_control_plane.py::TelegramControlBoundaryTests::test_candidate_items_render_body_and_native_inline_keyboard
+22 failed, 3050 passed, 7 skipped, 48 warnings, 486 subtests passed in 1575.64s (0:26:15)
+REGRESSION_EXIT=1

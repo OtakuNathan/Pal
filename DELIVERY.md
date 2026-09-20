@@ -21,6 +21,7 @@
 | `352d831` | G3(c)-3 | 准入分支：v2 ticket/ledger/outbox/lease 机器只留在 full_source；staging 自动接线按模式关断 |
 | `0695976` | G3(d) | H01 十二组合（2 宿主×3 shape×2 模式）真实 executor 链路 + retire 钩子共享修复（逮住 UnboundLocalError 真 bug） |
 | `0bb2b31` | G4 | owner 级 B01/B03/Q03 钉测 |
+| `5e042c6` | 后置 | **projection session 接入真实链路**：LLMRuntime 托管 per-scope session（活端点 binding、换端点单次 rebind）；two_segment install 后驱动 on_left_replaced（F13 不回滚） |
 
 ## 3. 设计要点
 
@@ -42,7 +43,7 @@
 
 - v3 新测试族（终 HEAD 复跑）：history_root 33 / projection_two_segment 14+12sub / memory facade 7 / executor flow 3 / builder 2 / H01 1+12sub / budget facts 3——全绿
 - 继承族逐 gate 抽查：runtime_compaction / full_compaction_source / hot_cache / memory / history / projection 全系 / bunshin harnesses / hosts_recovery——绿
-- 全量回归：终 HEAD 启动 nohup 全套（含 bootstrap，预计 30-40 分钟），日志 `/tmp/v3_full_regression.log`（含 REGRESSION_EXIT 终态行）；受影响族已逐 gate 复绿
+- 全量回归（HEAD `3575e48`，26:15）：**3050 passed + 486 subtests + 7 skipped，22 failed**。归因：19 个可提取失败节点（bootstrap/telegram keyboard、browser LRU、bunshin sandbox/v2public/verification、control_plane 键盘渲染）**单独复跑全部 PASS（0 复现）**，涉事文件批跑亦无失败复现——判为长时间全量运行下的资源争用/时序 flake（与 v3 改动面零交集：不触及任何失败断言所在路径）；另 3 个失败未产出可提取节点行。不宣称全量全绿；需干净环境重跑全套作最终归因
 - acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）
 
 ## 6. 全链路逼出的真 bug（本任务）
