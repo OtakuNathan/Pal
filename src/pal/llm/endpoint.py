@@ -20,7 +20,7 @@ from pal.llm.models import LLMEndpointModel
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes import codec_for_shape
-from pal.llm.shapes.base import ShapeContext
+from pal.llm.shapes.base import EncodedRequest, ShapeContext
 from pal.llm.transport import (
     DirectSDKTransport,
     EncodedTransportRequest,
@@ -76,20 +76,27 @@ class ShapeEndpointInvoker:
     def invoke(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         stream: bool = False, timeout_seconds: float = 600.0,
+        projection: EncodedRequest | None = None,
     ) -> tuple[LLMResponseIR, tuple[LLMResponseUpdate, ...]]:
-        updates = tuple(self._iterate(endpoint, request, stream=stream, timeout_seconds=timeout_seconds))
+        updates = tuple(self._iterate(endpoint, request, stream=stream,
+                                      timeout_seconds=timeout_seconds,
+                                      projection=projection))
         return updates[-1].response, updates
 
     def invoke_updates(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         timeout_seconds: float = 600.0, stream_control: LLMStreamControl | None = None,
+        projection: EncodedRequest | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         yield from self._iterate(endpoint, request, stream=True,
-                                 timeout_seconds=timeout_seconds, stream_control=stream_control)
+                                 timeout_seconds=timeout_seconds,
+                                 stream_control=stream_control,
+                                 projection=projection)
 
     def _iterate(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         stream: bool, timeout_seconds: float, stream_control: LLMStreamControl | None = None,
+        projection: EncodedRequest | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         shape = WireShape(str(endpoint.wire_shape))
         capabilities = dict(endpoint.capabilities_blob or {})
@@ -104,7 +111,17 @@ class ShapeEndpointInvoker:
             base_url=str(endpoint.base_url or ""), capabilities=capabilities,
         )
         codec = codec_for_shape(shape)
-        raw_encoded = codec.encode(request, context)
+        # N3 (review NEXT_STEPS §4.1): the owner may hand the immutable,
+        # already-projected wire encode for THIS attempt — typed input, not
+        # a mutable session smuggled through metadata.  Prepared owner-side
+        # against the resolved endpoint, it replaces the raw codec encode
+        # exactly here; every downstream consumer (cache coordinator,
+        # transport, decode) sees the same bytes it would have produced.
+        raw_encoded = (
+            projection
+            if projection is not None
+            else codec.encode(request, context)
+        )
         request_id = f"llm_{uuid4().hex}"
         started_at = time.monotonic()
         evidence = WireResponseEvidence(shape)
