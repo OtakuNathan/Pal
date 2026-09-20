@@ -23,6 +23,7 @@
 | `0bb2b31` | G4 | owner 级 B01/B03/Q03 钉测 |
 | `5e042c6` | 后置 | **projection session 接入真实链路**：LLMRuntime 托管 per-scope session（活端点 binding、换端点单次 rebind）；two_segment install 后驱动 on_left_replaced（F13 不回滚） |
 | `e58d1cd` | N1 | review 包 F1/F2/F5/F6 修复：root 终态收口（失败/取消/超时/deadline 门）、左 stamp 改不可变内容基 + settlement 不改写 cut 覆盖消息、终态记录瘦身 + reset 清档案、IN_PROGRESS 不入闭合组；`tests/test_v3_n1_root_lifecycle.py` 9红→10绿，红证据 `logs_n1_prefix_red.txt` |
+| `5a7258a` | N1收紧 | 对照 origin 包 PLAN §5.2 自审：stamp 覆盖全部消息身份字段（parts/semantic_kind/prompt_region/replay/metadata）并绑定 owner-issued cut 版本；补 metadata 篡改负例，N1 套件 11/11；73 文件 1225+285 subtests 零失败 |
 
 ## 3. 设计要点
 
@@ -53,6 +54,7 @@
 1. `compact_memory_async` two_segment 分支引用定义在其后的 `after_compact`（UnboundLocalError）——此前无测试真正驱动该入口，H01 矩阵首跑即暴露；retire 钩子移到模式分支前共享（`0695976`）
 2. `right_turns()` intra==len 时把边界 turn 重复放回 R（G1 自审发现）
 3. anthropic rebase 后 prefix 尾部 user 接缝不合并 → 退 pending tail 复用 F2（G2）
+4. **已知诚实边界（N1）**：`wait_for` 的 deadline 若恰落在 engine 内部 commit 与其 return 之间，编排返回 error 但 root 已 COMMITTED——root 终态是权威（I04/I05/I07 不破），不试图回滚；发生窗口极窄且仅计时竞态
 
 ## 7. 回退
 
