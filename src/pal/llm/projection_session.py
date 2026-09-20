@@ -56,6 +56,7 @@ from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
 __all__ = [
     "ProjectionChunk",
+    "LeftReplacement",
     "ProjectionSessionError",
     "ContinuationUnavailable",
     "EndpointProjectionSession",
@@ -102,6 +103,27 @@ class ProjectionChunk:
     cursor_after: HistoryCursor
     items: tuple[dict, ...]
     prefix_digest: str
+    # v3 (PLAN §6.2): the semantic message ids this chunk covers.  The rebase
+    # path (on_left_replaced) decides chunk survival from this span instead
+    # of subtracting item counts; an empty span is a legacy chunk that can
+    # no longer participate in a left replacement.
+    semantic_span: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LeftReplacement:
+    """Facts of one committed compact install (v3 PLAN §6.3).
+
+    Carried by the history owner after replace-left: the new seed content,
+    the semantic messages that survive in previously-frozen territory (the
+    right side's already-committed part), and the post-install cursor base
+    future append receipts must continue from.
+    """
+
+    seed_messages: tuple[LLMMessageIR, ...]
+    kept_frozen_messages: tuple[LLMMessageIR, ...]
+    cursor_after: HistoryCursor
+    left_revision: int = 0
 
 
 @dataclass
@@ -349,22 +371,19 @@ class EndpointProjectionSession:
         receipt: HistoryCommitReceipt,
         *,
         accepted_messages: Sequence[LLMMessageIR] = (),
+        span_message_ids: Sequence[str] = (),
     ) -> None:
         """Advance the frontier with a trusted joint commit (idempotent).
 
-        The sealed chunk must contain what this round actually ACCEPTED, not
-        merely a re-freeze of the request input (review R3).  Materialization
-        sources, in order:
-
-        1. attached native material (when ``receipt.native_committed``) — the
-           provider-native assistant wire items, byte-true;
-        2. ``accepted_messages`` — IR blocks (e.g. repaired tool results)
-           encoded through the shape codec.
-
-        Both may contribute in one commit (native assistant turn + IR tool
-        results).  Neither source alone may be replaced by the caller merely
-        asserting ``native_committed=True`` (review R4).
+        ``span_message_ids`` (v3) names the semantic messages this commit
+        covers beyond the previous frontier; they become the chunk's
+        semantic_span so a later left replacement can decide survival.
+        Repeated or out-of-order ids are refused.
         """
+
+        span_ids = tuple(str(value) for value in span_message_ids)
+        if len(set(span_ids)) != len(span_ids):
+            raise ProjectionSessionError("commit span repeats a message id")
 
         self._require_identity()
         previous = self._committed_attempts.get(receipt.attempt.attempt_id)
@@ -462,6 +481,7 @@ class EndpointProjectionSession:
             # instead of silently rewriting later requests (review R7).
             items=tuple(freeze_json_mapping(item) for item in items),
             prefix_digest=receipt.append.after.prefix_digest,
+            semantic_span=span_ids,
         )
         head_system_transfer = [dict(part) for part in self._active.prepared_head_system]
         # -- single install boundary: no session-visible failure past here --
@@ -496,6 +516,166 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("no matching open round to reject")
         self.native_by_attempt.pop(attempt_id, None)
         self._active = None
+
+    # -- v3 two-segment operations (PLAN §6.2) ------------------------------
+
+    def prepare_normal(
+        self,
+        view: HistoryView,
+        *,
+        controls: dict | None = None,
+        request_shell: LLMRequestIR | None = None,
+    ) -> PreparedRequest:
+        """Named normal-path prepare: base + frozen prefix + tail view."""
+
+        return self.prepare(view, controls=controls, request_shell=request_shell)
+
+    def rebind(
+        self,
+        binding: EndpointBinding,
+        *,
+        capabilities: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Named endpoint switch: destroys the old lineage (PLAN §6.2).
+
+        Compact install must NOT come through here — use on_left_replaced,
+        which preserves right-side material in the same binding.
+        """
+
+        self.bind(binding, capabilities=capabilities)
+
+    def prepare_handoff(
+        self,
+        left_messages: Sequence[LLMMessageIR],
+        *,
+        instruction: LLMMessageIR,
+        attempt: AttemptKey,
+        request_shell: LLMRequestIR | None = None,
+        controls: dict | None = None,
+    ) -> PreparedRequest:
+        """Build the compact handoff request: base + full L + instruction.
+
+        Independent-purpose view (PLAN §6.2): this encode never touches the
+        normal round, the native store, the pending tail, or the accepted
+        cursor — a failed or retried handoff leaves no trace in the normal
+        lineage (P08).  The whole left side is encoded in one codec call so
+        position-sensitive projections see a coherent conversation; the
+        instruction rides as the trailing user message.
+        """
+
+        self._require_identity()
+        if self._active is not None:
+            raise ProjectionSessionError(
+                "prepare_handoff cannot run inside an open normal round"
+            )
+        if attempt.identity != self.identity:
+            raise ProjectionSessionError("handoff attempt belongs to another lineage")
+        if instruction.role != MessageRole.USER:
+            raise ProjectionSessionError("handoff instruction must be a user message")
+        codec = codec_for_shape(self.binding.wire_shape)
+        context = self._shape_context()
+        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
+        shell = request_shell or LLMRequestIR(
+            messages=(),
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=4096),
+        )
+        encoded_shell = codec.encode(shell, context)
+        shell_payload = dict(encoded_shell.payload)
+        shell_fields = {
+            key: value for key, value in shell_payload.items() if key != container
+        }
+        body = (*left_messages, instruction)
+        encoded_body = codec.encode(replace(shell, messages=body), context)
+        body_items = [
+            dict(item) for item in (dict(encoded_body.payload).get(container) or [])
+        ]
+        payload: dict[str, Any] = {**shell_fields, container: body_items}
+        if controls:
+            payload["controls"] = dict(controls)
+        return PreparedRequest.build(attempt=attempt, base_cursor=self.frontier, payload=payload)
+
+    def on_left_replaced(self, change: LeftReplacement) -> None:
+        """Rebase the lineage after a committed compact install (§6.3).
+
+        Old-L chunks and their native material die; right-side chunks, wire
+        items, and native originals survive untouched in the same binding.
+        The frozen prefix is rebuilt as ONE fresh encode of seed + surviving
+        frozen messages (the generation-change cost, not a per-round path).
+        A chunk whose span straddles the replacement boundary is an illegal
+        cut and fails loudly instead of corrupting the prefix.
+        """
+
+        self._require_identity()
+        if self._active is not None:
+            raise ProjectionSessionError(
+                "on_left_replaced cannot run inside an open normal round"
+            )
+        kept_ids = tuple(m.message_id for m in change.kept_frozen_messages)
+        if len(set(kept_ids)) != len(kept_ids):
+            raise ProjectionSessionError("kept frozen messages repeat an id")
+        kept_set = set(kept_ids)
+        surviving_chunks: list[ProjectionChunk] = []
+        surviving_spans: list[str] = []
+        for chunk in self.chunks:
+            if not chunk.semantic_span:
+                raise ProjectionSessionError(
+                    "cannot rebase a lineage whose chunks lack semantic spans"
+                )
+            covered = set(chunk.semantic_span)
+            if covered & kept_set:
+                if covered <= kept_set:
+                    surviving_chunks.append(chunk)
+                    surviving_spans.extend(chunk.semantic_span)
+                    continue
+                raise ProjectionSessionError(
+                    "replacement boundary splits a frozen round; illegal cut"
+                )
+        if sorted(surviving_spans) != sorted(kept_ids):
+            raise ProjectionSessionError(
+                "kept frozen messages do not match the surviving chunks"
+            )
+        codec = codec_for_shape(self.binding.wire_shape)
+        context = self._shape_context()
+        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
+        rebuilt_source = (*change.seed_messages, *change.kept_frozen_messages)
+        if rebuilt_source:
+            encoded = codec.encode(
+                LLMRequestIR(
+                    messages=rebuilt_source,
+                    tools=(),
+                    policy=GenerationPolicyIR(max_output_tokens=4096),
+                ),
+                context,
+            )
+            rebuilt_items = [dict(i) for i in (dict(encoded.payload).get(container) or [])]
+        else:
+            rebuilt_items = []
+        # Anthropic merges adjacent user-role wire messages, so a rebuilt
+        # prefix ending in role "user" is not a stable freeze point (the
+        # same rule commit-time trimming applies).  Hand the trailing user
+        # items to the open tail so the next prepare merges them with the
+        # incoming tail exactly like a whole-history encode would.
+        unfrozen_tail: list[dict] = []
+        if self.binding.wire_shape.value == "anthropic_messages":
+            while rebuilt_items and isinstance(rebuilt_items[-1], dict) \
+                    and rebuilt_items[-1].get("role") == "user":
+                unfrozen_tail.insert(0, rebuilt_items.pop())
+        # -- single install section.
+        surviving_attempt_ids = {chunk.round_attempt_id for chunk in surviving_chunks}
+        dead_attempts = {
+            chunk.round_attempt_id
+            for chunk in self.chunks
+            if chunk.round_attempt_id not in surviving_attempt_ids
+        }
+        for attempt_id in dead_attempts:
+            self.native_by_attempt.pop(attempt_id, None)
+            self._committed_attempts.pop(attempt_id, None)
+        self.chunks = tuple(surviving_chunks)
+        self._prefix_items = rebuilt_items
+        self._pending_wire_tail = unfrozen_tail
+        self.frontier = change.cursor_after
+        self._frontier_item_count = len(rebuilt_items)
 
     # -- preparation ---------------------------------------------------------
 
