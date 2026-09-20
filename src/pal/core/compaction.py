@@ -159,6 +159,52 @@ class CompactionSnapshot:
             active_turn_ids=active_turn_ids,
         )
 
+    @classmethod
+    def capture_left(
+        cls,
+        memory_service: Any,
+        left_snapshot: Any,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+        clock_kind: CompactionClockKind,
+        clock_value: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> "CompactionSnapshot":
+        """v3 two-segment capture: the LEFT segment only (I10).
+
+        The run has already been opened by the history owner
+        (``begin_left_compaction``); this snapshot carries its stamp so the
+        install path can verify the left side never moved, while the right
+        side stays out of the summary source entirely.
+        """
+
+        transcripts = getattr(memory_service, "left_transcripts", None)
+        if not callable(transcripts):
+            raise RuntimeError(
+                "memory service does not expose left_transcripts for v3 compaction"
+            )
+        memory_items = tuple(
+            tuple(_copy_l1_message(item) for item in transcript)
+            for transcript in transcripts()
+        )
+        merged = dict(metadata or {})
+        merged["two_segment_run_id"] = str(left_snapshot.run_id)
+        return cls(
+            target_input_budget=max(0, int(target_input_budget or 0)),
+            reserved_output_tokens=max(0, int(reserved_output_tokens or 0)),
+            clock_kind=clock_kind,
+            clock_value=max(0, int(clock_value or 0)),
+            memory_items=memory_items,
+            replay_request=None,
+            replay_dialect="",
+            replay_wire_shape="",
+            metadata=deepcopy(merged),
+            source_stamp=str(left_snapshot.stamp or ""),
+            source_epoch=0,
+            active_turn_ids=(),
+        )
+
     @property
     def previous_summary(self) -> L2Entry | None:
         """Return the compact seed already stored inside frozen L1."""
@@ -779,6 +825,36 @@ class CompactionEngine:
         summary_entry: L2Entry,
         after_commit: Callable[[], None] | None = None,
     ) -> MemoryCompactResult | Exception:
+        two_segment_run_id = str(
+            snapshot.metadata.get("two_segment_run_id") or ""
+        ).strip()
+        if two_segment_run_id:
+            # v3 install: replace the LEFT segment only.  Root arbitration
+            # (StaleRun / TerminalClosed / CandidateConflict / stamp drift)
+            # surfaces as a normal engine failure — never a silent retry.
+            try:
+                outcome = memory_service.compact_left(
+                    two_segment_run_id,
+                    summary_entry,
+                    candidate_id=str(
+                        snapshot.metadata.get("compaction_op_id")
+                        or two_segment_run_id
+                    ),
+                    after_commit=after_commit,
+                )
+            except Exception as exc:
+                return exc
+            return MemoryCompactResult(
+                summary=summary_entry.summary,
+                projected_entries=[summary_entry],
+                metadata={
+                    "two_segment": True,
+                    "run_id": two_segment_run_id,
+                    "status": getattr(outcome, "status", ""),
+                    "left_revision": getattr(outcome, "left_revision", 0),
+                    "replayed": bool(getattr(outcome, "replayed", False)),
+                },
+            )
         request = MemoryCompactRequest(
             target_input_budget=snapshot.target_input_budget,
             reserved_output_tokens=snapshot.reserved_output_tokens,

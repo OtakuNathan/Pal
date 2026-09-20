@@ -68,6 +68,7 @@ class AgentTurnRuntime:
         compaction_scope: str = "pal:resident",
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
+        compaction_mode: str = "full_source",
     ) -> "AgentTurnRuntime":
         resolved_state = state if state is not None else AgentTurnRuntimeState()
         resolved_guard_host = guard_host
@@ -135,6 +136,7 @@ class AgentTurnRuntime:
             compaction_scope=compaction_scope,
             inject_pending=inject_pending,
             after_compaction=after_compaction,
+            compaction_mode=compaction_mode,
         )
         return cls(
             context=context,

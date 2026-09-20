@@ -125,6 +125,7 @@ class TurnExecutor:
         compaction_scope: str = "pal:resident",
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
+        compaction_mode: str = "full_source",
     ) -> None:
         self.context = context
         self.state = state
@@ -150,6 +151,13 @@ class TurnExecutor:
         self._compaction_scope = str(compaction_scope or "pal:resident")
         self._inject_pending = inject_pending
         self._after_compaction = after_compaction
+        if str(compaction_mode or "full_source") not in {
+            "full_source", "two_segment"
+        }:
+            raise ValueError(
+                "compaction_mode must be 'full_source' or 'two_segment'"
+            )
+        self._compaction_mode = str(compaction_mode)
 
     # ── public entry point ──────────────────────────────────────────────
 
@@ -2254,6 +2262,78 @@ class TurnExecutor:
             )
         except Exception:
             clock_value = 0
+        run_id = str(metadata.get("compaction_op_id") or "").strip()
+        if self._compaction_mode == "two_segment":
+            # v3: compact the LEFT segment only.  Closed history is promoted
+            # at this request boundary, the run is opened on the history
+            # owner (single-writer arbitration), and the right side never
+            # enters the summary source.  Warm replay anchors are a later
+            # increment; the first cut is the honest cold-left path.
+            import time as _time
+
+            memory_service = self.context.require_port("memory:memory")
+            root = getattr(memory_service, "history_root", None)
+            if root is None:
+                return CompactionRunResult(
+                    status="engine_unavailable",
+                    failures=("memory service has no history_root",),
+                    clock_kind=engine.policy.clock_kind,
+                )
+            try:
+                root.promote()
+            except Exception as exc:
+                return CompactionRunResult(
+                    status="error",
+                    failures=(f"promote failed: {exc}",),
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                )
+            if not run_id:
+                run_id = uuid4().hex
+                metadata["compaction_op_id"] = run_id
+            try:
+                left_snapshot = memory_service.begin_left_compaction(
+                    run_id,
+                    reason="auto",
+                    parent_turn_id=(
+                        str(continuation.turn_id) if continuation is not None else ""
+                    ),
+                    deadline_at=(
+                        _time.monotonic()
+                        + engine.timeout_seconds * max(1, engine.max_attempts)
+                    ),
+                )
+            except Exception as exc:
+                # NoBeneficialCompaction (minimal seed / empty left) and
+                # CompactLaneBusy are structured outcomes, not failures to
+                # retry: report them without touching L or R.
+                return CompactionRunResult(
+                    status="no_benefit"
+                    if type(exc).__name__ == "NoBeneficialCompaction"
+                    else "error",
+                    failures=(f"{type(exc).__name__}: {exc}",),
+                    clock_kind=engine.policy.clock_kind,
+                    clock_value=clock_value,
+                )
+            snapshot = CompactionSnapshot.capture_left(
+                memory_service,
+                left_snapshot,
+                target_input_budget=target_input_budget,
+                reserved_output_tokens=reserved_output_tokens,
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+                metadata=metadata,
+            )
+            run_result = await engine.run(
+                snapshot,
+                llm_runtime=llm_runtime,
+                memory_service=memory_service,
+                after_commit=after_compact,
+            )
+            if not run_result.success or continuation is None:
+                return run_result
+            self.clear_execution_cursors(continuation)
+            return run_result
         snapshot = CompactionSnapshot.capture(
             memory_service,
             target_input_budget=target_input_budget,
