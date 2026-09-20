@@ -538,13 +538,14 @@ def source_stamp_for_turns(turns: Iterable["L1TurnIR"]) -> str:
 
 
 def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
-    """Owner-issued digest over immutable left-span message content (F2).
+    """Owner-issued digest over immutable left-span message identity (F2).
 
     Unlike :func:`source_stamp_for_turns` (whole-history identity including
     per-turn state/revision), this basis is invariant to legal right-side
     growth inside the boundary turn — revision bumps and R-side settlement
     cannot invalidate a captured left — while any same-id content change
-    still rewrites the digest.
+    (parts, semantic kind, replay envelope, delivery metadata) still
+    rewrites the digest.
     """
     import hashlib
 
@@ -553,7 +554,9 @@ def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
         lines.append(turn.turn_id)
         for message in turn.messages:
             content = hashlib.sha256(
-                f"{message.role}|{message.parts!r}".encode("utf-8")
+                f"{message.role}|{message.parts!r}|{message.semantic_kind}"
+                f"|{message.prompt_region}|{message.replay!r}"
+                f"|{message.metadata!r}".encode("utf-8")
             ).hexdigest()
             lines.append(f"{message.message_id}:{content}")
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()

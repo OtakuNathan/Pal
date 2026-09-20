@@ -326,7 +326,14 @@ class HistoryRoot:
         return tuple(m for t in self.right_turns() for m in t.messages)
 
     def _left_stamp(self) -> str:
-        return left_span_stamp(self.left_turns())
+        # Binds immutable left content to the owner-issued cut version
+        # (review F2: content basis + cut/left version): a stale candidate
+        # can never install against a different cut even if the prefix
+        # content coincides (e.g. intra==len vs whole-turn coverage).
+        return (
+            left_span_stamp(self.left_turns())
+            + f"@{self._cut.revision}:{self._cut.cut_id}"
+        )
 
     # ------------------------------------------------------------------
     # R production — owner-only writes (§3.2)

@@ -142,6 +142,18 @@ class RootContractTests(unittest.TestCase):
         with self.assertRaises(HistoryRootError):
             root.commit('op')
 
+    def test_left_metadata_mutation_is_rejected(self):
+        root = small_root()
+        root.begin_compact('op', reason='review')
+        turn = root.all_turns()[0]
+        tampered_msg = replace(turn.messages[0], metadata={'injected': 'yes'})
+        tampered = replace(turn, messages=(tampered_msg, turn.messages[1]),
+                           revision=turn.revision + 1)
+        root.store.replace(tampered)
+        root.mark_ready('op', Candidate())
+        with self.assertRaises(HistoryRootError):
+            root.commit('op')
+
     def test_streaming_text_without_calls_is_not_a_closed_group(self):
         root = HistoryRoot()
         root.begin_right_turn('T', user_text='Q')
