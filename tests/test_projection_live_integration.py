@@ -173,7 +173,6 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             should_enter_failure_flow_for_tool_result=lambda v: False,
             compaction_engine=engine,
             compaction_clock_provider=lambda: 1,
-            compaction_mode="two_segment",
         )
 
         result = asyncio.run(executor.compact_memory_async(
@@ -230,7 +229,6 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             should_enter_failure_flow_for_tool_result=lambda v: False,
             compaction_engine=engine,
             compaction_clock_provider=lambda: 1,
-            compaction_mode="two_segment",
         )
         result = asyncio.run(executor.compact_memory_async(
             service,

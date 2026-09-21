@@ -137,8 +137,6 @@ def _executor(host: str, ports: _Ports) -> TurnExecutor:
         should_enter_failure_flow_for_tool_result=lambda v: False,
         compaction_engine=engine,
         compaction_clock_provider=_Clock(),
-        compaction_mode="two_segment",
-        compaction_scope=f"{host}:h01",
     )
 
 

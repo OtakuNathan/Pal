@@ -109,7 +109,7 @@ def _executor(memory, runtime):
         should_enter_failure_flow_for_tool_result=lambda _: False,
         compaction_engine=CompactionEngine(PalCompactionPolicy(), max_attempts=1,
                                            timeout_seconds=2),
-        compaction_clock_provider=lambda: 1, compaction_mode='two_segment',
+        compaction_clock_provider=lambda: 1,
     )
 
 

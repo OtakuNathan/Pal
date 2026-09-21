@@ -110,35 +110,12 @@ async def inject_pending_interjection_async(
                     )
                     if not committed:
                         raise
-                # Event receipts are durable and independent of the
-                # transcript: dedup must survive the original text being
-                # compacted away (Q08). Receipt failure keeps the batch
-                # queued; the idempotent append retries on the next drain.
-                staging = getattr(state, "ingress_staging", None)
-                if staging is not None:
-                    for envelope in batch:
-                        event_id = str(
-                            getattr(getattr(envelope, "event", None), "event_id", "")
-                            or ""
-                        )
-                        if event_id:
-                            staging.record_receipt(
-                                event_id, turn_id=str(continuation.turn_id)
-                            )
                 # Append and acknowledgement share the channel transition
                 # lock. A cancelled caller may leave this task running, but
                 # the normal next-turn path cannot dequeue the same envelope
                 # between the durable L1 write and this acknowledgement.
                 for _ in batch:
                     state.pending_channel_turns.popleft()
-                if staging is not None:
-                    for envelope in batch:
-                        event_id = str(
-                            getattr(getattr(envelope, "event", None), "event_id", "")
-                            or ""
-                        )
-                        if event_id:
-                            staging.remove(event_id)
                 return True
 
         commit = asyncio.create_task(append_and_acknowledge())

@@ -70,7 +70,7 @@ def executor(memory: MemoryService, llm) -> TurnExecutor:
         should_enter_failure_flow_for_tool_result=lambda _: False,
         compaction_engine=CompactionEngine(PalCompactionPolicy(), max_attempts=1,
                                            timeout_seconds=2),
-        compaction_clock_provider=lambda: 1, compaction_mode='two_segment',
+        compaction_clock_provider=lambda: 1,
     )
 
 
@@ -284,7 +284,6 @@ class ExecutorFailureTests(unittest.TestCase):
                 should_enter_failure_flow_for_tool_result=lambda _: False,
                 compaction_engine=engine,
                 compaction_clock_provider=lambda: 1,
-                compaction_mode='two_segment',
             )
             result = await ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,

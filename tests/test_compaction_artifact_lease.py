@@ -12,7 +12,6 @@ never re-requested as a new resource.
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +23,6 @@ from pal.artifact.models import (
 )
 from pal.artifact.service import ArtifactManager
 from pal.artifact.repository import ArtifactRepository
-from pal.core.ingress_staging import IngressStagingStore, StagedIngressRecord
 from pal.core.runtime import PalCore
 from pal.foundation import PalV2Database
 from pal.llm.ir import ArtifactRefPartIR, LLMMessageIR, MessageRole, TextPartIR
@@ -63,7 +61,6 @@ def _compact_core(tmp: Path, engine_status: str = "compacted"):
     core.context.port_registry["llm:llm"] = object()
     core.context.port_registry["artifact:artifact"] = manager
     core.turn_executor._compaction_engine = _BarrierEngine(status=engine_status)
-    core.state.ingress_staging = IngressStagingStore(tmp / "staging.json")
     return core, service, manager
 
 
@@ -73,56 +70,6 @@ def _effect():
     return MemoryCompactEffect(
         assembly_context=None, target_input_budget=8_192, reserved_output_tokens=2_048,
     )
-
-
-def test_q12_staged_attachment_lease_survives_reap_across_compaction():
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp = Path(tmp_dir)
-            core, service, manager = _compact_core(tmp)
-            artifact_id = _ingest_artifact(manager, tmp, "lease-q12.txt")
-
-            envelope = _envelope("m-q12", "see attachment")
-            envelope.event.payload["attachments"] = [
-                {"artifact_id": artifact_id, "kind": "file"},
-            ]
-            core.state.ingress_staging.enqueue(
-                StagedIngressRecord.from_channel_envelope(envelope, scope=SCOPE)
-            )
-            core.state.pending_channel_turns.append(envelope)
-
-            continuation = SimpleNamespace(
-                turn_id="t-lease", waiting_effect_id=None,
-                interrupted=False, interrupt_reason="",
-                delivery_binding=None,
-                pending_compact_memory_candidate_batches=[],
-            )
-            task = asyncio.ensure_future(
-                core.turn_executor.execute_turn_effect_async(continuation, _effect())
-            )
-            engine = core.turn_executor._compaction_engine
-            await engine.entered.wait()
-
-            # Ordinary reap tick while the compaction holds the gate: the
-            # staged reference keeps the artifact's lease alive.
-            reaped = manager.reap_expired()
-            assert reaped["retired"] == 0
-            hot = manager.select(artifact_id, SCOPE)
-            assert hot["ttl_refreshed"] is True
-            # While the event is still durably staged, the file carries the
-            # reference only — never the artifact bytes.
-            staged_text = (tmp / "staging.json").read_text(encoding="utf-8")
-            assert artifact_id in staged_text
-            assert "content-of-lease-q12" not in staged_text
-
-            engine.release.set()
-            result = await task
-            assert result.status == RuntimeStatus.OK
-
-            # After the compaction (and the queued-input drain it triggers)
-            # the referenced content is still readable.
-            manager.select(artifact_id, SCOPE)
-    asyncio.run(scenario())
 
 
 def test_r08_seed_referenced_artifact_survives_cleanup_and_restart():

@@ -162,5 +162,49 @@ class ServiceTwoSegmentTests(unittest.TestCase):
         self.assertEqual(outcome.status, "committed")
 
 
+class OwnerFacadeArbitrationTests(unittest.TestCase):
+    """Runtime-facing intent facade over the history root (G3c-2).
+
+    /interrupt and confirmed reset reach the owner through MemoryService,
+    never by reaching into history_root internals from the runtime.
+    """
+
+    def _service_with_run(self, run_id: str, *, parent_turn_id: str) -> MemoryService:
+        service = MemoryService()
+        service.l1_store.append(_seed_transcript())
+        service.l1_store.append(_settled_transcript("s0"))
+        service.begin_l1_turn("task-T", user_text="work")
+        service.history_root.promote()
+        service.begin_left_compaction(
+            run_id, reason="auto", parent_turn_id=parent_turn_id
+        )
+        return service
+
+    def test_interrupt_falls_back_to_parent_turn_and_cancels(self):
+        service = self._service_with_run("run-1", parent_turn_id="task-2")
+        # The interrupting client has no active turn id to offer; the owner
+        # still cancels a run that belongs to a turn.
+        self.assertEqual(service.interrupt_compaction_for_turn(None), "cancelled")
+
+    def test_interrupt_idle_manual_run_is_not_fake_cancelled(self):
+        service = self._service_with_run("run-2", parent_turn_id="")
+        self.assertEqual(
+            service.interrupt_compaction_for_turn(None), "no_active_turn"
+        )
+        self.assertEqual(
+            service.interrupt_compaction_for_turn("someone-else"), "no_active_turn"
+        )
+
+    def test_cancel_active_compaction_returns_outcome(self):
+        service = self._service_with_run("run-3", parent_turn_id="task-2")
+        outcome = service.cancel_active_compaction(reason="reset")
+        self.assertIsNotNone(outcome)
+        self.assertEqual(outcome.status, "cancelled")
+
+    def test_cancel_active_compaction_without_live_run(self):
+        service = MemoryService()
+        self.assertIsNone(service.cancel_active_compaction(reason="reset"))
+
+
 if __name__ == "__main__":
     unittest.main()

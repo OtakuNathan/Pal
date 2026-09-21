@@ -10,7 +10,6 @@ the full crash matrix (R-class) are P4; Bunshin lanes are P4.
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -21,12 +20,6 @@ from pal.core.compaction_coordinator import (
     CompactionGate,
     CompactionPhase,
     CompactionTrigger,
-)
-from pal.core.ingress_staging import (
-    IngressStagingError,
-    IngressStagingFull,
-    IngressStagingStore,
-    StagedIngressRecord,
 )
 from pal.core.interjection import inject_pending_interjection_async
 from pal.core.runtime import RESIDENT_COMPACTION_SCOPE, PalCore
@@ -149,7 +142,6 @@ def _build_core(tmp_path: Path, *, engine_status: str = "compacted"):
     core.context.port_registry["memory:memory"] = service
     core.context.port_registry["llm:llm"] = object()
     core.turn_executor._compaction_engine = engine
-    core.state.ingress_staging = IngressStagingStore(tmp_path / "staging.json")
     replies: list[str] = []
 
     async def record_reply(action, text):
@@ -264,8 +256,8 @@ def test_duplicate_manual_single_ticket_single_generate(tmp_path):
 # ── Q · backpressure, queue, ownership ──────────────────────────────────
 
 
-def test_gate_holds_new_messages_out_of_live_l1_durable_pending(tmp_path):
-    """Q01/Q02: during GENERATING new input is durably pending, L1 frozen."""
+def test_gate_holds_new_messages_out_of_live_l1(tmp_path):
+    """Q01/Q02: during GENERATING new input stays queued, L1 frozen."""
     async def scenario():
         core, service, engine, _replies = _build_core(tmp_path)
         manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
@@ -276,12 +268,7 @@ def test_gate_holds_new_messages_out_of_live_l1_durable_pending(tmp_path):
         assert len(core.state.pending_channel_turns) == 1
         assert list(service.l1_store.items) == l1_before
         assert not core.state.turn_tasks
-        records = core.state.ingress_staging.pending_records()
-        assert [record.event_id for record in records] == ["m-during"]
-        # Typed ingress compiled the dict into a message IR before queueing;
-        # the staged record must carry that typed form faithfully.
-        assert records[0].payload_kind == "message_ir"
-        assert "ACTUAL_NEW_CORRECTION" in json.dumps(records[0].payload, ensure_ascii=False)
+        assert [item.event.event_id for item in core.state.pending_channel_turns] == ["m-during"]
         engine.release.set()
         await manual
     _run(scenario())
@@ -360,7 +347,6 @@ def test_claim_waits_for_inflight_interjection_commit(tmp_path):
         await inject_task
         # The accepted message left the queue before the claim observed it.
         assert len(core.state.pending_channel_turns) == 0
-        assert core.state.ingress_staging.has_receipt("m-commit")
         engine.release.set()
     _run(scenario())
 
@@ -418,68 +404,6 @@ def test_failed_compaction_keeps_history_and_queue(tmp_path):
     _run(scenario())
 
 
-def test_staging_dedup_is_by_event_id_not_content(tmp_path):
-    """Q07: the same event id cannot be staged twice or re-staged after receipt."""
-    store = IngressStagingStore(tmp_path / "staging.json")
-    record = StagedIngressRecord.from_channel_envelope(_envelope("dup-1", "same text"), scope="s")
-    store.enqueue(record)
-    duplicate = StagedIngressRecord.from_channel_envelope(_envelope("dup-1", "same text"), scope="s")
-    try:
-        store.enqueue(duplicate)
-        raise AssertionError("duplicate enqueue must raise")
-    except IngressStagingError:
-        pass
-    store.record_receipt("dup-1", turn_id="t1")
-    store.remove("dup-1")
-    again = StagedIngressRecord.from_channel_envelope(_envelope("dup-1", "same text"), scope="s")
-    try:
-        store.enqueue(again)
-        raise AssertionError("receipt must suppress re-queueing")
-    except IngressStagingError:
-        pass
-
-
-def test_staging_full_refuses_without_ack_or_eviction(tmp_path):
-    """Q10: bounded queue refuses; oldest entries are never popped."""
-    async def scenario():
-        core, _service, engine, _replies = _build_core(tmp_path)
-        recorder = _ChannelRecorder()
-        core.context.port_registry["channel:channel"] = recorder
-        manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
-        await engine.entered.wait()
-        core.state.ingress_staging.max_entries = 2
-        await core.schedule_channel_turn_async(_envelope("q1", "one"))
-        await core.schedule_channel_turn_async(_envelope("q2", "two"))
-        await core.schedule_channel_turn_async(_envelope("q3", "three"))
-        kinds = [kind for kind, _payload in recorder.statuses]
-        assert kinds == ["ingress_full"]
-        ids = [item.event.event_id for item in core.state.pending_channel_turns]
-        assert ids == ["q1", "q2"]
-        engine.release.set()
-        await manual
-    _run(scenario())
-
-
-def test_staging_write_failure_no_queue_no_ack(tmp_path):
-    """Q11: persistence failure means not accepted; nothing is acknowledged."""
-    async def scenario():
-        core, _service, engine, _replies = _build_core(tmp_path)
-        recorder = _ChannelRecorder()
-        core.context.port_registry["channel:channel"] = recorder
-        manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
-        await engine.entered.wait()
-        blocker = tmp_path / "blocker"
-        blocker.write_text("not a directory")
-        core.state.ingress_staging = IngressStagingStore(blocker / "staging.json")
-        await core.schedule_channel_turn_async(_envelope("m-lost", "must not be acked"))
-        kinds = [kind for kind, _payload in recorder.statuses]
-        assert kinds == ["ingress_unavailable"]
-        assert len(core.state.pending_channel_turns) == 0
-        engine.release.set()
-        await manual
-    _run(scenario())
-
-
 def test_compaction_release_never_clears_other_quiesce_owners(tmp_path):
     """Q13: compact owns its ticket only; another owner's quiesce survives."""
     async def scenario():
@@ -522,49 +446,6 @@ def test_late_release_cannot_release_successor_ticket(tmp_path):
 # ── X · cancel, reset, control ──────────────────────────────────────────
 
 
-def test_interrupt_cancels_idle_manual_ticket(tmp_path):
-    """X01(idle)/X05: cancel reaches a ticket with no active turn."""
-    async def scenario():
-        core, _service, engine, _replies = _build_core(tmp_path)
-        core.turn_manager.latest_active_turn_id = Mock(return_value=None)
-        replies: list[str] = []
-
-        async def record(action, text):
-            replies.append(str(text))
-
-        core._complete_action_reply_async = record
-        manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
-        await engine.entered.wait()
-        await core._handle_interrupt_turn_async(
-            ControlAction(action_kind="interrupt", target_scope="memory", route=_route()))
-        assert replies == ["Cancelled the running context compaction."]
-        ticket = core.state.compaction_tickets[RESIDENT_COMPACTION_SCOPE]
-        assert ticket.cancelled and ticket.cancel_reason == "interrupt"
-        engine.release.set()
-        await manual
-        assert not core.state.compaction_tickets
-    _run(scenario())
-
-
-def test_confirmed_reset_revokes_tickets(tmp_path):
-    """X04: reset seizes the gate before resetting the scope."""
-    async def scenario():
-        core, _service, engine, _replies = _build_core(tmp_path)
-        core.turn_manager.latest_active_turn_id = Mock(return_value=None)
-        manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
-        await engine.entered.wait()
-        request = SimpleNamespace(request_id="r1", route=_route())
-        await core._execute_soft_reset_async(request)
-        ticket = core.state.compaction_tickets.get(RESIDENT_COMPACTION_SCOPE)
-        assert ticket is None or ticket.cancelled
-        engine.release.set()
-        await manual
-    _run(scenario())
-
-
-# ── round-safety predicate (A01-A05 unit level) ─────────────────────────
-
-
 def _active_turn(turn_id: str, messages) -> L1TurnIR:
     return L1TurnIR(
         turn_id=turn_id,
@@ -592,7 +473,6 @@ def test_manual_real_engine_vertical_smoke(tmp_path):
         core.turn_executor._compaction_engine = CompactionEngine(
             policy=PalCompactionPolicy()
         )
-        core.state.ingress_staging = IngressStagingStore(tmp_path / "staging.json")
         replies: list[str] = []
 
         async def record_reply(action, text):

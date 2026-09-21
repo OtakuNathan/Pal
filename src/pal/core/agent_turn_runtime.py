@@ -64,11 +64,8 @@ class AgentTurnRuntime:
         compaction_policy: CompactionPolicy | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
         after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
-        compaction_gate: Any | None = None,
-        compaction_scope: str = "pal:resident",
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
-        compaction_mode: str = "full_source",
     ) -> "AgentTurnRuntime":
         resolved_state = state if state is not None else AgentTurnRuntimeState()
         resolved_guard_host = guard_host
@@ -132,11 +129,8 @@ class AgentTurnRuntime:
             compaction_engine=compaction_engine,
             compaction_clock_provider=compaction_clock_provider,
             after_tool_batch=after_tool_batch,
-            compaction_gate=compaction_gate,
-            compaction_scope=compaction_scope,
             inject_pending=inject_pending,
             after_compaction=after_compaction,
-            compaction_mode=compaction_mode,
         )
         return cls(
             context=context,

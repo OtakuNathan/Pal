@@ -19,11 +19,7 @@ from pal.core.compaction import (
     CompactionRunResult,
     CompactionSnapshot,
 )
-from pal.core.compaction_coordinator import (
-    CompactionPhase,
-    CompactionTrigger,
-    compaction_gate_active,
-)
+from pal.core.compaction_coordinator import compaction_gate_active
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -121,11 +117,8 @@ class TurnExecutor:
         compaction_engine: CompactionEngine | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
         after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
-        compaction_gate: Any | None = None,
-        compaction_scope: str = "pal:resident",
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
-        compaction_mode: str = "full_source",
     ) -> None:
         self.context = context
         self.state = state
@@ -147,17 +140,8 @@ class TurnExecutor:
             compaction_clock_provider or (lambda: 0)
         )
         self._after_tool_batch = after_tool_batch
-        self._compaction_gate = compaction_gate
-        self._compaction_scope = str(compaction_scope or "pal:resident")
         self._inject_pending = inject_pending
         self._after_compaction = after_compaction
-        if str(compaction_mode or "full_source") not in {
-            "full_source", "two_segment"
-        }:
-            raise ValueError(
-                "compaction_mode must be 'full_source' or 'two_segment'"
-            )
-        self._compaction_mode = str(compaction_mode)
 
     # ── public entry point ──────────────────────────────────────────────
 
@@ -356,125 +340,19 @@ class TurnExecutor:
                 ),
             )
         memory_service = self.context.require_port("memory:memory")
-        ticket = None
-        source_stamp = ""
-        commit_eligible = None
-        gate = None
-        gate_lock = None
-        no_progress_stamps = None
-        if self._compaction_mode != "two_segment":
-            # v2 admission: scope ticket, no-progress ledger, candidate
-            # outbox, artifact lease — the whole pre-v3 machinery stays on
-            # the full-source path exactly as reviewed.
-            gate = self._compaction_gate
-            gate_lock = (
-                getattr(gate, "lock", None) if gate is not None else None
-            ) or getattr(self.state, "channel_turn_transition_lock", None)
-            no_progress_stamps = getattr(self.state, "compaction_no_progress", None)
-            self._drain_compaction_candidate_outbox(memory_service)
-            # Q12 lease: artifacts referenced by durably staged pending events
-            # keep their hot TTL refreshed while this compaction holds the
-            # gate across ordinary reap ticks, so the drained message still
-            # finds its content. References only — bytes never enter staging.
-            try:
-                from pal.core.artifact_lease import (
-                    artifact_ids_from_staged_records,
-                    touch_artifacts,
-                )
-
-                staged = getattr(self.state, "ingress_staging", None)
-                if staged is not None:
-                    pending_ids = artifact_ids_from_staged_records(
-                        staged.pending_records()
-                    )
-                    if pending_ids:
-                        touch_artifacts(
-                            self.context,
-                            pending_ids,
-                            str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
-                        )
-            except Exception:
-                pass
-            if no_progress_stamps is not None:
-                stamp_reader = getattr(memory_service, "l1_source_stamp", None)
-                if callable(stamp_reader):
-                    source_stamp = str(stamp_reader() or "")
-                if (
-                    source_stamp
-                    and no_progress_stamps.get(self._compaction_scope) == source_stamp
-                ):
-                    # X10/B09 no-progress suppression: this exact source already
-                    # burned a failed auto attempt; compacting it unchanged can
-                    # only hot-loop. The claim is refused BEFORE any ticket is
-                    # taken, so queued input and control events stay free to
-                    # run; the per-turn 3-attempt cap is untouched.
-                    return EffectResult(
-                        status=RuntimeStatus.ERROR,
-                        text=(
-                            "Memory compaction made no progress on the current "
-                            "source; waiting for new input before retrying."
-                        ),
-                    )
-            if gate is not None:
-                async with gate_lock:
-                    ticket = gate.claim(
-                        self._compaction_scope,
-                        trigger=CompactionTrigger.AUTO,
-                    )
-                    if ticket is not None:
-                        ticket = gate.advance(ticket, CompactionPhase.GENERATING)
-                if ticket is None:
-                    return EffectResult(
-                        status=RuntimeStatus.ERROR,
-                        text="Memory compaction is already in progress for this scope.",
-                    )
-
-            def commit_eligible() -> bool:
-                # Commit eligibility (X03/X06/X07): install only while this
-                # exact ticket is still the scope's current, uncancelled
-                # holder. A cancel (refresh/reset/interrupt), a deadline sweep,
-                # or a successor claim all revoke it; memory stays unchanged.
-                if ticket is None or gate is None:
-                    return True
-                current = gate.ticket_for(self._compaction_scope)
-                return (
-                    current is not None
-                    and current.op_id == ticket.op_id
-                    and not bool(current.cancelled)
-                )
         # two_segment admission: the history owner IS the arbiter — one live
         # run per session (CompactLaneBusy), owner-side terminal arbitration,
         # and the minimal-seed guard already refuses re-compacting an
         # unchanged left segment (L08).  No tickets, no ledger, no staging.
 
-        run_result = None
-        try:
-            run_result = await self.compact_memory_async(
-                memory_service,
-                target_input_budget=effect.target_input_budget,
-                reserved_output_tokens=effect.reserved_output_tokens,
-                assembly_context=effect.assembly_context,
-                continuation=continuation,
-                commit_guard=commit_eligible,
-            )
-            if ticket is not None and run_result.success:
-                async with gate_lock:
-                    gate.advance(ticket, CompactionPhase.COMMITTED)
-                if no_progress_stamps is not None:
-                    # The source progressed (B09): a fresh stamp may compact
-                    # again; the per-turn 3-attempt cap still bounds loops.
-                    no_progress_stamps.pop(self._compaction_scope, None)
-        finally:
-            if ticket is not None:
-                # Identity-checked release: cancellation or failure removes
-                # only this ticket; a successor's gate survives (F07/Q14).
-                async with gate_lock:
-                    gate.release(ticket)
+        run_result = await self.compact_memory_async(
+            memory_service,
+            target_input_budget=effect.target_input_budget,
+            reserved_output_tokens=effect.reserved_output_tokens,
+            assembly_context=effect.assembly_context,
+            continuation=continuation,
+        )
         if not run_result.success:
-            if no_progress_stamps is not None and source_stamp:
-                # Remember the failed source so an unchanged stamp cannot
-                # trigger another auto attempt (X10).
-                no_progress_stamps[self._compaction_scope] = source_stamp
             return EffectResult(
                 status=RuntimeStatus.ERROR,
                 text="Memory compaction failed; memory and the active tool RPC were left unchanged.",
@@ -514,26 +392,17 @@ class TurnExecutor:
                 # Persist before resuming the turn. Delivery can wait; a crash
                 # leaves the draft reachable through /memory_review. A stage
                 # failure here must NOT roll back the committed compact
-                # (I08): the batch goes to the retry outbox instead and
-                # stays a draft — never an automatic L3 write, and Bunshin
-                # lanes never gain a candidate route (their policy rejects
-                # candidates upstream).
+                # (I08): it is recorded as a diagnostic and the batch still
+                # rides the turn's pending candidate delivery at the owner —
+                # never an automatic L3 write, and Bunshin lanes never gain a
+                # candidate route (their policy rejects candidates upstream).
                 try:
                     memory_service.reviews.stage_payload(batch, route)
                 except Exception as exc:
-                    outbox = getattr(
-                        self.state, "compaction_candidate_outbox", None,
-                    )
-                    if outbox is not None:
-                        outbox.append({
-                            "batch": dict(batch),
-                            "route": route,
-                            "error": f"{type(exc).__name__}: {exc}",
-                        })
                     diagnostics = getattr(self.state, "diagnostics", None)
                     if diagnostics is not None:
                         diagnostics.append({
-                            "kind": "compaction_candidate_outbox",
+                            "kind": "compaction_candidate_stage_failed",
                             "candidate_batch_id": batch.get("candidate_batch_id"),
                             "error": f"{type(exc).__name__}: {exc}",
                         })
@@ -541,7 +410,6 @@ class TurnExecutor:
         if self._after_compaction is not None:
             # Drain queued input into the fresh context before the loop's
             # next preflight (PLAN section 4 default order).
-            self._drain_compaction_candidate_outbox(memory_service)
             await self._after_compaction(continuation)
         # R08 lease: artifacts referenced by the committed L1 (seed plus
         # active input) keep their TTL refreshed after the install, so a
@@ -566,26 +434,6 @@ class TurnExecutor:
         except Exception:
             pass
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
-
-    def _drain_compaction_candidate_outbox(self, memory_service) -> int:
-        """Retry outboxed candidate batches (I08): committed compacts whose
-        stage/approval-notify failed. The seed is never rolled back; the
-        drafts stay reachable only through the review flow."""
-        outbox = getattr(self.state, "compaction_candidate_outbox", None)
-        if not outbox:
-            return 0
-        remaining: list[dict[str, Any]] = []
-        drained = 0
-        for entry in list(outbox):
-            try:
-                memory_service.reviews.stage_payload(
-                    entry["batch"], entry["route"],
-                )
-                drained += 1
-            except Exception:
-                remaining.append(entry)
-        outbox[:] = remaining
-        return drained
 
     @_dispatch_effect.register(LLMRequestEffect)
     async def _handle_llm_request(self, effect, continuation):
@@ -2232,7 +2080,6 @@ class TurnExecutor:
         max_attempts: int | None = None,
         timeout_seconds: float | None = None,
         cache_epoch: str = "",
-        commit_guard: Any = None,
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -2295,49 +2142,6 @@ class TurnExecutor:
                 None,
             )
         )
-        replay_request = None
-        replay_dialect = ""
-        replay_wire_shape = ""
-        if (
-            logical_scope_id == "pal:resident"
-            and self._compaction_mode != "two_segment"
-        ):
-            # Warm handoff covers both admission shapes: idle manual (no
-            # active turn) and the auto path's active cut (anchor + accepted
-            # active suffix with a coverage proof).  The two-segment mode
-            # computes its own LEFT-bounded replay after the run opens and
-            # fences the cut (see below).
-            replay_request, replay_dialect, replay_wire_shape = (
-                self._resident_compaction_replay_request(
-                    memory_service,
-                    llm_runtime=llm_runtime,
-                    logical_scope_id=logical_scope_id,
-                    preferred_endpoint_id=preferred_endpoint_id,
-                    preferred_model_id=preferred_model_id,
-                    include_active=continuation is not None,
-                    active_turn_id=(
-                        str(continuation.turn_id) if continuation is not None else ""
-                    ),
-                )
-            )
-            if replay_request is not None:
-                preferred_endpoint_id = (
-                    preferred_endpoint_id
-                    or str(
-                        replay_request.metadata.get("preferred_endpoint_id")
-                        or ""
-                    ).strip()
-                    or None
-                )
-                preferred_model_id = (
-                    preferred_model_id
-                    or str(
-                        replay_request.metadata.get("preferred_model_id")
-                        or replay_request.model_hint
-                        or ""
-                    ).strip()
-                    or None
-                )
         try:
             clock_value = max(
                 0,
@@ -2400,290 +2204,198 @@ class TurnExecutor:
             after_compact = retire_compacted_l1_results
 
         run_id = str(metadata.get("compaction_op_id") or "").strip()
-        if self._compaction_mode == "two_segment":
-            # v3: compact the LEFT segment only.  Closed history is promoted
-            # at this request boundary, the run is opened on the history
-            # owner (single-writer arbitration), and the right side never
-            # enters the summary source.  Warm replay anchors are a later
-            # increment; the first cut is the honest cold-left path.
-            import time as _time
+        # v3: compact the LEFT segment only.  Closed history is promoted
+        # at this request boundary, the run is opened on the history
+        # owner (single-writer arbitration), and the right side never
+        # enters the summary source.  Warm replay anchors are a later
+        # increment; the first cut is the honest cold-left path.
+        import time as _time
 
-            memory_service = self.context.require_port("memory:memory")
-            root = getattr(memory_service, "history_root", None)
-            if root is None:
-                return CompactionRunResult(
-                    status="engine_unavailable",
-                    failures=("memory service has no history_root",),
-                    clock_kind=engine.policy.clock_kind,
-                )
-            try:
-                root.promote()
-            except Exception as exc:
-                return CompactionRunResult(
-                    status="error",
-                    failures=(f"promote failed: {exc}",),
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
-                )
-            if not run_id:
-                run_id = uuid4().hex
-                metadata["compaction_op_id"] = run_id
-            # One absolute deadline spans preflight, generation, repair, and
-            # the install gate (F1/N03): the run never resets its clock, and
-            # commit eligibility is checked on the owner, not trusted from
-            # engine internals.
-            deadline_at = (
-                _time.monotonic()
-                + engine.timeout_seconds * max(1, engine.max_attempts)
+        root = getattr(memory_service, "history_root", None)
+        if root is None:
+            return CompactionRunResult(
+                status="engine_unavailable",
+                failures=("memory service has no history_root",),
+                clock_kind=engine.policy.clock_kind,
             )
-            try:
-                left_snapshot = memory_service.begin_left_compaction(
-                    run_id,
-                    reason="auto",
-                    parent_turn_id=(
+        try:
+            root.promote()
+        except Exception as exc:
+            return CompactionRunResult(
+                status="error",
+                failures=(f"promote failed: {exc}",),
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+            )
+        if not run_id:
+            run_id = uuid4().hex
+            metadata["compaction_op_id"] = run_id
+        # One absolute deadline spans preflight, generation, repair, and
+        # the install gate (F1/N03): the run never resets its clock, and
+        # commit eligibility is checked on the owner, not trusted from
+        # engine internals.
+        deadline_at = (
+            _time.monotonic()
+            + engine.timeout_seconds * max(1, engine.max_attempts)
+        )
+        try:
+            left_snapshot = memory_service.begin_left_compaction(
+                run_id,
+                reason="auto",
+                parent_turn_id=(
+                    str(continuation.turn_id) if continuation is not None else ""
+                ),
+                deadline_at=deadline_at,
+            )
+        except Exception as exc:
+            # NoBeneficialCompaction (minimal seed / empty left) and
+            # CompactLaneBusy are structured outcomes, not failures to
+            # retry: report them without touching L or R.
+            return CompactionRunResult(
+                status="no_benefit"
+                if type(exc).__name__ == "NoBeneficialCompaction"
+                else "error",
+                failures=(f"{type(exc).__name__}: {exc}",),
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+            )
+
+        # Warm split (主项1): the run has fenced the cut, so the LEFT
+        # ids are final.  When a provider-confirmed cached anchor lies
+        # entirely inside L, the compact request rides the anchor bytes
+        # verbatim (cached prefix) + the LEFT suffix after it + the
+        # instruction tail; anything ineligible keeps the honest
+        # cold-left source builder (W21).
+        replay_request = None
+        replay_dialect = ""
+        replay_wire_shape = ""
+        try:
+            left_ids = tuple(
+                str(message.message_id)
+                for message in root.left_messages()
+            )
+            replay_request, replay_dialect, replay_wire_shape = (
+                self._resident_compaction_replay_request(
+                    memory_service,
+                    llm_runtime=llm_runtime,
+                    logical_scope_id=logical_scope_id,
+                    preferred_endpoint_id=preferred_endpoint_id,
+                    preferred_model_id=preferred_model_id,
+                    include_active=continuation is not None,
+                    active_turn_id=(
                         str(continuation.turn_id) if continuation is not None else ""
                     ),
-                    deadline_at=deadline_at,
+                    left_message_ids=left_ids,
                 )
-            except Exception as exc:
-                # NoBeneficialCompaction (minimal seed / empty left) and
-                # CompactLaneBusy are structured outcomes, not failures to
-                # retry: report them without touching L or R.
-                return CompactionRunResult(
-                    status="no_benefit"
-                    if type(exc).__name__ == "NoBeneficialCompaction"
-                    else "error",
-                    failures=(f"{type(exc).__name__}: {exc}",),
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
+            )
+        except Exception:
+            replay_request, replay_dialect, replay_wire_shape = None, "", ""
+        if replay_request is not None:
+            preferred_endpoint_id = (
+                preferred_endpoint_id
+                or str(
+                    replay_request.metadata.get("preferred_endpoint_id")
+                    or ""
+                ).strip()
+                or None
+            )
+            preferred_model_id = (
+                preferred_model_id
+                or str(
+                    replay_request.metadata.get("preferred_model_id")
+                    or replay_request.model_hint
+                    or ""
+                ).strip()
+                or None
+            )
+            metadata["preferred_endpoint_id"] = preferred_endpoint_id
+            metadata["preferred_model_id"] = preferred_model_id
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_warm_replay_engaged",
+                    "scope": str(logical_scope_id),
+                    "run_id": run_id,
+                    "dialect": replay_dialect,
+                    "wire_shape": replay_wire_shape,
+                })
+
+        def close_run_terminal(*, cancel: bool, reason: str) -> None:
+            """Idempotent close of OUR run (F1 / review R2-b).
+
+            A run already terminal (e.g. the engine committed), a run
+            retired by reset, or a superseded run is left alone — a
+            vanished run is terminal by construction and late cleanup
+            must never raise StaleRun out of its own finally path.
+            """
+
+            root.close_run(run_id, cancelled=cancel, reason=reason)
+
+        def committed_run_record():
+            record = root.run_record(run_id)
+            if record is not None and record.phase.value == "committed":
+                return record
+            return None
+
+        def post_commit_result(fault: str) -> CompactionRunResult:
+            """Committed outcome with post-fault diagnostics (review R2-a).
+
+            The install already won; the owner's terminal record is the
+            authority.  The caller gets a success carrying the accepted
+            memory result and the packaging fault — never a fabricated
+            empty success, never a `history unchanged` claim, and the
+            required projection rebase still fires.
+            """
+
+            from pal.memory.service import MemoryCompactResult
+
+            record = committed_run_record()
+            seed_text = ""
+            left_turns = root.left_turns()
+            if left_turns:
+                seed_text = "".join(
+                    getattr(part, "text", "")
+                    for message in left_turns[0].messages
+                    for part in message.parts
                 )
-
-            # Warm split (主项1): the run has fenced the cut, so the LEFT
-            # ids are final.  When a provider-confirmed cached anchor lies
-            # entirely inside L, the compact request rides the anchor bytes
-            # verbatim (cached prefix) + the LEFT suffix after it + the
-            # instruction tail; anything ineligible keeps the honest
-            # cold-left source builder (W21).
-            replay_request = None
-            replay_dialect = ""
-            replay_wire_shape = ""
-            try:
-                left_ids = tuple(
-                    str(message.message_id)
-                    for message in root.left_messages()
-                )
-                replay_request, replay_dialect, replay_wire_shape = (
-                    self._resident_compaction_replay_request(
-                        memory_service,
-                        llm_runtime=llm_runtime,
-                        logical_scope_id=logical_scope_id,
-                        preferred_endpoint_id=preferred_endpoint_id,
-                        preferred_model_id=preferred_model_id,
-                        include_active=continuation is not None,
-                        active_turn_id=(
-                            str(continuation.turn_id) if continuation is not None else ""
-                        ),
-                        left_message_ids=left_ids,
-                    )
-                )
-            except Exception:
-                replay_request, replay_dialect, replay_wire_shape = None, "", ""
-            if replay_request is not None:
-                preferred_endpoint_id = (
-                    preferred_endpoint_id
-                    or str(
-                        replay_request.metadata.get("preferred_endpoint_id")
-                        or ""
-                    ).strip()
-                    or None
-                )
-                preferred_model_id = (
-                    preferred_model_id
-                    or str(
-                        replay_request.metadata.get("preferred_model_id")
-                        or replay_request.model_hint
-                        or ""
-                    ).strip()
-                    or None
-                )
-                metadata["preferred_endpoint_id"] = preferred_endpoint_id
-                metadata["preferred_model_id"] = preferred_model_id
-                diagnostics = getattr(self.state, "diagnostics", None)
-                if diagnostics is not None:
-                    diagnostics.append({
-                        "kind": "two_segment_warm_replay_engaged",
-                        "scope": str(logical_scope_id),
-                        "run_id": run_id,
-                        "dialect": replay_dialect,
-                        "wire_shape": replay_wire_shape,
-                    })
-
-            def close_run_terminal(*, cancel: bool, reason: str) -> None:
-                """Idempotent close of OUR run (F1 / review R2-b).
-
-                A run already terminal (e.g. the engine committed), a run
-                retired by reset, or a superseded run is left alone — a
-                vanished run is terminal by construction and late cleanup
-                must never raise StaleRun out of its own finally path.
-                """
-
-                root.close_run(run_id, cancelled=cancel, reason=reason)
-
-            def committed_run_record():
-                record = root.run_record(run_id)
-                if record is not None and record.phase.value == "committed":
-                    return record
-                return None
-
-            def post_commit_result(fault: str) -> CompactionRunResult:
-                """Committed outcome with post-fault diagnostics (review R2-a).
-
-                The install already won; the owner's terminal record is the
-                authority.  The caller gets a success carrying the accepted
-                memory result and the packaging fault — never a fabricated
-                empty success, never a `history unchanged` claim, and the
-                required projection rebase still fires.
-                """
-
-                from pal.memory.service import MemoryCompactResult
-
-                record = committed_run_record()
-                seed_text = ""
-                left_turns = root.left_turns()
-                if left_turns:
-                    seed_text = "".join(
-                        getattr(part, "text", "")
-                        for message in left_turns[0].messages
-                        for part in message.parts
-                    )
-                memory_result = MemoryCompactResult(
-                    summary=seed_text,
-                    projected_entries=[],
-                    metadata={
-                        "two_segment": True,
-                        "run_id": run_id,
-                        "status": "committed",
-                        "left_revision": int(
-                            getattr(record, "committed_left_revision", 0) or 0
-                        ),
-                        "replayed": True,
-                        "reconstructed": "post_commit_packaging_fault",
-                    },
-                )
-                diagnostics = getattr(self.state, "diagnostics", None)
-                if diagnostics is not None:
-                    diagnostics.append({
-                        "kind": "two_segment_post_commit_packaging_fault",
-                        "scope": str(logical_scope_id),
-                        "run_id": run_id,
-                        "error": fault,
-                    })
-                self._rebase_projection_after_left_install(
-                    llm_runtime, logical_scope_id, root)
-                return CompactionRunResult(
-                    status="compacted",
-                    summary_entry=None,
-                    memory_result=memory_result,
-                    failures=(f"post-commit packaging fault: {fault}",),
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
-                )
-
-            try:
-                snapshot = CompactionSnapshot.capture_left(
-                    memory_service,
-                    left_snapshot,
-                    target_input_budget=target_input_budget,
-                    reserved_output_tokens=reserved_output_tokens,
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
-                    metadata=metadata,
-                    replay_request=replay_request,
-                    replay_dialect=replay_dialect,
-                    replay_wire_shape=replay_wire_shape,
-                )
-                run_result = await asyncio.wait_for(
-                    engine.run(
-                        snapshot,
-                        llm_runtime=llm_runtime,
-                        memory_service=memory_service,
-                        after_commit=after_compact,
+            memory_result = MemoryCompactResult(
+                summary=seed_text,
+                projected_entries=[],
+                metadata={
+                    "two_segment": True,
+                    "run_id": run_id,
+                    "status": "committed",
+                    "left_revision": int(
+                        getattr(record, "committed_left_revision", 0) or 0
                     ),
-                    timeout=max(deadline_at - _time.monotonic(), 0.05),
-                )
-            except asyncio.CancelledError:
-                if committed_run_record() is not None:
-                    # Post-commit external cancel (review R2-a): keep the
-                    # COMMITTED fact, mark derived state, then honor the
-                    # stop intent — never swallow the cancellation.
-                    self._rebase_projection_after_left_install(
-                        llm_runtime, logical_scope_id, root)
-                else:
-                    close_run_terminal(cancel=True,
-                                       reason="orchestration_cancelled")
-                raise
-            except TimeoutError:
-                if committed_run_record() is not None:
-                    return post_commit_result("deadline exceeded after commit")
-                close_run_terminal(cancel=False, reason="deadline")
-                return CompactionRunResult(
-                    status="error",
-                    failures=("deadline: compaction run exceeded its absolute "
-                              "time budget",),
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
-                )
-            except Exception as exc:
-                fault = f"{type(exc).__name__}: {exc}"
-                if committed_run_record() is not None:
-                    # The engine installed and then failed while packaging
-                    # the result; classification follows the owner's terminal
-                    # state, not the await's exception kind.
-                    return post_commit_result(fault)
-                close_run_terminal(cancel=False,
-                                   reason=f"orchestration_error:{type(exc).__name__}")
-                return CompactionRunResult(
-                    status="error",
-                    failures=(fault,),
-                    clock_kind=engine.policy.clock_kind,
-                    clock_value=clock_value,
-                )
-            if not run_result.success:
-                # The engine returns instead of raising on generation
-                # failure; close our run idempotently (reset may already
-                # have retired it — that is a valid terminal outcome).
-                close_run_terminal(cancel=False,
-                                   reason=f"engine:{run_result.status}")
-            else:
-                # The install already won: rebasing the hosted projection
-                # session is post-commit work (F13) — a failure here is
-                # recorded, never a rollback of the new left.
-                self._rebase_projection_after_left_install(
-                    llm_runtime, logical_scope_id, root)
-            if not run_result.success or continuation is None:
-                return run_result
-            self.clear_execution_cursors(continuation)
-            return run_result
-        snapshot = CompactionSnapshot.capture(
-            memory_service,
-            target_input_budget=target_input_budget,
-            reserved_output_tokens=reserved_output_tokens,
-            clock_kind=engine.policy.clock_kind,
-            clock_value=clock_value,
-            metadata={
-                **metadata,
-                "preferred_endpoint_id": preferred_endpoint_id,
-                "preferred_model_id": preferred_model_id,
-                "prompt_cache_scope_id": logical_scope_id,
-                "compaction_op_id": uuid4().hex,
-            },
-            replay_request=replay_request,
-            replay_dialect=replay_dialect,
-            replay_wire_shape=replay_wire_shape,
-            include_active=True,
-            source_epoch=max(0, int(getattr(memory_service, "context_epoch", 0) or 0)),
-        )
+                    "replayed": True,
+                    "reconstructed": "post_commit_packaging_fault",
+                },
+            )
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_post_commit_packaging_fault",
+                    "scope": str(logical_scope_id),
+                    "run_id": run_id,
+                    "error": fault,
+                })
+            self._rebase_projection_after_left_install(
+                llm_runtime, logical_scope_id, root)
+            return CompactionRunResult(
+                status="compacted",
+                summary_entry=None,
+                memory_result=memory_result,
+                failures=(f"post-commit packaging fault: {fault}",),
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+            )
+
         def replay_guard() -> bool:
+            # Hot-cache compaction (cache_epoch): the still-warm anchor must
+            # remain eligible while the engine retries — an expired or
+            # epoch-shifted anchor aborts instead of falling back to a cold
+            # request the notice never asked for.
             reader = getattr(llm_runtime, "prompt_cache_warm_deadline_snapshot", None)
             if not callable(reader):
                 return False
@@ -2697,17 +2409,80 @@ class TurnExecutor:
             except Exception:
                 return False
 
-        run_result = await engine.run(
-            snapshot,
-            llm_runtime=llm_runtime,
-            memory_service=memory_service,
-            after_commit=after_compact,
-            replay_guard=replay_guard if cache_epoch else None,
-            commit_guard=commit_guard,
-        )
+        try:
+            snapshot = CompactionSnapshot.capture_left(
+                memory_service,
+                left_snapshot,
+                target_input_budget=target_input_budget,
+                reserved_output_tokens=reserved_output_tokens,
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+                metadata=metadata,
+                replay_request=replay_request,
+                replay_dialect=replay_dialect,
+                replay_wire_shape=replay_wire_shape,
+            )
+            run_result = await asyncio.wait_for(
+                engine.run(
+                    snapshot,
+                    llm_runtime=llm_runtime,
+                    memory_service=memory_service,
+                    after_commit=after_compact,
+                    replay_guard=replay_guard if cache_epoch else None,
+                ),
+                timeout=max(deadline_at - _time.monotonic(), 0.05),
+            )
+        except asyncio.CancelledError:
+            if committed_run_record() is not None:
+                # Post-commit external cancel (review R2-a): keep the
+                # COMMITTED fact, mark derived state, then honor the
+                # stop intent — never swallow the cancellation.
+                self._rebase_projection_after_left_install(
+                    llm_runtime, logical_scope_id, root)
+            else:
+                close_run_terminal(cancel=True,
+                                   reason="orchestration_cancelled")
+            raise
+        except TimeoutError:
+            if committed_run_record() is not None:
+                return post_commit_result("deadline exceeded after commit")
+            close_run_terminal(cancel=False, reason="deadline")
+            return CompactionRunResult(
+                status="error",
+                failures=("deadline: compaction run exceeded its absolute "
+                          "time budget",),
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+            )
+        except Exception as exc:
+            fault = f"{type(exc).__name__}: {exc}"
+            if committed_run_record() is not None:
+                # The engine installed and then failed while packaging
+                # the result; classification follows the owner's terminal
+                # state, not the await's exception kind.
+                return post_commit_result(fault)
+            close_run_terminal(cancel=False,
+                               reason=f"orchestration_error:{type(exc).__name__}")
+            return CompactionRunResult(
+                status="error",
+                failures=(fault,),
+                clock_kind=engine.policy.clock_kind,
+                clock_value=clock_value,
+            )
+        if not run_result.success:
+            # The engine returns instead of raising on generation
+            # failure; close our run idempotently (reset may already
+            # have retired it — that is a valid terminal outcome).
+            close_run_terminal(cancel=False,
+                               reason=f"engine:{run_result.status}")
+        else:
+            # The install already won: rebasing the hosted projection
+            # session is post-commit work (F13) — a failure here is
+            # recorded, never a rollback of the new left.
+            self._rebase_projection_after_left_install(
+                llm_runtime, logical_scope_id, root)
         if not run_result.success or continuation is None:
             return run_result
-
         self.clear_execution_cursors(continuation)
         return run_result
 
@@ -2722,9 +2497,12 @@ class TurnExecutor:
         expected boundary outcome, not an error.
         """
 
-        if getattr(self, "_compaction_mode", "") != "two_segment":
+        port_registry = getattr(self.context, "port_registry", None)
+        if port_registry is None:
+            # Stub hosts (no port registry) have no memory owner: the cut
+            # simply does not advance on them.
             return
-        memory_service = self.context.port_registry.get("memory:memory")
+        memory_service = port_registry.get("memory:memory")
         root = getattr(memory_service, "history_root", None)
         if root is None:
             return
@@ -2755,8 +2533,6 @@ class TurnExecutor:
         touches the session (J5).
         """
 
-        if getattr(self, "_compaction_mode", "") != "two_segment":
-            return None
         prepare_plan = getattr(llm_runtime, "prepare_generation_plan", None)
         if not callable(prepare_plan):
             return None
@@ -2792,7 +2568,11 @@ class TurnExecutor:
         # Staleness guard (J7): a committed left replacement this session
         # never consumed leaves the frozen prefix replaying retired history.
         # Compare the root's left-replacement generation; mismatch = cold.
-        memory_service = self.context.port_registry.get("memory:memory")
+        port_registry = getattr(self.context, "port_registry", None)
+        if port_registry is None:
+            # Stub hosts have no memory owner: prepare stays cold.
+            return None
+        memory_service = port_registry.get("memory:memory")
         root = getattr(memory_service, "history_root", None)
         if root is None:
             return None

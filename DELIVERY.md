@@ -1,6 +1,6 @@
 # DELIVERY — pal-two-segment-v3 (refactor/two-segment-session-v3)
 
-状态：**v3 双段实现交付（dual-mode）+ N1 收口中**。基线 `7e6773f`（= origin/refactor/full-context-compaction-v2 tip，main 是其祖先；v2 的交付事实由该基线携带并仍可在 git 历史查阅，本文档按 MIGRATION.md 取代其作为本分支交付标准）。未 push 新增 commit、未合 main、未部署。
+状态：**two_segment 唯一模式（v2 已物理删除）+ 收口挂账中**。基线 `7e6773f`；v2 交付事实由 git 历史携带。未 push 新增 commit、未合 main、未部署。
 
 ## 1. Formal gate（G0）
 
@@ -32,23 +32,32 @@
 | `695efbc` | N4 切片 | W1/N20：请求边界 promote 闭合旧组（长活 turn 不再永久 no_benefit）；cut 规则修正：闭合前缀不得以悬空 user 结尾（L01 旧断言与其名义矛盾，已对齐 PLAN §3.3）；J7 过期守卫：root.left_generation（仅 install 跳）vs session.history_left_revision，rebase 未消费即冷回退不重播已退休历史 |
 | `1900125` | N7（pal_v3_af51d74_review） | review F1-F6 六项全修：F1 `prepare_generation_plan` 一次性派生不可变 prepared plan（resolved endpoint + 编译后 effective request + 强 binding：真实 spec digest / continuation contract version / 覆盖能力画像的 config fingerprint；spec-1/policy-1/provider:base_url 占位符全部消灭），投影编码 effective_request 且 generate/astream 在 plan 端点原样复用编译结果；F2 类型化 `ProjectionSendReceipt`（attempt id + resolved endpoint + applied + native）随 LLMGenerationResult / `last_projection_receipt`（stream）返回，observe_commit 仅由匹配的 applied receipt 授权，端点 fallback 报 applied=False 不冻结，sync stale-spec 递归不再丢投影参数（与 stream 对齐）；F3 invoker 按次把 NativeCapture 候选经 native_sink 交回，applied receipt 携带到 owner，真 continuation policy：清单匹配且 PRESERVED → byte-true native_committed 冻结，不匹配（边界替换/DSML 提升）→ 丢弃 native IR-only 冻结，降级 → 拒绝冻结冷回退；F4 显式 AcceptedContribution 边界 `_finalize_accepted_contribution`（finalization 替换先于投影 commit，receipt 穿越替换不被丢弃贡献冻结）；F5 pending tail 条目携 span 归属（`_PendingWireItem`）、chunk 新增对齐 `item_spans`（checkpoint 双向往返），on_left_replaced 按 kept_set 退休 pending 与幸存 chunk 内的退休 span 字节；F6 soft_reset 显式 roll HistoryRoot incarnation（不再从长度推断自愈），reset 流程 retire LLMRuntime 托管投影 session，owner prepare 新增结构性守卫：lineage 冻结 span 不再 durable 即冷回退；`test_v3_af51d74_review_fixes.py` 12红→12绿，19 邻接套件 192+67sub 零回归 |
 | `3eb036b` | N7 fixup | native_sink 仅传给 send 方法签名可接受的 invoker（收窄签名的子类调用时 TypeError 计为端点失败——全量暴露 3 个真回归 test_llm_runtime_ir stream，单跑 3/3 复现修复后全绿）；全量回归（1900125+本 fix）：3134 passed + 491 subtests + 7 skipped，25 failed = 3 个已修复真回归 + 19 节点 + 3 subtest 行与上轮全量完全同集，单跑 20/20 零复现（logs_flake_rerun_af51d74fix.txt）同族长跑争用归因 |
+| `15196dd` | 主项1 | warm handoff 拆分：executor 在 begin_left_compaction fence 后取最终 LEFT ids 调 `_resident_compaction_replay_request(left_message_ids=...)`（anchor 前缀相等校验、anchor 必须完全在 L 内、不合规诚实冷回退）；test_v3_warm_handoff_split 5红→6绿，138 邻接零回归 |
+| `3621a74` | 主项2 | prompt_cache 读证据确认（`_AnchorReadEvidence`：cached_input_tokens ≥ prefix_tokens 且更晚 sequence 才 confirm，resident-only，TTL；dffb210 边界内重建）；projection_session prepare 产出 spans（tail spans 重映射含 anthropic merge，否则显式缓存规划被绕过）；tests/test_v3_real_provider_e2e.py（gated PAL_V3_E2E，glm/deepseek/openrouter-luna 真跑通过） |
+| 本 commit | 主项3 | **v2 物理删除 + two_segment 唯一模式 + 所有权收权**（详见 §3a/§4/§6） |
 
 ## 3. 设计要点
 
 - **单一物理历史**：L/R 是 L1TurnStore 上的逻辑 cut 视图，无镜像历史（A03）
 - **Compact 只替左**：capture_left 只读左段（I10），install 单段无 await 发布、R 逐字保留（I05/F04，活动 round 内容折入物理记录而非拒绝）
 - **身份分离**：left_revision 不 fence R producer，仅 session incarnation（reset）fence（I09/X05/X06）
-- **准入**：two_segment 模式下 owner 即仲裁者（单活 run / 终态互斥 / L08 最小种子防环）；full_source 模式保留 v2 gate 全套——**双模式并存，v2 行为零破坏**
+- **准入**：owner 即仲裁者（单活 run / 终态互斥 / L08 最小种子防环）；手动 /compact 用 gate 原语作 idle 门闸（准入不同、primitive 相同，MIGRATION）
 - **projection rebase**：chunk 绑 semantic span，替换左段按 span 保/删，R 原 wire/native 字节保留；anthropic 用户接缝退 pending tail 复用 F2 机制
+
+## 3a. v2 物理删除清单（本 commit，v2 从未上线，无兼容负担）
+
+- **删除**：`ingress_staging.py` 整文件；`artifact_lease.py` 中 staged-records 分支（R08 L1 引用保活保留）；turn_executor v2 admission 块（ticket/no-progress ledger/candidate outbox/lease/Q12）；`compact_memory_async` whole-source 分支与 `CompactionSnapshot.capture` 调用；模式开关全套（`llm_compaction_mode` 配置、`_compaction_mode`/`_two_segment_compaction`/`compaction_gate`/`compaction_scope` 参数与属性）；bunshin worker carrier/gate；runtime_app ingress 自动接线；contracts 的 `compaction_no_progress`/`compaction_candidate_outbox` 字段；runtime 手动压缩的 staging 异常面；gate 文件 v2 语义测试（interrupt 取消 idle manual——CPT-01 后不取消；reset 直接撤票）与 x10/b09 ledger 测试；test_full_compaction_source/outbox/builder_mode_contract 三文件（fixture 迁 tests/test_compaction_fixtures.py）
+- **保留（MIGRATION 依据）**：CompactionGate/Ticket 原语（「准入不同、primitive相同」）——手动 /compact 的 idle 门闸；interjection 两道门（auto 无票放行 R 增长、manual 有票堵队列）；R08 lease；手动 /compact 处理器全套（A06/A08/A10/X06/X07/X08）
+- **所有权收权**：MemoryService 新增意图 façade `interrupt_compaction_for_turn`/`cancel_active_compaction`，runtime.py 不再三层深挖 history_root 内部；require_port 替代不存在的 get_port（见 §6.5）
 
 ## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
-0. **review 包（pal_v3_af51d74_review，Request changes）F1-F6 已全修（1900125/3eb036b）**：plan-first 投影 / send receipt 授权 / 真 native continuation / AcceptedContribution 边界 / pending tail 归属 / 显式 reset lineage。判决「不翻转 two_segment 默认」遵守——默认仍 full_source；剩余大项：warm handoff 拆分（cached L 前缀+未缓存后缀）、真 provider E2E、模式翻转后的 v2 物理清理（含 compaction_coordinator/staging/lease 文件级删除）
-1. **warm anchor 未接入双段流**：handoff 走 cold-left 全量编码；H01 warm 列验证的是「资格不可用时诚实回退 cold」。warm 拆分（cached L 前缀 + 未缓存后缀直发）是后续项
-2. **compaction_coordinator 未物理拆除**：full_source 模式仍在用；文件级删除等 two_segment 转默认后进行。two_segment 路径零依赖它
-3. **ingress_staging / artifact_lease**：自动接线已按模式关断（two_segment 下永不构造）；模块文件保留至模式翻转，届时随 v2 专用测试一并移出
-4. **H 族运行时项**：H02（root 快照持久化）、H04（旧 schema 显式迁移）、H06（staging gate UX）、Q04（two_segment 的 BUSY 路由）、B04-B08（发送门矩阵）未实现——账本 NOT_RUN
-5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律）；证据见回归日志与账本
+0. **主项1/2 已交付**（15196dd warm 拆分、3621a74 读证据+spans+E2E）；主项3 v2 物理删除+模式收权已完成（本 commit），全量回归 49 failed 归因：17 真回归已修（单跑复现+修复验证），10 个 prompt_cache_v2 astra/chain 失败为翻转预存阻塞（见 1），余 22 与既有长跑争用族同集（抽样单跑全绿）
+1. **astra chain prefix_preserved 10 失败（翻转预存，挂账 Nathan）**：HEAD 绿、HEAD+纯翻转即红。证据：payload 字节级前缀实际保持（commonprefix 覆盖前轮全部消息）；但 cache_diagnostics 的 span 项流不稳定——投影路径 assembled_spans 只含 preamble+tail，frozen 前缀 span 不随行（3621a74 只做了 tail 重映射）；更深层异常：该 harness 中投影每轮 PREFIX_N=0（从不冻结，observe 链未闭环）。曾尝试补发 frozen wire span（含 anthropic 边界/completion 缝合位置修正），部分变体转绿部分仍红（半对），已回退待设计定夺
+2. **引擎 whole-source 内部残留**：`service.compact` 的 source_stamp 分发与 `_compact_full_source`、compaction.py 的 `capture` whole-source 路径已无生产调用方（executor 只走 capture_left），但引擎内部与其直接测试（p6_perf test_a、runtime_compaction whole-source 族等 8 文件）未删——后续切片
+3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族
+4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
+5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律；本轮实测 1790s，后续建议 ≥2400s）
 
 ## 5. 验收证据
 
@@ -64,10 +73,13 @@
 2. `right_turns()` intra==len 时把边界 turn 重复放回 R（G1 自审发现）
 3. anthropic rebase 后 prefix 尾部 user 接缝不合并 → 退 pending tail 复用 F2（G2）
 4. **N1 终态出口（已由 N1.1 关闭）**：一切提交后故障（打包异常、超时、外部取消）按 owner 终态归类——已 COMMITTED 则报 success+已接受 memory_result+驱动 rebase，不伪造空成功、不宣称「历史未变」；reset 已退休的 run 迟到收尾幂等不抛 StaleRun。曾描述的「wait_for 计时器恰在 commit 与 return 之间插入」窗口未单独证明可达（单 event loop 同步段内 timeout callback 不插入），且已被同一归类路径覆盖，不再作为独立边界
+5. **get_port 假绿链（翻转首炸）**：eb25fdc/1900125 写的 two_segment 分支调用不存在的 `MainContext.get_port`；full_source 默认使其不可达，翻转即引爆：/interrupt AttributeError 崩、reset 侧 X04/X05 静默失效、F6 lineage 退休静默失效（原测试直调 llm runtime 方法，PalCore 侧 wiring 从未真跑，假绿）。修复：façade 收权 + require_port（不吞）+ 真实 context 接线测试
+6. **stub 漂移两例**：hosts 的 `_BarrierEngine` 缺 `timeout_seconds/max_attempts`（v3 deadline 读不到→任务静默死→测试挂死；且 NameError 留下未完成 barrier task 卡死事件循环）；hot_cache fixture 的 canned anchor 只有单消息（v3 W02/W03 前缀相等校验下永不接合）——均改为与真实引擎契约对齐
+7. **翻转暴露的连带**：v3 左装订不张 `context_epoch`（i11）；compact_memory_async v3 分支无视传入 service 参数强制 require_port（hot_cache 直调族全断）；`_promote/_prepare` 摸 port 无防御（stub context 崩）——均已修。architecture_skeleton 两断言按 v3 设计改写：seal 后 IR 即 provider-neutral，reasoning 字节保真由 wire envelope/投影 native 承载（Nathan 最初核心关切的 v3 形态）
 
 ## 7. 回退
 
-分支独立，未动 main / v2 分支；worktree 删除即回退。runtime 默认 `llm_compaction_mode='full_source'`，v3 行为需显式配置开启。
+分支独立，未动 main / v2 分支（历史可查）；未 push。two_segment 是唯一模式：回退 = revert 本 commit（v2 行为由 git 历史携带，不从本分支重建）。
 
 ## 8. 28 项收口矩阵实况（2026-09-21，对照 pal_v3_review_2014db4/TEST_MATRIX）
 
@@ -94,10 +106,10 @@
 | N19 handoff 输出只进 validator | PASS(component) | engine 套件（I14 既有） |
 | N20 长活 turn 能压 | PASS | test_v3_n3_vertical_trace（promote→compact 全链） |
 | N21 发送预算门 | PASS(component) | G4 B01/B03/Q03；B04-B08 NOT_RUN |
-| N22 无预热/miss 不重发 | PASS(component) | hot_cache 套件；warm 拆分 NOT_RUN |
+| N22 无预热/miss 不重发 | PASS | hot_cache 套件全绿（cache_epoch/replay_guard 语义在 v3 路径恢复）；warm 拆分 15196dd |
 | N23 interrupt vs commit 竞争 | PASS | N1 cancel + compact_cancel_control |
 | N24 rebase 失败禁旧投影 | PASS | stale-left 守卫测试 + af51d74 F6（lineage span 不 durable 冷回退） |
 | N25 worker/owner 单写者 | PASS | owner 侧 prepare + 类型化下沉 + **receipt 授权 commit**（af51d74 F2：无 receipt/applied=False/attempt 不匹配均拒绝冻结） |
 | N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
-| N27 宿主×shape×warm 真实 E2E | PARTIAL | H01 组件矩阵；真 provider E2E NOT_RUN |
-| N28 最终矩阵+全量 | 本表+全量日志 | 3eb036b 全量 3134+491+7sk/25f：3 真回归已修复（单跑复现+修复验证），其余 19 节点+3 subtest 与上轮同集单跑 20/20 零复现（logs_flake_rerun_af51d74fix.txt） |
+| N27 宿主×shape×warm 真实 E2E | PASS(gated) | 3621a74 test_v3_real_provider_e2e（glm/deepseek/openrouter-luna 真跑，PAL_V3_E2E 门控）；luna tail 方言 anchor 读证据为 bounded follow-up |
+| N28 最终矩阵+全量 | 本表+全量日志 | v2 删除后全量 3086+491+8sk/49f（1790s）：17 真回归修复后受影响 19 文件 299+29sub 全绿；10 astra 为翻转预存阻塞（§4.1 挂账）；余 22 长跑族抽样单跑全绿 |

@@ -243,10 +243,33 @@ def _attach_hot_cache(llm, service):
         "cached-turn", LLMMessageIR(role=MessageRole.ASSISTANT, parts=(TextPartIR("cached reply"),)),
     )
     service.settle_l1_turn("cached-turn")
+    # v3 warm replay (W02/W03): a provider-confirmed anchor request carries
+    # the FULL conversation prefix that was actually cached, ending exactly
+    # at the anchor message, plus the session continuity id.
+    conversation = [
+        message
+        for turn in service.l1_store.turns.turns
+        for message in turn.messages
+        if message.role.value not in {"system", "developer"}
+    ]
+    anchor_index = [m.message_id for m in conversation].index(anchor.message_id)
+    prefix_through_anchor = list(conversation[: anchor_index + 1])
+    prefix_through_anchor[-1] = replace(
+        anchor, prompt_region=PromptRegionIR.ACTIVE_INPUT
+    )
+    from pal.memory.contracts import MemoryPackRequest
+
+    continuity_id = str(
+        service.build_pack(
+            MemoryPackRequest(turn_kind="chat", include_l1_recent_context=False)
+        ).metadata.get("continuity_id", "")
+        or ""
+    )
     cached_request = LLMRequestIR(
-        messages=(replace(anchor, prompt_region=PromptRegionIR.ACTIVE_INPUT),),
+        messages=tuple(prefix_through_anchor),
         tools=(), policy=GenerationPolicyIR(max_output_tokens=1024),
         model_hint="gpt-5.6-luna", logical_scope_id="pal:resident",
+        metadata={"continuity_id": continuity_id} if continuity_id else {},
     )
     live = {"eligible": True, "anchor_epoch": "epoch-a", "anchor_remaining_ttl_seconds": 1800}
     llm.prompt_cache_warm_deadline_snapshot = lambda: live
@@ -1434,13 +1457,13 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         core.context.port_registry["llm:llm"] = _ScriptedLLM(
             [generation_result_from_values(text=_valid_pal_payload())]
         )
-        original_compact = service.compact
+        original_compact = service.compact_left
 
-        def fail_compact(_request):
+        def fail_compact(run_id, summary_entry, **kwargs):
             raise RuntimeError("commit failed")
 
-        service.compact = fail_compact
-        self.addCleanup(setattr, service, "compact", original_compact)
+        service.compact_left = fail_compact
+        self.addCleanup(setattr, service, "compact_left", original_compact)
         service.l1_store.append(l1_tool_protocol_transcript(_closed_protocol("safe tail"))[0])
         before_l1 = deepcopy(service.l1_store.items)
 

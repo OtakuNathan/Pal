@@ -31,19 +31,6 @@ def _collect_message_ids(message: Any, out: set[str]) -> None:
             out.add(part_id)
 
 
-def artifact_ids_from_staged_records(records: Iterable[Any]) -> set[str]:
-    """Artifact references carried by durably staged pending events."""
-    ids: set[str] = set()
-    for record in records or ():
-        payload = getattr(record, "payload", None)
-        if isinstance(payload, (dict, list, tuple)):
-            _collect_ids(payload, ids)
-            if isinstance(payload, dict):
-                # Typed message-ir staging keeps parts under "parts".
-                _collect_ids(payload.get("parts"), ids)
-    return ids
-
-
 def artifact_ids_from_l1_turns(turns: Iterable[Any]) -> set[str]:
     """Artifact references living in L1 turns (active input or seed)."""
     ids: set[str] = set()
@@ -80,7 +67,6 @@ def touch_artifacts(context: Any, artifact_ids: Iterable[str], scope_key: str) -
 
 
 __all__ = [
-    "artifact_ids_from_staged_records",
     "artifact_ids_from_l1_turns",
     "touch_artifacts",
 ]

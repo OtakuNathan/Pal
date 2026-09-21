@@ -361,6 +361,37 @@ class MemoryService(MemoryServicePort):
             deadline_at=deadline_at,
         )
 
+    def interrupt_compaction_for_turn(self, turn_id: str | None) -> str:
+        """Owner-side /interrupt arbitration for the live compact run.
+
+        The runtime hands the interrupting turn id (or ``None`` when no
+        turn is active) to the owner and acts on the verdict.  The run's
+        own parent turn is the fallback target; an idle manual run has no
+        parent and is never fake-cancelled (X03).  Returns ``"cancelled"``,
+        ``"committed"``, or ``"no_active_turn"``.
+        """
+
+        root = self.history_root
+        run = root.active_run
+        if run is None:
+            return "no_active_turn"
+        return root.interrupt_compaction_for_turn(
+            str(turn_id or run.parent_turn_id or "")
+        )
+
+    def cancel_active_compaction(self, *, reason: str) -> Any:
+        """Cancel the live compact run, if any (reset admission X04/X05).
+
+        Returns the run's ``CompactOutcome``, or ``None`` when no run is
+        live.
+        """
+
+        root = self.history_root
+        run = root.active_run
+        if run is None:
+            return None
+        return root.cancel(run.run_id, reason=reason)
+
     def compact_left(
         self,
         run_id: str,
@@ -400,6 +431,11 @@ class MemoryService(MemoryServicePort):
             # offending identities for any illegal delivery.
             root.mark_ready(run_id, summary_entry, candidate_id=candidate_id)
         outcome = root.commit(run_id)
+        if getattr(outcome, "status", "") == "committed":
+            # A committed left install changes the context identity exactly
+            # like the retired whole-source install did: late candidates
+            # captured at the old epoch stay fenced (PLAN §2).
+            self.context_epoch = int(self.context_epoch) + 1
         if after_commit is not None:
             try:
                 after_commit()

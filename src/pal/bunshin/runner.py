@@ -1491,17 +1491,6 @@ class BunshinRunner:
                 metadata={**dict(prompt.metadata), **_bunshin_llm_request_metadata(self.pack, self.run_id)},
             )
 
-        from pal.core.compaction_coordinator import CompactionGate
-        from pal.core.contracts import CoreRuntimeState
-
-        # Per-worker compaction admission, injected through the public
-        # builder (I18): the carrier exists only until the v3 owner-state
-        # admission replaces the ticket gate; nothing is written into the
-        # executor's private fields after construction.
-        carrier = CoreRuntimeState()
-        worker_gate = CompactionGate(
-            carrier, transition_lock=carrier.channel_turn_transition_lock
-        )
         runtime = AgentTurnRuntime.build(
             context=context,
             config=bundle.config or RuntimeConfig.defaults(),
@@ -1527,8 +1516,6 @@ class BunshinRunner:
             ),
             compaction_policy=BunshinCompactionPolicy(),
             compaction_clock_provider=lambda: state.llm_round_count,
-            compaction_gate=worker_gate,
-            compaction_scope=f"bunshin:{self.pack.work_order_id or self.run_id}",
         )
         return runtime
 

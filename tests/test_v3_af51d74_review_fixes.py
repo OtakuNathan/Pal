@@ -40,9 +40,12 @@ from pal.llm.projection_session import EndpointProjectionSession, LeftReplacemen
 from pal.llm.runtime import EndpointResolver, LLMRuntime
 from pal.llm.shapes.base import _JSONFrame
 from pal.llm.transport import LLMEndpointSpecStaleError
+from pal.control.contracts import ControlAction
+from pal.core.runtime import PalCore
 from pal.memory import MemoryService
 from pal.shared import PromptAssemblyContext
 from pal.shared.json_values import thaw_json
+from tests.test_cache_warm_deadline import _route
 from tests.test_v3_n1_root_lifecycle import user
 from tests.test_v3_n3_vertical_trace import (
     CapturingTransport, _drive, _executor, _request_for, _runtime,
@@ -547,6 +550,53 @@ def _commit_receipt(attempt: AttemptKey, session: EndpointProjectionSession,
         closed_call_ids=(),
         native_committed=False,
     )
+
+
+class OwnerPortWiringTests(unittest.TestCase):
+    """Runtime control paths reach owners through their ports (G3c-2/F6).
+
+    The two-segment interrupt/reset branches and the F6 lineage retirement
+    were written against a ``context.get_port`` that never existed on
+    MainContext; while full_source was the default they stayed unreachable,
+    so the wiring was never proven against a real context — /interrupt
+    crashed and the reset-side protections silently no-oped the moment
+    two_segment became reachable.
+    """
+
+    def test_interrupt_reaches_memory_owner(self):
+        core = PalCore()
+        core.context.port_registry["memory:memory"] = MemoryService()
+        replies: list[str] = []
+
+        async def record(action, text):
+            replies.append(str(text))
+
+        core._complete_action_reply_async = record
+        asyncio.run(
+            core._handle_interrupt_turn_async(
+                ControlAction(
+                    action_kind="interrupt",
+                    target_scope="memory",
+                    route=_route(),
+                )
+            )
+        )
+        self.assertEqual(replies, ["No active turn to interrupt."])
+
+    def test_execute_soft_reset_retires_projection_sessions_via_port(self):
+        core = PalCore()
+        transport = CapturingTransport(["unused"])
+        llm = _runtime(transport)
+        session = llm.endpoint_projection_session("pal:resident")
+        self.assertFalse(session.retired)
+        core.context.port_registry["memory:memory"] = MemoryService()
+        core.context.port_registry["llm:llm"] = llm
+        applied = asyncio.run(core._execute_soft_reset_async(SimpleNamespace()))
+        self.assertTrue(applied)
+        self.assertTrue(
+            session.retired,
+            "soft reset must retire hosted projection sessions via the llm port",
+        )
 
 
 if __name__ == "__main__":

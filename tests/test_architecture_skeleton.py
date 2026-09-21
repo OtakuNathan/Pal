@@ -3503,7 +3503,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         self.assertEqual(assistant_tool_message.tool_calls[0].name, "echo")
         self.assertEqual(dict(assistant_tool_message.tool_calls[0].arguments), {"value": "proto"})
-        self.assertEqual(assistant_tool_message.reasoning_text, "hidden protocol reasoning")
+        # v3 (request-boundary promote, N1-R1): the sealed round's IR is
+        # provider-neutral — reasoning rides the frozen wire envelope /
+        # projection native chunks, never the cold IR rebuild.
+        self.assertEqual(assistant_tool_message.reasoning_text, "")
         tool_message = next(message for message in followup_messages if message.role.value == "tool")
         self.assertIn("stable-result", str(tool_message.parts[0].content))
         system_message = next(message for message in followup_messages if message.role.value == "system")
@@ -3576,7 +3579,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for message in first_followup.messages
             if message.role.value == "assistant" and message.tool_calls
         )
-        self.assertEqual(active_tool_call.reasoning_text, "ephemeral provider reasoning")
+        # v3 (request-boundary promote, N1-R1): the closed round is sealed
+        # when the cut advances at the follow-up request boundary, so the
+        # provider-neutral IR no longer carries reasoning even mid-turn.
+        # Same-endpoint reasoning fidelity rides the frozen wire envelope /
+        # projection native chunks, never the cold IR rebuild.
+        self.assertEqual(active_tool_call.reasoning_text, "")
 
         run_turn("second request")
         second_request = [

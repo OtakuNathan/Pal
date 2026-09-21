@@ -19,11 +19,6 @@ from pal.core.compaction_coordinator import (
     CompactionTrigger,
     compaction_gate_active,
 )
-from pal.core.ingress_staging import (
-    IngressStagingError,
-    IngressStagingFull,
-    StagedIngressRecord,
-)
 
 RESIDENT_COMPACTION_SCOPE = "pal:resident"
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
@@ -536,17 +531,8 @@ class PalCore(MemoryMaintenanceMixin):
             compaction_policy=PalCompactionPolicy(),
             compaction_clock_provider=lambda: self.state.compaction_user_turn_count,
             after_tool_batch=self._after_tool_batch_async,
-            compaction_gate=self._compaction_gate(),
-            compaction_scope=RESIDENT_COMPACTION_SCOPE,
             inject_pending=self._inject_pending_for_executor_async,
             after_compaction=self._after_compaction_async,
-            compaction_mode=str(
-                getattr(self.config, "llm_compaction_mode", "full_source")
-                or "full_source"
-            ),
-        )
-        self._two_segment_compaction = (
-            self.agent_turn_runtime.executor._compaction_mode == "two_segment"
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
@@ -622,16 +608,6 @@ class PalCore(MemoryMaintenanceMixin):
 
     def _compaction_gate_active(self) -> bool:
         return compaction_gate_active(self.state)
-
-    def _stage_pending_channel_turn_locked(self, channel_envelope) -> None:
-        """Durably stage one queued envelope before any queued acknowledgement."""
-        staging = getattr(self.state, "ingress_staging", None)
-        if staging is None:
-            return
-        scope = self._derive_channel_control_scope_key(channel_envelope)
-        staging.enqueue(
-            StagedIngressRecord.from_channel_envelope(channel_envelope, scope=scope)
-        )
 
     async def _inject_pending_for_executor_async(self, continuation) -> bool:
         from pal.core.interjection import inject_pending_interjection_async
@@ -872,27 +848,9 @@ class PalCore(MemoryMaintenanceMixin):
         if sleeping:
             await self.deliver_memory_notice_async(self._route_from_channel_envelope(channel_envelope), SLEEP_REPLY, require_provider=False)
             return
-        try:
-            await self._schedule_admitted_channel_turn_async(channel_envelope)
-        except IngressStagingFull:
-            # Bounded queue is full: the message was NOT accepted and must
-            # not be acknowledged as queued (Q10). Never drop the oldest.
-            self._queue_channel_status(
-                channel_envelope,
-                "ingress_full",
-                payload={"reason": "pending input queue is full; message not accepted"},
-            )
-        except IngressStagingError as exc:
-            # Durable staging failed: no queued acknowledgement, silent
-            # loss is forbidden (Q11); the transport can redeliver.
-            self._queue_channel_status(
-                channel_envelope,
-                "ingress_unavailable",
-                payload={"reason": str(exc)},
-            )
-        finally:
-            self.state.memory_ingress_reservations -= 1
-            self.state.memory_maintenance_changed.set()
+        await self._schedule_admitted_channel_turn_async(channel_envelope)
+        self.state.memory_ingress_reservations -= 1
+        self.state.memory_maintenance_changed.set()
 
     async def _schedule_admitted_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         # Any new user activity makes the old idle-cache deadline irrelevant,
@@ -911,15 +869,13 @@ class PalCore(MemoryMaintenanceMixin):
                 or self._compaction_gate_active()
                 or self.turn_manager.latest_active_turn_id() is not None
             ):
-                # Busy: queue the envelope. Durable staging happens first;
-                # a queued acknowledgement may only follow a durable write.
+                # Busy: queue the envelope.
                 # The active turn keeps its typing status; working_stop is
                 # only emitted when that turn actually ends (turn.end /
                 # runner finally). An interjection may later be injected
                 # from this queue without ever starting its own turn, so
                 # stopping typing here would leave the chat silently idle
                 # while the tool chain is still running.
-                self._stage_pending_channel_turn_locked(channel_envelope)
                 self.state.pending_channel_turns.append(channel_envelope)
                 return
             self._start_channel_turn_task_locked(channel_envelope)
@@ -1672,28 +1628,10 @@ class PalCore(MemoryMaintenanceMixin):
         # and is never fake-cancelled (X03); a run whose parent turn was
         # interrupted loses commit eligibility before its summary returns
         # (X01); an install that already won stays (X02).
-        if getattr(self, "_two_segment_compaction", False):
-            memory_service = self.context.get_port("memory:memory")
-            root = getattr(memory_service, "history_root", None)
-            run = getattr(root, "active_run", None) if root is not None else None
-            if run is not None:
-                verdict = root.interrupt_compaction_for_turn(
-                    str(active_turn_id or run.parent_turn_id or "")
-                )
-                if verdict == "cancelled" and not interrupted:
-                    message = "Cancelled the running context compaction."
-            await self._complete_action_reply_async(action, message)
-            return
-        # Interrupt must also reach a compaction ticket that has no active
-        # turn of its own (X05), and must revoke commit eligibility of a
-        # ticket held by an interrupted turn (X01).
-        gate = self._compaction_gate()
-        async with self.state.channel_turn_transition_lock:
-            ticket = gate.ticket_for(RESIDENT_COMPACTION_SCOPE)
-            if ticket is not None and not ticket.cancelled:
-                gate.cancel(RESIDENT_COMPACTION_SCOPE, reason="interrupt")
-                if not interrupted:
-                    message = "Cancelled the running context compaction."
+        memory_service = self.context.require_port("memory:memory")
+        verdict = memory_service.interrupt_compaction_for_turn(active_turn_id)
+        if verdict == "cancelled" and not interrupted:
+            message = "Cancelled the running context compaction."
         await self._complete_action_reply_async(action, message)
 
     async def _handle_open_reset_confirm_async(self, action: ControlAction) -> None:
@@ -1771,18 +1709,9 @@ class PalCore(MemoryMaintenanceMixin):
             # root's live run first (X04/X05); the owner cancels it before
             # any history is cleared, so a late summary cannot publish into
             # the new session.
-            if getattr(self, "_two_segment_compaction", False):
-                try:
-                    memory_service = self.context.get_port("memory:memory")
-                    root = getattr(memory_service, "history_root", None)
-                    run = getattr(root, "active_run", None) if root is not None else None
-                    if run is not None:
-                        root.cancel(run.run_id, reason="reset")
-                except Exception:
-                    pass
-            # A confirmed reset seizes the gate: any live compaction ticket
-            # loses commit eligibility before reset proceeds (X04).
-            self._compaction_gate().cancel_all(reason="reset")
+            self.context.require_port(
+                "memory:memory"
+            ).cancel_active_compaction(reason="reset")
             self.state.resident_drained_event = asyncio.Event()
             current_turn_id = self.turn_manager.latest_active_turn_id()
             if current_turn_id is None:
@@ -1817,16 +1746,10 @@ class PalCore(MemoryMaintenanceMixin):
             # F6 (review af51d74): the LLM runtime's hosted projection
             # lineages must not outlive the history authority they were
             # frozen from — retire them with the rolled incarnation.
-            try:
-                llm_runtime = self.context.get_port("llm:llm")
-            except Exception:
-                llm_runtime = None
+            llm_runtime = self.context.require_port("llm:llm")
             retire = getattr(llm_runtime, "retire_projection_sessions", None)
             if callable(retire):
-                try:
-                    retire()
-                except Exception:
-                    pass
+                retire()
             return True
         finally:
             async with self.state.channel_turn_transition_lock:
