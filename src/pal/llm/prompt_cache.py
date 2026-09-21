@@ -173,6 +173,38 @@ class _TrackStats:
         self.submitted_at = 0.0
 
 
+_ANCHOR_TTL_SECONDS = {"5m": 300.0, "30m": 1800.0, "1h": 3600.0}
+
+
+@dataclass
+class _AnchorReadEvidence:
+    """Anchor-writing request retained for READ-evidence confirmation.
+
+    dffb210 removed submitted-marker authorization: bytes the planner once
+    sent may never authorize a cache-dependent request by themselves.  The
+    entry stays unconfirmed until a LATER successful request's provider
+    usage reports the anchor prefix served FROM CACHE
+    (``cached_input_tokens >= prefix_tokens``) — the provider's own read
+    evidence.  Retention is the resident singleton only.
+    """
+
+    request: LLMRequestIR
+    anchor_message_id: str
+    anchor_fingerprint: str
+    prefix_tokens: int
+    submitted_sequence: int
+    submitted_at: float
+    endpoint_id: str
+    wire_shape: str
+    dialect: str
+    ttl_seconds: float
+    confirmed_at: float = 0.0
+
+    @property
+    def confirmed(self) -> bool:
+        return self.confirmed_at > 0.0
+
+
 @dataclass
 class _ScopeStats:
     observations: deque[tuple[float, int, int]] = field(
@@ -227,6 +259,9 @@ class PromptCacheCoordinator:
     max_attempt_records: int = 128
     _tails: dict[str, TailHistory] = field(default_factory=dict, init=False, repr=False)
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
+    _anchor_evidence: dict[str, _AnchorReadEvidence] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _last_plan: PromptCachePlan | None = field(default=None, init=False, repr=False)
     _attempt_records: deque[dict[str, Any]] = field(
         default_factory=deque,
@@ -273,7 +308,7 @@ class PromptCacheCoordinator:
                 estimated_prefix_tokens=max((s.estimated_cache_prefix_tokens for s in encoded.message_spans if s.message_id in reusable), default=0),
                 decision="provider_automatic" if mode == "implicit" else "disabled",
                 **profile_fields)
-            self._remember(plan, request=request)
+            self._remember(plan, request=request, context=context)
             return plan
 
         spans = {span.message_id: span for span in encoded.message_spans}
@@ -463,7 +498,7 @@ class PromptCacheCoordinator:
             **profile_fields,
             mode="explicit",
         )
-        self._remember(plan, request=request)
+        self._remember(plan, request=request, context=context)
         return plan
 
     def _plan_tail(self, request, context, encoded, dialect, profile_fields, mode):
@@ -526,7 +561,7 @@ class PromptCacheCoordinator:
                 prepared_encoded=clean, tail_generation=state.generation, tail_current=frontier,
                 **dict(profile_fields, strategy=POLICY if mode == "explicit" else "fixed_anchors"))
             self._prune_scopes_locked(now=now, keep=scope)
-            self._remember(plan, request=request)
+            self._remember(plan, request=request, context=context)
             return plan
 
     def end_turn(self, turn_id: str) -> None:
@@ -865,6 +900,22 @@ class PromptCacheCoordinator:
                     applied_breakpoint_ids=applied_breakpoint_ids,
                     observed_at=now,
                 )
+                # READ-evidence anchor confirmation (dffb210 boundary): the
+                # provider itself must report the anchor prefix served from
+                # cache on a LATER request — strictly after the write.
+                evidence = self._anchor_evidence.get(plan.scope_key)
+                if (
+                    evidence is not None
+                    and not evidence.confirmed
+                    and evidence.anchor_fingerprint
+                    == plan.anchor.submitted_fingerprint
+                    and evidence.prefix_tokens > 0
+                    and int(plan.plan_sequence) > evidence.submitted_sequence
+                    and usage.has("cached_input_tokens")
+                    and int(usage.cached_input_tokens)
+                    >= evidence.prefix_tokens
+                ):
+                    evidence.confirmed_at = now
                 if plan.frontier.epoch_key == stats.frontier_epoch:
                     _record_track_success(
                         stats.frontier,
@@ -1004,18 +1055,101 @@ class PromptCacheCoordinator:
                 "anchor_epoch": "", "anchor_ttl_seconds": 0, "prefix_tokens": 0}
 
     def confirmed_anchor_request(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
-        # Submitted marker bytes remain in the planner, but must not authorize
-        # a cache-dependent compaction request or an expiry assertion.
-        return {}
+        """READ-evidence anchor confirmation (dffb210 boundary honored).
+
+        Returns the anchor-writing request ONLY when the provider has since
+        reported serving that anchor's prefix from cache on a later
+        successful request (``cached_input_tokens >= prefix_tokens``), the
+        confirmation is inside the anchor's TTL, and the requested endpoint
+        matches.  Submitted marker bytes alone authorize nothing.
+        """
+
+        wanted_scope = str(logical_scope_id or "pal:resident").strip()
+        with self._lock:
+            now = time.monotonic()
+            for scope_key, evidence in list(self._anchor_evidence.items()):
+                if str(
+                    getattr(evidence.request, "logical_scope_id", "") or ""
+                ) != wanted_scope:
+                    continue
+                if endpoint_id and str(endpoint_id) != evidence.endpoint_id:
+                    continue
+                if not evidence.confirmed:
+                    continue
+                if now - evidence.confirmed_at > evidence.ttl_seconds:
+                    self._anchor_evidence.pop(scope_key, None)
+                    continue
+                return {
+                    "request": evidence.request,
+                    "anchor_message_id": evidence.anchor_message_id,
+                    "dialect": evidence.dialect,
+                    "wire_shape": evidence.wire_shape,
+                }
+            return {}
 
     def _remember(
         self,
         plan: PromptCachePlan,
         *,
         request: LLMRequestIR,
+        context: ShapeContext | None = None,
     ) -> None:
         with self._lock:
             self._last_plan = plan
+            self._retain_anchor_evidence_locked(
+                plan, request=request, context=context)
+
+    def _retain_anchor_evidence_locked(
+        self,
+        plan: PromptCachePlan,
+        *,
+        request: LLMRequestIR,
+        context: ShapeContext | None,
+    ) -> None:
+        """Retain/refresh the anchor-writing request (resident only).
+
+        Same anchor re-submitted → keep the ORIGINAL write request (same
+        bytes, earliest sequence).  A different anchor → replace with a
+        fresh unconfirmed write.  Anchor no longer planned → the stale
+        entry dies: submitted markers authorize nothing on their own.
+        """
+
+        existing = self._anchor_evidence.get(plan.scope_key)
+        retainable = (
+            plan.enabled
+            and plan.anchor.submitted_message_id
+            and context is not None
+            and str(getattr(request, "logical_scope_id", "") or "")
+            == "pal:resident"
+        )
+        if not retainable:
+            if (
+                existing is not None
+                and not plan.anchor.submitted_message_id
+                and plan.anchor.submitted_fingerprint != existing.anchor_fingerprint
+            ):
+                self._anchor_evidence.pop(plan.scope_key, None)
+            return
+        if (
+            existing is not None
+            and existing.anchor_fingerprint == plan.anchor.submitted_fingerprint
+            and existing.anchor_message_id == plan.anchor.submitted_message_id
+        ):
+            return
+        self._anchor_evidence[plan.scope_key] = _AnchorReadEvidence(
+            request=request,
+            anchor_message_id=str(plan.anchor.submitted_message_id),
+            anchor_fingerprint=str(plan.anchor.submitted_fingerprint),
+            prefix_tokens=max(0, int(plan.anchor.submitted_prefix_tokens or 0)),
+            submitted_sequence=int(plan.plan_sequence),
+            submitted_at=time.monotonic(),
+            endpoint_id=str(context.endpoint_id if context is not None else ""),
+            wire_shape=str(context.wire_shape.value if context is not None else ""),
+            dialect=str(plan.dialect.value),
+            ttl_seconds=_ANCHOR_TTL_SECONDS.get(
+                str(plan.anchor.ttl or "5m"), 300.0
+            ),
+        )
 
     def _prune_scopes_locked(self, *, now: float, keep: str = "") -> None:
         for stats in self._stats.values():
@@ -1029,6 +1163,7 @@ class PromptCacheCoordinator:
             if key != keep and (now - accessed(key) > self.observation_ttl_seconds or len(scopes) > maximum):
                 self._stats.pop(key, None)
                 self._tails.pop(key, None)
+                self._anchor_evidence.pop(key, None)
                 scopes.remove(key)
 
 

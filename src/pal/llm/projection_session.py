@@ -954,6 +954,7 @@ class EndpointProjectionSession:
         # made a round-one tail developer message degrade while whole-history
         # encoding still promoted it (review G2).
         tail_payload: dict[str, Any] = {}
+        tail_spans: tuple = ()
         if view.messages:
             tail_context = replace(
                 context,
@@ -967,6 +968,7 @@ class EndpointProjectionSession:
                 dict(item)
                 for item in (tail_payload.get(container) or [])
             ]
+            tail_spans = tuple(encoded_tail.message_spans)
         else:
             tail_items = []
         # Conversation-span items only (review G1): the preamble NEVER enters
@@ -1053,6 +1055,51 @@ class EndpointProjectionSession:
                     *assembled[seam + 2 :],
                 ]
         payload: dict[str, Any] = {**shell_fields, container: assembled}
+        # W2/warm (主项1): spans travel WITH the assembled projection so the
+        # prompt-cache coordinator can plan anchors/frontiers on the PROJECTED
+        # payload exactly like a cold encode — without them the projected path
+        # silently bypasses explicit cache planning and can never confirm a
+        # warm anchor.  Preamble spans index the assembled head unchanged;
+        # tail spans remap into conversation coordinates, including the
+        # anthropic boundary merge (merged item = pending[-1] + tail[0]).
+        merged_boundary = (
+            len(preamble_items) + len(self._prefix_items)
+            + len(self._pending_wire_tail) - 1
+            if (
+                self.binding.wire_shape.value == "anthropic_messages"
+                and self._pending_wire_tail
+                and tail_items
+            )
+            else None
+        )
+        _left_pending = self._pending_wire_tail[-1].item if self._pending_wire_tail else {}
+        merged_left_blocks = (
+            len(_left_pending.get("content") or [])
+            if merged_boundary is not None
+            and isinstance(_left_pending.get("content"), list)
+            else 0
+        )
+        tail_container_start = len(preamble_items) + len(
+            self._prefix_items
+        ) + len(self._pending_wire_tail)
+        assembled_spans: list = [
+            *(
+                span for span in encoded_shell.message_spans
+                if span.message_id in {
+                    message.message_id for message in preamble_only
+                }
+            ),
+            *(
+                _remap_tail_span(
+                    span,
+                    container=container,
+                    container_start=tail_container_start,
+                    merged_boundary=merged_boundary,
+                    merged_left_blocks=merged_left_blocks,
+                )
+                for span in tail_spans
+            ),
+        ]
         # Position-sensitive codecs may hoist tail-head system/developer
         # content into the TAIL encode's top-level ``system`` when this batch
         # sits at the request head (no conversation prefix).  Those parts are
@@ -1090,6 +1137,8 @@ class EndpointProjectionSession:
             attempt=self._active.attempt,
             base_cursor=view.cursor,
             payload=payload,
+            message_spans=tuple(assembled_spans),
+            extra_body=dict(encoded_shell.extra_body or {}),
         )
 
     # -- repair ---------------------------------------------------------------
@@ -1229,6 +1278,61 @@ def _merge_anthropic_user_boundary(items: list[dict], boundary: int) -> tuple[bo
         merged_item["content"] = [*left["content"], *right["content"]]
         return True, [*items[:boundary], merged_item, *items[boundary + 2 :]]
     return False, items
+
+
+def _remap_path_into_assembled(
+    path: tuple,
+    *,
+    container: str,
+    container_start: int,
+    merged_boundary: int | None,
+    merged_left_blocks: int,
+) -> tuple:
+    """Remap one tail-encode JSON path into assembled-payload coordinates."""
+
+    if len(path) < 2 or path[0] != container or not isinstance(path[1], int):
+        return path
+    rest = list(path[2:])
+    index = container_start + int(path[1])
+    if merged_boundary is not None:
+        if int(path[1]) == 0:
+            # The first tail message merged into the pending user item:
+            # its content blocks sit AFTER the pending item's blocks.
+            index = merged_boundary
+            if len(rest) >= 2 and rest[0] == "content" and isinstance(rest[1], int):
+                rest[1] = int(rest[1]) + merged_left_blocks
+        else:
+            index -= 1
+    return (path[0], index, *rest)
+
+
+def _remap_tail_span(
+    span,
+    *,
+    container: str,
+    container_start: int,
+    merged_boundary: int | None,
+    merged_left_blocks: int,
+):
+    """Remap a tail-encode span into assembled-payload coordinates (warm)."""
+
+    remap_args = {
+        "container": container,
+        "container_start": container_start,
+        "merged_boundary": merged_boundary,
+        "merged_left_blocks": merged_left_blocks,
+    }
+    return replace(
+        span,
+        cache_targets=tuple(
+            _remap_path_into_assembled(path, **remap_args)
+            for path in (span.cache_targets or ())
+        ),
+        wire_item_paths=tuple(
+            _remap_path_into_assembled(path, **remap_args)
+            for path in (span.wire_item_paths or ())
+        ),
+    )
 
 
 def _merge_anthropic_user_boundary_pairs(
