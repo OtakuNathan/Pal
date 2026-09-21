@@ -30,6 +30,8 @@
 | `7d75ddb` | N3 切片 1 | invoker encode 点接受 owner 备好的不可变 projection（类型化参数，非 metadata 夹带）；无 projection 时 codec 路径字节不变；2 新测试 + 受影响 97 文件 1443+347sub 零失败；剩余 N3：runtime owner 侧准备（W3）、accept→observe_commit 闭环（W5）、完整纵向 trace |
 | `5642542` | N3 主体 | **ordinary 轮真正走投影**：executor owner 侧 prepare（durable-id 过滤，瞬态内容冷回退永不冻结）→ 类型化不可变 (EncodedRequest+Binding) 下沉 → runtime W3 端点匹配（不符即冷）→ invoker 发送 → 真实 decode/accept → observe_commit 冻结（ERROR 轮 reject 不冻结）；`test_v3_n3_vertical_trace.py` 两轮 trace：冻结块 span 覆盖 q+a、第二轮 payload 每条内容恰好一次；98 文件 1445+347sub 零失败 |
 | `695efbc` | N4 切片 | W1/N20：请求边界 promote 闭合旧组（长活 turn 不再永久 no_benefit）；cut 规则修正：闭合前缀不得以悬空 user 结尾（L01 旧断言与其名义矛盾，已对齐 PLAN §3.3）；J7 过期守卫：root.left_generation（仅 install 跳）vs session.history_left_revision，rebase 未消费即冷回退不重播已退休历史 |
+| `1900125` | N7（pal_v3_af51d74_review） | review F1-F6 六项全修：F1 `prepare_generation_plan` 一次性派生不可变 prepared plan（resolved endpoint + 编译后 effective request + 强 binding：真实 spec digest / continuation contract version / 覆盖能力画像的 config fingerprint；spec-1/policy-1/provider:base_url 占位符全部消灭），投影编码 effective_request 且 generate/astream 在 plan 端点原样复用编译结果；F2 类型化 `ProjectionSendReceipt`（attempt id + resolved endpoint + applied + native）随 LLMGenerationResult / `last_projection_receipt`（stream）返回，observe_commit 仅由匹配的 applied receipt 授权，端点 fallback 报 applied=False 不冻结，sync stale-spec 递归不再丢投影参数（与 stream 对齐）；F3 invoker 按次把 NativeCapture 候选经 native_sink 交回，applied receipt 携带到 owner，真 continuation policy：清单匹配且 PRESERVED → byte-true native_committed 冻结，不匹配（边界替换/DSML 提升）→ 丢弃 native IR-only 冻结，降级 → 拒绝冻结冷回退；F4 显式 AcceptedContribution 边界 `_finalize_accepted_contribution`（finalization 替换先于投影 commit，receipt 穿越替换不被丢弃贡献冻结）；F5 pending tail 条目携 span 归属（`_PendingWireItem`）、chunk 新增对齐 `item_spans`（checkpoint 双向往返），on_left_replaced 按 kept_set 退休 pending 与幸存 chunk 内的退休 span 字节；F6 soft_reset 显式 roll HistoryRoot incarnation（不再从长度推断自愈），reset 流程 retire LLMRuntime 托管投影 session，owner prepare 新增结构性守卫：lineage 冻结 span 不再 durable 即冷回退；`test_v3_af51d74_review_fixes.py` 12红→12绿，19 邻接套件 192+67sub 零回归 |
+| `3eb036b` | N7 fixup | native_sink 仅传给 send 方法签名可接受的 invoker（收窄签名的子类调用时 TypeError 计为端点失败——全量暴露 3 个真回归 test_llm_runtime_ir stream，单跑 3/3 复现修复后全绿）；全量回归（1900125+本 fix）：3134 passed + 491 subtests + 7 skipped，25 failed = 3 个已修复真回归 + 19 节点 + 3 subtest 行与上轮全量完全同集，单跑 20/20 零复现（logs_flake_rerun_af51d74fix.txt）同族长跑争用归因 |
 
 ## 3. 设计要点
 
@@ -41,7 +43,7 @@
 
 ## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
-0. **review 包（pal_v3_review_2014db4，Request changes）收口中**：N1 已修（F1/F2/F5/F6）；**F3（prepare_handoff 丢 in-container base preamble）与 F4（rebase 保留 R 未在真实 helper 成立：空 keeper、IR 重建丢 native、硬编码 epoch）属 N2**；W1-W5 接线缺口按 NEXT_STEPS N2-N6 推进（28 项收口矩阵全 NOT_RUN）
+0. **review 包（pal_v3_af51d74_review，Request changes）F1-F6 已全修（1900125/3eb036b）**：plan-first 投影 / send receipt 授权 / 真 native continuation / AcceptedContribution 边界 / pending tail 归属 / 显式 reset lineage。判决「不翻转 two_segment 默认」遵守——默认仍 full_source；剩余大项：warm handoff 拆分（cached L 前缀+未缓存后缀）、真 provider E2E、模式翻转后的 v2 物理清理（含 compaction_coordinator/staging/lease 文件级删除）
 1. **warm anchor 未接入双段流**：handoff 走 cold-left 全量编码；H01 warm 列验证的是「资格不可用时诚实回退 cold」。warm 拆分（cached L 前缀 + 未缓存后缀直发）是后续项
 2. **compaction_coordinator 未物理拆除**：full_source 模式仍在用；文件级删除等 two_segment 转默认后进行。two_segment 路径零依赖它
 3. **ingress_staging / artifact_lease**：自动接线已按模式关断（two_segment 下永不构造）；模块文件保留至模式翻转，届时随 v2 专用测试一并移出
@@ -53,7 +55,7 @@
 - v3 新测试族（终 HEAD 复跑）：history_root 33 / projection_two_segment 14+12sub / memory facade 7 / executor flow 3 / builder 2 / H01 1+12sub / budget facts 3——全绿
 - N1→N4 新增套件：n1_root_lifecycle 12 / n11_followup 12 / n2_projection_fixes 5+5sub / n2_continuity 3 / n3_invoker 3 / n3_vertical 4（含 promote→compact 全链与 stale-left）——全绿
 - 继承族逐 gate 抽查：runtime_compaction / full_compaction_source / hot_cache / memory / history / projection 全系 / bunshin harnesses / hosts_recovery——绿
-- 全量回归（HEAD `695efbc`，26:17）：**3124 passed + 491 subtests + 7 skipped，22 failed**。与前两次全量（3575e48、29a879f）同族同数：19 个可提取失败节点**单跑 19/19 PASS 零复现**（logs_n4_flake_rerun.txt，bunshin v2public/verification、control_plane 键盘渲染等），归因长跑资源争用/时序，与 v3 改动面零交集；另 3 个无节点行。不宣称全量全绿，干净环境重跑仍为最终归因步
+- 全量回归（HEAD `3eb036b`，25:47）：**3134 passed + 491 subtests + 7 skipped，25 failed**。其中 3 个为本次引入的真回归（native_sink vs 收窄 invoker 签名，test_llm_runtime_ir stream）——单跑 3/3 复现、修复后套件全绿；其余 19 节点 + 3 subtest 行与上轮全量（695efbc）完全同集，单跑 **20/20 零复现**（logs_flake_rerun_af51d74fix.txt），与 3575e48/29a879f 三次同族，归因长跑资源争用/时序。不宣称全量全绿，干净环境重跑仍为最终归因步
 - acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）；28 项收口矩阵实况见 §8
 
 ## 6. 全链路逼出的真 bug（本任务）
@@ -82,11 +84,11 @@
 | N09 native 原件重放 | PASS | 同上（kept native） |
 | N10 executor 真实 keeper | PASS | 同上（populated R + epoch） |
 | N11 共享 L reference | PASS | test_v3_n2_continuity_lview |
-| N12 实际 profile 编码 | PASS(component) | projection_session B1 能力套件 |
-| N13 端点不符冷回退 | PASS | test_v3_n3_invoker_projection（mismatch drop） |
-| N14 fallback/spec refresh 切换 | NOT_RUN | 需双端点 fallback fixture |
+| N12 实际 profile 编码 | PASS | runtime plan 侧真实 wiring：binding 携带 validated capabilities，投影/冷路径同源（af51d74 F1） |
+| N13 端点不符冷回退 | PASS | test_v3_n3_invoker_projection（mismatch drop）+ af51d74 F2（receipt applied=False） |
+| N14 fallback/spec refresh 切换 | PASS | af51d74 F2：双端点 fallback fixture（投影不冻结）+ sync stale-spec 刷新保投影参数 |
 | N15 spans/extra_body 保留 | PASS | n2 handoff wire-contract 对拍 |
-| N16 不预填未来 A | PASS | vertical trace（冻结在 accept 后） |
+| N16 不预填未来 A | PASS | vertical trace（冻结在 accept 后）+ af51d74 F4（边界替换后仅冻结 fallback） |
 | N17 工具结果 commit 故障不冻结 | NOT_RUN | 待接 tool-delivery 接受路径 |
 | N18 stream partial/length 不冻结 | PARTIAL | ERROR 轮 reject 已测；stream 细分 NOT_RUN |
 | N19 handoff 输出只进 validator | PASS(component) | engine 套件（I14 既有） |
@@ -94,8 +96,8 @@
 | N21 发送预算门 | PASS(component) | G4 B01/B03/Q03；B04-B08 NOT_RUN |
 | N22 无预热/miss 不重发 | PASS(component) | hot_cache 套件；warm 拆分 NOT_RUN |
 | N23 interrupt vs commit 竞争 | PASS | N1 cancel + compact_cancel_control |
-| N24 rebase 失败禁旧投影 | PASS | stale-left 守卫测试 |
-| N25 worker/owner 单写者 | PASS(design) | owner 侧 prepare + 类型化下沉；barrier 专项测试未写 |
+| N24 rebase 失败禁旧投影 | PASS | stale-left 守卫测试 + af51d74 F6（lineage span 不 durable 冷回退） |
+| N25 worker/owner 单写者 | PASS | owner 侧 prepare + 类型化下沉 + **receipt 授权 commit**（af51d74 F2：无 receipt/applied=False/attempt 不匹配均拒绝冻结） |
 | N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
 | N27 宿主×shape×warm 真实 E2E | PARTIAL | H01 组件矩阵；真 provider E2E NOT_RUN |
-| N28 最终矩阵+全量 | 本表+全量日志 | 695efbc 全量 3124+491+7sk/22f，19 节点单跑 19/19 零复现（logs_n4_flake_rerun.txt） |
+| N28 最终矩阵+全量 | 本表+全量日志 | 3eb036b 全量 3134+491+7sk/25f：3 真回归已修复（单跑复现+修复验证），其余 19 节点+3 subtest 与上轮同集单跑 20/20 零复现（logs_flake_rerun_af51d74fix.txt） |
