@@ -108,6 +108,12 @@ class ProjectionChunk:
     # of subtracting item counts; an empty span is a legacy chunk that can
     # no longer participate in a left replacement.
     semantic_span: tuple[str, ...] = ()
+    # F5 (review af51d74): per-item semantic ownership aligned with ``items``
+    # (same length; empty tuples are legacy items with unknown ownership).
+    # Wire bytes frozen out of a pending tail keep their ORIGINAL owning
+    # span, so a left replacement can retire them from a surviving chunk's
+    # replay instead of letting compacted-away content ride along.
+    item_spans: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,11 +145,28 @@ class _HeadSystemEntry:
     parts: tuple[Mapping[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class _PendingWireItem:
+    """One unfrozen wire item with the span that owns it (F5).
+
+    Pending tail items are semantic territory: they were trimmed from a
+    commit whose span ids name the round that produced them.  A left
+    replacement retires pending entries whose owning span died instead of
+    preserving the list wholesale and replaying compacted-away bytes after
+    the summary.
+    """
+
+    item: dict
+    span_ids: tuple[str, ...]
+
+
 @dataclass
 class _ActiveRound:
     attempt: AttemptKey
     requires_native: bool
     prepared_items: list[dict] = field(default_factory=list)
+    # F5: per-item span ownership aligned with prepared_items.
+    prepared_item_spans: list[tuple[str, ...]] = field(default_factory=list)
     prepared_base_cursor: HistoryCursor | None = None
     # Top-level system parts hoisted from THIS round's tail-head messages
     # (review G2 persistence): container coordinates cannot freeze them, so
@@ -176,12 +199,16 @@ class EndpointProjectionSession:
         # deepcopy of old chunks).  Private mutable dicts: the public chunk
         # view holds deep-frozen snapshots (review R7).
         self._prefix_items: list[dict] = []
-        # Unfrozen wire tail kept across rounds (review F2): trailing items
-        # trimmed from a commit (e.g. Anthropic user-role tool results) stay
-        # session-owned and are re-injected into every prepare until a later
-        # commit freezes past them.  Semantic acceptance and wire freezing
-        # are different coordinates.
-        self._pending_wire_tail: list[dict] = []
+        # Per-item span ownership aligned with _prefix_items (F5).
+        self._prefix_item_spans: list[tuple[str, ...]] = []
+        # Unfrozen wire tail kept across rounds (review F2 + F5 ownership):
+        # trailing items trimmed from a commit (e.g. Anthropic user-role tool
+        # results) stay session-owned and are re-injected into every prepare
+        # until a later commit freezes past them.  Each entry carries the
+        # span of the round that produced it, so a left replacement retires
+        # entries whose owning round died.  Semantic acceptance and wire
+        # freezing are different coordinates.
+        self._pending_wire_tail: list[_PendingWireItem] = []
         # Top-level system parts hoisted from past rounds' tail-head
         # system/developer messages (review G2 persistence).  Anthropic
         # renders request-head content outside the container, so committed
@@ -241,6 +268,7 @@ class EndpointProjectionSession:
         self._committed_attempts = {}
         self.frontier = HistoryCursor.initial()
         self._prefix_items = []
+        self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
         self._left_revision = 0
@@ -251,6 +279,7 @@ class EndpointProjectionSession:
         self.native_by_attempt = {}
         self.chunks = ()
         self._prefix_items = []
+        self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
         self._active = None
@@ -464,7 +493,17 @@ class EndpointProjectionSession:
         # double content.  The open round's prepared_items is never mutated
         # either — a failed observe_commit can be retried deterministically.
         extended = [*self._active.prepared_items, *materialized]
+        extended_spans = [
+            *self._active.prepared_item_spans,
+            *((span_ids,) * len(materialized)),
+        ]
+        if len(extended_spans) < len(extended):
+            # Legacy draft state without ownership: pad with unknown spans.
+            extended_spans.extend(
+                [()] * (len(extended) - len(extended_spans))
+            )
         items = tuple(extended[self._frontier_item_count :])
+        item_span_list = list(extended_spans[self._frontier_item_count :])
         if not items:
             raise ProjectionSessionError(
                 "no prepared items beyond the frontier; commit has nothing to seal"
@@ -474,12 +513,21 @@ class EndpointProjectionSession:
         # request's encoder would merge it with the following user message.
         # Trim trailing mergeable items back into the unfrozen tail; they are
         # re-encoded (bounded cost) until a later commit freezes past them.
+        # F5: trimmed items keep their ORIGINAL owning span, so a left
+        # replacement can retire them with the round that produced them.
         frozen_item_count = len(extended)
-        unfrozen_suffix: list[dict] = []
+        unfrozen_suffix: list[_PendingWireItem] = []
         if self.binding.wire_shape.value == "anthropic_messages":
             while items and isinstance(items[-1], dict) and items[-1].get("role") == "user":
-                unfrozen_suffix.insert(0, items[-1])
+                unfrozen_suffix.insert(
+                    0,
+                    _PendingWireItem(
+                        item=dict(items[-1]),
+                        span_ids=tuple(item_span_list[-1]),
+                    ),
+                )
                 items = items[:-1]
+                item_span_list = item_span_list[:-1]
                 frozen_item_count -= 1
         # A zero-freeze commit is ACCEPTED, not refused (review H1): Anthropic
         # can legitimately close a round whose items beyond the frontier are
@@ -499,14 +547,21 @@ class EndpointProjectionSession:
             items=tuple(freeze_json_mapping(item) for item in items),
             prefix_digest=receipt.append.after.prefix_digest,
             semantic_span=span_ids,
+            # F5: per-item ownership travels with the frozen snapshot so a
+            # later rebase can retire retired-span bytes from replay.
+            item_spans=tuple(tuple(span) for span in item_span_list),
         )
         head_system_parts = [dict(part) for part in self._active.prepared_head_system]
         # -- single install boundary: no session-visible failure past here --
-        self._pending_wire_tail = [dict(item) for item in unfrozen_suffix]
+        self._pending_wire_tail = [
+            _PendingWireItem(item=dict(entry.item), span_ids=tuple(entry.span_ids))
+            for entry in unfrozen_suffix
+        ]
         self.chunks = (*self.chunks, chunk)
         # The private amortized prefix keeps the mutable dicts; it is never
         # exposed and shares nothing with the frozen chunk snapshot above.
         self._prefix_items.extend(items)
+        self._prefix_item_spans.extend(tuple(span) for span in item_span_list)
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
         # Request-head content hoisted to top-level system this round becomes
         # session-owned exactly like the wire tail (review G2 persistence),
@@ -686,6 +741,7 @@ class EndpointProjectionSession:
         context = self._shape_context()
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         rebuilt_items: list[dict] = []
+        rebuilt_spans: list[tuple[str, ...]] = []
         if change.seed_messages:
             encoded = codec.encode(
                 LLMRequestIR(
@@ -695,38 +751,66 @@ class EndpointProjectionSession:
                 ),
                 context,
             )
-            rebuilt_items = [
+            seed_items = [
                 dict(thaw_json(item))
                 for item in (dict(encoded.payload).get(container) or [])
             ]
+            # Seed content belongs to the NEW left reference: it is the
+            # canonical-R seam's foundation and is never filtered against
+            # kept_set (empty ownership marks it unconditional).
+            rebuilt_items.extend(seed_items)
+            rebuilt_spans.extend([()] * len(seed_items))
         # F4: surviving right chunks replay their ORIGINAL wire items —
         # byte-true native material included — instead of an IR re-encode.
         # thaw_json: the private prefix owns MUTABLE copies; the chunk's
         # public snapshot is deep-frozen and must not leak proxies into
-        # later encodes.
+        # later encodes.  F5: when the chunk carries per-item ownership,
+        # items whose owning span retired die here — wire bytes frozen out
+        # of a retired round's pending tail must not ride a surviving
+        # chunk.  Legacy chunks without ownership replay whole.
+        for chunk in surviving_chunks:
+            spans = chunk.item_spans
+            if spans and len(spans) == len(chunk.items):
+                for item, span in zip(chunk.items, spans):
+                    if span and not set(span) <= kept_set:
+                        continue
+                    rebuilt_items.append(dict(thaw_json(item)))
+                    rebuilt_spans.append(tuple(span))
+            else:
+                for item in chunk.items:
+                    rebuilt_items.append(dict(thaw_json(item)))
+                    rebuilt_spans.append(())
+        # F5: the session-owned pending tail is right-side territory by
+        # definition (items trimmed from commits that are not yet frozen),
+        # but each entry belongs to the ROUND that produced it: entries
+        # whose owning span died with the compacted-away L retire here
+        # instead of reappearing after the summary.
+        surviving_pending = [
+            entry for entry in self._pending_wire_tail
+            if set(entry.span_ids) <= kept_set
+        ]
         rebuilt_items.extend(
-            dict(thaw_json(item))
-            for chunk in surviving_chunks
-            for item in chunk.items
+            dict(thaw_json(entry.item)) for entry in surviving_pending
         )
-        # The session-owned pending tail is right-side territory by
-        # definition (items trimmed from commits that are not yet frozen):
-        # it survives the left replacement wholesale and stays ahead of the
-        # incoming tail (review F4 — keep the unfrozen right representation
-        # too, not just chunk-frozen bytes).
-        rebuilt_items.extend(
-            dict(thaw_json(item)) for item in self._pending_wire_tail
+        rebuilt_spans.extend(
+            tuple(entry.span_ids) for entry in surviving_pending
         )
         # Anthropic merges adjacent user-role wire messages, so a rebuilt
         # prefix ending in role "user" is not a stable freeze point (the
         # same rule commit-time trimming applies).  Hand the trailing user
         # items to the open tail so the next prepare merges them with the
         # incoming tail exactly like a whole-history encode would.
-        unfrozen_tail: list[dict] = []
+        unfrozen_tail: list[_PendingWireItem] = []
         if self.binding.wire_shape.value == "anthropic_messages":
             while rebuilt_items and isinstance(rebuilt_items[-1], dict) \
                     and rebuilt_items[-1].get("role") == "user":
-                unfrozen_tail.insert(0, rebuilt_items.pop())
+                unfrozen_tail.insert(
+                    0,
+                    _PendingWireItem(
+                        item=rebuilt_items.pop(),
+                        span_ids=rebuilt_spans.pop(),
+                    ),
+                )
         # -- single install section.
         surviving_attempt_ids = {chunk.round_attempt_id for chunk in surviving_chunks}
         dead_attempts = {
@@ -739,6 +823,7 @@ class EndpointProjectionSession:
             self._committed_attempts.pop(attempt_id, None)
         self.chunks = tuple(surviving_chunks)
         self._prefix_items = rebuilt_items
+        self._prefix_item_spans = rebuilt_spans
         self._pending_wire_tail = unfrozen_tail
         # F4: head-system parts re-own to their surviving rounds; entries
         # attributed to retired left rounds die with them.
@@ -891,26 +976,47 @@ class EndpointProjectionSession:
         # conversation-only cursor, and a committed chunk can no longer
         # freeze the preamble into the prefix.  Preamble items are re-injected
         # fresh at assembly time below, honoring per-request shell budgets.
-        conversation_items: list[dict] = [
-            *self._prefix_items,
-            *(dict(item) for item in self._pending_wire_tail),
-            *tail_items,
+        # F5: each conversation item carries its owning span — frozen prefix
+        # items keep their historical span, pending entries keep the span of
+        # the round that produced them, and this round's tail items are
+        # attributed to the tail message ids.
+        prefix_spans = list(self._prefix_item_spans)
+        if len(prefix_spans) < len(self._prefix_items):
+            prefix_spans.extend([()] * (len(self._prefix_items) - len(prefix_spans)))
+        tail_message_ids = tuple(
+            str(message.message_id or "") for message in view.messages
+        )
+        conversation: list[tuple[dict, tuple[str, ...]]] = [
+            (dict(item), tuple(span))
+            for item, span in zip(self._prefix_items, prefix_spans)
         ]
+        conversation.extend(
+            (dict(entry.item), tuple(entry.span_ids))
+            for entry in self._pending_wire_tail
+        )
+        conversation.extend(
+            (dict(item), tail_message_ids) for item in tail_items
+        )
         # Anthropic merges adjacent user-role wire messages (source-verified
         # _append_message behavior), so the pending/tail boundary must merge
         # the same way a whole-history encode would — otherwise assembled
         # requests differ from full encodings by one split user message.
-        # Boundary index is in conversation coordinates (review G1).
+        # Boundary index is in conversation coordinates (review G1); the
+        # merged item owns the UNION of both sides' spans (F5).
         if (
             self.binding.wire_shape.value == "anthropic_messages"
             and self._pending_wire_tail
             and tail_items
         ):
             boundary = len(self._prefix_items) + len(self._pending_wire_tail) - 1
-            _merged, conversation_items = _merge_anthropic_user_boundary(
-                conversation_items, boundary
+            conversation = _merge_anthropic_user_boundary_pairs(
+                conversation, boundary
             )
-        self._active.prepared_items = conversation_items
+        self._active.prepared_items = [item for item, _ in conversation]
+        self._active.prepared_item_spans = [
+            span for _, span in conversation
+        ]
+        conversation_items = self._active.prepared_items
         self._active.prepared_base_cursor = view.cursor
         assembled: list[dict] = [
             *(dict(item) for item in preamble_items),
@@ -1123,6 +1229,41 @@ def _merge_anthropic_user_boundary(items: list[dict], boundary: int) -> tuple[bo
         merged_item["content"] = [*left["content"], *right["content"]]
         return True, [*items[:boundary], merged_item, *items[boundary + 2 :]]
     return False, items
+
+
+def _merge_anthropic_user_boundary_pairs(
+    conversation: list[tuple[dict, tuple[str, ...]]],
+    boundary: int,
+) -> list[tuple[dict, tuple[str, ...]]]:
+    """Span-aware mirror of _merge_anthropic_user_boundary (F5).
+
+    The merged item owns the UNION of both sides' spans: it carries content
+    from both owning rounds, so a left replacement retires it if EITHER
+    side dies.
+    """
+
+    if boundary < 0 or boundary + 1 >= len(conversation):
+        return conversation
+    left_pair = conversation[boundary]
+    right_pair = conversation[boundary + 1]
+    left, right = left_pair[0], right_pair[0]
+    if (
+        isinstance(left, dict)
+        and isinstance(right, dict)
+        and left.get("role") == "user"
+        and right.get("role") == "user"
+        and isinstance(left.get("content"), list)
+        and isinstance(right.get("content"), list)
+    ):
+        merged_item = dict(left)
+        merged_item["content"] = [*left["content"], *right["content"]]
+        merged_span = tuple(dict.fromkeys((*left_pair[1], *right_pair[1])))
+        return [
+            *conversation[:boundary],
+            (merged_item, merged_span),
+            *conversation[boundary + 2 :],
+        ]
+    return conversation
 
 
 def _candidate_from(material) -> NativeCandidate:

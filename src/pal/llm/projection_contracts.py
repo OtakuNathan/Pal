@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
+from pal.llm.continuation_policy import NativeCandidate
 from pal.llm.ir import WireShape
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "ClosedRound",
     "AppendReceipt",
     "HistoryCommitReceipt",
+    "ProjectionSendReceipt",
     "PreparedRequest",
 ]
 
@@ -249,6 +251,42 @@ class HistoryCommitReceipt:
             raise ProjectionContractError("duplicate call in commit receipt")
         if any(not str(call_id or "").strip() for call_id in self.closed_call_ids):
             raise ProjectionContractError("empty call id in commit receipt")
+
+
+@dataclass(frozen=True)
+class ProjectionSendReceipt:
+    """Proof of what the transport actually did with a prepared projection.
+
+    F2 (review af51d74): only this receipt can authorize the owner's
+    observe_commit.  It names the projection attempt, the endpoint that
+    actually served the request, and whether the projected payload was the
+    encode that went on the wire — a dropped projection (endpoint fallback,
+    spec refresh, unsupported invoker) reports ``applied=False`` so the
+    owner rejects the round instead of freezing a payload the provider
+    never saw.  ``native`` carries the codec-level native candidate
+    captured for THIS attempt (F3) so the owner can apply the real
+    continuation policy; ``binding`` is the binding the projection was
+    prepared against (present whenever a projection was offered).
+    """
+
+    attempt_id: str
+    resolved_endpoint_id: str
+    resolved_model_id: str
+    resolved_wire_shape: str
+    applied: bool
+    detail: str = ""
+    binding: "EndpointBinding | None" = None
+    native: "NativeCandidate | None" = None
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.attempt_id, "projection attempt id")
+        _require_non_empty(self.resolved_endpoint_id, "resolved endpoint id")
+        _require_non_empty(self.resolved_model_id, "resolved model id")
+        _require_non_empty(self.resolved_wire_shape, "resolved wire shape")
+        if self.applied and self.binding is None:
+            raise ProjectionContractError(
+                "an applied projection receipt must carry its binding"
+            )
 
 
 # ---------------------------------------------------------------------------

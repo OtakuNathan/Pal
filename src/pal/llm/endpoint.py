@@ -77,26 +77,31 @@ class ShapeEndpointInvoker:
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         stream: bool = False, timeout_seconds: float = 600.0,
         projection: EncodedRequest | None = None,
+        native_sink: Callable[["NativeCandidate"], None] | None = None,
     ) -> tuple[LLMResponseIR, tuple[LLMResponseUpdate, ...]]:
         updates = tuple(self._iterate(endpoint, request, stream=stream,
                                       timeout_seconds=timeout_seconds,
-                                      projection=projection))
+                                      projection=projection,
+                                      native_sink=native_sink))
         return updates[-1].response, updates
 
     def invoke_updates(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         timeout_seconds: float = 600.0, stream_control: LLMStreamControl | None = None,
         projection: EncodedRequest | None = None,
+        native_sink: Callable[["NativeCandidate"], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         yield from self._iterate(endpoint, request, stream=True,
                                  timeout_seconds=timeout_seconds,
                                  stream_control=stream_control,
-                                 projection=projection)
+                                 projection=projection,
+                                 native_sink=native_sink)
 
     def _iterate(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         stream: bool, timeout_seconds: float, stream_control: LLMStreamControl | None = None,
         projection: EncodedRequest | None = None,
+        native_sink: Callable[["NativeCandidate"], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         shape = WireShape(str(endpoint.wire_shape))
         capabilities = dict(endpoint.capabilities_blob or {})
@@ -178,6 +183,19 @@ class ShapeEndpointInvoker:
                 exc.llm_attempt_recorded = self.attempt_sink is not None
             raise
         finally:
+            # F3 (review af51d74): hand the validated-capture candidate for
+            # THIS attempt to the runtime's receipt collector BEFORE any
+            # accounting work can drop it; only successful attempts deliver.
+            if native_sink is not None and status == "success":
+                try:
+                    candidate = capture.result()
+                except Exception:
+                    candidate = None
+                if candidate is not None:
+                    try:
+                        native_sink(candidate)
+                    except Exception:
+                        pass
             for iterator in (decoded, frames):
                 close = getattr(iterator, "close", None)
                 if callable(close):

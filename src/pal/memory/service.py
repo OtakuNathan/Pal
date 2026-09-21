@@ -331,14 +331,12 @@ class MemoryService(MemoryServicePort):
 
         root = self._history_root
         turns = self.l1_store.turns
-        if (
-            root is None
-            or root.store is not turns
-            # External wholesale clears (soft reset) mutate the same store
-            # object: a cut pointing past the shrunken history is a stale
-            # root, heal onto a fresh one.
-            or root.cut.turn_count > len(turns.turns)
-        ):
+        # F6 (review af51d74): a root heals onto a fresh instance only when
+        # the store OBJECT was swapped (snapshot restore, legacy transcript
+        # setters).  Reset validity is NOT inferred from list length —
+        # soft_reset() rolls the existing root explicitly, so a cut-zero
+        # reset can never keep a stale incarnation alive.
+        if root is None or root.store is not turns:
             root = HistoryRoot(store=turns)
             self._history_root = root
         return root
@@ -1047,6 +1045,12 @@ class MemoryService(MemoryServicePort):
         # Reset changes the context identity: any live or late compaction
         # candidate is fenced by the epoch it was captured at (PLAN §2).
         self.context_epoch = int(self.context_epoch) + 1
+        # F6 (review af51d74): reset is EXPLICIT about the two-segment
+        # authority — the HistoryRoot rolls its incarnation (invalidating
+        # producer tokens, cancelling runs, clearing the cut and left
+        # generation) instead of relying on lazy length-based healing.
+        if self._history_root is not None:
+            self._history_root.reset()
 
     async def asoft_reset(self) -> None:
         self.soft_reset()

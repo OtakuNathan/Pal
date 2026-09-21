@@ -17,6 +17,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.llm.conversions import request_ir_from_prompt
+from pal.llm.projection_contracts import ProjectionSendReceipt
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,9 @@ class LLMGenerationResult:
     reserved_output_tokens: int = 0
     preferred_endpoint_id: str | None = None
     preferred_model_id: str | None = None
+    # F2 (review af51d74): proof of what the transport did with the owner's
+    # projection — None when no projection was offered for this generation.
+    projection_receipt: ProjectionSendReceipt | None = None
 
     @property
     def text(self) -> str:

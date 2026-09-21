@@ -1814,6 +1814,19 @@ class PalCore(MemoryMaintenanceMixin):
                     sync_reset = getattr(memory_service, "soft_reset", None)
                     if callable(sync_reset):
                         await asyncio.to_thread(sync_reset)
+            # F6 (review af51d74): the LLM runtime's hosted projection
+            # lineages must not outlive the history authority they were
+            # frozen from — retire them with the rolled incarnation.
+            try:
+                llm_runtime = self.context.get_port("llm:llm")
+            except Exception:
+                llm_runtime = None
+            retire = getattr(llm_runtime, "retire_projection_sessions", None)
+            if callable(retire):
+                try:
+                    retire()
+                except Exception:
+                    pass
             return True
         finally:
             async with self.state.channel_turn_transition_lock:

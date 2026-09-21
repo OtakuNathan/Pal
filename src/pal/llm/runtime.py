@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import sqlite3
@@ -38,7 +39,11 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.prompt_cache import CacheProfileError
-from pal.llm.projection_contracts import EndpointBinding, LogicalSessionId
+from pal.llm.projection_contracts import (
+    EndpointBinding,
+    LogicalSessionId,
+    ProjectionSendReceipt,
+)
 from pal.llm.projection_session import EndpointProjectionSession
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.models import LLMEndpointModel
@@ -75,6 +80,17 @@ _STRICT_ENDPOINT_PREFERRED_SOURCES = frozenset({"profile"})
 _FALLBACK_DISABLED_POLICIES = frozenset(
     {"disabled", "none", "off", "strict", "strict_preferred", "no_fallback"}
 )
+
+
+def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
+    """Single-slot box the invoker deposits the attempt's native capture in."""
+
+    def collect(candidate: Any) -> None:
+        box.setdefault("native", candidate)
+
+    return collect
+
+
 class LLMEndpointInvocationError(RuntimeError):
     pass
 
@@ -100,6 +116,45 @@ class PreparedLLMRequest:
             self.target_input_budget > 0
             and self.estimated_input_tokens > self.target_input_budget
         )
+
+
+@dataclass(frozen=True)
+class LLMPreparedPlan:
+    """One immutable prepared-generation plan (F1, review af51d74).
+
+    Derived BEFORE any projection encodes anything: the resolved endpoint
+    (first in the request's own preference/fallback order), the compiled
+    EFFECTIVE request (model hooks, effective thinking, output caps, cache
+    policy selection), the validated capability profile, and the strong
+    projection binding.  A live projection encodes ``effective_request``
+    and only THIS plan's endpoint may apply it; anything else must report
+    the projection unapplied (F2 receipt).
+    """
+
+    endpoint: LLMEndpointModel
+    prepared: PreparedLLMRequest
+    binding: EndpointBinding
+    capabilities: Mapping[str, Any]
+
+    @property
+    def effective_request(self) -> LLMRequestIR:
+        return self.prepared.request
+
+    @property
+    def endpoint_id(self) -> str:
+        return str(self.endpoint.endpoint_id)
+
+    @property
+    def model_id(self) -> str:
+        return str(self.endpoint.model_id)
+
+    @property
+    def wire_shape(self) -> str:
+        return str(self.endpoint.wire_shape)
+
+    @property
+    def compact_required(self) -> bool:
+        return self.prepared.compact_required
 
 
 @dataclass
@@ -208,6 +263,9 @@ class LLMRuntime(LLMRuntimePort):
     last_request: LLMRequestIR | None = None
     last_endpoint_id: str | None = None
     last_model_id: str | None = None
+    # F2: the send receipt of the most recent generation that was offered a
+    # projection (None when none was offered); cleared per generation.
+    last_projection_receipt: Any = None
     think_level: str = ""
     active_endpoint_id: str | None = None
     _endpoint_fallback_enabled: bool | None = None
@@ -255,35 +313,192 @@ class LLMRuntime(LLMRuntimePort):
     def active_endpoint(self) -> LLMEndpointModel | None:
         return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
 
-    def endpoint_projection_session(self, scope_id: str) -> EndpointProjectionSession | None:
-        """Host the per-scope projection owner bound to the active endpoint.
+    def endpoint_projection_session(
+        self,
+        scope_id: str,
+        *,
+        plan: "LLMPreparedPlan | None" = None,
+        rebind: bool = True,
+    ) -> EndpointProjectionSession | None:
+        """Host the per-scope projection owner bound to a resolved endpoint.
 
-        Returns None while no endpoint is resolvable.  Repeated calls return
-        the same session; a binding change rebinds it (one generation bump)
-        instead of leaking a stale lineage.
+        F1 (review af51d74): when ``plan`` is supplied the session binds
+        against the plan's RESOLVED endpoint with its strong binding (real
+        spec identity, the wire shape's continuation contract version, and
+        a config fingerprint covering the validated capability profile) —
+        never a placeholder identity derived from ``active_endpoint()``.
+        Without a plan the binding is derived from the active endpoint with
+        the same strong builder.  ``rebind=False`` returns the hosted
+        session WITHOUT destroying a drifted lineage — post-commit
+        readers (the left-replacement rebase) must not lose the lineage
+        they are about to repair.  Returns None while no endpoint is
+        resolvable.
         """
 
-        endpoint = self.active_endpoint()
-        if endpoint is None:
-            return None
+        if plan is not None:
+            binding = plan.binding
+            capabilities = plan.capabilities
+        else:
+            endpoint = self.active_endpoint()
+            if endpoint is None:
+                return None
+            try:
+                capabilities = self._projection_capabilities(
+                    endpoint,
+                    selection=(self.cache_policy_snapshot()
+                               .get(str(endpoint.endpoint_id)) or {}).get("policy"),
+                )
+                binding = self._projection_binding(
+                    endpoint, capabilities=capabilities)
+            except Exception:
+                return None
         key = str(scope_id or "pal:resident").strip() or "pal:resident"
         session = self._projection_sessions.get(key)
         if session is None:
             session = EndpointProjectionSession(LogicalSessionId(key))
             self._projection_sessions[key] = session
-        binding = EndpointBinding(
+        if session.binding is None or session.binding != binding:
+            if not rebind:
+                return session
+            session.rebind(binding, capabilities=capabilities)
+        return session
+
+    def prepare_generation_plan(
+        self, request: LLMRequestIR
+    ) -> "LLMPreparedPlan | None":
+        """Derive the immutable prepared-generation plan for one request.
+
+        F1 (review af51d74): the plan resolves the endpoint exactly the way
+        ``_generate`` will (preference, fallback policy, vision filtering)
+        and compiles the effective request ONCE — model hooks, effective
+        thinking settings, endpoint output caps, and the validated cache
+        policy selection.  The live projection encodes THIS request; a
+        generation that ends up on a different endpoint re-compiles and
+        must report the projection unapplied.  None means the honest cold
+        path (no endpoint, or compilation refused).
+        """
+
+        try:
+            endpoints = self._enabled_endpoints(request)
+        except Exception:
+            return None
+        if not endpoints:
+            return None
+        endpoint = endpoints[0]
+        try:
+            prepared = self._compile_request(endpoint, request)
+        except Exception:
+            return None
+        capabilities = self._projection_capabilities(
+            endpoint, selection=prepared.request.metadata.get("cache_policy_selection"))
+        binding = self._projection_binding(endpoint, capabilities=capabilities)
+        return LLMPreparedPlan(
+            endpoint=endpoint,
+            prepared=prepared,
+            binding=binding,
+            capabilities=capabilities,
+        )
+
+    def retire_projection_sessions(self) -> None:
+        """Retire every hosted logical-scope projection owner (F6).
+
+        Soft reset rolls the history authority's session incarnation; the
+        hosted projection lineages are retired with it and recreated lazily
+        by their next user.  Frozen prefixes must never outlive the history
+        they were frozen from.
+        """
+
+        for session in self._projection_sessions.values():
+            try:
+                session.retire()
+            except Exception:
+                pass
+        self._projection_sessions.clear()
+
+    def _projection_capabilities(
+        self,
+        endpoint: LLMEndpointModel,
+        *,
+        selection: Any,
+    ) -> dict[str, Any]:
+        """The validated capability profile for one projection binding."""
+
+        capabilities = thaw_json(
+            dict(getattr(endpoint, "capabilities_blob", None) or {})
+        )
+        if isinstance(selection, Mapping):
+            capabilities["prompt_cache"] = thaw_json(dict(selection))
+        return capabilities
+
+    def _projection_binding(
+        self,
+        endpoint: LLMEndpointModel,
+        *,
+        capabilities: Mapping[str, Any],
+    ) -> EndpointBinding:
+        """Strong projection binding (F1): no placeholder identity.
+
+        ``endpoint_spec_revision`` comes from the endpoint when declared and
+        otherwise from a digest of the endpoint's own config; the
+        continuation policy version is the wire shape's STRUCTURAL contract
+        version; the config fingerprint covers endpoint identity, spec
+        revision, policy version, and the validated capability profile, so
+        any config drift is a new binding (lineage destruction), never an
+        in-place mutation.
+        """
+
+        identity_fields = {
+            "endpoint_id": str(endpoint.endpoint_id),
+            "model_id": str(endpoint.model_id),
+            "wire_shape": str(endpoint.wire_shape),
+            "provider": str(endpoint.provider),
+            "base_url": str(endpoint.base_url or ""),
+            "context_window": int(getattr(endpoint, "context_window", 0) or 0),
+            "max_output_tokens": int(getattr(endpoint, "max_output_tokens", 0) or 0),
+            "supports_tools": bool(endpoint.supports_tools),
+            "supports_streaming": bool(endpoint.supports_streaming),
+            "supports_vision": bool(endpoint.supports_vision),
+            "thinking_levels": [
+                str(level) for level in (getattr(endpoint, "thinking_levels_blob", None) or ())
+            ],
+            "default_thinking_level": str(
+                getattr(endpoint, "default_thinking_level", "") or ""
+            ),
+            "capabilities": thaw_json(dict(capabilities or {})),
+        }
+        spec_revision = str(
+            getattr(endpoint, "endpoint_spec_revision", "") or ""
+        ).strip()
+        if not spec_revision:
+            spec_revision = "spec-" + hashlib.sha256(
+                json.dumps(identity_fields, sort_keys=True, default=str)
+                .encode("utf-8")
+            ).hexdigest()[:16]
+        from pal.llm.continuation_policy import contract_for_shape
+
+        contract = contract_for_shape(WireShape(str(endpoint.wire_shape)))
+        policy_version = (
+            contract.contract_version if contract is not None else "uncontracted"
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "identity": identity_fields,
+                    "endpoint_spec_revision": spec_revision,
+                    "continuation_policy_version": policy_version,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return EndpointBinding(
             endpoint_id=str(endpoint.endpoint_id),
             model_id=str(endpoint.model_id),
             wire_shape=WireShape(str(endpoint.wire_shape)),
-            endpoint_spec_revision=str(
-                getattr(endpoint, "endpoint_spec_revision", "") or "spec-1"
-            ),
-            continuation_policy_version="policy-1",
-            config_fingerprint=f"{endpoint.provider}:{endpoint.base_url}",
+            endpoint_spec_revision=spec_revision,
+            continuation_policy_version=policy_version,
+            config_fingerprint=f"fingerprint-{fingerprint}",
         )
-        if session.binding is None or session.binding != binding:
-            session.rebind(binding)
-        return session
 
     def refresh_runtime_settings(self) -> None:
         previous = self.active_endpoint()
@@ -493,10 +708,14 @@ class LLMRuntime(LLMRuntimePort):
         self, request: LLMRequestIR, *,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
+        projection_attempt_id: str = "",
+        generation_plan: "LLMPreparedPlan | None" = None,
     ) -> LLMGenerationResult:
         return self._generate(
             request, allow_stale_refresh=True,
             projection=projection, projection_binding=projection_binding,
+            projection_attempt_id=projection_attempt_id,
+            generation_plan=generation_plan,
         )
 
     def _generate(
@@ -506,8 +725,13 @@ class LLMRuntime(LLMRuntimePort):
         allow_stale_refresh: bool,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
+        projection_attempt_id: str = "",
+        generation_plan: "LLMPreparedPlan | None" = None,
     ) -> LLMGenerationResult:
         self.last_request = request
+        # F2: receipts are per generation; clearing here keeps a stale
+        # receipt from an earlier round from authorizing a later freeze.
+        self.last_projection_receipt = None
         try:
             endpoints = self._enabled_endpoints(request)
         except Exception as exc:
@@ -518,20 +742,30 @@ class LLMRuntime(LLMRuntimePort):
         last_error: Exception | None = None
         requested_preferred = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
         for endpoint_index, endpoint in enumerate(endpoints):
-            try:
-                prepared = self._compile_request(endpoint, request)
-            except CacheProfileError as exc:
-                self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
-                return _failure_result(str(exc), exc=exc)
-            except Exception as exc:
-                last_error = exc
-                error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
-                self._emit(
-                    "llm_endpoint_exhausted",
-                    endpoint=endpoint,
-                    reason=error_kind,
-                )
-                continue
+            # F1: when the prepared plan resolved THIS endpoint, reuse its
+            # compiled request verbatim — the projected payload is the
+            # encoding of exactly this effective request, not a parallel
+            # compile.
+            if (
+                generation_plan is not None
+                and str(endpoint.endpoint_id) == generation_plan.endpoint_id
+            ):
+                prepared = generation_plan.prepared
+            else:
+                try:
+                    prepared = self._compile_request(endpoint, request)
+                except CacheProfileError as exc:
+                    self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
+                    return _failure_result(str(exc), exc=exc)
+                except Exception as exc:
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    continue
             effective = prepared.request
             if prepared.compact_required:
                 return self._compact_required_result(endpoint, effective)
@@ -539,14 +773,21 @@ class LLMRuntime(LLMRuntimePort):
                 response = _text_response("stub response", LLMFinishReason.STUB)
                 return self._success(endpoint, response)
             for attempt in range(self.endpoint_retry_attempts):
+                native_box: dict[str, Any] = {}
                 try:
                     invoke_kwargs: dict[str, Any] = {
                         "stream": False,
                         "timeout_seconds": self._timeout_seconds(effective),
                     }
+                    attempt_projection = None
                     if isinstance(self._invoker(), ShapeEndpointInvoker):
-                        invoke_kwargs["projection"] = self._projection_for_endpoint(
+                        attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
+                        if attempt_projection is not None:
+                            invoke_kwargs["projection"] = attempt_projection
+                        # F3: the codec-level native capture for THIS attempt
+                        # travels back with the send receipt.
+                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     response, _ = self._invoker().invoke(
                         endpoint,
                         effective,
@@ -569,7 +810,17 @@ class LLMRuntime(LLMRuntimePort):
                         self.set_active_endpoint(endpoint.endpoint_id)
                     if endpoint_index > 0:
                         self._emit("llm_endpoint_fallback_succeeded", endpoint=endpoint)
-                    return self._success(endpoint, response)
+                    receipt = self._projection_send_receipt(
+                        attempt_id=projection_attempt_id,
+                        endpoint=endpoint,
+                        projection=projection,
+                        binding=projection_binding,
+                        applied=attempt_projection is not None,
+                        native_box=native_box,
+                    )
+                    if receipt is not None:
+                        self.last_projection_receipt = receipt
+                    return self._success(endpoint, response, projection_receipt=receipt)
                 except LLMEndpointSpecStaleError as exc:
                     if allow_stale_refresh:
                         self._emit(
@@ -578,9 +829,16 @@ class LLMRuntime(LLMRuntimePort):
                             reason="endpoint_spec_stale",
                         )
                         self.refresh_llm_endpoints()
+                        # F2: the sync refresh recursion keeps the projection
+                        # arguments exactly like the stream path — dropping
+                        # them here silently downgraded the round to cold.
                         return self._generate(
                             request,
                             allow_stale_refresh=False,
+                            projection=projection,
+                            projection_binding=projection_binding,
+                            projection_attempt_id=projection_attempt_id,
+                            generation_plan=generation_plan,
                         )
                     last_error = exc
                     error_kind = self._record_failure(endpoint, exc, attempt)
@@ -609,6 +867,39 @@ class LLMRuntime(LLMRuntimePort):
         return _failure_result(
             _public_failure_text(last_error),
             exc=last_error,
+        )
+
+    def _projection_send_receipt(
+        self,
+        *,
+        attempt_id: str,
+        endpoint: LLMEndpointModel,
+        projection: "EncodedRequest | None",
+        binding: "EndpointBinding | None",
+        applied: bool,
+        native_box: dict[str, Any] | None = None,
+    ) -> ProjectionSendReceipt | None:
+        """F2: build the typed send receipt when a projection was offered.
+
+        No projection offered → no receipt (None); offered but dropped →
+        applied=False with the resolved endpoint that actually served, so
+        the owner rejects the round instead of freezing a payload the
+        provider never saw.  Native material only rides an APPLIED
+        receipt — a cold send's capture authorizes nothing.
+        """
+
+        if projection is None or binding is None or not str(attempt_id or "").strip():
+            return None
+        candidate = (native_box or {}).get("native") if applied else None
+        return ProjectionSendReceipt(
+            attempt_id=str(attempt_id),
+            resolved_endpoint_id=str(endpoint.endpoint_id),
+            resolved_model_id=str(endpoint.model_id),
+            resolved_wire_shape=str(endpoint.wire_shape),
+            applied=bool(applied),
+            detail="sent" if applied else "projection_dropped_for_endpoint",
+            binding=binding,
+            native=candidate,
         )
 
     def _projection_for_endpoint(
@@ -645,10 +936,14 @@ class LLMRuntime(LLMRuntimePort):
         self, request: LLMRequestIR, *,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
+        projection_attempt_id: str = "",
+        generation_plan: "LLMPreparedPlan | None" = None,
     ) -> LLMGenerationResult:
         return await asyncio.to_thread(
             self.generate, request,
             projection=projection, projection_binding=projection_binding,
+            projection_attempt_id=projection_attempt_id,
+            generation_plan=generation_plan,
         )
 
     def _iter_stream_updates(
@@ -659,8 +954,13 @@ class LLMRuntime(LLMRuntimePort):
         allow_stale_refresh: bool = True,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
+        projection_attempt_id: str = "",
+        generation_plan: "LLMPreparedPlan | None" = None,
     ) -> Iterator[LLMResponseUpdate]:
         self.last_request = request
+        # F2: per-generation receipt; cleared so late readers cannot see a
+        # previous round's receipt.
+        self.last_projection_receipt = None
         try:
             endpoints = self._enabled_endpoints(request)
         except Exception as exc:
@@ -677,21 +977,29 @@ class LLMRuntime(LLMRuntimePort):
             return
         last_error: Exception | None = None
         for endpoint in endpoints:
-            try:
-                prepared = self._compile_request(endpoint, request)
-            except CacheProfileError as exc:
-                self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
-                yield LLMResponseUpdate(_failure_result(str(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
-                return
-            except Exception as exc:
-                last_error = exc
-                error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
-                self._emit(
-                    "llm_endpoint_exhausted",
-                    endpoint=endpoint,
-                    reason=error_kind,
-                )
-                continue
+            # F1: plan-prepared requests are reused verbatim on their
+            # resolved endpoint (the projection encoded exactly this).
+            if (
+                generation_plan is not None
+                and str(endpoint.endpoint_id) == generation_plan.endpoint_id
+            ):
+                prepared = generation_plan.prepared
+            else:
+                try:
+                    prepared = self._compile_request(endpoint, request)
+                except CacheProfileError as exc:
+                    self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
+                    yield LLMResponseUpdate(_failure_result(str(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    continue
             effective = prepared.request
             if prepared.compact_required:
                 response = self._compact_required_result(endpoint, effective).response
@@ -700,6 +1008,8 @@ class LLMRuntime(LLMRuntimePort):
             semantic_seen = False
             for attempt in range(self.endpoint_retry_attempts):
                 last_update: LLMResponseUpdate | None = None
+                native_box: dict[str, Any] = {}
+                attempt_projection = None
                 try:
                     invoke_kwargs: dict[str, Any] = {
                         "timeout_seconds": self._timeout_seconds(effective),
@@ -710,6 +1020,8 @@ class LLMRuntime(LLMRuntimePort):
                             endpoint, projection, projection_binding)
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
+                        # F3: native capture travels back with the receipt.
+                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,
@@ -747,6 +1059,16 @@ class LLMRuntime(LLMRuntimePort):
                         completed = recovered
                     if completed.finish_reason == LLMFinishReason.ERROR:
                         raise _accounted_response_error(endpoint, completed)
+                    receipt = self._projection_send_receipt(
+                        attempt_id=projection_attempt_id,
+                        endpoint=endpoint,
+                        projection=projection,
+                        binding=projection_binding,
+                        applied=attempt_projection is not None,
+                        native_box=native_box,
+                    )
+                    if receipt is not None:
+                        self.last_projection_receipt = receipt
                     self._record_success(endpoint, completed)
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
@@ -768,6 +1090,8 @@ class LLMRuntime(LLMRuntimePort):
                             allow_stale_refresh=False,
                             projection=projection,
                             projection_binding=projection_binding,
+                            projection_attempt_id=projection_attempt_id,
+                            generation_plan=generation_plan,
                         )
                         return
                     last_error = exc
@@ -833,6 +1157,8 @@ class LLMRuntime(LLMRuntimePort):
         self, request: LLMRequestIR, *,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
+        projection_attempt_id: str = "",
+        generation_plan: "LLMPreparedPlan | None" = None,
     ) -> AsyncIterator[LLMResponseUpdate]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
@@ -857,6 +1183,8 @@ class LLMRuntime(LLMRuntimePort):
                     stream_control=stream_control,
                     projection=projection,
                     projection_binding=projection_binding,
+                    projection_attempt_id=projection_attempt_id,
+                    generation_plan=generation_plan,
                 ):
                     enqueue(update)
             except BaseException as exc:  # noqa: BLE001
@@ -1361,7 +1689,13 @@ class LLMRuntime(LLMRuntimePort):
             )
         return updates[-1].response
 
-    def _success(self, endpoint: LLMEndpointModel, response: LLMResponseIR) -> LLMGenerationResult:
+    def _success(
+        self,
+        endpoint: LLMEndpointModel,
+        response: LLMResponseIR,
+        *,
+        projection_receipt: ProjectionSendReceipt | None = None,
+    ) -> LLMGenerationResult:
         self.last_endpoint_id = endpoint.endpoint_id
         self.last_model_id = endpoint.model_id
         self._record_success(endpoint, response)
@@ -1369,6 +1703,7 @@ class LLMRuntime(LLMRuntimePort):
             response=response,
             preferred_endpoint_id=endpoint.endpoint_id,
             preferred_model_id=endpoint.model_id,
+            projection_receipt=projection_receipt,
         )
 
     def _record_success(self, endpoint: LLMEndpointModel, response: LLMResponseIR) -> None:

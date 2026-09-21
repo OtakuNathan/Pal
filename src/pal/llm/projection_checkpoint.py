@@ -91,7 +91,12 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         # receipt's SOURCE fence (review B4): cancelled rounds advance it
         # without ever producing a receipt, so it must be persisted itself.
         "owner_fence": session._owner_fence,
-        "pending_wire_tail": thaw_json(list(session._pending_wire_tail)),
+        # F5: pending entries persist WITH their owning span so a restored
+        # lineage can retire them at a later left replacement.
+        "pending_wire_tail": [
+            {"item": thaw_json(dict(entry.item)), "span_ids": list(entry.span_ids)}
+            for entry in session._pending_wire_tail
+        ],
         "committed_head_system": [
             {
                 "span_ids": list(entry.span_ids),
@@ -107,6 +112,8 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "items": thaw_json(list(chunk.items)),
                 "prefix_digest": chunk.prefix_digest,
                 "semantic_span": list(chunk.semantic_span),
+                # F5: per-item span ownership (absent in pre-F5 snapshots).
+                "item_spans": [list(span) for span in chunk.item_spans],
             }
             for chunk in session.chunks
         ],
@@ -355,6 +362,7 @@ def restore_projection(
 
     chunks: list[ProjectionChunk] = []
     prefix_items: list[dict] = []
+    prefix_item_spans: list[tuple[str, ...]] = []
     expected_before = HistoryCursor.initial()
     for raw in chunks_raw:
         if not isinstance(raw, Mapping):
@@ -392,6 +400,21 @@ def restore_projection(
             isinstance(mid, str) for mid in span_raw
         ):
             raise ProjectionCheckpointError("chunk semantic_span is invalid")
+        # F5: per-item span ownership; absent in pre-F5 snapshots → legacy
+        # whole-chunk replay semantics (empty ownership is unconditional).
+        item_spans_raw = raw.get("item_spans") or ()
+        if not isinstance(item_spans_raw, (list, tuple)) or not all(
+            isinstance(span, (list, tuple)) and all(isinstance(mid, str) for mid in span)
+            for span in item_spans_raw
+        ):
+            raise ProjectionCheckpointError("chunk item_spans are invalid")
+        if item_spans_raw and len(item_spans_raw) != len(items):
+            raise ProjectionCheckpointError(
+                "chunk item_spans length does not match items"
+            )
+        chunk_item_spans = tuple(
+            tuple(str(mid) for mid in span) for span in item_spans_raw
+        )
         chunks.append(
             ProjectionChunk(
                 round_attempt_id=str(raw.get("attempt_id") or ""),
@@ -403,16 +426,49 @@ def restore_projection(
                 # spanless semantics (the chunk can no longer survive a left
                 # replacement, same as an in-memory legacy chunk).
                 semantic_span=tuple(str(mid) for mid in span_raw),
+                item_spans=chunk_item_spans,
             )
         )
         # The restored private prefix holds the deep-copied owned dicts (the
         # public chunk snapshot is deep-frozen); the two share nothing.
         prefix_items.extend(dict(item) for item in items)
+        if chunk_item_spans:
+            prefix_item_spans.extend(chunk_item_spans)
+        else:
+            prefix_item_spans.extend([()] * len(items))
         expected_before = cursor_after
     pending_raw = section.get("pending_wire_tail") or ()
     if not isinstance(pending_raw, (list, tuple)):
         raise ProjectionCheckpointError("pending_wire_tail section is invalid")
-    pending_wire_tail = json.loads(json.dumps(list(pending_raw)))
+    from pal.llm.projection_session import _PendingWireItem
+
+    pending_wire_tail: list[_PendingWireItem] = []
+    for entry_raw in json.loads(json.dumps(list(pending_raw))):
+        if (
+            isinstance(entry_raw, Mapping)
+            and "item" in entry_raw
+            and "span_ids" in entry_raw
+        ):
+            # F5 snapshot: span-attributed entry.
+            span_ids_raw = entry_raw["span_ids"] or ()
+            if not isinstance(span_ids_raw, (list, tuple)) or not all(
+                isinstance(mid, str) for mid in span_ids_raw
+            ):
+                raise ProjectionCheckpointError(
+                    "pending_wire_tail span_ids are invalid"
+                )
+            pending_wire_tail.append(
+                _PendingWireItem(
+                    item=dict(entry_raw["item"]),
+                    span_ids=tuple(str(mid) for mid in span_ids_raw),
+                )
+            )
+        else:
+            # Pre-F5 snapshot: plain wire item with no ownership — the
+            # legacy semantics (survives every later rebase).
+            pending_wire_tail.append(
+                _PendingWireItem(item=dict(entry_raw), span_ids=())
+            )
     head_system_raw = section.get("committed_head_system")
     # Absent key = pre-G2-persistence snapshot: empty is the only faithful
     # reconstruction (the prototype never persisted hoisted head parts).
@@ -528,6 +584,7 @@ def restore_projection(
     session.frontier = frontier
     session.chunks = tuple(chunks)
     session._prefix_items = prefix_items
+    session._prefix_item_spans = prefix_item_spans
     session._frontier_item_count = len(prefix_items)
     session._pending_wire_tail = pending_wire_tail
     session._committed_head_system = committed_head_system
