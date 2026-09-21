@@ -91,6 +91,28 @@ def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
     return collect
 
 
+def _invoker_accepts_native_sink(invoker: Any, method: str = "invoke_updates") -> bool:
+    """Whether the invoker's send method can take the native_sink kwarg.
+
+    Subclasses that narrow the base signature (historically: without
+    ``**kwargs``) must not receive the kwarg — a TypeError at call time
+    would count as an endpoint failure before any attempt runs.
+    """
+
+    import inspect
+
+    try:
+        signature = inspect.signature(getattr(invoker, method))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if "native_sink" in signature.parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
 class LLMEndpointInvocationError(RuntimeError):
     pass
 
@@ -787,7 +809,8 @@ class LLMRuntime(LLMRuntimePort):
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: the codec-level native capture for THIS attempt
                         # travels back with the send receipt.
-                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
+                        if _invoker_accepts_native_sink(self._invoker(), "invoke"):
+                            invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     response, _ = self._invoker().invoke(
                         endpoint,
                         effective,
@@ -1021,7 +1044,8 @@ class LLMRuntime(LLMRuntimePort):
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: native capture travels back with the receipt.
-                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
+                        if _invoker_accepts_native_sink(self._invoker()):
+                            invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,
