@@ -52,8 +52,8 @@
 
 ## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
-0. **主项1/2 已交付**（15196dd warm 拆分、3621a74 读证据+spans+E2E）；主项3 v2 物理删除+模式收权已完成（本 commit），全量回归 49 failed 归因：17 真回归已修（单跑复现+修复验证），10 个 prompt_cache_v2 astra/chain 失败为翻转预存阻塞（见 1），余 22 与既有长跑争用族同集（抽样单跑全绿）
-1. **astra chain prefix_preserved 10 失败（翻转预存，挂账 Nathan）**：HEAD 绿、HEAD+纯翻转即红。证据：payload 字节级前缀实际保持（commonprefix 覆盖前轮全部消息）；但 cache_diagnostics 的 span 项流不稳定——投影路径 assembled_spans 只含 preamble+tail，frozen 前缀 span 不随行（3621a74 只做了 tail 重映射）；更深层异常：该 harness 中投影每轮 PREFIX_N=0（从不冻结，observe 链未闭环）。曾尝试补发 frozen wire span（含 anthropic 边界/completion 缝合位置修正），部分变体转绿部分仍红（半对），已回退待设计定夺
+0. **主项1/2 已交付**（15196dd warm 拆分、3621a74 读证据+spans+E2E）；主项3 v2 物理删除+模式收权已完成，全量回归 49 failed 归因：17 真回归已修（单跑复现+修复验证），10 个 prompt_cache_v2 astra/chain 失败为翻转预存阻塞（见 1；后续诊断层修复后余 6），余 22 与既有长跑争用族同集（抽样单跑全绿）
+1. **astra chain prefix_preserved 10 失败（翻转预存）——诊断层已修，余 6 挂账归因收敛**：认识论定案（Nathan 2026-09-21，PLAN §7/I11/I12/F15 锚定）：marker 非证据、回执（usage cached tokens）是命中唯一确认、本地唯一主张是出站字节级相同；frozen 前缀 span 不随行是 §6.2「不重写稳定前缀」的设计结果非缺陷，错在 describe_request 以 span 存在性为枚举门槛（无 span 消息字节蒸发→项流不对称→假 prefix_changed）。修复（诊断层 commit）：字节自足枚举——会话容器项全量描述，span 降级为路径地图（未认领项继承无 span 消息 region，混合默认 history）；红先行契约测试 tests/test_cache_diagnostics.py（cold→projected 不对称仍报 prefix_preserved + 真字节漂移仍报 prefix_changed 护栏）。结果 10→6：explicit/hybrid chain 4 例全绿，cache 族零连带。**余 6 同一根族：harness 投影 observe/promote 闭环未闭合**（est 全程平坦 6458、cache_tail=False 从不 prepared；[compaction] 轮 4 后旧 history 项原样保留=从未 promote 进 L，summary 只追加报 history_appended 而测试期望 prefix_changed；[dynamic] 另含 encode 不声明动态 context 项——276B 无主项按字节真相进前缀比对）。修法属 encode/planning 层，超出「修诊断不修投影」切片，挂账 Nathan。**环境警示**：本机 user-site editable 安装（pal_v2→~/Documents/coding/Pal main@4daab5f）会劫持 import，worktree 测试必须 PYTHONPATH=src（曾致一次假绿误判，已纠正）
 2. **引擎 whole-source 内部残留**：`service.compact` 的 source_stamp 分发与 `_compact_full_source`、compaction.py 的 `capture` whole-source 路径已无生产调用方（executor 只走 capture_left），但引擎内部与其直接测试（p6_perf test_a、runtime_compaction whole-source 族等 8 文件）未删——后续切片
 3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族
 4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
@@ -112,4 +112,4 @@
 | N25 worker/owner 单写者 | PASS | owner 侧 prepare + 类型化下沉 + **receipt 授权 commit**（af51d74 F2：无 receipt/applied=False/attempt 不匹配均拒绝冻结） |
 | N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
 | N27 宿主×shape×warm 真实 E2E | PASS(gated) | 3621a74 test_v3_real_provider_e2e（glm/deepseek/openrouter-luna 真跑，PAL_V3_E2E 门控）；luna tail 方言 anchor 读证据为 bounded follow-up |
-| N28 最终矩阵+全量 | 本表+全量日志 | v2 删除后全量 3086+491+8sk/49f（1790s）：17 真回归修复后受影响 19 文件 299+29sub 全绿；10 astra 为翻转预存阻塞（§4.1 挂账）；余 22 长跑族抽样单跑全绿 |
+| N28 最终矩阵+全量 | 本表+全量日志 | v2 删除后全量 3086+491+8sk/49f（1790s）：17 真回归修复后受影响 19 文件 299+29sub 全绿；10 astra 翻转预存：诊断层修复后余 6（observe/promote 闭环族，§4.1）；余 22 长跑族抽样单跑全绿 |

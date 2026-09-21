@@ -25,18 +25,50 @@ def describe_request(request, raw_encoded, encoded) -> dict[str, Any]:
     spans = {s.message_id: s for s in raw_encoded.message_spans}
     groups: dict[str, list] = {"stable": [], "history": [], "dynamic": [], "tools": [payload.get("tools", ())]}
     items: list[tuple[str, str, int]] = []
+
+    def describe(component: str, value: Any) -> None:
+        digest, size = fingerprint(value)
+        items.append((component, digest, size))
+        groups[component].append(value)
+
+    def component_for(message) -> str:
+        return ("dynamic" if message.prompt_region == PromptRegionIR.ACTIVE_DYNAMIC else
+                "stable" if message.prompt_region == PromptRegionIR.STABLE_SYSTEM else "history")
+
+    # Wire-first enumeration (I11): spans are a path map, not a presence
+    # gate.  A derived projection re-encodes only the seam and the tail
+    # (PLAN §6.2), so frozen-prefix messages keep their wire bytes while
+    # their spans do not travel with the assembled request.  Conversation
+    # container items that no span claims are still described, from the
+    # wire itself, so consecutive rounds compare bytes rather than span
+    # coverage.  Unclaimed items inherit the unspanned messages' region
+    # when it is uniform (the frozen-prefix case); mixed or envelope-only
+    # leftovers default to "history".
+    container_key = next((key for key in ("input", "messages")
+                          if isinstance(payload.get(key), list)), None)
+    claimed: dict[int, str] = {}
+    extras: list[tuple[str, tuple]] = []
+    unspanned: list[str] = []
     for message in request.messages:
-        component = ("dynamic" if message.prompt_region == PromptRegionIR.ACTIVE_DYNAMIC else
-                     "stable" if message.prompt_region == PromptRegionIR.STABLE_SYSTEM else "history")
+        component = component_for(message)
         span = spans.get(message.message_id)
         if span is None:
+            unspanned.append(component)
             continue
-        paths = span.wire_item_paths or span.cache_targets
-        for path in paths:
-            item = at_path(payload, path)
-            digest, size = fingerprint(item)
-            items.append((component, digest, size))
-            groups[component].append(item)
+        for path in span.wire_item_paths or span.cache_targets:
+            if (container_key is not None and len(path) >= 2
+                    and path[0] == container_key and isinstance(path[1], int)):
+                claimed[path[1]] = component
+                if len(path) > 2:
+                    extras.append((component, path))
+            else:
+                extras.append((component, path))
+    if container_key is not None:
+        fallback = unspanned[0] if len(set(unspanned)) == 1 else "history"
+        for index, value in enumerate(payload[container_key]):
+            describe(claimed.get(index, fallback), value)
+    for component, path in extras:
+        describe(component, at_path(payload, path))
     components = {key: dict(zip(("hash", "bytes"), fingerprint(value))) for key, value in groups.items()}
     markers = []
     applied = set(encoded.applied_cache_breakpoint_message_ids)
