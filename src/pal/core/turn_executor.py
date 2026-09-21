@@ -2298,10 +2298,15 @@ class TurnExecutor:
         replay_request = None
         replay_dialect = ""
         replay_wire_shape = ""
-        if logical_scope_id == "pal:resident":
+        if (
+            logical_scope_id == "pal:resident"
+            and self._compaction_mode != "two_segment"
+        ):
             # Warm handoff covers both admission shapes: idle manual (no
             # active turn) and the auto path's active cut (anchor + accepted
-            # active suffix with a coverage proof).
+            # active suffix with a coverage proof).  The two-segment mode
+            # computes its own LEFT-bounded replay after the run opens and
+            # fences the cut (see below).
             replay_request, replay_dialect, replay_wire_shape = (
                 self._resident_compaction_replay_request(
                     memory_service,
@@ -2453,6 +2458,66 @@ class TurnExecutor:
                     clock_value=clock_value,
                 )
 
+            # Warm split (主项1): the run has fenced the cut, so the LEFT
+            # ids are final.  When a provider-confirmed cached anchor lies
+            # entirely inside L, the compact request rides the anchor bytes
+            # verbatim (cached prefix) + the LEFT suffix after it + the
+            # instruction tail; anything ineligible keeps the honest
+            # cold-left source builder (W21).
+            replay_request = None
+            replay_dialect = ""
+            replay_wire_shape = ""
+            try:
+                left_ids = tuple(
+                    str(message.message_id)
+                    for message in root.left_messages()
+                )
+                replay_request, replay_dialect, replay_wire_shape = (
+                    self._resident_compaction_replay_request(
+                        memory_service,
+                        llm_runtime=llm_runtime,
+                        logical_scope_id=logical_scope_id,
+                        preferred_endpoint_id=preferred_endpoint_id,
+                        preferred_model_id=preferred_model_id,
+                        include_active=continuation is not None,
+                        active_turn_id=(
+                            str(continuation.turn_id) if continuation is not None else ""
+                        ),
+                        left_message_ids=left_ids,
+                    )
+                )
+            except Exception:
+                replay_request, replay_dialect, replay_wire_shape = None, "", ""
+            if replay_request is not None:
+                preferred_endpoint_id = (
+                    preferred_endpoint_id
+                    or str(
+                        replay_request.metadata.get("preferred_endpoint_id")
+                        or ""
+                    ).strip()
+                    or None
+                )
+                preferred_model_id = (
+                    preferred_model_id
+                    or str(
+                        replay_request.metadata.get("preferred_model_id")
+                        or replay_request.model_hint
+                        or ""
+                    ).strip()
+                    or None
+                )
+                metadata["preferred_endpoint_id"] = preferred_endpoint_id
+                metadata["preferred_model_id"] = preferred_model_id
+                diagnostics = getattr(self.state, "diagnostics", None)
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "kind": "two_segment_warm_replay_engaged",
+                        "scope": str(logical_scope_id),
+                        "run_id": run_id,
+                        "dialect": replay_dialect,
+                        "wire_shape": replay_wire_shape,
+                    })
+
             def close_run_terminal(*, cancel: bool, reason: str) -> None:
                 """Idempotent close of OUR run (F1 / review R2-b).
 
@@ -2533,6 +2598,9 @@ class TurnExecutor:
                     clock_kind=engine.policy.clock_kind,
                     clock_value=clock_value,
                     metadata=metadata,
+                    replay_request=replay_request,
+                    replay_dialect=replay_dialect,
+                    replay_wire_shape=replay_wire_shape,
                 )
                 run_result = await asyncio.wait_for(
                     engine.run(
@@ -3047,6 +3115,7 @@ class TurnExecutor:
         preferred_model_id: str | None = None,
         include_active: bool = False,
         active_turn_id: str = "",
+        left_message_ids: tuple[str, ...] | None = None,
     ) -> tuple[LLMRequestIR | None, str, str]:
         """Build a warm handoff request: frozen anchor + accepted suffix.
 
@@ -3061,6 +3130,14 @@ class TurnExecutor:
           than guessed (W18);
         - coverage proof (W02/W03): every eligible live L1 message must be
           covered exactly once by the anchor prefix plus the suffix.
+
+        ``left_message_ids`` (v3 two-segment warm split): the ordered LEFT
+        segment message ids from the history authority, captured after the
+        compact run opened and fenced the cut.  When present, the anchor
+        prefix must cover L exactly up to the anchor (prefix equality), the
+        suffix carries only L content after the anchor, and the RIGHT side
+        never enters the summary source (I10) — an anchor reaching past
+        the cut refuses warm instead of leaking R.
         """
         reader = getattr(
             llm_runtime,
@@ -3089,6 +3166,25 @@ class TurnExecutor:
             return None, "", ""
         if not dialect or not wire_shape:
             return None, "", ""
+        left_ids: tuple[str, ...] | None = None
+        if left_message_ids is not None:
+            left_ids = tuple(str(value) for value in left_message_ids)
+            if not left_ids:
+                return None, "", ""
+            if anchor_message_id not in left_ids:
+                # The anchor is not LEFT content: its cached prefix either
+                # reaches past the cut into R or predates the segment.
+                return None, "", ""
+            anchor_conversation_ids = tuple(
+                str(message.message_id)
+                for message in anchor_request.messages
+                if message.role.value not in {"system", "developer"}
+            )
+            anchor_position = left_ids.index(anchor_message_id)
+            if anchor_conversation_ids != left_ids[: anchor_position + 1]:
+                # W02/W03 prefix equality: the cached prefix must be L
+                # exactly up to the anchor — no gap, no R, no extras.
+                return None, "", ""
         anchor_endpoint = str(
             anchor_request.metadata.get("preferred_endpoint_id") or ""
         ).strip()
@@ -3141,6 +3237,7 @@ class TurnExecutor:
         suffix: list[LLMMessageIR] = []
         anchor_found = False
         live_ids: list[str] = []
+        left_id_set = set(left_ids) if left_ids is not None else None
         anchor_ids = {
             str(message.message_id) for message in anchor_request.messages
         }
@@ -3148,7 +3245,12 @@ class TurnExecutor:
         def project_into_suffix(messages: list[LLMMessageIR], *, settled: bool) -> None:
             nonlocal anchor_found
             for message in messages:
-                live_ids.append(str(message.message_id))
+                message_id = str(message.message_id)
+                if left_id_set is not None and message_id not in left_id_set:
+                    # v3 I10: anything outside the fenced LEFT segment is
+                    # right-side territory — it never enters the source.
+                    continue
+                live_ids.append(message_id)
                 if anchor_found:
                     suffix.append(
                         replace(
@@ -3184,6 +3286,14 @@ class TurnExecutor:
                 project_into_suffix(projected_active, settled=False)
         if not anchor_found:
             return None, "", ""
+        if left_ids is not None:
+            expected_suffix_ids = left_ids[left_ids.index(anchor_message_id) + 1 :]
+            suffix_ids = [str(message.message_id) for message in suffix]
+            if tuple(suffix_ids) != tuple(expected_suffix_ids):
+                # W02/W03 coverage in v3 form: every L id after the anchor
+                # rides the suffix exactly once, in order — anything else
+                # refuses warm instead of guessing.
+                return None, "", ""
         # Coverage proof (W02/W03): the confirmed-anchor contract covers the
         # live order up to anchor_message_id; every eligible live message
         # strictly after the anchor must be carried by the suffix exactly

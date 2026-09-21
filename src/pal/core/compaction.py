@@ -170,13 +170,20 @@ class CompactionSnapshot:
         clock_kind: CompactionClockKind,
         clock_value: int,
         metadata: dict[str, Any] | None = None,
+        replay_request: LLMRequestIR | None = None,
+        replay_dialect: str = "",
+        replay_wire_shape: str = "",
     ) -> "CompactionSnapshot":
         """v3 two-segment capture: the LEFT segment only (I10).
 
         The run has already been opened by the history owner
         (``begin_left_compaction``); this snapshot carries its stamp so the
         install path can verify the left side never moved, while the right
-        side stays out of the summary source entirely.
+        side stays out of the summary source entirely.  A warm
+        ``replay_request`` (provider-confirmed anchor inside L + accepted
+        suffix + instruction tail, see the executor's warm split) replaces
+        the cold source builder for the model attempt; oversized replays
+        fall back to the bounded frozen-L1 source inside the engine.
         """
 
         transcripts = getattr(memory_service, "left_transcripts", None)
@@ -196,9 +203,9 @@ class CompactionSnapshot:
             clock_kind=clock_kind,
             clock_value=max(0, int(clock_value or 0)),
             memory_items=memory_items,
-            replay_request=None,
-            replay_dialect="",
-            replay_wire_shape="",
+            replay_request=replay_request,
+            replay_dialect=str(replay_dialect or "").strip(),
+            replay_wire_shape=str(replay_wire_shape or "").strip(),
             metadata=deepcopy(merged),
             source_stamp=str(left_snapshot.stamp or ""),
             source_epoch=0,
