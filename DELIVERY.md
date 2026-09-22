@@ -44,6 +44,8 @@
 | 本 commit | H族账本 | acceptance_status 46/72 PASS（fill_ledger 逐 node 实跑 @ faf2f41）；§4.4/§4.6/N21 同步 |
 | `3a7bbe9` | H02+H03 | 优雅停止 owner 状态随 resident checkpoint 持久化（见 §4.4）：HistoryRoot.owner_state/restore_owner_state + memory runtime schema 2→3；H02 app 级 SIGTERM 链端到端、损坏 fail-closed；H03 旧 checkpoint 可读无残留 |
 | 本 commit | H02账本 | acceptance_status 48/72 PASS（fill_ledger 逐 node 实跑 @ 3a7bbe9）；§4.4 同步；分支首次 push（refactor/two-segment-session-v3，不合 main） |
+| `faee0dd` | C 收口 | review pal_v3_review_c9cb2d2 三项修复（C1 完整冷源 / C2 TEXT-ONLY 交接验收 / C3 恢复·重绑后一次 projection bootstrap）+ `tests/test_v3_c9cb2d2_review_fixes.py` 11 节点（详见 §10） |
+| 本 commit | C 证据 | DELIVERY §10 + 全量回归日志 `logs_full_regression_c9cb2d2_review_fixes.txt`（22 failed 与已知族长跑集逐项相同） |
 
 ## 3. 设计要点
 
@@ -173,4 +175,22 @@
 - reviewer 草案原样实跑（修复树）：6/9 过，3 失败即上 fixture 漂移定性证据
 - 宽域：projection/prompt_cache/cache/compaction/runtime/continuity/history/v3 族 515 passed + 82 subtests + 1 skip（62s）
 - 全量回归（a1058c5+a923583 树，1356s）：**3134 passed + 491 subtests + 8 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——与上轮长跑族（3eb036b 归因集）完全同集（上轮 3 个 llm_runtime_ir 真回归未复现）；单跑 **19/19 + 3 subtests 全绿（7.6s）**，第四次同族验证（3575e48/29a879f/af51d74fix/本轮）。运行中段受 ollama bge-m3 驻留（1.2GB）内存挤压降速，模型卸载后恢复，总时长仍在历史区间。不宣称全量全绿，干净环境重跑仍为最终归因步（§4.3 挂账继续）
+
+## 10. c9cb2d2 定点复审收口（2026-09-22，review pal_v3_review_c9cb2d2）
+
+固定输入：`refactor/two-segment-session-v3@c9cb2d250271192a06198abd587eb462f9000b5f`（reviewer 包 MANIFEST 固定），产品尾部 `3a7bbe9`。修复树 `faee0dd`（实现 + 测试），证据随本 commit。全程 `PYTHONPATH="$PWD/src:$PWD"` 且 `pal.__file__` 指向本 worktree。未 push、未合 main、未部署、无真实 provider 调用。
+
+reviewer 结论三项（Request changes，C1 P1 / C2 P2 / C3 P2）逐条闭环：
+
+- **C1 完整冷源（已修，core/compaction.py）**：`build_compaction_units` 不再对每条消息做 head/tail 字符投影（删除 `unit_text_limit` / `_bounded_source_text`）；合法内容整条进入冷源，是否装下由引擎真实 preflight 发送预算判定——超窗走既有 `source_too_large` / `base_over_budget` 终态并完整保留旧 L，不再靠源裁剪偷偷通过。证据：A01（10k 头 + 中间唯一约束 + 10k 尾、窗口足够 → 约束原样送达、无投影 marker）、A02 短源正对照、A03 超窗对照（READY 窗口 fixture 按实测请求字符数判定：完整源 = COMPACT_REQUIRED → 空源探针 READY → `source_too_large`；生成零调用、旧 L/R 逐 id 不变）。
+- **C2 最终交接 TEXT ONLY（已修，core/compaction.py）**：唯一 generation-result 验收点在任何解析前拒绝 TOOL_CALLS finish 与 tool-call parts（即便文本是合法 checkpoint JSON）；重试沿原有 attempts/绝对时限；未完成调用不搬入 repair history（不设 repair_output）。证据：B01（TOOL_CALLS + 合法 JSON + ToolCallIR → 拒绝、零安装、turns 不变）、B02（同 parts 但 finish=STOP 亦拒绝；纯文本正对照安装）、B03（首次非法→二次合法：attempts=2、单次安装、retry 请求无 `compaction_failed_output`/`compaction_repair_request` 语义）。
+- **C3 恢复/绑定后一次 projection bootstrap（已修，turn_executor + projection_session）**：`EndpointProjectionSession.has_materialized_content()` 区分「fresh/rebound（未物化）」与「已物化 stale」；mismatch 且未物化时以当前 canonical L 模型视图 + CURRENT R 经 `on_left_replaced` 冷重建一次——与 post-commit rebase 共享 `_install_left_replacement` 同一入口（不新增第三条恢复路径）；内容与 coverage 一起建立后才记录已消费 generation；已物化 lineage 保持严格拒用（不动 counter）。证据：C01a（focused 保存/恢复两轮重入，summary/历史恰一次）、C01b（app 级真实宿主 save/publish→restore + app 自有 executor 真实 PromptCompiler 路径两轮：`RESTORED SEED SUMMARY` 与各用户消息在 wire 上各恰一次、首轮即 freeze、无 stale/bootstrap-failed 诊断）、C02（切 endpoint binding：旧 native 不跨 provider、新投影从当前 L/R 建立、后继轮复用、发送数 == 轮数零预热）、C03（gen0 正例不退化；恢复后 bootstrap 恰一次、第二轮不重入；已物化 stale 继续拒用、显式 rebase 后才 engage）。
+
+证据与命令（工作区 `~/Documents/coding/Pal-two-segment-v3`）：
+
+- reviewer 草案 `test_review_c9cb2d2.py`（T01–T05，reviewer 未运行）：c9cb2d2 树实跑 3 failed / 2 passed（复现 C1/C2/C3）→ 修复树 **5/5 passed**。命令：`PYTHONPATH="$PWD/src:$PWD" python -m pytest <review 包>/test_review_c9cb2d2.py -q`，exit 0。
+- 新仓库节点 `tests/test_v3_c9cb2d2_review_fixes.py`：**11/11 passed**（A01–A03 / B01–B03 / C01a / C01b / C02 / C03×2），同命令同前缀，exit 0。
+- 受影响链复跑（修复树）：v3 链 14 文件 **107 passed + 12 subtests**；compaction 族 7 文件 **60 passed**；projection 族 13 文件 **133 passed + 74 subtests**；合计 **300 passed + 86 subtests**，全绿。
+- 全量回归（`faee0dd` 树，1371.83s）：**3094 passed + 498 subtests + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——与空闲重跑基线（`logs_full_regression_idle_rerun.txt`）的 FAILED 集和 SUBFAILED 集逐项 diff 为空；无新增失败，全部为已知长跑时序/顺序敏感族（bootstrap-telegram / bunshin_sandbox / bunshin_v2_public / browser_cli / control_plane / bunshin_submission_errors / bunshin_v2_contract_protocol / bunshin_v2_verification）。passed 3094 vs 基线 3071 的增量对应间段新增节点（H02/H03、B 族与本节 11 节点）。不宣称全量全绿。
+- 未运行 / 不主张：N27 真实 provider E2E（opt-in `PAL_V3_E2E` 门控，未设 → SKIP，不冒充已跑）；iqoo/slot.py 补丁（未获得确切 repo/branch/SHA，reviewer 与本轮均未 review）；TLA 未新增模型动作（本轮为源/验收/恢复复用修复，`on_left_replaced` 既有动作语义未变），未以旧日志替代新路径证据；SIGKILL/逐 compact 持久化/预热/durable inbox 均未引入（保持用户范围）。
 
