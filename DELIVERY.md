@@ -40,6 +40,8 @@
 | `a923583` | N8 测试 | `tests/test_v3_review_95373ef_fixes.py` 19 条（reviewer 草案 9 条修 fixture 不弱化断言 + M16/M18 + M04 正反 + M05 异常变体 + M06 迟到清理）；M17 迁移 `test_prompt_cache_v2_runtime.py` 真 v3 compaction 入口 + 字节真相退役断言；warm_handoff_split eligible reader |
 | 本 commit | N8 证据 | DELIVERY §9 + 红基线/全量回归日志（引用同树测试 a1058c5+a923583） |
 | 本 commit | N8 后续 | M12 seam 变体收口：test_completion_system_seam_paths_shift_with_the_head（20/20 绿），M12 PARTIAL→PASS；余下挂账排序见 §4.6 |
+| `faf2f41` | H族收口 | Q04/B04-B08 实现收口（见 §4.4）：Q04 BUSY_RETRY 回执、B05 base_over_budget 终态+报因、B04/B06/B07/B08 诚实 executor/engine 节点；H04/H06 OBSOLETE、H02 挂账 |
+| 本 commit | H族账本 | acceptance_status 46/72 PASS（fill_ledger 逐 node 实跑 @ faf2f41）；§4.4/§4.6/N21 同步 |
 
 ## 3. 设计要点
 
@@ -61,9 +63,9 @@
 1. **astra chain prefix_preserved 10 失败（翻转预存）——诊断层已修，余 6 挂账归因收敛**：认识论定案（Nathan 2026-09-21，PLAN §7/I11/I12/F15 锚定）：marker 非证据、回执（usage cached tokens）是命中唯一确认、本地唯一主张是出站字节级相同；frozen 前缀 span 不随行是 §6.2「不重写稳定前缀」的设计结果非缺陷，错在 describe_request 以 span 存在性为枚举门槛（无 span 消息字节蒸发→项流不对称→假 prefix_changed）。修复（诊断层 commit）：字节自足枚举——会话容器项全量描述，span 降级为路径地图（未认领项继承无 span 消息 region，混合默认 history）；红先行契约测试 tests/test_cache_diagnostics.py（cold→projected 不对称仍报 prefix_preserved + 真字节漂移仍报 prefix_changed 护栏）。结果 10→6：explicit/hybrid chain 4 例全绿，cache 族零连带。**余 6 同一根族：harness 投影 observe/promote 闭环未闭合**（est 全程平坦 6458、cache_tail=False 从不 prepared；[compaction] 轮 4 后旧 history 项原样保留=从未 promote 进 L，summary 只追加报 history_appended 而测试期望 prefix_changed；[dynamic] 另含 encode 不声明动态 context 项——276B 无主项按字节真相进前缀比对）。修法属 encode/planning 层，超出「修诊断不修投影」切片，挂账 Nathan。**环境警示**：本机 user-site editable 安装（pal_v2→~/Documents/coding/Pal main@4daab5f）会劫持 import，worktree 测试必须 PYTHONPATH=src（曾致一次假绿误判，已纠正）。**[N8/M17 关闭（a923583）]** 余 6 已归因关闭：根因是测试侧 legacy `memory.compact` 捷径绕过真实 v3 promote/observe 闭环（est 平坦、cache_tail 永不 prepared、旧 history 项原样保留皆为该捷径产物）；迁移到真 v3 入口（左跑+切割+安装+rebase，transport 应答 schema 合法 summary）后全文件绿，并新增字节真相退役断言（压缩掉的左段 reasoning 不重放、存活段逐字节原样、summary 请求独立记账）。见 §9/M17
 2. **[已收（本日后续 commit）] 引擎 whole-source 内部残留**：已物理删除——`CompactionSnapshot.capture`（whole-source 生产者）、engine 的 MemoryCompactRequest 回退安装链（acompact_transactionally/compact_transactionally/acompact/compact getattr 阶梯）改为诚实 RuntimeError 守卫（无 two_segment_run_id 的手搓快照无受支持安装路径）；`MemoryService.compact/_compact_full_source/compact_transactionally/acompact_transactionally/acompact/mark_compaction_cleanup_pending` 全删；`MemoryCompactRequest` 留具名墓碑（陈旧 import 响亮报错），port 接口四方法删；`pal.memory` 导出清理。**保留**：engine 的 `source_stamp` 分支（414/487）非 full-source 专属——capture_left 亦设置左戳，属「带戳快照」通用规则（S03/S04 超限分离）；`l1_source_stamp` 只读 façade。测试侧：删 4 整文件（test_compact_continuity / test_p6_fault_matrix / test_p6_perf_ab / test_compaction_diagnostics）+ test_p6_matrix_gaps 3 条 + test_runtime_compaction 28 条（22 引擎族 + 5 策略 + 1 事务）+ 空类 CompactionPolicyTests + 死 helper `_snapshot`/`_capture_warm` + skeleton 1 条 + bunshin 2 条 + warm_handoff 5 条 + gated 真引擎 1 条；迁移 2 条策略容错测试到真 v3 路径（begin_left_compaction + capture_left + compact_left 安装，比原 whole-source 马甲更真）；n11 的 MemoryCompactResult 改指 pal.memory。诚实边界：部分引擎通用契约（checkpoint 两万上限、重试不膨胀 attempts、三失败隔离等）原本只经 whole-source 马甲覆盖，删除后无 v3 等价单测——挂账后续按需补 v3 版
 3. **[已收（本日后续 commit）] v2 flake 族干净环境重跑归因**：空闲机（ollama 空、无并发负载）worktree 全量重跑 1454s：**22 failed（19 FAILED + 3 SUBFAILED）与既定族完全同集**——第五次连续同集（3575e48/29a879f/af51d74fix/N8 主线/本次空闲跑），单跑 19/19+3sub 绿。归因定案：串行全量长跑的时序/顺序敏感（bootstrap-telegram / bunshin_sandbox / bunshin_v2_public / browser_cli / control_plane 族），非 ollama 内存挤压、非任何 v3 改动、非真回归；若未来要根治需逐测试隔离归因（事件循环/端口/环境变量泄漏类），非 v3 收口阻塞项。环境方法论记录：换 venv/克隆属过度工程——历次基线同环境同 PYTHONPATH 纪律，归因变量是机器负载而非依赖；宿主 shell 全局 PYTHONPATH 携带 pal_v2 src（劫持源），worktree 前缀纪律已压住
-4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
+4. **[已收（faf2f41）] H 族运行时项分类收口**：Q04/B04-B08 已实现并有诚实 node（Q04=test_compaction_gate BUSY_RETRY 回执；B04-B08=tests/test_v3_b_family_runtime.py，真 executor/engine/owner，网络侧 fake）；B05 代码收口=engine 新增 `base_over_budget` 终态（空 source 探针仍超窗→零次生成、不删 base 凑窗）+ 手动 compact 明确报因。H04/H06 判 OBSOLETE（v2 从未上线：无旧 schema L1、无旧 staging 文件可迁，无诚实输入）；H02 挂账单独一轮（owner 侧 deadline/terminal 机制已在，缺持久化+重载增量）。爆炸半径重跑 170 passed + 24 subtests 绿
 5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律；本轮实测 1790s，后续建议 ≥2400s）
-6. **N8 后续安排（2026-09-22，Nathan 授权安排）**：① M10 三路径 final-wire 并排单测（✅ 已收，tests/test_v3_m10_final_wire.py）；② whole-source 引擎残留物理删除（见 2）；③ acceptance_status 补账（fill_ledger 逐 node 实跑，31 项 NOT_RUN）；④ 22 长跑族干净环境重跑（台式机干净 checkout，Nathan 授权）；⑤ H 族运行时项（H02/H04/H06/Q04/B04-B08）。M12 seam 变体已收（b80fd1b）
+6. **N8 后续安排（2026-09-22，Nathan 授权安排）**：① M10 三路径 final-wire 并排单测（✅ 已收，tests/test_v3_m10_final_wire.py）；② whole-source 引擎残留物理删除（✅ 见 2）；③ acceptance_status 补账（✅ fill_ledger 逐 node 实跑）；④ 22 长跑族干净环境重跑（✅ 见 3）；⑤ H 族运行时项（✅ 见 4，Q04/B04-B08 实现+H04/H06 OBSOLETE+H02 挂账）。M12 seam 变体已收（b80fd1b）
 
 ## 5. 验收证据
 
@@ -111,7 +113,7 @@
 | N18 stream partial/length 不冻结 | PARTIAL | ERROR 轮 reject 已测；stream 细分 NOT_RUN |
 | N19 handoff 输出只进 validator | PASS(component) | engine 套件（I14 既有） |
 | N20 长活 turn 能压 | PASS | test_v3_n3_vertical_trace（promote→compact 全链） |
-| N21 发送预算门 | PASS(component) | G4 B01/B03/Q03；B04-B08 NOT_RUN |
+| N21 发送预算门 | PASS | G4 B01/B03/Q03 + B04/B05（faf2f41：B04 当前视图硬溢出拦截、B05 base_over_budget 终态）；B06-B08 见 test_v3_b_family_runtime |
 | N22 无预热/miss 不重发 | PASS | hot_cache 套件全绿（cache_epoch/replay_guard 语义在 v3 路径恢复）；warm 拆分 15196dd |
 | N23 interrupt vs commit 竞争 | PASS | N1 cancel + compact_cancel_control |
 | N24 rebase 失败禁旧投影 | PASS | stale-left 守卫测试 + af51d74 F6（lineage span 不 durable 冷回退） |
