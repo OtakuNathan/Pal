@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from pal.execution.contracts import ToolCallBudget
@@ -2917,10 +2917,11 @@ class TurnExecutor:
         Post-commit only (F13): rebase failures land in diagnostics and never
         roll back the installed left segment.
 
-        R3 (review 95373ef): the reseed uses the MODEL view of L — the
-        standalone continuity reference that normal compiler injection and
-        the handoff carry — and registers its id as L-owned coverage, so
-        the next prepare never re-appends the same summary as fresh tail.
+        R3/B1 (review 95373ef / 4b14ce4): the reseed uses the MODEL view of L
+        — the standalone continuity reference that normal compiler injection
+        and the handoff carry — and registers the ids of EVERYTHING that view
+        materialized as L-owned coverage, so the next prepare never re-appends
+        L content the rebuilt prefix already carries.
         """
 
         provider = getattr(llm_runtime, "endpoint_projection_session", None)
@@ -2953,7 +2954,7 @@ class TurnExecutor:
         A fresh or rebound projection that never consumed a left generation
         is initialized from the CURRENT canonical L model view + current R
         with the endpoint plan/profile its binding already carries.  Same
-        seed/reference/coverage rules as the post-commit rebase — this is
+        seed/coverage rules as the post-commit rebase — this is
         that same entry, not a third recovery path.  Never called on a
         materialized lineage and never a per-round fallback: after this one
         rebuild the consumed generation matches the root and ordinary
@@ -2980,10 +2981,10 @@ class TurnExecutor:
         """One left replacement install, shared by rebase and bootstrap (C3).
 
         Builds the SAME facts for both callers: the model-view seed (with
-        its L-owned reference ids), the surviving frozen right side the
-        session actually holds, and the post-install cursor base at the
-        authority's own left generation.  The native/coverage rules live in
-        ``on_left_replaced`` itself.
+        the full L-owned coverage its encode materializes), the surviving
+        frozen right side the session actually holds, and the post-install
+        cursor base at the authority's own left generation.  The
+        native/coverage rules live in ``on_left_replaced`` itself.
         """
 
         rebase = getattr(session, "on_left_replaced", None)
@@ -2995,9 +2996,9 @@ class TurnExecutor:
         from pal.llm.projection_session import LeftReplacement
 
         seed_messages: tuple = tuple(root.left_messages())
-        seed_reference_ids: tuple[str, ...] = ()
+        seed_coverage_ids: tuple[str, ...] = ()
         if memory_service is not None:
-            seed_messages, seed_reference_ids = self._left_view_seed(
+            seed_messages, seed_coverage_ids = self._left_view_seed(
                 memory_service, root
             )
         # F4 (review): the keeper is the session's ACTUAL frozen right
@@ -3033,44 +3034,61 @@ class TurnExecutor:
                     prefix_digest=digest or "0" * 64,
                 ),
                 left_revision=left_revision,
-                seed_reference_ids=seed_reference_ids,
+                seed_coverage_ids=seed_coverage_ids,
             )
         )
 
     def _left_view_seed(
         self, memory_service: Any, root: Any
     ) -> tuple[tuple, tuple[str, ...]]:
-        """R3 (review 95373ef): the reseed as the MODEL view of L.
+        """R3/B1: the reseed as the MODEL view of L, with its full coverage.
 
         When the cut owns the compact seed, the model sees the standalone
         continuity reference — the same message normal compiler injection
         and the handoff carry — not the raw assistant seed the authority
         stores.  Encoding the raw form here would put the same summary on
         the wire twice (raw assistant seed + standalone user reference).
-        Returns ``(seed_messages, seed_reference_ids)`` with the reference
-        ids empty whenever no cut-owned seed exists (full-source path).
+
+        B1 (review 4b14ce4): the seed is not always "just the summary".  A
+        recovery/rebind bootstrap hands this entry the WHOLE current L model
+        view (summary plus promoted ordinary groups), so the returned
+        coverage is the model-view id of EVERY message the seed encode
+        receives — one encode, one coverage set.  Returns
+        ``(seed_messages, seed_coverage_ids)``; the ids are empty only for
+        an empty seed.
         """
+
+        def coverage(messages: Sequence[Any]) -> tuple[str, ...]:
+            # Same coordinates as the encode: the standalone substitution
+            # above keeps the canonical source id out of the model view.
+            return tuple(
+                dict.fromkeys(
+                    str(message.message_id)
+                    for message in messages
+                    if str(message.message_id or "")
+                )
+            )
 
         messages = tuple(root.left_messages())
         turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
         continuity = getattr(turns, "continuity", None)
         if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
-            return messages, ()
+            return messages, coverage(messages)
         summary_turn_id = getattr(turns, "summary_turn_id", None)
         if not summary_turn_id or not any(
             turn.turn_id == summary_turn_id for turn in root.left_turns()
         ):
-            return messages, ()
+            return messages, coverage(messages)
         if not any(
             message.message_id == continuity.source_id for message in messages
         ):
-            return messages, ()
+            return messages, coverage(messages)
         standalone = continuity.standalone_message()
         mapped = tuple(
             standalone if message.message_id == continuity.source_id else message
             for message in messages
         )
-        return mapped, (standalone.message_id,)
+        return mapped, coverage(mapped)
 
     def _left_model_view_ids(
         self, memory_service: Any, left_ids: tuple[str, ...]

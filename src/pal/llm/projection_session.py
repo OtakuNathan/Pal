@@ -130,11 +130,15 @@ class LeftReplacement:
     kept_frozen_messages: tuple[LLMMessageIR, ...]
     cursor_after: HistoryCursor
     left_revision: int = 0
-    # R3 (review 95373ef): model-view message ids the new seed carries as
-    # L-owned references (the standalone continuity form).  The next prepare
-    # treats them as ALREADY covered by the assembled prefix instead of
-    # re-appending the compiler's identical injection as fresh tail.
-    seed_reference_ids: tuple[str, ...] = ()
+    # B1 (review 4b14ce4): model-view ids of EVERY message this seed
+    # materializes.  A post-compact rebase seed is the standalone continuity
+    # reference alone; a recovery/rebind bootstrap hands this entry the WHOLE
+    # current L model view (summary plus promoted ordinary groups), so its
+    # coverage is that whole view's id set — declaring one id while encoding
+    # more made the next prepare re-append the rest as fresh tail.  The
+    # coverage is established by the SAME encode that materializes the seed:
+    # content first, declaration second, never a fabricated round chunk.
+    seed_coverage_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -224,11 +228,14 @@ class EndpointProjectionSession:
         # Monotonic history-authority revision seen by this lineage (F4):
         # each left replacement must advance it, mirroring the root's cut.
         self._left_revision = 0
-        # R3 (review 95373ef): model-view ids of L-owned references installed
-        # by a rebase (the standalone continuity seed form).  They are
-        # coverage: the assembled prefix already carries them, so the next
-        # prepare must not re-append the compiler's identical injection.
-        self._l_reference_ids: tuple[str, ...] = ()
+        # B1 (review 4b14ce4): model-view ids of every L message the current
+        # replacement seed materialized (the standalone continuity form
+        # included).  They are derived coverage: the assembled prefix already
+        # carries them, so the next prepare must not re-append any of them as
+        # fresh tail — not the summary, and not promoted ordinary history.
+        # Replaced wholesale by the next left replacement; cleared by
+        # bind/retire.
+        self._l_coverage_ids: tuple[str, ...] = ()
         self._owner_fence = 0
         self.retired = False
 
@@ -282,7 +289,7 @@ class EndpointProjectionSession:
         self._pending_wire_tail = []
         self._committed_head_system = []
         self._left_revision = 0
-        self._l_reference_ids = ()
+        self._l_coverage_ids = ()
         self._active = None
 
     def retire(self) -> None:
@@ -293,7 +300,7 @@ class EndpointProjectionSession:
         self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
-        self._l_reference_ids = ()
+        self._l_coverage_ids = ()
         self._active = None
 
     def _require_identity(self) -> ProjectionIdentity:
@@ -845,10 +852,12 @@ class EndpointProjectionSession:
         self._prefix_items = rebuilt_items
         self._prefix_item_spans = rebuilt_spans
         self._pending_wire_tail = unfrozen_tail
-        # R3 (review 95373ef): the new seed's model-view reference ids become
-        # L-owned coverage from this moment on.
-        self._l_reference_ids = tuple(
-            str(value) for value in (change.seed_reference_ids or ())
+        # B1 (review 4b14ce4): the replacement's seed coverage becomes the
+        # lineage's L-owned coverage from this moment on — every model-view id
+        # the seed encode materialized, so the next prepare never re-appends
+        # L content the rebuilt prefix already carries.
+        self._l_coverage_ids = tuple(
+            str(value) for value in (change.seed_coverage_ids or ())
         )
         # F4: head-system parts re-own to their surviving rounds; entries
         # attributed to retired left rounds die with them.
@@ -877,17 +886,20 @@ class EndpointProjectionSession:
         )
 
     def covered_message_ids(self) -> tuple[str, ...]:
-        """Semantic ids the assembled prefix already covers (R3 read).
+        """Semantic ids the assembled prefix already covers (R3/B1 read).
 
-        Committed chunks' spans PLUS the L-owned reference ids installed by
-        a rebase (the standalone continuity seed form).  The next prepare
+        Committed chunks' spans PLUS the L-owned coverage of the current left
+        materialization (every model-view message the replacement seed
+        encoded — the standalone continuity form included).  The next prepare
         must not re-append any of them as a fresh tail; a seed that lived
         only as empty-span prefix bytes used to be re-injected exactly that
-        way, doubling the summary on the wire.
+        way, doubling the summary on the wire, and a recovery bootstrap with
+        promoted ordinary history re-appended every non-summary L message
+        (review 4b14ce4 B1).
         """
 
         return tuple(
-            dict.fromkeys((*self.frozen_message_ids(), *self._l_reference_ids))
+            dict.fromkeys((*self.frozen_message_ids(), *self._l_coverage_ids))
         )
 
     @property
@@ -919,7 +931,7 @@ class EndpointProjectionSession:
             or self._prefix_items
             or self._pending_wire_tail
             or self._committed_head_system
-            or self._l_reference_ids
+            or self._l_coverage_ids
         )
 
     # -- preparation ---------------------------------------------------------

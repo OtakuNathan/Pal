@@ -12,6 +12,10 @@ C3/C01-C03 · a fresh or rebound projection cold-builds ONCE from the current
              canonical L/R after restore/rebind; a materialized stale prefix
              keeps the strict refusal (no counter-only permission).
 
+Review 4b14ce4 B1: the rebind node below also pins wire multiplicity — the
+bootstrap materializes the WHOLE current L view, so promoted ordinary
+history must ride the wire exactly once, never re-appended as fresh tail.
+
 Real components: MemoryService/HistoryRoot, the compaction engine + policy +
 schema validator + install, the resident-checkpoint app harness, LLMRuntime +
 EndpointProjectionSession, and the TurnExecutor path with the real
@@ -552,6 +556,25 @@ class C3RecoveryReentryTests(unittest.TestCase):
             self.assertEqual(session.history_left_revision, 1)
             # No pre-warm or extra provider traffic: exactly one send per round.
             self.assertEqual(len(transport.captured), 3)
+
+            # B1 (review 4b14ce4): the rebound round already promoted Q1/A1
+            # into L, and the bootstrap materialized that WHOLE L view — so
+            # every historical message must ride the wire exactly once.  The
+            # old coverage declared only the summary and re-appended Q1/A1 as
+            # fresh tail (each sentinel twice).
+            sent = [
+                json.dumps(dict(entry.payload), ensure_ascii=False)
+                for entry in transport.captured
+            ]
+            for index in (1, 2):
+                with self.subTest(request_number=index + 1):
+                    self.assertEqual(sent[index].count("REBIND SEED SUMMARY"), 1)
+                    self.assertEqual(sent[index].count("First round."), 1,
+                                     "promoted Q1 must not be encoded in both L and tail")
+                    self.assertEqual(sent[index].count("REBOUND_1"), 1,
+                                     "accepted A1 must occur once after rebind")
+            self.assertEqual(sent[1].count("Second round after rebind."), 1)
+            self.assertEqual(sent[2].count("Third round reuses."), 1)
         finally:
             runtime.close()
 
