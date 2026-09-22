@@ -225,3 +225,27 @@ reviewer 结论：C1/C2 关闭本轮发现；C3 判 PARTIAL，剩一个阻塞 B1
 - 全量回归（`af400d9` 树，1377.37s）：**3098 passed + 533 subtests + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——FAILED 集与 SUBFAILED 集与 `logs_full_regression_idle_rerun.txt`（已知长跑族）逐项 diff 为空，无新增失败；passed 增量 3098-3094=4 为本轮 4 个新节点，subtests 增量 533-498=35 为 4 节点 33 sub + C02 加固 2 sub。不宣称全量全绿。
 - 未运行 / 不主张：N27 真实 provider E2E（opt-in `PAL_V3_E2E` 门控未设 → SKIP）；iqoo/slot.py 补丁（仍未获得确切 repo/branch/SHA，未 review）；TLA 未新增模型动作（物化/coverage 表示不变量，未引入新 ownership 状态转移；`on_left_replaced` 既有动作语义未变），不以旧日志替代新路径证据；SIGKILL/逐 compact 持久化/缓存预热/durable inbox 未引入。
 
+## 12. 7d182fd 定点复审收口（2026-09-23，review pal_v3_review_7d182fd，S1 跨 cut user seam）
+
+固定输入：`refactor/two-segment-session-v3@7d182fdb32a5aa080d4dc40ff639787b487f5938`（reviewer 包 MANIFEST 固定，产品尾部 `af400d9`）。全程 `PYTHONPATH="$PWD/src:$PWD"`，`pal.__file__` 指向本 worktree。未 push、未合 main、未部署、无真实 provider 调用（fake 网络帧仅产品解码器格式）。
+
+reviewer 结论：原 B1 关闭；新开 S1·P1——Anthropic user seam 合并时旧 L 字节被重新归给 R，下一次左替换无法退休它们。
+
+- **S1 症状（实跑复现）**：
+  - 组件级：reviewer 草案 `test_review_7d182fd.py`（reviewer 仅 py_compile）在 7d182fd 树实跑 **2 failed / 2 passed + 3 subtests**——T01 旧 L 文本 `RETIRED_LEFT_INSTRUCTION` 借存活 R chunk 的混合 user item 复活；T02 旧 `tool_result` 成 orphan，`prepare` 直接被工具协议校验拒（`ProjectionContractError`，比 review 说的「退 cold」更硬）；T03 三 shape 对照 + T04 interrupted turn 合法性对照绿。
+  - 产品级（本轮新纵向）：bootstrap（L 以 interrupted user-only turn 结尾）→ 接受 R 回答 → 只 compact 左侧（R 从不 promote，`_rebase_projection_after_left_install` 同 post-commit 接口）→ 下一轮 anthropic wire 中旧 L 文本复活 1 次（`Old interrupted ask` 在 round2 payload count=1）。**产品路径工具变体到不了**：`_ensure_assistant_closure`（turn_ir）保证 L1 turn 以 TOOL 结尾必加 assistant 桥，L 视图永不以 tool_result 收尾——工具 orphan 变体由组件级 T02 覆盖，产品级由文本变体覆盖，两者同一机制（空 span 在 seam 合并时被 R 的 span 吞掉）。
+- **修复（块级归属 + seed L-owned 标记，同一批）**：
+  1. **per-BLOCK ownership 贯穿**：`ProjectionChunk.item_block_spans` / `_PendingWireItem.block_spans` / `_ActiveRound.prepared_item_block_spans` / `_prefix_item_block_spans` 四条轴线与既有 per-item span 平行。`prepare` 组装 conversation 三元组；`_merge_anthropic_user_boundary_pairs` 的块级归属按 content 顺序拼接（merge 就是 `[*left.content, *right.content]`，块序即来源序）；`observe_commit` 的 accepted 物化块级归本 commit span，尾部 trim 带走块级；checkpoint 序列化/恢复同步（缺字段 → () = legacy 整项规则，宽松降级不拒快照）。
+  2. **seed 归属修正**：`on_left_replaced` 的 seed items span 从无条件 `()` 改为 `seed_coverage_ids`（B1 同源坐标）。空 span 语义只剩 legacy（保守保留）；有 coverage 的 seed 字节在**下一次**左替换时退休——修复了 pending 直通路径（bootstrap 尾部 user 不再跨 replace 幸存）与 seam 路径的共同根因。空 coverage（legacy 调用方）保持旧保守行为。
+  3. **块级退休重建**：新 `_retire_wire_item(item, span, blocks, kept)`——有对齐块级时逐块判定（空 span/⊆kept 留，其余删），部分退休则**重建 item** 只留存活块，新 item span = 存活块 span 去重并集；无块级轴线时维持 F5 整项规则。`on_left_replaced` 的 chunk 过滤与 pending 过滤统一走它。不重编码 frozen prefix、不伪造 thinking/signature、无新 coordinator/终态/ticket（PLAN 边界全守）。
+- **不变量核对**：S-I1 seed 物化有可追溯归属（coverage 即 span，空 span 不再是永久无主）；S-I2 merge 不改源归属（块级拼接，两侧各自保留）；S-I3 替换后退休 L 原文消失、R 文本/工具结果各保留一次（T01/T02/纵向 round2/3 计数断言）；S-I4 wire 跨 cut 不拆 semantic 工具组（T02 修复后 tool_use 随纯 L item 整项退休、tool_result 块级退休，存活请求无 orphan——工具协议校验通过）；S-I5 覆盖集仍对应当前物化（`_l_coverage_ids` 机制未动，B1 测试族全绿无重复 append）。
+- **不主张**：没有把组件测试等同宿主 E2E；没有运行真实 provider；全量回归的既有 22 项失败不属于本轮必修（只要求失败集合不新增）；TLA 无新增持有/转移状态机故未新增模型；checkpoint 独立 codec 的完整 rebased prefix roundtrip 仍未宣称（新字段是 best-effort 增量，缺省退化 legacy 整项规则）。
+
+证据与命令（工作区 `~/Documents/coding/Pal-two-segment-v3`）：
+
+- reviewer 草案：7d182fd 树 **2 failed / 2 passed + 3 subtests**（T01/T02 红）→ 修复树 **4 passed + 3 subtests** 全绿（exit 0）。
+- 新增 `tests/test_v3_7d182fd_review_fixes.py`（矩阵 S02 纵向 + S03 openai 对照，B05 延伸）：修复前 anthropic 纵向红在 `Old interrupted ask` 复活（SUBFAILED round=2）→ 修复后 **2 passed + 22 subtests** 全绿。节点内容：B05 的 LEFT 完整工具组（interrupted 收尾，无桥）+ interrupted user-only turn 折入同一尾部 user item（S01 文本 + S02 工具同场景）；接受 R 回答后只 compact 左侧（R 从不 promote），断言 round2/round3：旧 call/result/旧摘要/旧 interrupted 文本 0 次，新摘要/R Q/A/下一问各 1 次，无 stale/prepare_failed/rebase_failed/bootstrap_failed 诊断（不靠 cold 回退），round3 继续 warm（chunks>0、left_revision=2）；openai_completion 对照同退休/保留（无 seam 亦无回归）。
+- 受影响链复跑：reviewer 草案 + 纵向 + checkpoint 族 + B 族 + C 族（5 文件）**28 passed + 62 subtests**；projection/native/v3 聚焦族（21 文件）**206 passed + 79 subtests**；全绿。
+- 全量回归（修复树，1359.85s）：**3100 passed + 557 subtests passed + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——FAILED/SUBFAILED 集与基线 `logs_full_regression_4b14ce4_review_fixes.txt` 逐项 diff 为空，无新增失败；passed 增量 3100-3098=2、subtests 增量 557-533=24 均为本轮新测试节点（S02 纵向 + S03 对照，2 tests + 22 subtests），不宣称全量全绿。日志 `logs_full_regression_7d182fd_s1_seam_fix.txt`。
+
+
