@@ -1087,6 +1087,46 @@ class PromptCacheCoordinator:
                 }
             return {}
 
+    def eligible_anchor_request(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
+        """Local-eligibility anchor replay (R3/S1, review 95373ef).
+
+        The anchor-writing request is locally valid material for building a
+        same-source handoff as soon as the bytes exist and the scope /
+        endpoint / TTL still hold — READ evidence is NOT a prerequisite for
+        trying: a hit saves the prefix, a miss costs exactly what the cold
+        alternative would have paid.  ``read_confirmed`` exposes the READ
+        observation for diagnostics and explicit hot-only surfaces; callers
+        must not turn it into a permission check for ordinary autocompact.
+        Submitted marker bytes still authorize nothing on their own
+        (dffb210): this reader returns material for a request that treats
+        the anchor as input, never a cache-dependent guarantee.
+        """
+
+        wanted_scope = str(logical_scope_id or "pal:resident").strip()
+        with self._lock:
+            now = time.monotonic()
+            for scope_key, evidence in list(self._anchor_evidence.items()):
+                if str(
+                    getattr(evidence.request, "logical_scope_id", "") or ""
+                ) != wanted_scope:
+                    continue
+                if endpoint_id and str(endpoint_id) != evidence.endpoint_id:
+                    continue
+                if now - evidence.submitted_at > evidence.ttl_seconds:
+                    self._anchor_evidence.pop(scope_key, None)
+                    continue
+                return {
+                    "request": evidence.request,
+                    "anchor_message_id": evidence.anchor_message_id,
+                    "dialect": evidence.dialect,
+                    "wire_shape": evidence.wire_shape,
+                    "read_confirmed": bool(
+                        evidence.confirmed
+                        and now - evidence.confirmed_at <= evidence.ttl_seconds
+                    ),
+                }
+            return {}
+
     def _remember(
         self,
         plan: PromptCachePlan,

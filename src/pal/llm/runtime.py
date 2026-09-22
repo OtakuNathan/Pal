@@ -452,6 +452,56 @@ class LLMRuntime(LLMRuntimePort):
             capabilities["prompt_cache"] = thaw_json(dict(selection))
         return capabilities
 
+    def _endpoint_identity_fields(self, endpoint: LLMEndpointModel) -> dict[str, Any]:
+        """R1 (review 95373ef): the endpoint object's OWN configuration.
+
+        Everything here is recomputable from a live endpoint at reuse time.
+        Runtime-injected selection (cache-policy generation counters, model-
+        hook provenance) is deliberately NOT part of this view — it belongs
+        to the binding's display fingerprint, not to the endpoint's
+        configuration identity."""
+
+        return {
+            "endpoint_id": str(endpoint.endpoint_id),
+            "model_id": str(endpoint.model_id),
+            "wire_shape": str(endpoint.wire_shape),
+            "provider": str(endpoint.provider),
+            "base_url": str(endpoint.base_url or ""),
+            "context_window": int(getattr(endpoint, "context_window", 0) or 0),
+            "max_output_tokens": int(getattr(endpoint, "max_output_tokens", 0) or 0),
+            "supports_tools": bool(endpoint.supports_tools),
+            "supports_streaming": bool(endpoint.supports_streaming),
+            "supports_vision": bool(endpoint.supports_vision),
+            "thinking_levels": [
+                str(level) for level in (getattr(endpoint, "thinking_levels_blob", None) or ())
+            ],
+            "default_thinking_level": str(
+                getattr(endpoint, "default_thinking_level", "") or ""
+            ),
+            "declared_spec_revision": str(
+                getattr(endpoint, "endpoint_spec_revision", "") or ""
+            ).strip(),
+            "capabilities_blob": thaw_json(
+                dict(getattr(endpoint, "capabilities_blob", None) or {})
+            ),
+        }
+
+    def _endpoint_config_digest(self, endpoint: LLMEndpointModel) -> str:
+        """R1: digest over the endpoint's own config, recomputable anywhere.
+
+        This is the reuse admission check for projections and plans: the
+        same endpoint id/model/shape does not prove the same validated
+        profile, so callers compare THIS digest before trusting a prepared
+        binding."""
+
+        return hashlib.sha256(
+            json.dumps(
+                self._endpoint_identity_fields(endpoint),
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
     def _projection_binding(
         self,
         endpoint: LLMEndpointModel,
@@ -470,22 +520,7 @@ class LLMRuntime(LLMRuntimePort):
         """
 
         identity_fields = {
-            "endpoint_id": str(endpoint.endpoint_id),
-            "model_id": str(endpoint.model_id),
-            "wire_shape": str(endpoint.wire_shape),
-            "provider": str(endpoint.provider),
-            "base_url": str(endpoint.base_url or ""),
-            "context_window": int(getattr(endpoint, "context_window", 0) or 0),
-            "max_output_tokens": int(getattr(endpoint, "max_output_tokens", 0) or 0),
-            "supports_tools": bool(endpoint.supports_tools),
-            "supports_streaming": bool(endpoint.supports_streaming),
-            "supports_vision": bool(endpoint.supports_vision),
-            "thinking_levels": [
-                str(level) for level in (getattr(endpoint, "thinking_levels_blob", None) or ())
-            ],
-            "default_thinking_level": str(
-                getattr(endpoint, "default_thinking_level", "") or ""
-            ),
+            **self._endpoint_identity_fields(endpoint),
             "capabilities": thaw_json(dict(capabilities or {})),
         }
         spec_revision = str(
@@ -520,7 +555,50 @@ class LLMRuntime(LLMRuntimePort):
             endpoint_spec_revision=spec_revision,
             continuation_policy_version=policy_version,
             config_fingerprint=f"fingerprint-{fingerprint}",
+            endpoint_config_digest=self._endpoint_config_digest(endpoint),
         )
+
+    def _binding_is_current(
+        self,
+        binding: EndpointBinding,
+        endpoint: LLMEndpointModel,
+    ) -> bool:
+        """R1 (review 95373ef): is this binding still the endpoint's config?
+
+        Same endpoint id/model/shape is NOT a validated profile (J1): the
+        endpoint's own configuration must still be the one the binding was
+        derived from.  The check recomputes the endpoint-config digest from
+        the LIVE endpoint; any drift (capabilities, output caps, spec
+        revision) makes the caller fall back to a fresh compile (plans) or
+        an honest cold send (projections) — never an old effective request
+        wearing a refreshed profile.  A refresh that changes nothing but
+        the cache-policy generation counter keeps the projection: that
+        counter is runtime bookkeeping, not endpoint configuration.
+        """
+
+        try:
+            current_digest = self._endpoint_config_digest(endpoint)
+        except Exception:
+            return False
+        recorded = str(getattr(binding, "endpoint_config_digest", "") or "")
+        if not recorded:
+            # Manual/legacy bindings carry no config digest; nothing is
+            # recomputable, so the caller's own field-level checks stand
+            # (historical behaviour).
+            return True
+        return current_digest == recorded
+
+    def _plan_is_current(
+        self,
+        plan: "LLMPreparedPlan",
+        endpoint: LLMEndpointModel,
+    ) -> bool:
+        """R1: a prepared plan may be reused only while its strong binding
+        still matches the endpoint's live config; a refreshed or replaced
+        profile must re-compile instead of re-sending the old plan's
+        effective request."""
+
+        return self._binding_is_current(plan.binding, endpoint)
 
     def refresh_runtime_settings(self) -> None:
         previous = self.active_endpoint()
@@ -767,10 +845,12 @@ class LLMRuntime(LLMRuntimePort):
             # F1: when the prepared plan resolved THIS endpoint, reuse its
             # compiled request verbatim — the projected payload is the
             # encoding of exactly this effective request, not a parallel
-            # compile.
+            # compile.  R1: the plan is a config snapshot; reuse requires
+            # its strong binding to still match the endpoint's live config.
             if (
                 generation_plan is not None
                 and str(endpoint.endpoint_id) == generation_plan.endpoint_id
+                and self._plan_is_current(generation_plan, endpoint)
             ):
                 prepared = generation_plan.prepared
             else:
@@ -817,7 +897,9 @@ class LLMRuntime(LLMRuntimePort):
                         **invoke_kwargs,
                     )
                     if response.finish_reason == LLMFinishReason.LENGTH:
+                        first = response
                         response = self._recover_length(endpoint, effective, response)
+                        recovery_rewrote = response is not first
                         # Recovery merges multiple already-decoded pieces, so
                         # the merged response crosses the same provider
                         # decorator once more. Non-recovered responses were
@@ -827,6 +909,14 @@ class LLMRuntime(LLMRuntimePort):
                             effective,
                             response,
                         )
+                        if recovery_rewrote:
+                            # R2 (review 95373ef): recovery rewrote the
+                            # contribution (merged continuations or discarded
+                            # the first attempt).  The first attempt's codec
+                            # capture no longer represents the accepted
+                            # output — revoke it so the receipt cannot freeze
+                            # a half response as this turn's native lineage.
+                            native_box.clear()
                     if response.finish_reason == LLMFinishReason.ERROR:
                         raise _accounted_response_error(endpoint, response)
                     if requested_preferred is None and endpoint.endpoint_id != self.active_endpoint_id:
@@ -855,13 +945,19 @@ class LLMRuntime(LLMRuntimePort):
                         # F2: the sync refresh recursion keeps the projection
                         # arguments exactly like the stream path — dropping
                         # them here silently downgraded the round to cold.
+                        # R1: the stale-spec event revokes the prepared plan
+                        # outright (J1): the retry re-derives the effective
+                        # request from the REFRESHED endpoint config.  The
+                        # projection rides along, but _projection_for_endpoint
+                        # re-validates its binding against the live config and
+                        # drops it when anything drifted.
                         return self._generate(
                             request,
                             allow_stale_refresh=False,
                             projection=projection,
                             projection_binding=projection_binding,
                             projection_attempt_id=projection_attempt_id,
-                            generation_plan=generation_plan,
+                            generation_plan=None,
                         )
                     last_error = exc
                     error_kind = self._record_failure(endpoint, exc, attempt)
@@ -935,7 +1031,13 @@ class LLMRuntime(LLMRuntimePort):
         prepared against.  The owner prepared it for ``binding``; if THIS
         resolved endpoint (including fallback) differs, drop the projection
         and let the codec encode cold — correct, just without the cached
-        prefix benefit."""
+        prefix benefit.
+
+        R1 (review 95373ef): id/model/shape equality is not a profile proof.
+        The binding is re-derived from the endpoint's LIVE config and the
+        projection is dropped on any drift (capabilities, output caps, spec
+        revision, cache-policy generation), so a refreshed endpoint can
+        never re-send the old encode."""
 
         if projection is None or binding is None:
             return None
@@ -949,6 +1051,7 @@ class LLMRuntime(LLMRuntimePort):
                 and str(binding.model_id) == str(endpoint.model_id)
                 and str(getattr(binding.wire_shape, "value", binding.wire_shape))
                 == str(endpoint.wire_shape)
+                and self._binding_is_current(binding, endpoint)
             ):
                 return projection
         except Exception:
@@ -1002,9 +1105,12 @@ class LLMRuntime(LLMRuntimePort):
         for endpoint in endpoints:
             # F1: plan-prepared requests are reused verbatim on their
             # resolved endpoint (the projection encoded exactly this).
+            # R1: only while the plan's strong binding still matches the
+            # endpoint's live config — a refreshed profile re-compiles.
             if (
                 generation_plan is not None
                 and str(endpoint.endpoint_id) == generation_plan.endpoint_id
+                and self._plan_is_current(generation_plan, endpoint)
             ):
                 prepared = generation_plan.prepared
             else:
@@ -1065,17 +1171,24 @@ class LLMRuntime(LLMRuntimePort):
                         yield update
                     completed = last_update.response if last_update is not None else _text_response("", LLMFinishReason.ERROR)
                     if completed.finish_reason == LLMFinishReason.LENGTH:
+                        first = completed
                         recovered = self._recover_length(
                             endpoint,
                             effective,
                             completed,
                             allow_discarded_retry=False,
                         )
+                        recovery_rewrote = recovered is not first
                         recovered = self._normalize_completed_response(
                             endpoint,
                             effective,
                             recovered,
                         )
+                        if recovery_rewrote:
+                            # R2: the merged continuation is not represented
+                            # by the first attempt's capture; revoke it
+                            # rather than freezing a half response.
+                            native_box.clear()
                         if recovered.finish_reason == LLMFinishReason.ERROR:
                             raise _accounted_response_error(endpoint, recovered)
                         recovery_updates = tuple(stream_recovery_updates(completed, recovered))
@@ -1108,6 +1221,9 @@ class LLMRuntime(LLMRuntimePort):
                             reason="endpoint_spec_stale",
                         )
                         self.refresh_llm_endpoints()
+                        # R1: stale-spec refresh revokes the plan; the retry
+                        # re-derives the effective request from the live
+                        # config and re-validates the projection's binding.
                         yield from self._iter_stream_updates(
                             request,
                             stream_control=stream_control,
@@ -1115,7 +1231,7 @@ class LLMRuntime(LLMRuntimePort):
                             projection=projection,
                             projection_binding=projection_binding,
                             projection_attempt_id=projection_attempt_id,
-                            generation_plan=generation_plan,
+                            generation_plan=None,
                         )
                         return
                     last_error = exc
@@ -1322,6 +1438,43 @@ class LLMRuntime(LLMRuntimePort):
     ) -> dict[str, Any]:
         prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
         snapshot = getattr(prompt_cache, "confirmed_anchor_request", None)
+        active_endpoint = self.active_endpoint()
+        resolved_endpoint_id = str(endpoint_id or "").strip() or (
+            str(active_endpoint.endpoint_id)
+            if active_endpoint is not None
+            else ""
+        )
+        return (
+            dict(
+                snapshot(
+                    logical_scope_id=str(logical_scope_id or "").strip(),
+                    endpoint_id=resolved_endpoint_id,
+                )
+                or {}
+            )
+            if callable(snapshot)
+            else {}
+        )
+
+    def prompt_cache_eligible_anchor_request(
+        self,
+        *,
+        logical_scope_id: str = "pal:resident",
+        endpoint_id: str = "",
+    ) -> dict[str, Any]:
+        """R3/S1 (review 95373ef): locally eligible anchor material.
+
+        Local eligibility says the replayed bytes may be used to BUILD a
+        same-source request; read evidence only says the provider once
+        served them.  Ordinary autocompact uses this reader so an
+        unconfirmed-but-locally-valid prefix is tried instead of silently
+        switching to another cold source; the confirmed reader remains for
+        diagnostics and explicit hot-only surfaces.  No prewarm, no extra
+        provider call is issued here.
+        """
+
+        prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
+        snapshot = getattr(prompt_cache, "eligible_anchor_request", None)
         active_endpoint = self.active_endpoint()
         resolved_endpoint_id = str(endpoint_id or "").strip() or (
             str(active_endpoint.endpoint_id)

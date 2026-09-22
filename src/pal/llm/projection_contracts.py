@@ -102,6 +102,14 @@ class EndpointBinding:
     endpoint_spec_revision: str
     continuation_policy_version: str
     config_fingerprint: str
+    # R1 (review 95373ef): digest over the endpoint OBJECT's own config
+    # (identity fields + raw capabilities blob), recomputable from a live
+    # endpoint at reuse time.  Unlike ``config_fingerprint`` it excludes
+    # runtime-injected selection (the cache-policy generation counter), so
+    # a refresh that changes nothing real does not invalidate a projection,
+    # while any actual config drift does.  Empty on manual/legacy
+    # constructions.
+    endpoint_config_digest: str = ""
 
     def __post_init__(self) -> None:
         _require_non_empty(self.endpoint_id, "endpoint id")

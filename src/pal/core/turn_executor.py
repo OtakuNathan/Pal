@@ -479,34 +479,46 @@ class TurnExecutor:
         # canonical acceptance boundary, authorized by the send receipt.
         # None everywhere means the honest cold codec path.
         projection_pack = self._prepare_turn_projection(llm_runtime, request)
-        if self._llm_runtime_supports_streaming(llm_runtime, request):
-            outcome = await self.stream_llm_request_async(
-                continuation, llm_runtime, request, projection_pack=projection_pack)
-        else:
-            if projection_pack is not None:
-                outcome = await llm_runtime.agenerate(
-                    request,
-                    projection=projection_pack[0],
-                    projection_binding=projection_pack[1],
-                    projection_attempt_id=projection_pack[2]["attempt"].attempt_id,
-                    generation_plan=projection_pack[2]["plan"],
-                )
+        # R6 (review 95373ef): the prepared projection draft belongs to THIS
+        # attempt.  Any exit between prepare and canonical observation —
+        # cancellation of the provider await, a failed L1 acceptance, an
+        # owner-side exception — must close only this round; the owner-match
+        # check in the guard keeps it from ever touching a successor round
+        # or rolling back an accept that already committed.
+        try:
+            if self._llm_runtime_supports_streaming(llm_runtime, request):
+                outcome = await self.stream_llm_request_async(
+                    continuation, llm_runtime, request, projection_pack=projection_pack)
             else:
-                outcome = await self._call_port_async(
-                    llm_runtime, "agenerate", "generate", request)
-            # An endpoint error is transport/recovery state, not an assistant
-            # message.  Persisting it into L1 makes a later retry replay a
-            # synthetic assistant turn and, for strict providers such as
-            # Anthropic thinking mode, can produce an ill-formed protocol.
-            if outcome.response.finish_reason != LLMFinishReason.ERROR:
-                await self._upsert_l1_assistant_async(continuation, outcome.response.message)
-        # F4 (review af51d74): the AcceptedContribution boundary.  Owner-side
-        # postprocessing (finalization_only) may still discard the provider's
-        # tool-call/empty answer and replace it with fallback text; the
-        # projection may only freeze what canonical L1 actually keeps.
-        outcome = await self._finalize_accepted_contribution(continuation, outcome)
-        # F2: observe only what the transport receipt authorizes.
-        self._observe_turn_projection(projection_pack, continuation, outcome)
+                if projection_pack is not None:
+                    outcome = await llm_runtime.agenerate(
+                        request,
+                        projection=projection_pack[0],
+                        projection_binding=projection_pack[1],
+                        projection_attempt_id=projection_pack[2]["attempt"].attempt_id,
+                        generation_plan=projection_pack[2]["plan"],
+                    )
+                else:
+                    outcome = await self._call_port_async(
+                        llm_runtime, "agenerate", "generate", request)
+                # An endpoint error is transport/recovery state, not an assistant
+                # message.  Persisting it into L1 makes a later retry replay a
+                # synthetic assistant turn and, for strict providers such as
+                # Anthropic thinking mode, can produce an ill-formed protocol.
+                if outcome.response.finish_reason != LLMFinishReason.ERROR:
+                    await self._upsert_l1_assistant_async(continuation, outcome.response.message)
+            # F4 (review af51d74): the AcceptedContribution boundary.  Owner-side
+            # postprocessing (finalization_only) may still discard the provider's
+            # tool-call/empty answer and replace it with fallback text; the
+            # projection may only freeze what canonical L1 actually keeps.
+            outcome = await self._finalize_accepted_contribution(continuation, outcome)
+            # F2: observe only what the transport receipt authorizes.
+            self._observe_turn_projection(projection_pack, continuation, outcome)
+        finally:
+            # Normal exits closed the round inside the observation; this only
+            # bites for cancelled/failed rounds, and only while the lineage
+            # still holds THIS attempt's draft.
+            self._abandon_turn_projection_round(projection_pack)
         self._debug_log_outcome(continuation, outcome)
         refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
         if refresh is not None:
@@ -618,8 +630,10 @@ class TurnExecutor:
             )
             # F2: the send receipt survives the swap — it authorizes the
             # freeze of THIS round (the projected payload was sent); the
-            # native material it carries no longer matches the accepted
-            # contribution and is discarded at observe time.
+            # R2 (review 95373ef): but its native capture described the
+            # pre-boundary provider output that canonical L1 just discarded.
+            # Strip it here — the accepted contribution is synthesized text
+            # and no provider-native payload may "complete" it.
             send_receipt = getattr(outcome, "projection_receipt", None)
             outcome = self._generation_result_from_text(
                 self.fallback_final_reply(continuation),
@@ -627,6 +641,8 @@ class TurnExecutor:
                 response_mode=LLMResponseMode.CHAT,
             )
             if send_receipt is not None:
+                if getattr(send_receipt, "native", None) is not None:
+                    send_receipt = replace(send_receipt, native=None)
                 outcome = replace(outcome, projection_receipt=send_receipt)
             await self._upsert_l1_assistant_async(
                 continuation,
@@ -2261,11 +2277,12 @@ class TurnExecutor:
             )
 
         # Warm split (主项1): the run has fenced the cut, so the LEFT
-        # ids are final.  When a provider-confirmed cached anchor lies
+        # ids are final.  When a locally eligible cached anchor lies
         # entirely inside L, the compact request rides the anchor bytes
-        # verbatim (cached prefix) + the LEFT suffix after it + the
-        # instruction tail; anything ineligible keeps the honest
-        # cold-left source builder (W21).
+        # verbatim + the LEFT suffix after it + the instruction tail;
+        # anything ineligible keeps the honest cold-left source builder
+        # (W21).  Read confirmation is diagnostics, not a prerequisite
+        # (R3/S1: a hit saves the prefix, a miss costs the cold price).
         replay_request = None
         replay_dialect = ""
         replay_wire_shape = ""
@@ -2381,7 +2398,8 @@ class TurnExecutor:
                     "error": fault,
                 })
             self._rebase_projection_after_left_install(
-                llm_runtime, logical_scope_id, root)
+                llm_runtime, logical_scope_id, root,
+                memory_service=memory_service)
             return CompactionRunResult(
                 status="compacted",
                 summary_entry=None,
@@ -2438,7 +2456,8 @@ class TurnExecutor:
                 # COMMITTED fact, mark derived state, then honor the
                 # stop intent — never swallow the cancellation.
                 self._rebase_projection_after_left_install(
-                    llm_runtime, logical_scope_id, root)
+                    llm_runtime, logical_scope_id, root,
+                    memory_service=memory_service)
             else:
                 close_run_terminal(cancel=True,
                                    reason="orchestration_cancelled")
@@ -2480,7 +2499,8 @@ class TurnExecutor:
             # session is post-commit work (F13) — a failure here is
             # recorded, never a rollback of the new left.
             self._rebase_projection_after_left_install(
-                llm_runtime, logical_scope_id, root)
+                llm_runtime, logical_scope_id, root,
+                memory_service=memory_service)
         if not run_result.success or continuation is None:
             return run_result
         self.clear_execution_cursors(continuation)
@@ -2591,8 +2611,14 @@ class TurnExecutor:
                     "session_generation": session_generation,
                 })
             return None
-        frozen_reader = getattr(session, "frozen_message_ids", None)
-        frozen = set(frozen_reader()) if callable(frozen_reader) else set()
+        # R3 (review 95373ef): "already in the prefix" covers committed
+        # chunk spans AND the L-owned reference ids a rebase installed —
+        # the next request must not re-append the compiler's identical
+        # continuity injection as fresh tail (that doubled the summary).
+        covered_reader = getattr(session, "covered_message_ids", None)
+        if not callable(covered_reader):
+            covered_reader = getattr(session, "frozen_message_ids", None)
+        frozen = set(covered_reader()) if callable(covered_reader) else set()
         # Durable identity = present in the L1 store (or the L-owned
         # continuity reference).  A request message whose id is NOT durable
         # is transient compiler content: it must never freeze into the
@@ -2626,10 +2652,24 @@ class TurnExecutor:
                     "nondurable_spans": sorted(frozen_span_ids - durable_ids),
                 })
             return None
+        # R4/M17 (review 95373ef): only the LEADING run of system/developer
+        # messages is shell-owned preamble (the codecs hoist exactly those
+        # heads; mid-conversation developer contexts degrade chronologically).
+        # Every other message — developer contexts included — rides the
+        # conversation: durable-id checked, frozen-skipped, else tail.  The
+        # old role-wide skip let each new pal_context revision jump ahead of
+        # the frozen prefix, reordering wire bytes mid-payload.
         preamble_roles = {"system", "developer"}
-        tail: list[LLMMessageIR] = []
-        for message in plan.effective_request.messages:
+        request_messages = tuple(plan.effective_request.messages)
+        head_end = 0
+        for message in request_messages:
             if message.role.value in preamble_roles:
+                head_end += 1
+            else:
+                break
+        tail: list[LLMMessageIR] = []
+        for index, message in enumerate(request_messages):
+            if index < head_end:
                 continue
             message_id = str(message.message_id or "")
             if not message_id or message_id not in durable_ids:
@@ -2679,6 +2719,39 @@ class TurnExecutor:
         return (encoded, binding, {"session": session, "attempt": attempt,
                                    "tail_ids": tuple(m.message_id for m in tail),
                                    "plan": plan})
+
+    def _abandon_turn_projection_round(self, projection_pack: tuple | None) -> None:
+        """R6 (review 95373ef): close an unaccepted draft owned by THIS pack.
+
+        Runs on every exit path of ``_handle_llm_request`` after prepare;
+        a round the observation already closed (commit or reject) is a
+        no-op, and a lineage that has moved on to a successor attempt is
+        left untouched — late cleanup must never release someone else's
+        round or roll back an accept that already committed.
+        """
+
+        if projection_pack is None:
+            return
+        session = projection_pack[2]["session"]
+        attempt = projection_pack[2]["attempt"]
+        active = getattr(session, "_active", None)
+        if active is None:
+            return
+        if str(getattr(getattr(active, "attempt", None), "attempt_id", "")) != str(
+            attempt.attempt_id
+        ):
+            return
+        try:
+            session.reject_commit(attempt.attempt_id, reason="round_abandoned")
+        except Exception:
+            return
+        diagnostics = getattr(self.state, "diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.append({
+                "kind": "two_segment_turn_projection_abandoned",
+                "reason": "round_abandoned",
+                "attempt": attempt.attempt_id,
+            })
 
     def _observe_turn_projection(
         self, projection_pack: tuple | None, continuation: Any, outcome: Any
@@ -2816,12 +2889,18 @@ class TurnExecutor:
                 })
 
     def _rebase_projection_after_left_install(
-        self, llm_runtime: Any, scope_id: str, root: Any
+        self, llm_runtime: Any, scope_id: str, root: Any, *,
+        memory_service: Any = None,
     ) -> None:
         """Drive on_left_replaced on the runtime-hosted projection session.
 
         Post-commit only (F13): rebase failures land in diagnostics and never
         roll back the installed left segment.
+
+        R3 (review 95373ef): the reseed uses the MODEL view of L — the
+        standalone continuity reference that normal compiler injection and
+        the handoff carry — and registers its id as L-owned coverage, so
+        the next prepare never re-appends the same summary as fresh tail.
         """
 
         provider = getattr(llm_runtime, "endpoint_projection_session", None)
@@ -2840,7 +2919,12 @@ class TurnExecutor:
             from pal.llm.projection_contracts import HistoryCursor
             from pal.llm.projection_session import LeftReplacement
 
-            seed_messages = root.left_messages()
+            seed_messages: tuple = tuple(root.left_messages())
+            seed_reference_ids: tuple[str, ...] = ()
+            if memory_service is not None:
+                seed_messages, seed_reference_ids = self._left_view_seed(
+                    memory_service, root
+                )
             # F4 (review): the keeper is the session's ACTUAL frozen right
             # side — unfrozen right messages stay in the open tail and must
             # not claim chunk survival; a session with no committed chunks
@@ -2874,6 +2958,7 @@ class TurnExecutor:
                         prefix_digest=digest or "0" * 64,
                     ),
                     left_revision=left_revision,
+                    seed_reference_ids=seed_reference_ids,
                 )
             )
         except Exception as exc:
@@ -2884,6 +2969,73 @@ class TurnExecutor:
                     "scope": str(scope_id),
                     "error": f"{type(exc).__name__}: {exc}",
                 })
+
+    def _left_view_seed(
+        self, memory_service: Any, root: Any
+    ) -> tuple[tuple, tuple[str, ...]]:
+        """R3 (review 95373ef): the reseed as the MODEL view of L.
+
+        When the cut owns the compact seed, the model sees the standalone
+        continuity reference — the same message normal compiler injection
+        and the handoff carry — not the raw assistant seed the authority
+        stores.  Encoding the raw form here would put the same summary on
+        the wire twice (raw assistant seed + standalone user reference).
+        Returns ``(seed_messages, seed_reference_ids)`` with the reference
+        ids empty whenever no cut-owned seed exists (full-source path).
+        """
+
+        messages = tuple(root.left_messages())
+        turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        continuity = getattr(turns, "continuity", None)
+        if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
+            return messages, ()
+        summary_turn_id = getattr(turns, "summary_turn_id", None)
+        if not summary_turn_id or not any(
+            turn.turn_id == summary_turn_id for turn in root.left_turns()
+        ):
+            return messages, ()
+        if not any(
+            message.message_id == continuity.source_id for message in messages
+        ):
+            return messages, ()
+        standalone = continuity.standalone_message()
+        mapped = tuple(
+            standalone if message.message_id == continuity.source_id else message
+            for message in messages
+        )
+        return mapped, (standalone.message_id,)
+
+    def _left_model_view_ids(
+        self, memory_service: Any, left_ids: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """R3: map raw L ids into the model-view coordinates.
+
+        The cut-owned compact seed appears to the model as its standalone
+        continuity reference (``continuity:<source>``), while the history
+        authority stores the raw seed id.  Warm coverage compares like for
+        like through this canonical mapping — shared with the rebase seed
+        view and the normal compiler injection — instead of raw-vs-model
+        equality, which refused every warm attempt on a two-segment
+        history.  No cut-owned seed means no substitution.
+        """
+
+        ids = tuple(str(value) for value in left_ids)
+        turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        continuity = getattr(turns, "continuity", None)
+        if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
+            return ids
+        root = getattr(memory_service, "history_root", None)
+        summary_turn_id = getattr(turns, "summary_turn_id", None)
+        if root is None or not summary_turn_id:
+            return ids
+        if not any(turn.turn_id == summary_turn_id for turn in root.left_turns()):
+            return ids
+        if continuity.source_id not in ids:
+            return ids
+        return tuple(
+            continuity.standalone_id if value == continuity.source_id else value
+            for value in ids
+        )
 
     def _resident_compaction_replay_request(
         self,
@@ -2919,11 +3071,21 @@ class TurnExecutor:
         never enters the summary source (I10) — an anchor reaching past
         the cut refuses warm instead of leaking R.
         """
+        # R3/S1 (review 95373ef): a locally eligible anchor is material for
+        # building the same-source handoff — read-observed confirmation is
+        # evidence about the PAST, not a permission for trying (a hit saves
+        # the prefix, a miss costs exactly what the cold alternative would).
+        # The confirmed reader stays available for diagnostics and explicit
+        # hot-only surfaces; ordinary autocompact uses eligibility.
         reader = getattr(
             llm_runtime,
-            "prompt_cache_confirmed_anchor_request",
+            "prompt_cache_eligible_anchor_request",
             None,
         )
+        if not callable(reader):
+            reader = getattr(
+                llm_runtime, "prompt_cache_confirmed_anchor_request", None
+            )
         if not callable(reader):
             return None, "", ""
         try:
@@ -2947,11 +3109,19 @@ class TurnExecutor:
         if not dialect or not wire_shape:
             return None, "", ""
         left_ids: tuple[str, ...] | None = None
+        model_left_ids: tuple[str, ...] | None = None
         if left_message_ids is not None:
             left_ids = tuple(str(value) for value in left_message_ids)
             if not left_ids:
                 return None, "", ""
-            if anchor_message_id not in left_ids:
+            # R3 (review 95373ef): the anchor's ids are the MODEL view of L
+            # (the cut-owned seed appears as its standalone continuity
+            # reference), while left_ids are raw authority coordinates.
+            # Compare through the ONE canonical mapping — shared with the
+            # normal compiler injection and the rebase seed view — instead
+            # of raw-vs-model equality that refuses every two-segment warm.
+            model_left_ids = self._left_model_view_ids(memory_service, left_ids)
+            if anchor_message_id not in model_left_ids:
                 # The anchor is not LEFT content: its cached prefix either
                 # reaches past the cut into R or predates the segment.
                 return None, "", ""
@@ -2960,8 +3130,8 @@ class TurnExecutor:
                 for message in anchor_request.messages
                 if message.role.value not in {"system", "developer"}
             )
-            anchor_position = left_ids.index(anchor_message_id)
-            if anchor_conversation_ids != left_ids[: anchor_position + 1]:
+            anchor_position = model_left_ids.index(anchor_message_id)
+            if anchor_conversation_ids != model_left_ids[: anchor_position + 1]:
                 # W02/W03 prefix equality: the cached prefix must be L
                 # exactly up to the anchor — no gap, no R, no extras.
                 return None, "", ""
@@ -3067,7 +3237,12 @@ class TurnExecutor:
         if not anchor_found:
             return None, "", ""
         if left_ids is not None:
-            expected_suffix_ids = left_ids[left_ids.index(anchor_message_id) + 1 :]
+            # The raw/model substitution is 1:1 positionally, so the anchor
+            # position is identical in both coordinate systems; the suffix
+            # stays raw (live L1 projections carry raw ids).
+            expected_suffix_ids = left_ids[
+                model_left_ids.index(anchor_message_id) + 1 :
+            ]
             suffix_ids = [str(message.message_id) for message in suffix]
             if tuple(suffix_ids) != tuple(expected_suffix_ids):
                 # W02/W03 coverage in v3 form: every L id after the anchor

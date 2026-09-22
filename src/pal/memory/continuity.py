@@ -49,6 +49,19 @@ class Continuity:
     def standalone_id(self) -> str:
         return f"continuity:{self.source_id}"
 
+    def standalone_message(self) -> LLMMessageIR:
+        """The ONE model-view message this seed projects as (R3).
+
+        Normal compiler injection, handoff, and the projection rebase seed
+        all build the reference HERE, so every surface shares one identity
+        and one canonical mapping (raw source id -> this message id).
+        """
+
+        return LLMMessageIR(
+            role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
+            semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
+            metadata={"continuity_id": self.source_id, "continuity_part_index": 0})
+
     def project(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
         """Attach the seed to already-selected request messages, not raw L1."""
         messages = list(messages)
@@ -63,10 +76,7 @@ class Continuity:
         # Keep tool call/result adjacency intact by inserting before all history.
         index = next((i for i, m in enumerate(messages)
                       if m.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER}), len(messages))
-        messages.insert(index, LLMMessageIR(
-            role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
-            semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            metadata={"continuity_id": self.source_id, "continuity_part_index": 0}))
+        messages.insert(index, self.standalone_message())
         return messages
 
     def project_standalone(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
@@ -90,8 +100,5 @@ class Continuity:
             return messages
         index = next((i for i, m in enumerate(messages)
                       if m.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER}), len(messages))
-        messages.insert(index, LLMMessageIR(
-            role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
-            semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
-            metadata={"continuity_id": self.source_id, "continuity_part_index": 0}))
+        messages.insert(index, self.standalone_message())
         return messages

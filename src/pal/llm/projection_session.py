@@ -130,6 +130,11 @@ class LeftReplacement:
     kept_frozen_messages: tuple[LLMMessageIR, ...]
     cursor_after: HistoryCursor
     left_revision: int = 0
+    # R3 (review 95373ef): model-view message ids the new seed carries as
+    # L-owned references (the standalone continuity form).  The next prepare
+    # treats them as ALREADY covered by the assembled prefix instead of
+    # re-appending the compiler's identical injection as fresh tail.
+    seed_reference_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,11 @@ class EndpointProjectionSession:
         # Monotonic history-authority revision seen by this lineage (F4):
         # each left replacement must advance it, mirroring the root's cut.
         self._left_revision = 0
+        # R3 (review 95373ef): model-view ids of L-owned references installed
+        # by a rebase (the standalone continuity seed form).  They are
+        # coverage: the assembled prefix already carries them, so the next
+        # prepare must not re-append the compiler's identical injection.
+        self._l_reference_ids: tuple[str, ...] = ()
         self._owner_fence = 0
         self.retired = False
 
@@ -272,6 +282,7 @@ class EndpointProjectionSession:
         self._pending_wire_tail = []
         self._committed_head_system = []
         self._left_revision = 0
+        self._l_reference_ids = ()
         self._active = None
 
     def retire(self) -> None:
@@ -282,6 +293,7 @@ class EndpointProjectionSession:
         self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
+        self._l_reference_ids = ()
         self._active = None
 
     def _require_identity(self) -> ProjectionIdentity:
@@ -666,11 +678,19 @@ class EndpointProjectionSession:
             tools=(),
             policy=GenerationPolicyIR(max_output_tokens=4096),
         )
-        preamble = tuple(
-            message
-            for message in shell.messages
-            if message.role.value in self._PREAMBLE_ROLES
-        )
+        # R4/M17 (review 95373ef): heads only — the LEADING system/developer
+        # run of the shell.  Left-segment content (mid-conversation developer
+        # contexts included) is carried by ``left_messages`` in its own
+        # chronological position; hoisting every developer message would both
+        # reorder the handoff bytes and duplicate L content.
+        shell_messages = tuple(shell.messages)
+        head_end = 0
+        for message in shell_messages:
+            if message.role.value in self._PREAMBLE_ROLES:
+                head_end += 1
+            else:
+                break
+        preamble = shell_messages[:head_end]
         body = (*preamble, *left_messages, instruction)
         encoded = codec.encode(replace(shell, messages=body), context)
         payload: dict[str, Any] = dict(encoded.payload)
@@ -825,6 +845,11 @@ class EndpointProjectionSession:
         self._prefix_items = rebuilt_items
         self._prefix_item_spans = rebuilt_spans
         self._pending_wire_tail = unfrozen_tail
+        # R3 (review 95373ef): the new seed's model-view reference ids become
+        # L-owned coverage from this moment on.
+        self._l_reference_ids = tuple(
+            str(value) for value in (change.seed_reference_ids or ())
+        )
         # F4: head-system parts re-own to their surviving rounds; entries
         # attributed to retired left rounds die with them.
         self._committed_head_system = [
@@ -849,6 +874,20 @@ class EndpointProjectionSession:
                 for chunk in self.chunks
                 for message_id in chunk.semantic_span
             )
+        )
+
+    def covered_message_ids(self) -> tuple[str, ...]:
+        """Semantic ids the assembled prefix already covers (R3 read).
+
+        Committed chunks' spans PLUS the L-owned reference ids installed by
+        a rebase (the standalone continuity seed form).  The next prepare
+        must not re-append any of them as a fresh tail; a seed that lived
+        only as empty-span prefix bytes used to be re-injected exactly that
+        way, doubling the summary on the wire.
+        """
+
+        return tuple(
+            dict.fromkeys((*self.frozen_message_ids(), *self._l_reference_ids))
         )
 
     @property
@@ -911,36 +950,53 @@ class EndpointProjectionSession:
             policy=GenerationPolicyIR(max_output_tokens=4096),
         )
         # 1) Shell envelope, encoded verbatim each prepare (small, stable).
-        #    Even a message-less shell (pure policy/tools change) produces
-        #    envelope fields; the codec's empty-request fallback items live
-        #    in the container and are simply discarded here.
+        #    S2 (review 95373ef): the envelope encode must NOT scan the whole
+        #    history — callers hand the complete effective request as the
+        #    shell, but only the preamble belongs to this encode; the
+        #    conversation part is re-encoded with the tail view below.
+        #    Encoding the whole request here was O(history) codec work twice
+        #    per round.  Even a message-less shell (pure policy/tools change)
+        #    produces envelope fields; the codec's empty-request fallback
+        #    items live in the container and are simply discarded.
+        #
+        #    R4/M17 (review 95373ef): the preamble is the LEADING run of
+        #    system/developer messages only — "heads", not every developer
+        #    message anywhere in the shell.  Mid-conversation developer
+        #    contexts (per-turn pal_context revisions) stay with the
+        #    conversation, exactly like a whole-history encode keeps them
+        #    (codecs place them chronologically, degrading mid-stream
+        #    guidance to a chronological block).  Hoisting ALL developer
+        #    messages used to move those revisions ahead of the frozen
+        #    prefix, so a new revision reordered bytes mid-payload and broke
+        #    both the cold-equality invariant and the cached prefix.
         shell_fields: dict[str, Any] = {}
         preamble_items: list[dict] = []
-        encoded_shell = codec.encode(shell, context)
+        shell_messages = tuple(shell.messages)
+        head_end = 0
+        for message in shell_messages:
+            if message.role.value in self._PREAMBLE_ROLES:
+                head_end += 1
+            else:
+                break
+        preamble_only = shell_messages[:head_end]
+        encoded_shell = codec.encode(
+            replace(shell, messages=preamble_only), context
+        )
         shell_payload = dict(encoded_shell.payload)
         shell_fields = {
             key: value for key, value in shell_payload.items() if key != container
         }
-        preamble_only = tuple(
-            message
-            for message in shell.messages
-            if message.role.value in self._PREAMBLE_ROLES
-        )
         if preamble_only:
-            encoded_preamble = codec.encode(
-                replace(shell, messages=preamble_only), context
-            )
-            # Only wire items actually mapped to a preamble message (via the
-            # codec's own spans) enter the request.  The codec's empty-array
-            # fallback ("Continue.") has no span and is excluded here.
+            # The envelope encode IS the preamble encode; only wire items
+            # actually mapped to a preamble message (via the codec's own
+            # spans) enter the request.  The codec's empty-array fallback
+            # ("Continue.") has no span and is excluded here.
             spanned_indexes: set[int] = set()
-            for span in encoded_preamble.message_spans:
+            for span in encoded_shell.message_spans:
                 for path in span.wire_item_paths:
                     if len(path) >= 2 and path[0] == container and isinstance(path[1], int):
                         spanned_indexes.add(path[1])
-            container_items = list(
-                dict(encoded_preamble.payload).get(container) or []
-            )
+            container_items = list(shell_payload.get(container) or [])
             preamble_items = [
                 dict(container_items[index])
                 for index in sorted(spanned_indexes)
@@ -1005,15 +1061,22 @@ class EndpointProjectionSession:
         # requests differ from full encodings by one split user message.
         # Boundary index is in conversation coordinates (review G1); the
         # merged item owns the UNION of both sides' spans (F5).
+        anthropic_boundary_merged = False
         if (
             self.binding.wire_shape.value == "anthropic_messages"
             and self._pending_wire_tail
             and tail_items
         ):
             boundary = len(self._prefix_items) + len(self._pending_wire_tail) - 1
+            conversation_length_before = len(conversation)
             conversation = _merge_anthropic_user_boundary_pairs(
                 conversation, boundary
             )
+            # R4 (review 95373ef): the remap transform may only claim a merge
+            # that actually happened.  Pending+tail PRESENCE is not a merge —
+            # a user USER boundary keeps both items, and a user + assistant
+            # boundary never merges at all.
+            anthropic_boundary_merged = len(conversation) != conversation_length_before
         self._active.prepared_items = [item for item, _ in conversation]
         self._active.prepared_item_spans = [
             span for _, span in conversation
@@ -1030,6 +1093,7 @@ class EndpointProjectionSession:
         # a whole-history encoding by one split system message (review G1/G2
         # seam).  The preamble side is always a fresh copy, so merging here
         # never mutates the frozen prefix.
+        seam_merged = False
         if (
             self.binding.wire_shape.value == "openai_completion"
             and preamble_items
@@ -1054,6 +1118,11 @@ class EndpointProjectionSession:
                     merged,
                     *assembled[seam + 2 :],
                 ]
+                # R4 (review 95373ef): the merge shrinks the assembled item
+                # array by one; every conversation/tail coordinate below
+                # must consume that REAL transform instead of assuming the
+                # preamble size is unchanged.
+                seam_merged = True
         payload: dict[str, Any] = {**shell_fields, container: assembled}
         # W2/warm (主项1): spans travel WITH the assembled projection so the
         # prompt-cache coordinator can plan anchors/frontiers on the PROJECTED
@@ -1065,11 +1134,7 @@ class EndpointProjectionSession:
         merged_boundary = (
             len(preamble_items) + len(self._prefix_items)
             + len(self._pending_wire_tail) - 1
-            if (
-                self.binding.wire_shape.value == "anthropic_messages"
-                and self._pending_wire_tail
-                and tail_items
-            )
+            if anthropic_boundary_merged
             else None
         )
         _left_pending = self._pending_wire_tail[-1].item if self._pending_wire_tail else {}
@@ -1079,9 +1144,12 @@ class EndpointProjectionSession:
             and isinstance(_left_pending.get("content"), list)
             else 0
         )
-        tail_container_start = len(preamble_items) + len(
-            self._prefix_items
-        ) + len(self._pending_wire_tail)
+        tail_container_start = (
+            len(preamble_items)
+            - (1 if seam_merged else 0)
+            + len(self._prefix_items)
+            + len(self._pending_wire_tail)
+        )
         assembled_spans: list = [
             *(
                 span for span in encoded_shell.message_spans
@@ -1133,11 +1201,25 @@ class EndpointProjectionSession:
                 payload["system"] = merged_system
         if controls:
             payload["controls"] = dict(controls)
+        # R4/M17 (review 95373ef): finalize the assembled spans against the
+        # payload ACTUALLY being sent.  The tail spans' fingerprints and
+        # estimates described the tail-only encode while their paths were
+        # remapped into assembled coordinates — a map that did not point at
+        # the wire it claimed.  Cold encodes are finalized inside the codecs;
+        # the projected path must describe the same bytes to plan anchors and
+        # frontiers "exactly like a cold encode" (and to keep the stall
+        # diagnostics fed with a truthful growing prefix estimate).
+        from pal.llm.shapes.base import EncodedRequest as _AssembledRequest
+        from pal.llm.shapes.base import finalize_cache_spans
+
+        finalized = finalize_cache_spans(
+            _AssembledRequest(payload=payload, message_spans=tuple(assembled_spans))
+        )
         return PreparedRequest.build(
             attempt=self._active.attempt,
             base_cursor=view.cursor,
             payload=payload,
-            message_spans=tuple(assembled_spans),
+            message_spans=tuple(finalized.message_spans),
             extra_body=dict(encoded_shell.extra_body or {}),
         )
 
@@ -1331,6 +1413,14 @@ def _remap_tail_span(
         wire_item_paths=tuple(
             _remap_path_into_assembled(path, **remap_args)
             for path in (span.wire_item_paths or ())
+        ),
+        # R4 (review 95373ef): the continuity target is a path like every
+        # other — it consumes the same real transform, or the summary anchor
+        # keeps a stale tail-local coordinate (or none at all).
+        continuity_target=(
+            _remap_path_into_assembled(span.continuity_target, **remap_args)
+            if span.continuity_target
+            else ()
         ),
     )
 

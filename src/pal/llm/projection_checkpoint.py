@@ -80,6 +80,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
             "endpoint_spec_revision": binding.endpoint_spec_revision,
             "continuation_policy_version": binding.continuation_policy_version,
             "config_fingerprint": binding.config_fingerprint,
+            "endpoint_config_digest": binding.endpoint_config_digest,
         },
         "projection_generation": session.identity.projection_generation,
         "frontier": _cursor_fields(session.frontier),
@@ -226,6 +227,9 @@ def restore_projection(
                 binding_raw.get("continuation_policy_version") or ""
             ),
             config_fingerprint=str(binding_raw.get("config_fingerprint") or ""),
+            endpoint_config_digest=str(
+                binding_raw.get("endpoint_config_digest") or ""
+            ),
         )
     except ProjectionContractError as exc:
         raise ProjectionCheckpointError(f"projection binding is invalid: {exc}") from exc
