@@ -24,7 +24,7 @@
           "node": "tests/test_history_root_authority.py::PartitionTests::test_left_plus_right_partitions_store_exactly",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::PartitionTests::test_left_plus_right_partitions_store_exactly -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "left+right partition the single store exactly, no mirror history"
         }
       ]
@@ -62,7 +62,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L01_open_group_stays_whole_in_right",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L01_open_group_stays_whole_in_right -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -75,7 +75,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L02_settle_does_not_auto_promote",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L02_settle_does_not_auto_promote -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -88,7 +88,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L03_compact_original_L_latest_R_not_moved",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L03_compact_original_L_latest_R_not_moved -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -101,7 +101,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L04_promote_preserves_content_and_order",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L04_promote_preserves_content_and_order -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -114,7 +114,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L05_result_arriving_during_compact_lands_in_R_once",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L05_result_arriving_during_compact_lands_in_R_once -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -127,7 +127,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L06_result_and_commit_commute",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L06_result_and_commit_commute -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -140,7 +140,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L07_cut_frozen_while_compact_live",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L07_cut_frozen_while_compact_live -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -153,7 +153,7 @@
           "node": "tests/test_history_root_authority.py::LPromoteTests::test_L08_minimal_left_refuses_recompaction",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::LPromoteTests::test_L08_minimal_left_refuses_recompaction -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -166,7 +166,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C01_snapshot_reads_left_only",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C01_snapshot_reads_left_only -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -179,7 +179,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C02_install_replaces_only_left",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C02_install_replaces_only_left -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -192,7 +192,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C03_failure_keeps_current_R_additions",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C03_failure_keeps_current_R_additions -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -205,7 +205,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C04_validator_rejection_never_installs",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C04_validator_rejection_never_installs -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "owner-level terminal side; engine validator rejection pinned by inherited v2 schema tests"
         }
       ]
@@ -218,7 +218,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C05_construction_failure_does_not_half_publish",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C05_construction_failure_does_not_half_publish -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -231,7 +231,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C06_duplicate_completion_installs_once",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C06_duplicate_completion_installs_once -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -244,7 +244,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C07_conflicting_candidate_rejected",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C07_conflicting_candidate_rejected -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -257,7 +257,7 @@
           "node": "tests/test_history_root_authority.py::CCompactTests::test_C08_full_left_source_is_not_truncated",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::CCompactTests::test_C08_full_left_source_is_not_truncated -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -270,7 +270,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X01_cancel_wins_then_late_summary_rejected",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X01_cancel_wins_then_late_summary_rejected -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -283,7 +283,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X02_commit_wins_interrupt_keeps_new_left",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X02_commit_wins_interrupt_keeps_new_left -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -296,7 +296,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X03_idle_manual_is_not_a_turn",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X03_idle_manual_is_not_a_turn -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -309,7 +309,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X04_old_run_events_cannot_touch_new_run",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X04_old_run_events_cannot_touch_new_run -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -322,7 +322,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X05_reset_fences_old_incarnation_producers",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X05_reset_fences_old_incarnation_producers -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -335,7 +335,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X06_left_rebase_does_not_fence_producers",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X06_left_rebase_does_not_fence_producers -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -348,7 +348,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X07_interrupt_never_touches_left",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X07_interrupt_never_touches_left -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -361,7 +361,7 @@
           "node": "tests/test_history_root_authority.py::XArbitrationTests::test_X08_deadline_failure_beats_late_network_success",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_history_root_authority.py::XArbitrationTests::test_X08_deadline_failure_beats_late_network_success -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -374,7 +374,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P01_incremental_equals_full_across_shapes_and_rebase",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P01_incremental_equals_full_across_shapes_and_rebase -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -387,7 +387,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P02_preamble_once_and_never_frozen",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P02_preamble_once_and_never_frozen -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -400,7 +400,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P03_anthropic_user_seam_survives_rebase",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P03_anthropic_user_seam_survives_rebase -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -422,7 +422,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P05_rebase_keeps_right_wire_and_native",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P05_rebase_keeps_right_wire_and_native -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -435,7 +435,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P06_endpoint_switch_differs_from_rebase",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P06_endpoint_switch_differs_from_rebase -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -448,7 +448,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P07_empty_tail_and_seed_only_view",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P07_empty_tail_and_seed_only_view -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -461,7 +461,7 @@
           "node": "tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P08_handoff_leaves_normal_lineage_untouched",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::TwoSegmentOracleTests::test_P08_handoff_leaves_normal_lineage_untouched -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -474,7 +474,7 @@
           "node": "tests/test_two_segment_executor_flow.py::TwoSegmentExecutorFlowTests::test_capture_left_and_engine_install_left_only",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_executor_flow.py::TwoSegmentExecutorFlowTests::test_capture_left_and_engine_install_left_only -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "single generation, no confirmation wait, no prewarm (structural)"
         }
       ]
@@ -501,7 +501,7 @@
           "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W04_shell_policy_carried_verbatim",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W04_shell_policy_carried_verbatim -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -514,7 +514,7 @@
           "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W05_tools_schema_stays_in_envelope",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W05_tools_schema_stays_in_envelope -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -527,7 +527,7 @@
           "node": "tests/test_projection_two_segment.py::HandoffRequestTests::test_W_left_only_with_instruction",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_projection_two_segment.py::HandoffRequestTests::test_W_left_only_with_instruction -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "cold-left full encode: no prewarm, no cached-prefix assumptions"
         }
       ]
@@ -560,7 +560,7 @@
           "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_Q03_queued_input_never_enters_the_left_source",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_Q03_queued_input_never_enters_the_left_source -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -573,7 +573,7 @@
           "node": "tests/test_compaction_gate.py::test_q04_busy_retry_receipt_for_input_queued_behind_compaction",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_compaction_gate.py::test_q04_busy_retry_receipt_for_input_queued_behind_compaction -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "runtime gate: explicit BUSY_RETRY receipt while input stays queued (no L/R write, no turn, no durable staging)"
         }
       ]
@@ -606,7 +606,7 @@
           "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B01_local_history_may_exceed_any_window",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B01_local_history_may_exceed_any_window -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -624,7 +624,7 @@
           "node": "tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B03_handoff_source_must_fit_the_visible_budget",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B03_handoff_source_must_fit_the_visible_budget -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": ""
         }
       ]
@@ -637,7 +637,7 @@
           "node": "tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B04_r_growth_kept_next_normal_blocked_on_current_view",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B04_r_growth_kept_next_normal_blocked_on_current_view -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "R growth lands in R, L swaps alone, next normal blocked on the CURRENT view's hard-overflow budget"
         }
       ]
@@ -650,7 +650,7 @@
           "node": "tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B05_base_over_budget_is_distinct_and_never_summarizes",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B05_base_over_budget_is_distinct_and_never_summarizes -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "distinct base_over_budget terminal verdict via empty-source probe; zero generation attempts; base never trimmed"
         }
       ]
@@ -663,7 +663,7 @@
           "node": "tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B06_paging_contract_retires_exactly_what_left_l1",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B06_paging_contract_retires_exactly_what_left_l1 -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "retires exactly the results that left L1; R paged payload survives byte-identically; no second paging layer"
         }
       ]
@@ -676,7 +676,7 @@
           "node": "tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B07_total_deadline_ends_run_with_attempts_unconsumed",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B07_total_deadline_ends_run_with_attempts_unconsumed -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "one absolute cutoff spans preflight/generation; run ends with attempts unconsumed (no per-attempt clock reset)"
         }
       ]
@@ -689,7 +689,7 @@
           "node": "tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B08_compaction_does_not_reset_work_budget_or_permissions",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B08_compaction_does_not_reset_work_budget_or_permissions -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "mid-turn compaction keeps counters, finalization_only downgrade, and revoked tool permissions; no new task from the new L"
         }
       ]
@@ -702,24 +702,36 @@
           "node": "tests/test_h01_combination_matrix.py::H01CombinationMatrixTests::test_H01_matrix",
           "command": "PYTHONPATH=src python3 -m pytest tests/test_h01_combination_matrix.py::H01CombinationMatrixTests::test_H01_matrix -q",
           "exit": 0,
-          "product_sha": "faf2f416c486faa868d92c65bf1084395ff42657",
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
           "note": "12 combinations (2 hosts x 3 shapes x 2 modes); warm column = honest cold fallback"
         }
       ]
     },
     {
       "id": "H02",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "evidence": [
         {
-          "note": "DEFERRED (separate round, Nathan-approved backlog): graceful SIGTERM root-snapshot persistence + new-process recovery — owner-side deadline/terminal machinery exists (X08, close_run terminal); the persistence+reload increment is scheduled on its own"
+          "node": "tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H02_app_level_old_root_survives_graceful_restart",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H02_app_level_old_root_survives_graceful_restart -q",
+          "exit": 0,
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
+          "note": "app-level SIGTERM checkpoint carries the two-segment owner state; restored process sees the complete old/new root (cut+incarnation+left-generation), replay envelopes survive, live compact run abandoned, old turns interrupted not re-run; corrupt owner state fails closed"
         }
       ]
     },
     {
       "id": "H03",
-      "status": "NOT_RUN",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {
+          "node": "tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H03_failed_publish_keeps_previous_checkpoint_readable",
+          "command": "PYTHONPATH=src python3 -m pytest tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H03_failed_publish_keeps_previous_checkpoint_readable -q",
+          "exit": 0,
+          "product_sha": "3a7bbe946e17a9233644e2339c7e30696da8e6ea",
+          "note": "failed shutdown write raises honestly; previous complete checkpoint stays readable, no temp residue"
+        }
+      ]
     },
     {
       "id": "H04",
