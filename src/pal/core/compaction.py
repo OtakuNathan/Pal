@@ -246,6 +246,12 @@ class CompactionEngine:
         started_at = time.monotonic()
         attempt_started_at = started_at
         outcome = None
+        # B05: "base_over_budget" is a distinct terminal verdict — the fixed
+        # base (policy system prompt + request shell) overflows the window on
+        # its own, so no amount of source summarization can help.  It never
+        # becomes a generic "failed": the caller must be able to tell the
+        # user precisely that compacting history cannot fix this window.
+        terminal_status = "failed"
 
         def log_failure(reason: str) -> None:
             failures.append(reason)
@@ -364,6 +370,7 @@ class CompactionEngine:
                             failures=failures,
                         )
                     log_failure("input:base_context_over_budget")
+                    terminal_status = "base_over_budget"
                     break
                 previous_size = len(source)
                 snapshot = _snapshot_for_budget_advice(snapshot, advice)
@@ -376,6 +383,7 @@ class CompactionEngine:
                 )
                 if shrunk is None:
                     log_failure("input:base_context_over_budget")
+                    terminal_status = "base_over_budget"
                     break
                 retained = shrunk
                 continue
@@ -429,6 +437,7 @@ class CompactionEngine:
                 )
                 if shrunk is None:
                     log_failure("input:base_context_over_budget")
+                    terminal_status = "base_over_budget"
                     break
                 retained = shrunk
                 validation_error = ""
@@ -536,7 +545,7 @@ class CompactionEngine:
 
         return finish(
             snapshot,
-            status="failed",
+            status=terminal_status,
             attempts=attempts,
             source_sizes=source_sizes,
             failures=failures,

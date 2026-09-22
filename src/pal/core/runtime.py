@@ -785,6 +785,42 @@ class PalCore(MemoryMaintenanceMixin):
                 payload=dict(payload or {}),
             )
 
+    async def _deliver_busy_retry_notice_async(
+        self, channel_envelope: ChannelEnvelope,
+    ) -> None:
+        """Q04: explicit BUSY_RETRY receipt for input queued behind a live
+        compaction ticket.
+
+        The queued envelope is already durable in the in-process queue; a
+        failed receipt must never dequeue or duplicate it, so every error
+        here is swallowed (the queue semantics in
+        ``_schedule_admitted_channel_turn_async`` remain authoritative).
+        """
+
+        channel_runtime = self.context.port_registry.get("channel:channel")
+        queue_reply = getattr(channel_runtime, "queue_reply", None)
+        if not callable(queue_reply):
+            return
+        try:
+            result = queue_reply(
+                self._delivery_binding_for_envelope(channel_envelope),
+                "A context compaction is in progress; your message is "
+                "queued and has NOT entered the conversation yet. It will "
+                "be handled as soon as the compaction finishes — no need "
+                "to resend.",
+            )
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "busy_retry_notice_failed",
+                    "event_id": str(
+                        getattr(channel_envelope.event, "event_id", "")
+                    ),
+                })
+
     def _delivery_binding_for_envelope(
         self,
         channel_envelope: ChannelEnvelope,
@@ -877,6 +913,14 @@ class PalCore(MemoryMaintenanceMixin):
                 # stopping typing here would leave the chat silently idle
                 # while the tool chain is still running.
                 self.state.pending_channel_turns.append(channel_envelope)
+                if self._compaction_gate_active():
+                    # Q04 BUSY_RETRY: an explicit, user-visible receipt —
+                    # the message is NOT in the conversation yet.  It stays
+                    # queued (no L/R write, no turn, no durable staging) and
+                    # is admitted right after the compaction releases.
+                    await self._deliver_busy_retry_notice_async(
+                        channel_envelope,
+                    )
                 return
             self._start_channel_turn_task_locked(channel_envelope)
 
@@ -1857,7 +1901,17 @@ class PalCore(MemoryMaintenanceMixin):
             await self._start_next_queued_turn_async()
         if not run_result.success:
             message = "Compaction failed - memory state was left unchanged."
-            if cache_epoch:
+            if run_result.status == "base_over_budget":
+                # B05: the fixed base (system prompt + tools shell) exceeds
+                # the context window on its own.  Compacting history cannot
+                # fix that, and the base was not trimmed to fake a fit.
+                message = (
+                    "Compaction cannot help: the fixed base (system prompt "
+                    "and tools) already exceeds the context window by "
+                    "itself. Reduce the base or switch to a larger endpoint; "
+                    "history was left unchanged."
+                )
+            elif cache_epoch:
                 message = (
                     "热缓存已失效或无法复用，已停止自动尝试。原上下文保留，请按需手动 compact。"
                     if run_result.status == "hot_cache_unavailable"

@@ -97,9 +97,13 @@ class _BlockingLLM:
 class _ChannelRecorder:
     def __init__(self) -> None:
         self.statuses: list[tuple[str, dict]] = []
+        self.replies: list[str] = []
 
     def queue_status(self, binding, kind, payload=None):
         self.statuses.append((str(kind), dict(payload or {})))
+
+    def queue_reply(self, binding, text, **kwargs):
+        self.replies.append(str(text))
 
     def last_user_route(self):
         return None
@@ -254,6 +258,31 @@ def test_duplicate_manual_single_ticket_single_generate(tmp_path):
 
 
 # ── Q · backpressure, queue, ownership ──────────────────────────────────
+
+
+def test_q04_busy_retry_receipt_for_input_queued_behind_compaction(tmp_path):
+    """Q04: input arriving mid-compaction gets an explicit BUSY_RETRY
+    receipt — "not in the conversation yet" — while staying queued with no
+    L/R write, no new turn, and no durable staging."""
+    async def scenario():
+        core, service, engine, _replies = _build_core(tmp_path)
+        recorder = _ChannelRecorder()
+        core.context.port_registry["channel:channel"] = recorder
+        manual = asyncio.create_task(core._handle_compact_memory_async(_action()))
+        await engine.entered.wait()
+        l1_before = list(service.l1_store.items)
+        envelope = _envelope("m-q04", "BUSY_DURING_COMPACT")
+        await core.schedule_channel_turn_async(envelope)
+        # Queued exactly once, explicitly acknowledged as NOT admitted.
+        assert [item.event.event_id for item in core.state.pending_channel_turns] == ["m-q04"]
+        assert len(recorder.replies) == 1
+        assert "NOT entered the conversation" in recorder.replies[0]
+        # No L/R write, no turn, no durable staging (the queue is in-memory).
+        assert list(service.l1_store.items) == l1_before
+        assert not core.state.turn_tasks
+        engine.release.set()
+        await manual
+    _run(scenario())
 
 
 def test_gate_holds_new_messages_out_of_live_l1(tmp_path):

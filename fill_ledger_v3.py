@@ -60,16 +60,27 @@ MAP = {
     "B01": ("tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B01_local_history_may_exceed_any_window", ""),
     "B03": ("tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_B03_handoff_source_must_fit_the_visible_budget", ""),
     "Q03": ("tests/test_two_segment_budget_facts.py::OwnerBudgetFactsTests::test_Q03_queued_input_never_enters_the_left_source", ""),
+    "Q04": ("tests/test_compaction_gate.py::test_q04_busy_retry_receipt_for_input_queued_behind_compaction",
+            "runtime gate: explicit BUSY_RETRY receipt while input stays queued (no L/R write, no turn, no durable staging)"),
+    "B04": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B04_r_growth_kept_next_normal_blocked_on_current_view",
+            "R growth lands in R, L swaps alone, next normal blocked on the CURRENT view's hard-overflow budget"),
+    "B05": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B05_base_over_budget_is_distinct_and_never_summarizes",
+            "distinct base_over_budget terminal verdict via empty-source probe; zero generation attempts; base never trimmed"),
+    "B06": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B06_paging_contract_retires_exactly_what_left_l1",
+            "retires exactly the results that left L1; R paged payload survives byte-identically; no second paging layer"),
+    "B07": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B07_total_deadline_ends_run_with_attempts_unconsumed",
+            "one absolute cutoff spans preflight/generation; run ends with attempts unconsumed (no per-attempt clock reset)"),
+    "B08": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B08_compaction_does_not_reset_work_budget_or_permissions",
+            "mid-turn compaction keeps counters, finalization_only downgrade, and revoked tool permissions; no new task from the new L"),
 }
 
 NOT_RUN_NOTES = {
     "A02": "OBSOLETE: the mode switch (and its builder-mode contract test) was physically removed with v2 (1e8b42d); two_segment is the only mode — no node can honestly exist",
     "P04": "explicit node not authored; native one-representation pinned by inherited projection suites, two-segment rebase covered by P05",
     "W02": "marker attribution is engine/cache-layer; session test asserts content-only left; NOT honestly claimable",
-    "H02": "root snapshot persistence not implemented (see DELIVERY §4)",
-    "H04": "old-schema explicit migration not implemented",
-    "H06": "staging gate UX: staging auto-wire off in two_segment, no files can exist",
-    "Q04": "two_segment BUSY routing at runtime level not wired",
+    "H02": "DEFERRED (separate round, Nathan-approved backlog): graceful SIGTERM root-snapshot persistence + new-process recovery — owner-side deadline/terminal machinery exists (X08, close_run terminal); the persistence+reload increment is scheduled on its own",
+    "H04": "OBSOLETE: v2 never shipped — no old-schema L1 store exists anywhere in production, so the explicit old-schema migration gate has no honest input to migrate; revisit only when a schema break happens in a DEPLOYED build",
+    "H06": "OBSOLETE: staging auto-wire is off in two_segment and no legacy staging files can exist (v2 never deployed); the migration-gate UX has no live population",
 }
 
 
