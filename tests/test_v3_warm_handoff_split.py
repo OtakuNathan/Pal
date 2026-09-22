@@ -46,6 +46,9 @@ def _anchor_request(memory_ids: dict, *, system_text: str = "ANCHOR-BASE") -> LL
 
 
 def _stub_anchor_reader(anchor: LLMRequestIR, anchor_id: str):
+    """Anchor material for BOTH readers: eligible drives ordinary
+    autocompact (R3/S1, review 95373ef); confirmed stays the
+    diagnostics/hot-only surface."""
     return lambda **kwargs: {
         "request": anchor,
         "anchor_message_id": anchor_id,
@@ -91,7 +94,7 @@ class TwoSegmentWarmSplitTests(unittest.TestCase):
         transport = CapturingTransport([_valid_pal_payload("SUMMARY SEED")])
         runtime = _runtime(transport)
         anchor = _anchor_request(ids)
-        runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
             anchor, ids["a1"])
         ex = _executor(memory, runtime)
 
@@ -129,7 +132,7 @@ class TwoSegmentWarmSplitTests(unittest.TestCase):
         memory, ids = _memory_with_left_and_right()
         transport = CapturingTransport([_valid_pal_payload("COLD SEED")])
         runtime = _runtime(transport)
-        runtime.prompt_cache_confirmed_anchor_request = lambda **kwargs: {}
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = lambda **kwargs: {}
         ex = _executor(memory, runtime)
 
         result = _compact(ex, memory)
@@ -170,7 +173,7 @@ class TwoSegmentWarmSplitTests(unittest.TestCase):
             logical_scope_id="pal:resident",
             metadata={"preferred_endpoint_id": "trace-endpoint"},
         )
-        runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
             anchor, ids["q2"])
         ex = _executor(memory, runtime)
 
@@ -193,7 +196,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
         transport = CapturingTransport([])
         runtime = _runtime(transport)
         anchor = _anchor_request(ids)
-        runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
             anchor, ids["a1"])
         ex = self._executor(memory, runtime)
 
@@ -240,7 +243,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
             logical_scope_id="pal:resident",
             metadata={"preferred_endpoint_id": "trace-endpoint"},
         )
-        runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
             anchor, ids["a1"])
         ex = self._executor(memory, runtime)
 
@@ -280,7 +283,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
         transport = CapturingTransport([])
         runtime = _runtime(transport)
         anchor = _anchor_request(ids)
-        runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
+        runtime.prompt_cache_eligible_anchor_request = runtime.prompt_cache_confirmed_anchor_request = _stub_anchor_reader(
             anchor, ids["a1"])
         ex = self._executor(memory, runtime)
 

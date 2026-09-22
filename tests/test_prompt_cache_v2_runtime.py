@@ -69,6 +69,37 @@ def response_payload(index=1, *, tool=False, usage=None):
                 "input_tokens_details": {"cached_tokens": 2000, "cache_write_tokens": 0}, "cost": 0.01}}
 
 
+_SUMMARY_JSON = json.dumps({
+    "schema": "pal.compaction.pal.v2",
+    "kind": "pal",
+    "continuity": {
+        "current_focus": "fixture chain",
+        "primary_request_and_intent": "exercise the compact chain",
+        "active_operating_instructions": [],
+        "active_requests": [],
+        "temporary_task_state": [],
+        "key_decisions": [],
+        "pending_questions": [],
+        "recent_raw_turns": [],
+        "warm_compressed_turns": [],
+        "retired_or_superseded_context": [],
+        "optional_next_step": "",
+    },
+    "summary": {"summary": "Compacted fixture history", "search_text": "fixture compacted history"},
+    "memory_candidates": [],
+})
+
+
+def summary_response_payload(index=1, usage=None):
+    """Schema-valid summary answer for the REAL v3 compaction engine."""
+    return {"id": f"compact-{index}", "model": "openai/gpt-6-astra", "provider": "fixture-provider",
+            "status": "completed", "service_tier": "fixture",
+            "output": [{"type": "message", "id": f"compact-msg-{index}", "role": "assistant",
+                        "content": [{"type": "output_text", "text": _SUMMARY_JSON}]}],
+            "usage": usage if usage is not None else {"input_tokens": 100_000, "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 2000, "cache_write_tokens": 0}, "cost": 0.01}}
+
+
 @pytest.mark.parametrize("profile", PROFILES)
 def test_disabled_and_mismatched_profiles_fail_before_transport(profile):
     ctx = _astra_context({"prompt_cache": {"enabled": False, "cache_profile": profile}})
@@ -225,7 +256,17 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
     async def run():
         class Transport:
             requests = []
+            summary_requests = []
             def frames(self, _endpoint, request):
+                payload_text = json.dumps(thaw_json(request.payload), ensure_ascii=False)
+                if "pal.compaction.pal.v2" in payload_text:
+                    # M17 (review 95373ef): the real v3 compaction asks THIS
+                    # runtime for the summary; answer with the engine's
+                    # schema-valid JSON and keep the call out of the ordinary
+                    # round accounting (separate counter below).
+                    self.summary_requests.append(request)
+                    yield _JSONFrame(0, summary_response_payload(len(self.summary_requests)))
+                    return
                 self.requests.append(request)
                 yield _JSONFrame(0, response_payload(len(self.requests), tool=len(self.requests) < rounds))
         transport = Transport()
@@ -255,10 +296,16 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                 if mutation == "profile" and n == 4:
                     llm.active_endpoint().capabilities_blob = {"prompt_cache": {"cache_profile": PROFILES[2]}}
                 if mutation == "compaction" and n == 4:
-                    from pal.memory.contracts import MemoryCompactRequest, L2Entry
-                    memory.compact(MemoryCompactRequest(8192, 1024, summary_entry=L2Entry(
-                        "fixture-summary", "summary", "session", "Fixture summary", "Compacted fixture history",
-                        rendered="Compacted fixture history")))
+                    # M17 (review 95373ef): drive the REAL v3 compaction entry
+                    # (left run + cut + install + rebase) instead of the legacy
+                    # memory.compact shortcut, so this chain exercises the
+                    # supported flow.
+                    await core.turn_executor.compact_memory_async(
+                        memory,
+                        target_input_budget=8192,
+                        reserved_output_tokens=1024,
+                        continuation=continuation,
+                    )
                 result = await core.turn_executor.execute_turn_effect_async(continuation, LLMRequestEffect(
                     assembly_context=assembly, max_output_tokens=128, tools_override=tools))
                 response = result.payload.response
@@ -291,16 +338,42 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                     assert str(payload["input"]).count("stable-runtime") == 1
                     assert str(payload["input"]).count("reference-only fixture context") == 1
                 assert "reference-only fixture context" in str(payload["input"])
-                for old in range(1, index + 1):
-                    assert next(item for item in payload["input"] if item.get("id") == f"reason-{old}")["encrypted_content"] == f"opaque-{old}"
+                # Byte truth first: every reasoning item still on the wire is
+                # the original encrypted payload, never a re-encode.
+                present = {
+                    str(item.get("id")): item.get("encrypted_content")
+                    for item in payload["input"]
+                    if str(item.get("id", "")).startswith("reason-")
+                }
+                for reason_id, encrypted in present.items():
+                    assert encrypted == f"opaque-{reason_id.split('-')[1]}"
+                if mutation == "compaction":
+                    # M17 (review 95373ef): the REAL v3 compaction retires the
+                    # compacted left segment.  Pre-cut reasoning (rounds 1-4,
+                    # folded into the summary seed) must NOT replay; the post-
+                    # cut rounds must, byte-true.
+                    if index < 4:
+                        for old in range(1, index + 1):
+                            assert f"reason-{old}" in present
+                    else:
+                        assert not [
+                            rid for rid in present if int(rid.split("-")[1]) <= 4
+                        ], "compacted-away reasoning must not replay"
+                        for old in range(5, index + 1):
+                            assert f"reason-{old}" in present
+                else:
+                    # No replacement of active history: every prior round's
+                    # reasoning still replays verbatim.
+                    for old in range(1, index + 1):
+                        assert f"reason-{old}" in present
                 if profile == PROFILES[1]:
                     assert "prompt_cache_breakpoint" not in str(payload)
                 if profile == PROFILES[1]:
                     assert "prompt_cache_options" not in request.extra_body
                 if profile == PROFILES[2]:
                     assert request.extra_body["prompt_cache_options"]["mode"] == "implicit"
-            assert llm.usage_ledger.snapshot()["provider_request_count"] == rounds
-            assert llm.usage_ledger.snapshot()["cost"] == pytest.approx(rounds * 0.01)
+            assert llm.usage_ledger.snapshot()["provider_request_count"] == rounds + len(transport.summary_requests)
+            assert llm.usage_ledger.snapshot()["cost"] == pytest.approx((rounds + len(transport.summary_requests)) * 0.01)
             serialized = json.dumps(records)
             assert "opaque-1" not in serialized
             assert "fixture stable" not in serialized
