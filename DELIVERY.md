@@ -39,6 +39,7 @@
 | `a1058c5` | N8 实现 | review 95373ef R1-R6/S1/S2 修复主体（详见 §9）：配置 digest 准入 / 替换边界剥 native / L 视图覆盖（seed_reference_ids）/ 头部 preamble + 真实 merge 坐标 / 全 wire 诊断枚举 / attempt owner-match 收尾 / eligible anchor 读侧 / shell 只编码 preamble |
 | `a923583` | N8 测试 | `tests/test_v3_review_95373ef_fixes.py` 19 条（reviewer 草案 9 条修 fixture 不弱化断言 + M16/M18 + M04 正反 + M05 异常变体 + M06 迟到清理）；M17 迁移 `test_prompt_cache_v2_runtime.py` 真 v3 compaction 入口 + 字节真相退役断言；warm_handoff_split eligible reader |
 | 本 commit | N8 证据 | DELIVERY §9 + 红基线/全量回归日志（引用同树测试 a1058c5+a923583） |
+| 本 commit | N8 后续 | M12 seam 变体收口：test_completion_system_seam_paths_shift_with_the_head（20/20 绿），M12 PARTIAL→PASS；余下挂账排序见 §4.6 |
 
 ## 3. 设计要点
 
@@ -62,6 +63,7 @@
 3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族（N8 第四次同集验证，单跑 19/19+3sub 绿，见 §9）
 4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
 5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律；本轮实测 1790s，后续建议 ≥2400s）
+6. **N8 后续安排（2026-09-22，Nathan 授权安排）**：① M10 三路径 final-wire 并排单测（§9 唯一余 PARTIAL）；② whole-source 引擎残留物理删除（见 2）；③ acceptance_status 补账（fill_ledger 逐 node 实跑，31 项 NOT_RUN）；④ 22 长跑族干净环境重跑（等 Nathan 定环境：台式机干净 checkout / Pi 新 venv）；⑤ H 族运行时项（H02/H04/H06/Q04/B04-B08）。M12 seam 变体已收（本日后续 commit）
 
 ## 5. 验收证据
 
@@ -127,7 +129,7 @@
 - **R1（同 ID ≠ 同 profile）已修**：`_endpoint_config_digest` 从活端点重算（capabilities/输出上限/spec revision 全入 digest），drift → 旧投影/旧 plan 冷回退或重编译；runtime 注入选择（cache-policy 代数计数）移出身份视图，无害 refresh 不再毁 lineage。反例 M01；正常对照 M02 后半（配置未变重试复用、不增探测）
 - **R2（恢复/替换后 native 资格）已修**：真 LENGTH→continuation 恢复 receipt.native=None、冻结件带合并全文（M03）；finalization 替换在 F4 边界剥 native（M04 负例）；未改原件 byte-true 冻结（M04 正例）。诚实边界：observe 层未加「伪造 receipt 文本比对」守卫——按 HANDOFF「不三处补独立推测条件」，生产替换路径已被两道防线（F4 剥离 + call_ids 对账）全部闭合；手工伪造 receipt 的 API 滥用不构成产品反例
 - **R3（一份 L 模型视图）已修**：rebase 安装 `seed_reference_ids` 为 L 覆盖，下轮 prepare 不再重注相同 standalone 种子（M07 sentinel 恰一次）；连续两次 compact 共享同一 raw→standalone 映射（M08）
-- **R4（接缝坐标忠于实际 wire）已修**：preamble 只取头部 system/developer 连续段（中段 developer 按时间序留在会话流）；tail span 重映射用真实 merge 结果（M11 未合并→真 assistant 坐标 / 合并→block offset 对照）；continuity_target 与 cache/wire 同一 remapper（M12 主断言）。**PARTIAL**：Completion system seam 变体未单列（M11/M16/M18 completion 全链已隐式覆盖头部 seam），挂账
+- **R4（接缝坐标忠于实际 wire）已修**：preamble 只取头部 system/developer 连续段（中段 developer 按时间序留在会话流）；tail span 重映射用真实 merge 结果（M11 未合并→真 assistant 坐标 / 合并→block offset 对照）；continuity_target 与 cache/wire 同一 remapper（M12）。Completion system seam 变体由后续切片补入（test_completion_system_seam_paths_shift_with_the_head，全局坐标 + 标记不落错消息，一次过）
 - **R5（诊断枚举完整 wire）已修**（95373ef 诊断层基础上补齐负例）：M13 嵌套 span 覆盖变化不误报 / M14 顶层 system 漂移不隐没 / M15 dynamic 子块不吞历史归属；P01/P02 正对照保留于 test_cache_diagnostics
 - **R6（attempt 不失控）已修**：prepare→observe 间一切退出（cancel/接受异常/owner 异常）由同 owner finally 收自己的 draft（M05 两变体）；迟到清理 owner-match：不碰后继轮、不回滚已提交（M06）
 - **S1（合法本地前缀可直接尝试）已定**：`eligible_anchor_request` 只查 scope/endpoint/TTL，`read_confirmed` 是诊断位不是许可位；confirmed 读者不变（hot-only 费用边界原样）（M09 + warm_handoff_split）
@@ -148,7 +150,7 @@
 | M09 | PASS | ::test_unconfirmed_local_anchor_is_eligible_until_ttl_expiry + tests/test_v3_warm_handoff_split.py |
 | M10 | PARTIAL | 成功路径 final-wire：M18-composed + N20 vertical trace；失败/取消路径：compact_cancel_control / N24 stale-left（既有）；三路径并排单测未做，挂账 |
 | M11 | PASS | ::test_no_merge_uses_no_merge_coordinate_transform + ::test_merged_user_boundary_uses_merged_block_offset（full prepare） |
-| M12 | PASS(主断言)/PARTIAL(变体) | ::test_continuity_target_is_remapped_with_cache_and_wire_paths；Completion system seam 显式变体挂账 |
+| M12 | PASS | ::test_continuity_target_is_remapped_with_cache_and_wire_paths + ::test_completion_system_seam_paths_shift_with_the_head（Completion system seam 全链：全局坐标 + 标记不落错消息；后续切片补入） |
 | M13 | PASS | DiagnosticContracts::test_identical_wire_with_nested_span_coverage_change_is_preserved |
 | M14 | PASS | ::test_top_level_system_drift_is_not_hidden_by_missing_span |
 | M15 | PASS | ::test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item |

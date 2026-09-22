@@ -196,6 +196,62 @@ class ProjectionSpanContracts(unittest.TestCase):
         self.assertEqual(target.get('text'),'TAIL-Q',
                          'merged tail content must sit after the pending blocks')
 
+    def test_completion_system_seam_paths_shift_with_the_head(self):
+        # M12 (Completion system-seam variant): with a leading SYSTEM message
+        # and committed history ahead of the tail, the tail's wire/cache (and,
+        # when present, continuity) coordinates must land on THIS payload's
+        # GLOBAL indices — never tail-local ones — and each marker must sit
+        # on its own message.
+        session=EndpointProjectionSession(LogicalSessionId('review'))
+        session.bind(EndpointBinding(endpoint_id='review-endpoint',model_id='review-model',
+                                     wire_shape=WireShape.OPENAI_COMPLETION,
+                                     endpoint_spec_revision='rev-1',
+                                     continuation_policy_version='policy-1',
+                                     config_fingerprint='fp-1'))
+        shell=LLMRequestIR(messages=(LLMMessageIR(role=MessageRole.SYSTEM,
+                                                  parts=(TextPartIR('SEAM_BASE'),),message_id='sys'),),
+                           tools=(),policy=GenerationPolicyIR(max_output_tokens=64))
+        attempt1=AttemptKey(session.identity,OwnerFence(0),'s1')
+        session.begin_round(attempt1,requires_native=False)
+        history=(LLMMessageIR(role=MessageRole.USER,parts=(TextPartIR('history q'),),message_id='h1'),
+                 LLMMessageIR(role=MessageRole.ASSISTANT,parts=(TextPartIR('history a'),),
+                              message_id='h2',state=MessageState.COMPLETE))
+        session.prepare(HistoryView(cursor=HistoryCursor.initial(),messages=history),
+                        request_shell=shell)
+        after=HistoryCursor(history_epoch=0,block_sequence=1,prefix_digest='a'*64)
+        session.observe_commit(
+            HistoryCommitReceipt(attempt=attempt1,
+                                 append=AppendReceipt(before=HistoryCursor.initial(),
+                                                      after=after,block_count=1),
+                                 closed_call_ids=(),native_committed=False),
+            span_message_ids=('h1','h2'))
+        attempt2=AttemptKey(session.identity,OwnerFence(0),'s2')
+        session.begin_round(attempt2,requires_native=False)
+        tail=LLMMessageIR(role=MessageRole.USER,parts=(TextPartIR('TAIL_Q_SEAM'),),message_id='t-seam')
+        request=session.prepare(HistoryView(cursor=after,messages=(tail,)),request_shell=shell)
+        payload=json.loads(request.payload_json)
+        items=payload['messages']
+        self.assertEqual(items[0]['role'],'system')
+        self.assertEqual(str(items[0].get('content')),'SEAM_BASE')
+        self.assertEqual(len(items),4,'system head + two history items + one tail')
+        self.assertIn('history q',str(items[1]));self.assertIn('history a',str(items[2]))
+        self.assertIn('TAIL_Q_SEAM',str(items[3]))
+        self.assertEqual(json.dumps(payload).count('TAIL_Q_SEAM'),1,
+                         'a marker never lands on two messages')
+        span=next(s for s in request.message_spans if s.message_id=='t-seam')
+        self.assertEqual(tuple(span.wire_item_paths[0][:2]),('messages',3),
+                         'wire paths carry the shifted global index, not tail-local 0')
+        tail_item=payload
+        for part in span.wire_item_paths[0]:tail_item=tail_item[part]
+        self.assertIn('TAIL_Q_SEAM',str(tail_item),
+                      'the wire path must address the tail message itself')
+        if span.cache_targets:
+            self.assertEqual(tuple(span.cache_targets[0][:2]),('messages',3),
+                             'cache targets shift with the system head')
+        if span.continuity_target:
+            self.assertEqual(tuple(span.continuity_target[:2]),('messages',3),
+                             'continuity never keeps tail-local coordinates')
+
     def test_shell_encode_never_scans_the_whole_history(self):
         # M16/S2: the shell envelope encode must see only the preamble; the
         # full effective request a caller passes as the shell must not be
