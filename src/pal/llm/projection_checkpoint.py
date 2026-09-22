@@ -93,9 +93,17 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         # without ever producing a receipt, so it must be persisted itself.
         "owner_fence": session._owner_fence,
         # F5: pending entries persist WITH their owning span so a restored
-        # lineage can retire them at a later left replacement.
+        # lineage can retire them at a later left replacement.  S1 (review
+        # 7d182fd): per-block ownership persists alongside so a restored
+        # seam-merged entry still retires only its retired-left blocks.
         "pending_wire_tail": [
-            {"item": thaw_json(dict(entry.item)), "span_ids": list(entry.span_ids)}
+            {
+                "item": thaw_json(dict(entry.item)),
+                "span_ids": list(entry.span_ids),
+                "block_spans": [
+                    list(span) for span in entry.block_spans
+                ],
+            }
             for entry in session._pending_wire_tail
         ],
         "committed_head_system": [
@@ -115,6 +123,12 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "semantic_span": list(chunk.semantic_span),
                 # F5: per-item span ownership (absent in pre-F5 snapshots).
                 "item_spans": [list(span) for span in chunk.item_spans],
+                # S1 (review 7d182fd): per-block ownership (absent in
+                # pre-S1 snapshots → whole-item rules on restore).
+                "item_block_spans": [
+                    [list(span) for span in blocks]
+                    for blocks in chunk.item_block_spans
+                ],
             }
             for chunk in session.chunks
         ],
@@ -367,6 +381,8 @@ def restore_projection(
     chunks: list[ProjectionChunk] = []
     prefix_items: list[dict] = []
     prefix_item_spans: list[tuple[str, ...]] = []
+    # S1 (review 7d182fd): per-item BLOCK ownership axis for the prefix.
+    prefix_item_block_spans: list[tuple[tuple[str, ...], ...]] = []
     expected_before = HistoryCursor.initial()
     for raw in chunks_raw:
         if not isinstance(raw, Mapping):
@@ -419,6 +435,28 @@ def restore_projection(
         chunk_item_spans = tuple(
             tuple(str(mid) for mid in span) for span in item_spans_raw
         )
+        # S1 (review 7d182fd): per-block ownership; absent in pre-S1
+        # snapshots → () restores whole-item rules.  Invalid or misaligned
+        # data degrades to no block axis rather than refusing the snapshot
+        # (the item-level spans above remain authoritative for whole items).
+        chunk_item_block_spans: tuple[tuple[tuple[str, ...], ...], ...] = ()
+        blocks_raw = raw.get("item_block_spans") or ()
+        if isinstance(blocks_raw, (list, tuple)) and blocks_raw:
+            parsed_blocks: list[tuple[tuple[str, ...], ...]] = []
+            valid_blocks = len(blocks_raw) == len(items)
+            for per_item in blocks_raw:
+                if not isinstance(per_item, (list, tuple)) or not all(
+                    isinstance(span, (list, tuple))
+                    and all(isinstance(mid, str) for mid in span)
+                    for span in per_item
+                ):
+                    valid_blocks = False
+                    break
+                parsed_blocks.append(
+                    tuple(tuple(str(mid) for mid in span) for span in per_item)
+                )
+            if valid_blocks:
+                chunk_item_block_spans = tuple(parsed_blocks)
         chunks.append(
             ProjectionChunk(
                 round_attempt_id=str(raw.get("attempt_id") or ""),
@@ -431,6 +469,7 @@ def restore_projection(
                 # replacement, same as an in-memory legacy chunk).
                 semantic_span=tuple(str(mid) for mid in span_raw),
                 item_spans=chunk_item_spans,
+                item_block_spans=chunk_item_block_spans,
             )
         )
         # The restored private prefix holds the deep-copied owned dicts (the
@@ -440,6 +479,10 @@ def restore_projection(
             prefix_item_spans.extend(chunk_item_spans)
         else:
             prefix_item_spans.extend([()] * len(items))
+        if chunk_item_block_spans:
+            prefix_item_block_spans.extend(chunk_item_block_spans)
+        else:
+            prefix_item_block_spans.extend([()] * len(items))
         expected_before = cursor_after
     pending_raw = section.get("pending_wire_tail") or ()
     if not isinstance(pending_raw, (list, tuple)):
@@ -461,10 +504,30 @@ def restore_projection(
                 raise ProjectionCheckpointError(
                     "pending_wire_tail span_ids are invalid"
                 )
+            # S1 (review 7d182fd): per-block ownership; absent or invalid
+            # in older snapshots → () keeps whole-item rules.
+            entry_block_spans: tuple[tuple[str, ...], ...] = ()
+            blocks_raw = entry_raw.get("block_spans") or ()
+            content = (entry_raw["item"] or {}).get("content")
+            if (
+                isinstance(blocks_raw, (list, tuple))
+                and blocks_raw
+                and isinstance(content, list)
+                and len(blocks_raw) == len(content)
+                and all(
+                    isinstance(span, (list, tuple))
+                    and all(isinstance(mid, str) for mid in span)
+                    for span in blocks_raw
+                )
+            ):
+                entry_block_spans = tuple(
+                    tuple(str(mid) for mid in span) for span in blocks_raw
+                )
             pending_wire_tail.append(
                 _PendingWireItem(
                     item=dict(entry_raw["item"]),
                     span_ids=tuple(str(mid) for mid in span_ids_raw),
+                    block_spans=entry_block_spans,
                 )
             )
         else:
@@ -589,6 +652,7 @@ def restore_projection(
     session.chunks = tuple(chunks)
     session._prefix_items = prefix_items
     session._prefix_item_spans = prefix_item_spans
+    session._prefix_item_block_spans = prefix_item_block_spans
     session._frontier_item_count = len(prefix_items)
     session._pending_wire_tail = pending_wire_tail
     session._committed_head_system = committed_head_system

@@ -114,6 +114,15 @@ class ProjectionChunk:
     # span, so a left replacement can retire them from a surviving chunk's
     # replay instead of letting compacted-away content ride along.
     item_spans: tuple[tuple[str, ...], ...] = ()
+    # S1 (review 7d182fd): per-BLOCK semantic ownership aligned with both
+    # ``items`` and ``item_spans``.  An Anthropic user-seam merge
+    # concatenates two eras' blocks into ONE wire item; per-item spans
+    # alone cannot retire just the retired-left blocks without dropping
+    # the surviving right's blocks with them (whole-item keep/drop would
+    # misdelete R).  Each entry aligns with that item's content blocks;
+    # an empty entry marks an item without block ownership (whole-item
+    # rules apply, e.g. legacy snapshots or non-list content).
+    item_block_spans: tuple[tuple[tuple[str, ...], ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -163,10 +172,17 @@ class _PendingWireItem:
     replacement retires pending entries whose owning span died instead of
     preserving the list wholesale and replaying compacted-away bytes after
     the summary.
+
+    S1 (review 7d182fd): ``block_spans`` carries per-content-block
+    ownership so a seam-merged item (retired-left blocks + surviving-right
+    blocks in ONE user item) can retire exactly the left-owned blocks at
+    the next left replacement.  Empty = no block ownership (whole-item
+    rules; the item-level ``span_ids`` still applies).
     """
 
     item: dict
     span_ids: tuple[str, ...]
+    block_spans: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass
@@ -176,6 +192,11 @@ class _ActiveRound:
     prepared_items: list[dict] = field(default_factory=list)
     # F5: per-item span ownership aligned with prepared_items.
     prepared_item_spans: list[tuple[str, ...]] = field(default_factory=list)
+    # S1 (review 7d182fd): per-item BLOCK ownership aligned with
+    # prepared_items (same length as prepared_item_spans).
+    prepared_item_block_spans: list[tuple[tuple[str, ...], ...]] = field(
+        default_factory=list
+    )
     prepared_base_cursor: HistoryCursor | None = None
     # Top-level system parts hoisted from THIS round's tail-head messages
     # (review G2 persistence): container coordinates cannot freeze them, so
@@ -210,6 +231,9 @@ class EndpointProjectionSession:
         self._prefix_items: list[dict] = []
         # Per-item span ownership aligned with _prefix_items (F5).
         self._prefix_item_spans: list[tuple[str, ...]] = []
+        # S1 (review 7d182fd): per-item BLOCK ownership aligned with
+        # _prefix_items and _prefix_item_spans.
+        self._prefix_item_block_spans: list[tuple[tuple[str, ...], ...]] = []
         # Unfrozen wire tail kept across rounds (review F2 + F5 ownership):
         # trailing items trimmed from a commit (e.g. Anthropic user-role tool
         # results) stay session-owned and are re-injected into every prepare
@@ -505,6 +529,14 @@ class EndpointProjectionSession:
             materialized.extend(
                 dict(item) for item in self._encode_messages(tuple(accepted_messages))
             )
+        # S1 (review 7d182fd): accepted output beyond the frontier is
+        # owned by THIS commit's span at block granularity — every content
+        # block the encode materialized.  A later seam merge concatenates
+        # blocks from two owners, so the per-block axis must exist here
+        # first or mixed items could never be retired partially.
+        materialized_block_spans = [
+            _uniform_block_spans(item, span_ids) for item in materialized
+        ]
         # Everything below is computed on LOCAL candidates and installed in
         # ONE block at the very end (review H1): a refusal must leave every
         # piece of session-visible state untouched, so neither a replayed
@@ -521,8 +553,19 @@ class EndpointProjectionSession:
             extended_spans.extend(
                 [()] * (len(extended) - len(extended_spans))
             )
+        extended_block_spans = [
+            *self._active.prepared_item_block_spans,
+            *materialized_block_spans,
+        ]
+        if len(extended_block_spans) < len(extended):
+            extended_block_spans.extend(
+                [()] * (len(extended) - len(extended_block_spans))
+            )
         items = tuple(extended[self._frontier_item_count :])
         item_span_list = list(extended_spans[self._frontier_item_count :])
+        item_block_span_list = list(
+            extended_block_spans[self._frontier_item_count :]
+        )
         if not items:
             raise ProjectionSessionError(
                 "no prepared items beyond the frontier; commit has nothing to seal"
@@ -543,10 +586,12 @@ class EndpointProjectionSession:
                     _PendingWireItem(
                         item=dict(items[-1]),
                         span_ids=tuple(item_span_list[-1]),
+                        block_spans=tuple(item_block_span_list[-1]),
                     ),
                 )
                 items = items[:-1]
                 item_span_list = item_span_list[:-1]
+                item_block_span_list = item_block_span_list[:-1]
                 frozen_item_count -= 1
         # A zero-freeze commit is ACCEPTED, not refused (review H1): Anthropic
         # can legitimately close a round whose items beyond the frontier are
@@ -569,11 +614,21 @@ class EndpointProjectionSession:
             # F5: per-item ownership travels with the frozen snapshot so a
             # later rebase can retire retired-span bytes from replay.
             item_spans=tuple(tuple(span) for span in item_span_list),
+            # S1 (review 7d182fd): per-block ownership travels alongside so
+            # a later rebase can retire ONLY the retired-left blocks of a
+            # seam-merged item while the surviving right's blocks stay.
+            item_block_spans=tuple(
+                tuple(blocks) for blocks in item_block_span_list
+            ),
         )
         head_system_parts = [dict(part) for part in self._active.prepared_head_system]
         # -- single install boundary: no session-visible failure past here --
         self._pending_wire_tail = [
-            _PendingWireItem(item=dict(entry.item), span_ids=tuple(entry.span_ids))
+            _PendingWireItem(
+                item=dict(entry.item),
+                span_ids=tuple(entry.span_ids),
+                block_spans=tuple(entry.block_spans),
+            )
             for entry in unfrozen_suffix
         ]
         self.chunks = (*self.chunks, chunk)
@@ -581,6 +636,9 @@ class EndpointProjectionSession:
         # exposed and shares nothing with the frozen chunk snapshot above.
         self._prefix_items.extend(items)
         self._prefix_item_spans.extend(tuple(span) for span in item_span_list)
+        self._prefix_item_block_spans.extend(
+            tuple(blocks) for blocks in item_block_span_list
+        )
         self._committed_attempts[receipt.attempt.attempt_id] = receipt
         # Request-head content hoisted to top-level system this round becomes
         # session-owned exactly like the wire tail (review G2 persistence),
@@ -769,6 +827,18 @@ class EndpointProjectionSession:
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         rebuilt_items: list[dict] = []
         rebuilt_spans: list[tuple[str, ...]] = []
+        rebuilt_block_spans: list[tuple[tuple[str, ...], ...]] = []
+        # S1 (review 7d182fd): the seed's wire bytes are OWNED BY the left
+        # reference its coverage names — not unconditionally-owned flotsam.
+        # An empty span used to make seed bytes survive every later left
+        # replacement (the pending-tail path) and, after a seam merge,
+        # ride inside a surviving right chunk's user item.  With the
+        # coverage as the span the NEXT replacement retires them; an empty
+        # coverage only occurs for legacy callers and keeps the old
+        # conservative (unconditional) behavior.
+        seed_span = tuple(
+            str(value) for value in (change.seed_coverage_ids or ())
+        )
         if change.seed_messages:
             encoded = codec.encode(
                 LLMRequestIR(
@@ -782,11 +852,11 @@ class EndpointProjectionSession:
                 dict(thaw_json(item))
                 for item in (dict(encoded.payload).get(container) or [])
             ]
-            # Seed content belongs to the NEW left reference: it is the
-            # canonical-R seam's foundation and is never filtered against
-            # kept_set (empty ownership marks it unconditional).
             rebuilt_items.extend(seed_items)
-            rebuilt_spans.extend([()] * len(seed_items))
+            rebuilt_spans.extend([seed_span] * len(seed_items))
+            rebuilt_block_spans.extend(
+                _uniform_block_spans(item, seed_span) for item in seed_items
+            )
         # F4: surviving right chunks replay their ORIGINAL wire items —
         # byte-true native material included — instead of an IR re-encode.
         # thaw_json: the private prefix owns MUTABLE copies; the chunk's
@@ -795,32 +865,55 @@ class EndpointProjectionSession:
         # items whose owning span retired die here — wire bytes frozen out
         # of a retired round's pending tail must not ride a surviving
         # chunk.  Legacy chunks without ownership replay whole.
+        # S1 (review 7d182fd): with per-BLOCK ownership the filter RETIRES
+        # ONLY the retired-left blocks of a seam-merged item and rebuilds
+        # the item from the surviving blocks — whole-item keep/drop would
+        # either resurrect the retired left (span names only right ids) or
+        # misdelete the surviving right (union span escapes kept_set).
         for chunk in surviving_chunks:
             spans = chunk.item_spans
-            if spans and len(spans) == len(chunk.items):
-                for item, span in zip(chunk.items, spans):
-                    if span and not set(span) <= kept_set:
-                        continue
-                    rebuilt_items.append(dict(thaw_json(item)))
-                    rebuilt_spans.append(tuple(span))
-            else:
-                for item in chunk.items:
-                    rebuilt_items.append(dict(thaw_json(item)))
-                    rebuilt_spans.append(())
+            blocks_per_item = chunk.item_block_spans
+            has_item_spans = bool(spans) and len(spans) == len(chunk.items)
+            has_block_spans = (
+                bool(blocks_per_item) and len(blocks_per_item) == len(chunk.items)
+            )
+            for index, item in enumerate(chunk.items):
+                item_span = tuple(spans[index]) if has_item_spans else ()
+                item_blocks = (
+                    tuple(blocks_per_item[index]) if has_block_spans else ()
+                )
+                surviving = _retire_wire_item(
+                    thaw_json(item), item_span, item_blocks, kept_set
+                )
+                if surviving is None:
+                    continue
+                kept_item, kept_span, kept_blocks = surviving
+                rebuilt_items.append(dict(kept_item))
+                rebuilt_spans.append(kept_span)
+                rebuilt_block_spans.append(kept_blocks)
         # F5: the session-owned pending tail is right-side territory by
         # definition (items trimmed from commits that are not yet frozen),
         # but each entry belongs to the ROUND that produced it: entries
         # whose owning span died with the compacted-away L retire here
-        # instead of reappearing after the summary.
+        # instead of reappearing after the summary.  S1: block ownership
+        # retires only the retired-left blocks of a merged entry.
         surviving_pending = [
-            entry for entry in self._pending_wire_tail
-            if set(entry.span_ids) <= kept_set
+            entry
+            for entry in (
+                _retire_wire_item(
+                    thaw_json(entry.item),
+                    tuple(entry.span_ids),
+                    tuple(entry.block_spans),
+                    kept_set,
+                )
+                for entry in self._pending_wire_tail
+            )
+            if entry is not None
         ]
-        rebuilt_items.extend(
-            dict(thaw_json(entry.item)) for entry in surviving_pending
-        )
-        rebuilt_spans.extend(
-            tuple(entry.span_ids) for entry in surviving_pending
+        rebuilt_items.extend(kept_item for kept_item, _, _ in surviving_pending)
+        rebuilt_spans.extend(kept_span for _, kept_span, _ in surviving_pending)
+        rebuilt_block_spans.extend(
+            kept_blocks for _, _, kept_blocks in surviving_pending
         )
         # Anthropic merges adjacent user-role wire messages, so a rebuilt
         # prefix ending in role "user" is not a stable freeze point (the
@@ -836,6 +929,7 @@ class EndpointProjectionSession:
                     _PendingWireItem(
                         item=rebuilt_items.pop(),
                         span_ids=rebuilt_spans.pop(),
+                        block_spans=rebuilt_block_spans.pop(),
                     ),
                 )
         # -- single install section.
@@ -851,6 +945,7 @@ class EndpointProjectionSession:
         self.chunks = tuple(surviving_chunks)
         self._prefix_items = rebuilt_items
         self._prefix_item_spans = rebuilt_spans
+        self._prefix_item_block_spans = rebuilt_block_spans
         self._pending_wire_tail = unfrozen_tail
         # B1 (review 4b14ce4): the replacement's seed coverage becomes the
         # lineage's L-owned coverage from this moment on — every model-view id
@@ -1073,19 +1168,35 @@ class EndpointProjectionSession:
         prefix_spans = list(self._prefix_item_spans)
         if len(prefix_spans) < len(self._prefix_items):
             prefix_spans.extend([()] * (len(self._prefix_items) - len(prefix_spans)))
+        prefix_block_spans = list(self._prefix_item_block_spans)
+        if len(prefix_block_spans) < len(self._prefix_items):
+            prefix_block_spans.extend(
+                [()] * (len(self._prefix_items) - len(prefix_block_spans))
+            )
         tail_message_ids = tuple(
             str(message.message_id or "") for message in view.messages
         )
-        conversation: list[tuple[dict, tuple[str, ...]]] = [
-            (dict(item), tuple(span))
-            for item, span in zip(self._prefix_items, prefix_spans)
+        # S1 (review 7d182fd): each conversation item now carries (item,
+        # item_span, block_spans) — the per-block axis survives the seam
+        # merge below so a later left replacement can retire exactly the
+        # retired-left blocks of a merged user item.
+        conversation: list[tuple[dict, tuple[str, ...], tuple[tuple[str, ...], ...]]] = [
+            (dict(item), tuple(span), tuple(blocks))
+            for item, span, blocks in zip(
+                self._prefix_items, prefix_spans, prefix_block_spans
+            )
         ]
         conversation.extend(
-            (dict(entry.item), tuple(entry.span_ids))
+            (dict(entry.item), tuple(entry.span_ids), tuple(entry.block_spans))
             for entry in self._pending_wire_tail
         )
         conversation.extend(
-            (dict(item), tail_message_ids) for item in tail_items
+            (
+                dict(item),
+                tail_message_ids,
+                _uniform_block_spans(item, tail_message_ids),
+            )
+            for item in tail_items
         )
         # Anthropic merges adjacent user-role wire messages (source-verified
         # _append_message behavior), so the pending/tail boundary must merge
@@ -1109,9 +1220,12 @@ class EndpointProjectionSession:
             # a user USER boundary keeps both items, and a user + assistant
             # boundary never merges at all.
             anthropic_boundary_merged = len(conversation) != conversation_length_before
-        self._active.prepared_items = [item for item, _ in conversation]
+        self._active.prepared_items = [item for item, _, _ in conversation]
         self._active.prepared_item_spans = [
-            span for _, span in conversation
+            span for _, span, _ in conversation
+        ]
+        self._active.prepared_item_block_spans = [
+            blocks for _, _, blocks in conversation
         ]
         conversation_items = self._active.prepared_items
         self._active.prepared_base_cursor = view.cursor
@@ -1457,22 +1571,108 @@ def _remap_tail_span(
     )
 
 
+def _uniform_block_spans(
+    item: Mapping[str, Any], span: tuple[str, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """S1 (review 7d182fd): block ownership for one wholly-owned item.
+
+    An item whose whole content belongs to ONE owner gets one span per
+    content block (list content only); non-list content has no block axis
+    and keeps whole-item rules.
+    """
+
+    content = item.get("content") if isinstance(item, Mapping) else None
+    if not isinstance(content, list):
+        return ()
+    return tuple(span for _ in content)
+
+
+def _effective_block_spans(
+    item: Mapping[str, Any],
+    span: tuple[str, ...],
+    block_spans: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[str, ...], ...]:
+    """S1: usable block ownership for ``item``, falling back to the whole
+    item's span when the per-block axis is absent or misaligned."""
+
+    content = item.get("content") if isinstance(item, Mapping) else None
+    if (
+        block_spans
+        and isinstance(content, list)
+        and len(block_spans) == len(content)
+    ):
+        return block_spans
+    return _uniform_block_spans(item, span)
+
+
+def _retire_wire_item(
+    item: Any,
+    span: tuple[str, ...],
+    block_spans: tuple[tuple[str, ...], ...],
+    kept_set: set[str],
+) -> tuple[Mapping[str, Any], tuple[str, ...], tuple[tuple[str, ...], ...]] | None:
+    """S1 (review 7d182fd): retire ONLY the blocks a retired left owned.
+
+    Returns the surviving ``(item, item_span, block_spans)`` or ``None``
+    when nothing survives.  Items with usable block ownership keep each
+    block whose owning span is empty (unconditional/legacy) or inside
+    ``kept_set``; the item is REBUILT from the surviving blocks when only
+    some die, so a seam-merged user item loses exactly the retired-left
+    blocks while the surviving right's blocks stay (S-I2/S-I3).  Items
+    without the block axis keep the F5 whole-item rule.
+    """
+
+    content = item.get("content") if isinstance(item, Mapping) else None
+    if (
+        block_spans
+        and isinstance(content, list)
+        and len(block_spans) == len(content)
+    ):
+        kept_pairs = [
+            (block, tuple(block_span))
+            for block, block_span in zip(content, block_spans)
+            if not block_span or set(block_span) <= kept_set
+        ]
+        if not kept_pairs:
+            return None
+        if len(kept_pairs) == len(content):
+            return item, tuple(span), tuple(block_spans)
+        rebuilt = dict(item)
+        rebuilt["content"] = [block for block, _ in kept_pairs]
+        merged_span = tuple(
+            dict.fromkeys(
+                block_span for _, block_span in kept_pairs if block_span
+            )
+        )
+        return (
+            rebuilt,
+            merged_span,
+            tuple(kept_block_span for _, kept_block_span in kept_pairs),
+        )
+    if span and not set(span) <= kept_set:
+        return None
+    return item, tuple(span), tuple(block_spans)
+
+
 def _merge_anthropic_user_boundary_pairs(
-    conversation: list[tuple[dict, tuple[str, ...]]],
+    conversation: list[tuple[dict, tuple[str, ...], tuple[tuple[str, ...], ...]]],
     boundary: int,
-) -> list[tuple[dict, tuple[str, ...]]]:
+) -> list[tuple[dict, tuple[str, ...], tuple[tuple[str, ...], ...]]]:
     """Span-aware mirror of _merge_anthropic_user_boundary (F5).
 
-    The merged item owns the UNION of both sides' spans: it carries content
-    from both owning rounds, so a left replacement retires it if EITHER
-    side dies.
+    The merged item owns the UNION of both sides' item spans.  S1 (review
+    7d182fd): the per-BLOCK ownership concatenates in the same order the
+    content blocks do, so each era's blocks keep their own owner and a
+    later left replacement retires exactly the retired-left blocks —
+    never the whole merged item (that would misdelete R) and never none
+    of it (that would resurrect the retired left).
     """
 
     if boundary < 0 or boundary + 1 >= len(conversation):
         return conversation
-    left_pair = conversation[boundary]
-    right_pair = conversation[boundary + 1]
-    left, right = left_pair[0], right_pair[0]
+    left_triple = conversation[boundary]
+    right_triple = conversation[boundary + 1]
+    left, right = left_triple[0], right_triple[0]
     if (
         isinstance(left, dict)
         and isinstance(right, dict)
@@ -1483,10 +1683,14 @@ def _merge_anthropic_user_boundary_pairs(
     ):
         merged_item = dict(left)
         merged_item["content"] = [*left["content"], *right["content"]]
-        merged_span = tuple(dict.fromkeys((*left_pair[1], *right_pair[1])))
+        merged_span = tuple(dict.fromkeys((*left_triple[1], *right_triple[1])))
+        merged_blocks = (
+            *_effective_block_spans(left, left_triple[1], left_triple[2]),
+            *_effective_block_spans(right, right_triple[1], right_triple[2]),
+        )
         return [
             *conversation[:boundary],
-            (merged_item, merged_span),
+            (merged_item, merged_span, merged_blocks),
             *conversation[boundary + 2 :],
         ]
     return conversation
