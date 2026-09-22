@@ -15,7 +15,7 @@ from pal.core.compaction import CompactionEngine
 from pal.llm import generation_result_from_values
 from pal.llm.ir import ReasoningPartIR, MessageState, TextPartIR
 from pal.memory import MemoryService
-from pal.memory.service import MemoryCompactResult  # noqa: F401  (contract check)
+from pal.memory import MemoryCompactResult  # noqa: F401  (contract check)
 import pal.memory.history_root as history_module
 from pal.memory.history_root import (
     HistoryRoot, HistoryRootError, default_summary_builder,

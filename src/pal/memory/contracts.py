@@ -188,16 +188,11 @@ class MemoryPack:
 
 @dataclass(frozen=True)
 class MemoryCompactRequest:
-    target_input_budget: int
-    reserved_output_tokens: int
-    summary_entry: L2Entry | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    # Full-source install fields (P2). Absent/empty values keep the legacy
-    # partial-compaction semantics for direct callers.
-    op_id: str = ""            # install idempotency key (receipt primary key)
-    source_stamp: str = ""     # owner-issued digest; non-empty selects full mode
-    active_turn_id: str = ""   # logical turn receiving a fresh empty segment
-    expected_epoch: int = 0    # memory context epoch observed at capture
+    """Removed with the v2 whole-source install path (capture_left is the
+    only capture producer).  Kept as a named tombstone so stale imports fail
+    loudly with a clear AttributeError instead of an opaque missing name."""
+
+    __slots__ = ()
 
 
 class StaleCompactionSource(ValueError):
@@ -379,28 +374,6 @@ class MemoryServicePort(Protocol):
         context_messages: tuple["LLMMessageIR", ...] = (),
         after_commit: Callable[[], None] | None = None,
     ) -> "L1TurnIR":
-        ...
-
-    def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
-        ...
-
-    async def acompact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
-        ...
-
-    def compact_transactionally(
-        self,
-        request: MemoryCompactRequest,
-        *,
-        after_commit: Callable[[], None],
-    ) -> MemoryCompactResult:
-        ...
-
-    async def acompact_transactionally(
-        self,
-        request: MemoryCompactRequest,
-        *,
-        after_commit: Callable[[], None],
-    ) -> MemoryCompactResult:
         ...
 
     def commit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:

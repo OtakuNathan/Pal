@@ -103,9 +103,20 @@ def test_compact_anchor_is_exact_interior_block_then_advances_next_turn(shape, p
     assert coordinator.snapshot()["tail"]["tails"] == []
 
 def test_compiler_anchors_last_real_user_interjection_not_runtime_user_context():
-    from pal.core import PalCore, register_with_core
+    from pal.core import PalCore, TurnContinuation, register_with_core
+    from pal.foundation import EventEnvelope
     from pal.memory import MemoryService, register_with_core as register_memory
-    from tests.test_compact_continuity import request as build_request
+    from pal.shared import PromptAssemblyContext
+
+    def build_request(core, turn_id):
+        continuation = TurnContinuation(
+            turn_id=turn_id, program=iter(()), correlation_id=turn_id)
+        return core.turn_executor.build_turn_prompt(
+            continuation, PromptAssemblyContext(event=EventEnvelope(
+                event_kind="user.message", source_kind="channel",
+                payload={"text": "continue"})),
+            max_output_tokens=128)
+
     core, memory = PalCore(), MemoryService()
     register_with_core(core)
     register_memory(core.context, memory)

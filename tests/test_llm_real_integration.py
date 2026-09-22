@@ -537,64 +537,6 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertIn("PAL_ONLINE", (outcome.text or outcome.reasoning_text))
         self.assertEqual(runtime.last_endpoint_id, "real-openai-completion-test")
 
-    def test_real_llm_shared_compaction_engine_returns_valid_checkpoint(self) -> None:
-        runtime = _real_runtime(max_output_tokens=4096)
-        memory = MemoryService()
-        memory.l1_store.items = [
-            [
-                L1TranscriptMessage(
-                    role="user",
-                    content="L3 is already fine; do not change it for compact.",
-                ),
-                L1TranscriptMessage(
-                    role="assistant",
-                    content="Agreed to keep L3 untouched.",
-                ),
-            ],
-            [
-                L1TranscriptMessage(
-                    role="user",
-                    content=(
-                        "Implement Pal compact v2 and validate compact stability "
-                        "with a real LLM."
-                    ),
-                )
-            ],
-            [
-                L1TranscriptMessage(
-                    role="user",
-                    content="Run the real shared compaction engine test.",
-                )
-            ],
-        ]
-        snapshot = CompactionSnapshot.capture(
-            memory,
-            target_input_budget=8_192,
-            reserved_output_tokens=2_048,
-            clock_kind=CompactionClockKind.USER_TURN,
-            clock_value=2,
-        )
-        run_result = asyncio.run(
-            CompactionEngine(PalCompactionPolicy()).run(
-                snapshot,
-                llm_runtime=runtime,
-                memory_service=memory,
-            )
-        )
-
-        self.assertTrue(run_result.success)
-        self.assertIsNotNone(run_result.summary_entry)
-        result = run_result.summary_entry.payload
-        self.assertEqual(result["schema"], "pal.compaction.pal.v2")
-        self.assertEqual(result["kind"], "pal")
-        continuity = result["continuity"]
-        self.assertIsInstance(continuity, dict)
-        self.assertTrue(continuity.get("primary_request_and_intent") or continuity.get("current_focus"))
-        self.assertIsInstance(continuity.get("active_operating_instructions"), list)
-        self.assertIsInstance(continuity.get("active_requests"), list)
-        self.assertIsInstance(continuity.get("temporary_task_state"), list)
-        self.assertIsInstance(continuity.get("retired_or_superseded_context"), list)
-        self.assertIsInstance(result["memory_candidates"], list)
 
     def test_real_runtime_channel_turn_replies_through_pal_core(self) -> None:
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_e2e_"))

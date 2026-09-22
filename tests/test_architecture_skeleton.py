@@ -79,7 +79,6 @@ from pal.memory import (
     L3RecallView,
     L3ProviderSelector,
     MemoryCommitRequest,
-    MemoryCompactRequest,
     MemoryPack,
     MemoryPackRequest,
     MemoryQuery,
@@ -4714,69 +4713,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("if the user says not to run tests, do not run them", priority.content)
         self.assertIn("report that tests were not run", priority.content)
 
-    def test_memory_service_compact_commits_validated_summary_entry_atomically(self) -> None:
-        service = MemoryService()
-        service.l1_store.append(
-            [
-                L1TranscriptMessage(role="user", content="Please remember that the user prefers concise replies."),
-                L1TranscriptMessage(role="assistant", content="I will keep replies concise."),
-            ]
-        )
-
-        snapshot = CompactionSnapshot.capture(
-            service,
-            target_input_budget=512,
-            reserved_output_tokens=128,
-            clock_kind=CompactionClockKind.USER_TURN,
-            clock_value=1,
-        )
-        entry = PalCompactionPolicy().validate_checkpoint(
-            json.dumps(
-                {
-                    "schema": "pal.compaction.pal.v2",
-                    "kind": "pal",
-                    "continuity": {
-                        "current_focus": "concise replies",
-                        "primary_request_and_intent": "preserve the user's preference",
-                        "active_operating_instructions": [],
-                        "active_requests": [],
-                        "temporary_task_state": [],
-                        "key_decisions": [],
-                        "pending_questions": [],
-                        "recent_raw_turns": [],
-                        "warm_compressed_turns": [],
-                        "retired_or_superseded_context": [],
-                        "optional_next_step": "",
-                    },
-                    "summary": {
-                        "summary": "The user prefers concise replies.",
-                        "search_text": "concise replies",
-                    },
-                    "memory_candidates": [],
-                }
-            ),
-            snapshot,
-        )
-        result = service.compact(
-            MemoryCompactRequest(
-                target_input_budget=512,
-                reserved_output_tokens=128,
-                summary_entry=entry,
-            )
-        )
-        self.assertEqual(result.summary, "The user prefers concise replies.")
-        self.assertEqual(len(service.l1_store.items), 1)
-        self.assertEqual(len(service.l1_store.items[0]), 1)
-        summary_message = service.l1_store.items[0][0]
-        self.assertEqual(summary_message.role, "assistant")
-        self.assertEqual(summary_message.kind, L1MessageKind.RUNTIME_CONTEXT_SUMMARY)
-        self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', summary_message.content)
-        self.assertIn("The user prefers concise replies.", summary_message.content)
-        self.assertNotIn("memory_summary_current", service.l2_store.items)
-        summary = service.build_pack(MemoryPackRequest()).current_summary
-        self.assertIsNotNone(summary)
-        self.assertEqual(summary.kind, "summary")
-        self.assertIn("The user prefers concise replies.", summary.rendered)
 
     def test_tool_stagnation_guard_detects_repeat_and_oscillation(self) -> None:
         guard = ToolStagnationGuardProcess(repeat_threshold=3, oscillation_window=4)

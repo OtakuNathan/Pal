@@ -27,7 +27,6 @@ from pal.memory.contracts import (
     L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
-    MemoryCompactRequest,
     MemoryCompactResult,
 )
 from pal.shared import LLMFinishReason, LLMPreflightStatus
@@ -79,85 +78,12 @@ class CompactionSnapshot:
     replay_dialect: str = ""
     replay_wire_shape: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-    # Full-source mode (P2): owner-issued stamp/epoch over the captured turns.
-    # Empty source_stamp keeps the legacy settled-only semantics.
+    # v3 two-segment capture: the LEFT stamp issued by the history owner at
+    # begin_left_compaction.  A non-empty stamp selects the stamped-snapshot
+    # engine rules (S03/S04 oversize separation, no silent shrink).
     source_stamp: str = ""
     source_epoch: int = 0
     active_turn_ids: tuple[str, ...] = ()
-
-    @classmethod
-    def capture(
-        cls,
-        memory_service: Any,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        clock_kind: CompactionClockKind,
-        clock_value: int,
-        metadata: dict[str, Any] | None = None,
-        replay_request: LLMRequestIR | None = None,
-        replay_dialect: str = "",
-        replay_wire_shape: str = "",
-        include_active: bool = True,
-        source_epoch: int = 0,
-    ) -> "CompactionSnapshot":
-        l1_store = getattr(memory_service, "l1_store", None)
-        source_stamp = ""
-        active_turn_ids: tuple[str, ...] = ()
-        if include_active:
-            # Full-source capture: every turn (settled and active) from the
-            # same ordered revision set; the stamp is issued by the L1 owner's
-            # own digest so install verification cannot be spoofed (S01).
-            from pal.memory.turn_ir import source_stamp_for_turns
-
-            turns = list(
-                getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
-            )
-            source_stamp = source_stamp_for_turns(turns)
-            active_turn_ids = tuple(
-                turn.turn_id
-                for turn in turns
-                if str(getattr(turn.state, "value", turn.state)) == "active"
-            )
-            memory_items = tuple(
-                tuple(_copy_l1_message(item) for item in transcript)
-                for transcript in list(getattr(l1_store, "items", ()) or ())
-            )
-        else:
-            raw_items = list(getattr(l1_store, "items", ()) or ())
-            turns = list(
-                getattr(getattr(l1_store, "turns", None), "turns", ()) or ()
-            )
-            if len(turns) == len(raw_items):
-                raw_items = [
-                    transcript
-                    for turn, transcript in zip(turns, raw_items)
-                    if str(
-                        getattr(
-                            getattr(turn, "state", ""),
-                            "value",
-                            getattr(turn, "state", ""),
-                        )
-                    ) != "active"
-                ]
-            memory_items = tuple(
-                tuple(_copy_l1_message(item) for item in list(transcript or ()))
-                for transcript in raw_items
-            )
-        return cls(
-            target_input_budget=max(0, int(target_input_budget or 0)),
-            reserved_output_tokens=max(0, int(reserved_output_tokens or 0)),
-            clock_kind=clock_kind,
-            clock_value=max(0, int(clock_value or 0)),
-            memory_items=memory_items,
-            replay_request=replay_request,
-            replay_dialect=str(replay_dialect or "").strip(),
-            replay_wire_shape=str(replay_wire_shape or "").strip(),
-            metadata=deepcopy(metadata or {}),
-            source_stamp=source_stamp,
-            source_epoch=max(0, int(source_epoch or 0)),
-            active_turn_ids=active_turn_ids,
-        )
 
     @classmethod
     def capture_left(
@@ -862,59 +788,14 @@ class CompactionEngine:
                     "replayed": bool(getattr(outcome, "replayed", False)),
                 },
             )
-        request = MemoryCompactRequest(
-            target_input_budget=snapshot.target_input_budget,
-            reserved_output_tokens=snapshot.reserved_output_tokens,
-            summary_entry=summary_entry,
-            metadata={
-                "compaction_policy": self.policy.policy_id,
-                "compaction_clock_kind": snapshot.clock_kind.value,
-                "compaction_clock_value": snapshot.clock_value,
-            },
-            op_id=(
-                str(snapshot.metadata.get("compaction_op_id") or "").strip()
-                or uuid4().hex
-            ),
-            source_stamp=snapshot.source_stamp,
-            active_turn_id=(
-                snapshot.active_turn_ids[0] if snapshot.active_turn_ids else ""
-            ),
-            expected_epoch=snapshot.source_epoch,
+        # capture_left is the only producer of snapshots; a missing
+        # two-segment run id means a hand-built snapshot, which has no
+        # supported install path (v2 whole-source was physically removed).
+        raise RuntimeError(
+            "compaction snapshot carries no two_segment_run_id; "
+            "whole-source install was removed with v2"
         )
-        try:
-            if after_commit is not None:
-                method = getattr(
-                    memory_service,
-                    "acompact_transactionally",
-                    None,
-                )
-                if callable(method):
-                    value = method(request, after_commit=after_commit)
-                    return await value if inspect.isawaitable(value) else value
-                method = getattr(
-                    memory_service,
-                    "compact_transactionally",
-                    None,
-                )
-                if not callable(method):
-                    raise RuntimeError(
-                        "memory service does not support transactional compaction"
-                    )
-                return await asyncio.to_thread(
-                    method,
-                    request,
-                    after_commit=after_commit,
-                )
-            method = getattr(memory_service, "acompact", None)
-            if callable(method):
-                value = method(request)
-                return await value if inspect.isawaitable(value) else value
-            method = getattr(memory_service, "compact", None)
-            if not callable(method):
-                raise RuntimeError("memory service does not expose compact")
-            return await asyncio.to_thread(method, request)
-        except Exception as exc:
-            return exc
+
 
     @staticmethod
     def _result(

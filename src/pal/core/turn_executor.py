@@ -2364,7 +2364,7 @@ class TurnExecutor:
             required projection rebase still fires.
             """
 
-            from pal.memory.service import MemoryCompactResult
+            from pal.memory.contracts import MemoryCompactResult
 
             record = committed_run_record()
             seed_text = ""
