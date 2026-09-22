@@ -13,7 +13,7 @@ from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
 
-MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "2"
+MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "3"
 
 _RECEIPT_FIELDS = (
     "op_id", "status", "epoch_before", "epoch_after", "summary_source_id",
@@ -85,6 +85,9 @@ class _PreparedMemoryState:
     heat: dict[str, HeatState]
     context_epoch: int = 0
     compaction_receipts: dict[str, CompactionReceipt] = field(default_factory=dict)
+    # H02: (incarnation, cut, left_generation) — None means the payload
+    # predates two-segment authority (explicit migration: fresh root).
+    history_root: tuple[str, Any, int] | None = None
 
 
 @dataclass
@@ -125,6 +128,15 @@ class MemoryRuntimeStatePort:
                     self.service, "compaction_receipts", {}
                 ).values()
             },
+            # H02: the two-segment authority travels with the turns — without
+            # it a restored process would see every turn uncut and lose the
+            # incarnation/left-generation chain the projections rebase on.
+            # None only when this service never attached a root at all.
+            "history_root": (
+                self.service.history_root.owner_state()
+                if getattr(self.service, "_history_root", None) is not None
+                else None
+            ),
         }
 
     def prepare_restore_state(self, payload: Mapping[str, Any]) -> _PreparedMemoryState:
@@ -136,6 +148,7 @@ class MemoryRuntimeStatePort:
             "l2_heat",
             "context_epoch",
             "compaction_receipts",
+            "history_root",
         }
         if extras := sorted(set(value) - allowed_fields):
             raise ValueError(
@@ -225,6 +238,9 @@ class MemoryRuntimeStatePort:
             heat=heat,
             context_epoch=context_epoch,
             compaction_receipts=receipts,
+            history_root=_prepared_history_root(
+                value.get("history_root"), turns,
+            ),
         )
 
     def install_prepared_state(self, prepared: _PreparedMemoryState) -> None:
@@ -236,10 +252,119 @@ class MemoryRuntimeStatePort:
         self.service.l2_store.heat_registry = prepared.heat
         self.service.context_epoch = int(prepared.context_epoch)
         self.service.compaction_receipts = dict(prepared.compaction_receipts)
+        if prepared.history_root is not None:
+            from pal.memory.history_root import CutPosition
+
+            incarnation, cut, left_generation = prepared.history_root
+            # The store object was swapped above, so this access heals a
+            # fresh root over the restored turns first; the persisted owner
+            # state is then reinstated on top of it (H02).
+            root = self.service.history_root
+            root.restore_owner_state(
+                incarnation=incarnation,
+                cut=CutPosition(**cut),
+                left_generation=left_generation,
+            )
+        else:
+            # Explicit migration (v2-era payload / root never attached):
+            # the authority stays lazy and fresh — no cut is invented.
+            self.service._history_root = None
 
     def reset_state(self, reason: str) -> None:
         _ = reason
         self.service.soft_reset()
+
+
+def _prepared_history_root(
+    raw: Any, turns: L1TurnStore,
+) -> tuple[str, dict[str, int | str], int] | None:
+    """Validate the persisted owner state against the prepared turns (H02).
+
+    ``None`` (explicit migration) is returned only for payloads that
+    predate two-segment authority or services that never attached a root;
+    anything present must be complete and must fit the restored history,
+    so a corrupted snapshot fails closed here — before any install.
+    """
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("memory runtime snapshot history_root is invalid")
+    value = dict(raw)
+    allowed = {"incarnation", "left_generation", "cut", "abandoned_run"}
+    if extras := sorted(set(value) - allowed):
+        raise ValueError(
+            f"memory runtime snapshot history_root has unknown fields: {extras}"
+        )
+    incarnation = str(value.get("incarnation") or "").strip()
+    if not incarnation:
+        raise ValueError("memory runtime snapshot history_root has no incarnation")
+    raw_generation = value.get("left_generation")
+    if (
+        isinstance(raw_generation, bool)
+        or not isinstance(raw_generation, int)
+        or raw_generation < 0
+    ):
+        raise ValueError(
+            "memory runtime snapshot history_root left_generation is invalid"
+        )
+    raw_cut = value.get("cut")
+    if not isinstance(raw_cut, Mapping):
+        raise ValueError("memory runtime snapshot history_root has no cut")
+    cut = dict(raw_cut)
+    cut_allowed = {"turn_count", "intra_messages", "revision", "cut_id"}
+    if extras := sorted(set(cut) - cut_allowed):
+        raise ValueError(
+            f"memory runtime snapshot history_root cut has unknown fields: {extras}"
+        )
+    counters: dict[str, int] = {}
+    for key in ("turn_count", "intra_messages", "revision"):
+        item = cut.get(key)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError(
+                f"memory runtime snapshot history_root cut {key} is invalid"
+            )
+        counters[key] = item
+    cut_id = str(cut.get("cut_id") or "").strip()
+    if not cut_id:
+        raise ValueError("memory runtime snapshot history_root cut has no cut_id")
+    # The abandoned_run record is diagnostics only (a live run at save time
+    # is abandoned; the restored process starts with a free lane).  Accept
+    # None or an object with a run_id; reject anything else structurally.
+    abandoned = value.get("abandoned_run")
+    if abandoned is not None and (
+        not isinstance(abandoned, Mapping)
+        or not str(abandoned.get("run_id") or "").strip()
+    ):
+        raise ValueError(
+            "memory runtime snapshot history_root abandoned_run is invalid"
+        )
+    turn_total = len(turns.turns)
+    if counters["turn_count"] > turn_total:
+        raise ValueError(
+            "memory runtime snapshot history_root cut exceeds the restored turns"
+        )
+    if counters["intra_messages"]:
+        if counters["turn_count"] >= turn_total:
+            raise ValueError(
+                "memory runtime snapshot history_root intra cut has no boundary turn"
+            )
+        boundary = turns.turns[counters["turn_count"]]
+        if counters["intra_messages"] > len(boundary.messages):
+            raise ValueError(
+                "memory runtime snapshot history_root intra cut splits "
+                "messages that never existed"
+            )
+    return (
+        incarnation,
+        {
+            "turn_count": counters["turn_count"],
+            "intra_messages": counters["intra_messages"],
+            "revision": counters["revision"],
+            "cut_id": cut_id,
+        },
+        raw_generation,
+    )
 
 
 def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:

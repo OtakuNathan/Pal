@@ -347,6 +347,110 @@ class HistoryRoot:
         )
 
     # ------------------------------------------------------------------
+    # H02 — graceful-stop owner state (persist/restore)
+    # ------------------------------------------------------------------
+
+    def owner_state(self) -> dict[str, Any]:
+        """Persistable owner state for a graceful shutdown snapshot (H02).
+
+        The store's turns are snapshotted separately by the memory runtime
+        state port; this carries only the authority facts (incarnation, cut,
+        left replacement generation) plus a diagnostic record of a compact
+        run that was still live at save time — such a run is abandoned, and
+        a restored process never resumes or re-runs it.
+        """
+
+        active = self.active_run
+        return {
+            "incarnation": self._incarnation,
+            "left_generation": int(self._left_generation),
+            "cut": {
+                "turn_count": int(self._cut.turn_count),
+                "intra_messages": int(self._cut.intra_messages),
+                "revision": int(self._cut.revision),
+                "cut_id": str(self._cut.cut_id),
+            },
+            "abandoned_run": (
+                {"run_id": active.run_id, "phase": active.phase.value}
+                if active is not None
+                else None
+            ),
+        }
+
+    def restore_owner_state(
+        self,
+        *,
+        incarnation: str,
+        cut: CutPosition,
+        left_generation: int,
+    ) -> None:
+        """Reinstate persisted owner state over the already-restored store.
+
+        The wrapped store must already hold the persisted turns; the cut is
+        validated against them so a corrupted snapshot fails closed (only a
+        complete old or new root is ever visible — never a half-installed
+        one).  Run bookkeeping is never restored: a run that was live at
+        save time was abandoned, and this process starts with a free lane.
+        """
+
+        if self.active_run is not None:
+            raise HistoryRootError(
+                "cannot restore owner state while a compact run is live",
+                incarnation=self._incarnation,
+            )
+        identity = str(incarnation or "").strip()
+        cut_identity = str(getattr(cut, "cut_id", "") or "").strip()
+        if not identity or not cut_identity:
+            raise HistoryRootError(
+                "restored owner state is missing identity fields",
+                incarnation=identity,
+                cut_id=cut_identity,
+            )
+        turn_count = int(getattr(cut, "turn_count", -1))
+        intra_messages = int(getattr(cut, "intra_messages", -1))
+        revision = int(getattr(cut, "revision", -1))
+        generation = int(left_generation)
+        if min(turn_count, intra_messages, revision, generation) < 0:
+            raise HistoryRootError(
+                "restored owner state has negative counters",
+                turn_count=turn_count,
+                intra_messages=intra_messages,
+                revision=revision,
+                left_generation=generation,
+            )
+        turns = self._ordered_turns()
+        total = len(turns)
+        if turn_count > total:
+            raise HistoryRootError(
+                "restored cut exceeds the restored history",
+                turn_count=turn_count,
+                turn_total=total,
+            )
+        if intra_messages:
+            if turn_count >= total:
+                raise HistoryRootError(
+                    "restored intra cut has no boundary turn",
+                    turn_count=turn_count,
+                    turn_total=total,
+                )
+            boundary_messages = len(turns[turn_count].messages)
+            if intra_messages > boundary_messages:
+                raise HistoryRootError(
+                    "restored intra cut splits messages that never existed",
+                    intra_messages=intra_messages,
+                    boundary_messages=boundary_messages,
+                )
+        self._incarnation = identity
+        self._cut = CutPosition(
+            turn_count=turn_count,
+            intra_messages=intra_messages,
+            revision=revision,
+            cut_id=cut_identity,
+        )
+        self._left_generation = generation
+
+
+    # ------------------------------------------------------------------
     # R production — owner-only writes (§3.2)
     # ------------------------------------------------------------------
 

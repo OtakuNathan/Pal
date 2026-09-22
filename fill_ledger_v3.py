@@ -72,13 +72,16 @@ MAP = {
             "one absolute cutoff spans preflight/generation; run ends with attempts unconsumed (no per-attempt clock reset)"),
     "B08": ("tests/test_v3_b_family_runtime.py::BFamilyRuntimeFactsTests::test_B08_compaction_does_not_reset_work_budget_or_permissions",
             "mid-turn compaction keeps counters, finalization_only downgrade, and revoked tool permissions; no new task from the new L"),
+    "H02": ("tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H02_app_level_old_root_survives_graceful_restart",
+            "app-level SIGTERM checkpoint carries the two-segment owner state; restored process sees the complete old/new root (cut+incarnation+left-generation), replay envelopes survive, live compact run abandoned, old turns interrupted not re-run; corrupt owner state fails closed"),
+    "H03": ("tests/test_v3_h02_graceful_recovery.py::H02GracefulRecoveryTests::test_H03_failed_publish_keeps_previous_checkpoint_readable",
+            "failed shutdown write raises honestly; previous complete checkpoint stays readable, no temp residue"),
 }
 
 NOT_RUN_NOTES = {
     "A02": "OBSOLETE: the mode switch (and its builder-mode contract test) was physically removed with v2 (1e8b42d); two_segment is the only mode — no node can honestly exist",
     "P04": "explicit node not authored; native one-representation pinned by inherited projection suites, two-segment rebase covered by P05",
     "W02": "marker attribution is engine/cache-layer; session test asserts content-only left; NOT honestly claimable",
-    "H02": "DEFERRED (separate round, Nathan-approved backlog): graceful SIGTERM root-snapshot persistence + new-process recovery — owner-side deadline/terminal machinery exists (X08, close_run terminal); the persistence+reload increment is scheduled on its own",
     "H04": "OBSOLETE: v2 never shipped — no old-schema L1 store exists anywhere in production, so the explicit old-schema migration gate has no honest input to migrate; revisit only when a schema break happens in a DEPLOYED build",
     "H06": "OBSOLETE: staging auto-wire is off in two_segment and no legacy staging files can exist (v2 never deployed); the migration-gate UX has no live population",
 }
