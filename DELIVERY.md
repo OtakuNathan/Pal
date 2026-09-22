@@ -46,6 +46,8 @@
 | 本 commit | H02账本 | acceptance_status 48/72 PASS（fill_ledger 逐 node 实跑 @ 3a7bbe9）；§4.4 同步；分支首次 push（refactor/two-segment-session-v3，不合 main） |
 | `faee0dd` | C 收口 | review pal_v3_review_c9cb2d2 三项修复（C1 完整冷源 / C2 TEXT-ONLY 交接验收 / C3 恢复·重绑后一次 projection bootstrap）+ `tests/test_v3_c9cb2d2_review_fixes.py` 11 节点（详见 §10） |
 | 本 commit | C 证据 | DELIVERY §10 + 全量回归日志 `logs_full_regression_c9cb2d2_review_fixes.txt`（22 failed 与已知族长跑集逐项相同） |
+| `af400d9` | B1 收口 | review pal_v3_review_4b14ce4 B1：bootstrap coverage 覆盖整个已物化 L 视图（seed_coverage_ids 由同一次 encode 建立；恢复/重绑不再把已 promote 普通历史重编码进 tail）+ `tests/test_v3_4b14ce4_review_fixes.py` B02/B04/B05/B06 四节点 + C02 加固（详见 §11） |
+| 本 commit | B1 证据 | DELIVERY §11 + 全量回归日志 `logs_full_regression_4b14ce4_review_fixes.txt`（22 failed 与前次长跑集逐项相同；3098 passed + 533 subtests） |
 
 ## 3. 设计要点
 
@@ -193,4 +195,33 @@ reviewer 结论三项（Request changes，C1 P1 / C2 P2 / C3 P2）逐条闭环�
 - 受影响链复跑（修复树）：v3 链 14 文件 **107 passed + 12 subtests**；compaction 族 7 文件 **60 passed**；projection 族 13 文件 **133 passed + 74 subtests**；合计 **300 passed + 86 subtests**，全绿。
 - 全量回归（`faee0dd` 树，1371.83s）：**3094 passed + 498 subtests + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——与空闲重跑基线（`logs_full_regression_idle_rerun.txt`）的 FAILED 集和 SUBFAILED 集逐项 diff 为空；无新增失败，全部为已知长跑时序/顺序敏感族（bootstrap-telegram / bunshin_sandbox / bunshin_v2_public / browser_cli / control_plane / bunshin_submission_errors / bunshin_v2_contract_protocol / bunshin_v2_verification）。passed 3094 vs 基线 3071 的增量对应间段新增节点（H02/H03、B 族与本节 11 节点）。不宣称全量全绿。
 - 未运行 / 不主张：N27 真实 provider E2E（opt-in `PAL_V3_E2E` 门控，未设 → SKIP，不冒充已跑）；iqoo/slot.py 补丁（未获得确切 repo/branch/SHA，reviewer 与本轮均未 review）；TLA 未新增模型动作（本轮为源/验收/恢复复用修复，`on_left_replaced` 既有动作语义未变），未以旧日志替代新路径证据；SIGKILL/逐 compact 持久化/预热/durable inbox 均未引入（保持用户范围）。
+
+## 11. 4b14ce4 复审收口（2026-09-22，review pal_v3_review_4b14ce4，B1）
+
+固定输入：`refactor/two-segment-session-v3@4b14ce4542afd49c29871c207f03c15cbe2d7331`（reviewer 包 MANIFEST 固定），产品尾部 `faee0dd`。修复树 `af400d9`（实现 + 测试），证据随本提交。全程 `PYTHONPATH="$PWD/src:$PWD"` 且 `pal.__file__` 指向本 worktree。未 push、未合 main、未部署、无真实 provider 调用（B05 全 shape 走 prepare-only，零网络）。
+
+reviewer 结论：C1/C2 关闭本轮发现；C3 判 PARTIAL，剩一个阻塞 B1（P1）。B1 已收口：
+
+- **B1 症状（复现）**：`_install_left_replacement` 在 fresh/rebind bootstrap 时把**整个当前 L 模型视图**编码进 prefix，但该入口当年只为「刚 compact 完、L 只有摘要 seed」设计——coverage 只登记 standalone continuity 一个 id。恢复/重绑时 chunks 为空，于是 L 里已 promote 的普通 Q/A 不在 coverage 里，被 normal tail 再编码一次：summary 一份，普通历史两份。reviewer 草案 T01/T02 在 4b14ce4 树实跑 3 红（Q1/A1、POST_COMPACT_USER/ANSWER 各出现 2 次）。
+- **修复（af400d9）**：物化与覆盖**同一次 encode 建立**——
+  - `LeftReplacement.seed_reference_ids` → `seed_coverage_ids`：seed encode 实际接收的**每一条**模型视图消息的 id（post-compact rebase 仍等于 standalone 单条；恢复/重绑 bootstrap 是整个 L 视图）。仍是派生 coverage，不伪造 provider round chunk、不新增权威存储。
+  - `EndpointProjectionSession._l_reference_ids` → `_l_coverage_ids`：`on_left_replaced` 整体置换、`bind`/`retire` 清空、`covered_message_ids()` 读取语义不变。
+  - `TurnExecutor._left_view_seed` 从它交给 encode 的模型视图计算覆盖集（standalone 替换坐标保留，canonical id 不靠字符串去重进入覆盖）；三个无 seed 的 fallback 分支如实声明它们实际编码的 id。
+  - 已 materialized 的 stale 投影继续严格拒用（C3 负例未动）；`_left_revision` 不靠改 counter 放行。
+- **不变量核对**：B-I1 物化与声明同源（同一 encode）；B-I2 正常请求 L/R 各一次、顺序=当前合法模型视图（B04/B05/B06 计数断言）；B-I3 恢复/重绑只重建派生表示（零新增 provider 调用，B02/B06 发送数==轮数+compact）；B-I4 fresh 可初始化、materialized stale 仍拒、无 counter 放行（C03 两测 + B06 退休断言）。
+
+证据与命令（工作区 `~/Documents/coding/Pal-two-segment-v3`，修复树 `af400d9`）：
+
+- reviewer 草案 `test_review_4b14ce4.py`（reviewer 未运行）：4b14ce4 树 **6 failed / 8 passed**（T01 请求 2/3 各 2 次、T02 两请求 POST_COMPACT 各 2 次）→ 修复树 **8 passed + 12 subtests**（exit 0）。
+- 红基线（本仓库节点，终版测试集）：把两个源文件临时 `git checkout HEAD~1 --` 回 4b14ce4 态后，`tests/test_v3_4b14ce4_review_fixes.py` 与加固后的 C02 共 **17 failed**（B02 4 subfail / B04 4 / B05 3 shape / B06 4 / C02 2），同时 15 passed + 18 subtests；`git checkout HEAD --` 恢复后 **15 passed + 35 subtests 全绿**，工作树核对无损。
+- 新增 `tests/test_v3_4b14ce4_review_fixes.py`（矩阵 B02/B04/B05/B06，4 节点）：
+  - B02：真实 app checkpoint 保存/恢复（compact 后又完成并 promote 普通问答）+ app 自有 executor 真实 PromptCompiler 两轮；summary / POST_COMPACT Q/A / 恢复后首问在两次 payload 各恰一次；projection 接入（left_revision=1、chunks=2）。
+  - B04：seed + 两组已 promote 普通历史，第二组与当前 R 同属 logical turn T；恢复后一轮 payload 六个 sentinel 各一次；cut 合法（promote 后 L=[seed,q1,A1,q2,A2]、R=空，恢复后 L 逐 id 相同）。
+  - B05：L 含完整聚合 tool call + result（`append_l1_tool_result`），R 含新工作；**三种受支持 shape** 逐一走真实 `_prepare_turn_projection`（真实 LLMRuntime plan/codec、真实 bootstrap），**只 prepare 不发送**：result sentinel 恰一次、call id 恰两次（声明+结果链接）、顺序 call<result、各 shape 用各自 codec（tool_calls/tool_call_id、function_call、tool_use/tool_result）；tail 恰为当前 R 一条。不声称工具会/不会重执行——本节点根本没有任何发送。
+  - B06：bootstrap → 普通运行 → 第二次真实 compact（真引擎）：bootstrap 轮六 sentinel 各一次；二次 compact 后旧 L coverage 随旧 L 退休（covered 集合不再含 b06-q1/q2/q3），新摘要与 compact 后的新 R 各一次、被退休内容 0 次；发送数==3（两轮+compact），零预热。
+- B01 = 加固后的 `test_C02`（同轮 c9cb2d2 文件）：第二、三次 payload 中 "REBIND SEED SUMMARY"/"First round."/"REBOUND_1" 各恰一次。
+- B03 = 既有对照未弱化：C01b（seed-only app 正例）、C03 两节点（gen0 正例不退化 + bootstrap 恰一次 + materialized stale 仍拒）继续全绿。
+- 受影响链复跑：v3 链 15 文件 **111 passed + 47 subtests**；compaction 族 7 文件 **60 passed**；projection 族 13 文件 **133 passed + 74 subtests**；全绿。
+- 全量回归（`af400d9` 树，1377.37s）：**3098 passed + 533 subtests + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——FAILED 集与 SUBFAILED 集与 `logs_full_regression_idle_rerun.txt`（已知长跑族）逐项 diff 为空，无新增失败；passed 增量 3098-3094=4 为本轮 4 个新节点，subtests 增量 533-498=35 为 4 节点 33 sub + C02 加固 2 sub。不宣称全量全绿。
+- 未运行 / 不主张：N27 真实 provider E2E（opt-in `PAL_V3_E2E` 门控未设 → SKIP）；iqoo/slot.py 补丁（仍未获得确切 repo/branch/SHA，未 review）；TLA 未新增模型动作（物化/coverage 表示不变量，未引入新 ownership 状态转移；`on_left_replaced` 既有动作语义未变），不以旧日志替代新路径证据；SIGKILL/逐 compact 持久化/缓存预热/durable inbox 未引入。
 
