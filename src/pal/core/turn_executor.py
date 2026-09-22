@@ -2602,6 +2602,26 @@ class TurnExecutor:
         root_generation = int(root_generation or 0)
         session_generation = int(getattr(session, "history_left_revision", 0) or 0)
         if root_generation != session_generation:
+            # C3 (review c9cb2d2): a fresh or rebound lineage owns no frozen or
+            # pending wire bytes and cannot be replaying retired history — it
+            # is simply not materialized yet.  The restored/rebound process
+            # gives it ONE cold rebuild from the CURRENT canonical L model
+            # view plus the current R through the same owner interface the
+            # post-commit rebase uses; content and coverage are established
+            # together, and only then does the consumed generation record the
+            # rebuilt view.  A lineage that already holds wire content keeps
+            # the strict stale refusal (explicit rebase required) — no
+            # counter-only permission for a retired prefix.
+            materialized = getattr(session, "has_materialized_content", None)
+            if callable(materialized) and not materialized():
+                self._bootstrap_projection_from_current_left(
+                    scope_id, root,
+                    memory_service=memory_service, session=session,
+                )
+                session_generation = int(
+                    getattr(session, "history_left_revision", 0) or 0
+                )
+        if root_generation != session_generation:
             diagnostics = getattr(self.state, "diagnostics", None)
             if diagnostics is not None:
                 diagnostics.append({
@@ -2911,55 +2931,8 @@ class TurnExecutor:
                 session = provider(scope_id, rebind=False)
             except TypeError:
                 session = provider(scope_id)
-            rebase = getattr(session, "on_left_replaced", None)
-            if not callable(rebase):
-                return
-            import hashlib as _hashlib
-
-            from pal.llm.projection_contracts import HistoryCursor
-            from pal.llm.projection_session import LeftReplacement
-
-            seed_messages: tuple = tuple(root.left_messages())
-            seed_reference_ids: tuple[str, ...] = ()
-            if memory_service is not None:
-                seed_messages, seed_reference_ids = self._left_view_seed(
-                    memory_service, root
-                )
-            # F4 (review): the keeper is the session's ACTUAL frozen right
-            # side — unfrozen right messages stay in the open tail and must
-            # not claim chunk survival; a session with no committed chunks
-            # keeps nothing.  The cursor epoch comes from the history
-            # authority's own left revision, never a hardcoded constant.
-            frozen_reader = getattr(session, "frozen_message_ids", None)
-            frozen_ids = (
-                set(frozen_reader()) if callable(frozen_reader) else set()
-            )
-            kept = tuple(
-                message
-                for message in root.right_messages()
-                if message.message_id in frozen_ids
-            )
-            left_revision = getattr(root, "left_generation", None)
-            if left_revision is None:
-                left_revision = getattr(root, "left_revision", 0)
-            left_revision = int(left_revision or 0)
-            digest = _hashlib.sha256(
-                "".join(
-                    m.message_id for m in (*seed_messages, *kept)
-                ).encode("utf-8")
-            ).hexdigest()
-            rebase(
-                LeftReplacement(
-                    seed_messages=seed_messages,
-                    kept_frozen_messages=kept,
-                    cursor_after=HistoryCursor(
-                        history_epoch=left_revision,
-                        block_sequence=1,
-                        prefix_digest=digest or "0" * 64,
-                    ),
-                    left_revision=left_revision,
-                    seed_reference_ids=seed_reference_ids,
-                )
+            self._install_left_replacement(
+                session, memory_service=memory_service, root=root
             )
         except Exception as exc:
             diagnostics = getattr(self.state, "diagnostics", None)
@@ -2969,6 +2942,100 @@ class TurnExecutor:
                     "scope": str(scope_id),
                     "error": f"{type(exc).__name__}: {exc}",
                 })
+
+    def _bootstrap_projection_from_current_left(
+        self, scope_id: str, root: Any, *,
+        memory_service: Any = None,
+        session: Any,
+    ) -> None:
+        """C3 (review c9cb2d2): one cold rebuild for an unmaterialized lineage.
+
+        A fresh or rebound projection that never consumed a left generation
+        is initialized from the CURRENT canonical L model view + current R
+        with the endpoint plan/profile its binding already carries.  Same
+        seed/reference/coverage rules as the post-commit rebase — this is
+        that same entry, not a third recovery path.  Never called on a
+        materialized lineage and never a per-round fallback: after this one
+        rebuild the consumed generation matches the root and ordinary
+        prepares resume; a later mismatch without an explicit rebase stays
+        refused.
+        """
+
+        try:
+            self._install_left_replacement(
+                session, memory_service=memory_service, root=root
+            )
+        except Exception as exc:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_projection_bootstrap_failed",
+                    "scope": str(scope_id),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+    def _install_left_replacement(
+        self, session: Any, *, memory_service: Any, root: Any
+    ) -> None:
+        """One left replacement install, shared by rebase and bootstrap (C3).
+
+        Builds the SAME facts for both callers: the model-view seed (with
+        its L-owned reference ids), the surviving frozen right side the
+        session actually holds, and the post-install cursor base at the
+        authority's own left generation.  The native/coverage rules live in
+        ``on_left_replaced`` itself.
+        """
+
+        rebase = getattr(session, "on_left_replaced", None)
+        if not callable(rebase):
+            return
+        import hashlib as _hashlib
+
+        from pal.llm.projection_contracts import HistoryCursor
+        from pal.llm.projection_session import LeftReplacement
+
+        seed_messages: tuple = tuple(root.left_messages())
+        seed_reference_ids: tuple[str, ...] = ()
+        if memory_service is not None:
+            seed_messages, seed_reference_ids = self._left_view_seed(
+                memory_service, root
+            )
+        # F4 (review): the keeper is the session's ACTUAL frozen right
+        # side — unfrozen right messages stay in the open tail and must
+        # not claim chunk survival; a session with no committed chunks
+        # keeps nothing.  The cursor epoch comes from the history
+        # authority's own left revision, never a hardcoded constant.
+        frozen_reader = getattr(session, "frozen_message_ids", None)
+        frozen_ids = (
+            set(frozen_reader()) if callable(frozen_reader) else set()
+        )
+        kept = tuple(
+            message
+            for message in root.right_messages()
+            if message.message_id in frozen_ids
+        )
+        left_revision = getattr(root, "left_generation", None)
+        if left_revision is None:
+            left_revision = getattr(root, "left_revision", 0)
+        left_revision = int(left_revision or 0)
+        digest = _hashlib.sha256(
+            "".join(
+                m.message_id for m in (*seed_messages, *kept)
+            ).encode("utf-8")
+        ).hexdigest()
+        rebase(
+            LeftReplacement(
+                seed_messages=seed_messages,
+                kept_frozen_messages=kept,
+                cursor_after=HistoryCursor(
+                    history_epoch=left_revision,
+                    block_sequence=1,
+                    prefix_digest=digest or "0" * 64,
+                ),
+                left_revision=left_revision,
+                seed_reference_ids=seed_reference_ids,
+            )
+        )
 
     def _left_view_seed(
         self, memory_service: Any, root: Any

@@ -902,6 +902,26 @@ class EndpointProjectionSession:
 
         return self._left_revision
 
+    def has_materialized_content(self) -> bool:
+        """Whether this lineage holds any frozen or pending wire bytes (read).
+
+        C3 (review c9cb2d2): the turn projection distinguishes a fresh or
+        rebound lineage — which owns no wire content and therefore cannot be
+        replaying retired history — from a materialized one whose frozen
+        prefix may be behind the current left generation.  Only the former
+        may cold-build from the current canonical L/R once; a materialized
+        lineage keeps the strict stale refusal until an explicit rebase.
+        Session-visible state only.
+        """
+
+        return bool(
+            self.chunks
+            or self._prefix_items
+            or self._pending_wire_tail
+            or self._committed_head_system
+            or self._l_reference_ids
+        )
+
     # -- preparation ---------------------------------------------------------
 
     _PREAMBLE_ROLES = frozenset({"system", "developer"})

@@ -30,6 +30,7 @@ from pal.memory.contracts import (
     MemoryCompactResult,
 )
 from pal.shared import LLMFinishReason, LLMPreflightStatus
+from pal.shared.tool_protocol import ToolCallIR
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -452,6 +453,18 @@ class CompactionEngine:
             if finish_reason == LLMFinishReason.ERROR:
                 log_failure("endpoint:error")
                 continue
+            # C2 (review c9cb2d2): this is the single generation-result
+            # acceptance point, and a final handoff is TEXT ONLY.  A
+            # TOOL_CALLS finish, or tool-call parts riding next to an
+            # otherwise valid JSON text component, is an outstanding
+            # exchange — never a completed checkpoint.  It is rejected
+            # before any parse and before the schema validator, spends the
+            # ordinary attempt and absolute-time budget, and the unfinished
+            # call is never moved into repair history (no repair_output is
+            # set).
+            if finish_reason == LLMFinishReason.TOOL_CALLS or _handoff_tool_calls(outcome):
+                log_failure("output:tool_call_handoff")
+                continue
 
             raw_text = str(getattr(outcome, "text", "") or "").strip()
             try:
@@ -863,15 +876,20 @@ def _usage_snapshot(outcome: Any) -> dict[str, Any] | None:
 def build_compaction_units(
     snapshot: CompactionSnapshot,
 ) -> tuple[CompactionUnit, ...]:
+    """One whole unit per frozen L1 transcript; no per-message projection.
+
+    C1 (review c9cb2d2): the cold source is the only input the summarizer
+    ever sees, and the successful install replaces the complete L.  Head/tail
+    character trimming used to drop the middle of a message that the request
+    could actually afford to carry, so the model could not preserve
+    constraints it never received.  Fit is decided by the engine's real
+    preflight send-budget check instead: a source that does not fit yields
+    the existing source_too_large / base_over_budget verdict and keeps the
+    old L; legal content is never silently trimmed here.
+    """
+
     units: list[CompactionUnit] = []
     order = 0
-    unit_text_limit = max(
-        1_024,
-        min(
-            16_000,
-            max(1_024, int(snapshot.target_input_budget or 0) // 2),
-        ),
-    )
     for index, transcript in enumerate(snapshot.memory_items):
         if not transcript or _transcript_is_summary(transcript):
             continue
@@ -879,10 +897,7 @@ def build_compaction_units(
             CompactionUnit(
                 unit_id=f"memory:{index}",
                 source="memory",
-                text=_render_l1_transcript(
-                    transcript,
-                    max_chars=unit_text_limit,
-                ),
+                text=_render_l1_transcript(transcript),
                 order=order,
             )
         )
@@ -1085,6 +1100,28 @@ def _is_output_truncation(finish_reason: str) -> bool:
     }
 
 
+def _handoff_tool_calls(outcome: Any) -> tuple[Any, ...]:
+    """Tool-call parts carried by a generation outcome (C2 review c9cb2d2).
+
+    The response message's own ``tool_calls`` view is authoritative and is
+    computed from its parts; a shape whose outcome object does not expose it
+    (or exposes it empty while a part still carries a call) must not slip an
+    unfinished tool request past the text-only handoff acceptance, so the
+    parts are inspected directly as well.
+    """
+
+    calls = tuple(getattr(outcome, "tool_calls", None) or ())
+    if calls:
+        return calls
+    response = getattr(outcome, "response", None)
+    message = getattr(response, "message", None)
+    return tuple(
+        part
+        for part in (getattr(message, "parts", None) or ())
+        if isinstance(part, ToolCallIR)
+    )
+
+
 def _copy_l1_message(value: Any) -> L1TranscriptMessage:
     if isinstance(value, L1TranscriptMessage):
         return replace(
@@ -1176,9 +1213,15 @@ def _message_kind(message: L1TranscriptMessage) -> L1MessageKind:
 
 def _render_l1_transcript(
     transcript: Sequence[L1TranscriptMessage],
-    *,
-    max_chars: int,
 ) -> str:
+    """Render one frozen L1 transcript whole (C1 review c9cb2d2).
+
+    Message content enters the source verbatim: the old head/tail character
+    projection could drop the middle of a legal message whose full text fit
+    the request budget, and the successful install then replaced an L the
+    summarizer had never fully received.
+    """
+
     lines: list[str] = []
     for message in transcript:
         role = str(message.role or "assistant").strip()
@@ -1195,38 +1238,10 @@ def _render_l1_transcript(
             )
         content = str(message.content or "").strip()
         if content:
-            lines.append(
-                _bounded_source_text(
-                    content,
-                    max_chars=max_chars,
-                    label=f"{role or 'message'} body",
-                )
-            )
+            lines.append(content)
         if message.tool_call_id:
             lines.append(f"[tool_call_id={message.tool_call_id}]")
     return "\n".join(lines).strip()
-
-
-def _bounded_source_text(
-    value: str,
-    *,
-    max_chars: int,
-    label: str,
-) -> str:
-    text = str(value or "")
-    limit = max(256, int(max_chars or 0))
-    if len(text) <= limit:
-        return text
-    marker_budget = 96
-    content_budget = max(2, limit - marker_budget)
-    head_chars = max(1, content_budget // 2)
-    tail_chars = max(1, content_budget - head_chars)
-    omitted = max(0, len(text) - head_chars - tail_chars)
-    return (
-        text[:head_chars].rstrip()
-        + f"\n[... {label} omitted {omitted} chars; head/tail projection only ...]\n"
-        + text[-tail_chars:].lstrip()
-    )
 
 
 def _log_failure_reason(reason: str) -> str:
