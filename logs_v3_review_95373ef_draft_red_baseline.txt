@@ -1,0 +1,224 @@
+FFFFFFFFF                                                                [100%]
+=================================== FAILURES ===================================
+_ DiagnosticContracts.test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item _
+
+self = <tests.test_v3_review_95373ef_draft.DiagnosticContracts testMethod=test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item>
+
+    def test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item(self):
+        msgs=[SimpleNamespace(message_id='h',prompt_region=PromptRegionIR.SETTLED_HISTORY),
+              SimpleNamespace(message_id='d',prompt_region=PromptRegionIR.ACTIVE_DYNAMIC)]
+        span=[EncodedMessageSpan('d',wire_item_paths=(('messages',0,'content',1),))]
+        def p(h):return {'messages':[{'role':'user','content':[{'type':'text','text':h},{'type':'text','text':'DYNAMIC'}]}]}
+        a,b=description(p('OLD'),span,msgs),description(p('NEW'),span,msgs)
+>       self.assertFalse(compare_requests(a,b)['prefix_preserved'])
+E       AssertionError: True is not false
+
+tests/test_v3_review_95373ef_draft.py:56: AssertionError
+_ DiagnosticContracts.test_identical_wire_with_nested_span_coverage_change_is_preserved _
+
+self = <tests.test_v3_review_95373ef_draft.DiagnosticContracts testMethod=test_identical_wire_with_nested_span_coverage_change_is_preserved>
+
+    def test_identical_wire_with_nested_span_coverage_change_is_preserved(self):
+        p={'messages':[{'role':'assistant','content':[{'type':'text','text':'SAME'}]}]}
+        a=description(p,[EncodedMessageSpan('m',wire_item_paths=(('messages',0,'content',0),))])
+        b=description(p)
+        self.assertEqual(a['wire_hash'],b['wire_hash'])
+>       self.assertTrue(compare_requests(a,b)['prefix_preserved'])
+E       AssertionError: False is not true
+
+tests/test_v3_review_95373ef_draft.py:42: AssertionError
+_ DiagnosticContracts.test_top_level_system_drift_is_not_hidden_by_missing_span _
+
+self = <tests.test_v3_review_95373ef_draft.DiagnosticContracts testMethod=test_top_level_system_drift_is_not_hidden_by_missing_span>
+
+    def test_top_level_system_drift_is_not_hidden_by_missing_span(self):
+        def p(s):return {'system':[{'type':'text','text':s}], 'messages':[{'role':'user','content':'Q'}]}
+        a,b=description(p('OLD')),description(p('NEW'))
+        self.assertNotEqual(a['wire_hash'],b['wire_hash'])
+>       self.assertFalse(compare_requests(a,b)['prefix_preserved'])
+E       AssertionError: True is not false
+
+tests/test_v3_review_95373ef_draft.py:48: AssertionError
+_ ProjectionSpanContracts.test_continuity_target_is_remapped_with_cache_and_wire_paths _
+
+self = <tests.test_v3_review_95373ef_draft.ProjectionSpanContracts testMethod=test_continuity_target_is_remapped_with_cache_and_wire_paths>
+
+    def test_continuity_target_is_remapped_with_cache_and_wire_paths(self):
+        path=('messages',0,'content',0)
+        span=EncodedMessageSpan('summary',cache_targets=(path,),wire_item_paths=(path,),continuity_target=path)
+        new=_remap_tail_span(span,container='messages',container_start=3,merged_boundary=None,merged_left_blocks=0)
+>       self.assertEqual(new.continuity_target,('messages',3,'content',0))
+E       AssertionError: Tuples differ: ('messages', 0, 'content', 0) != ('messages', 3, 'content', 0)
+E       
+E       First differing element 1:
+E       0
+E       3
+E       
+E       - ('messages', 0, 'content', 0)
+E       ?              ^
+E       
+E       + ('messages', 3, 'content', 0)
+E       ?              ^
+
+tests/test_v3_review_95373ef_draft.py:63: AssertionError
+___ ProjectionSpanContracts.test_no_merge_uses_no_merge_coordinate_transform ___
+
+self = <tests.test_v3_review_95373ef_draft.ProjectionSpanContracts testMethod=test_no_merge_uses_no_merge_coordinate_transform>
+
+    def test_no_merge_uses_no_merge_coordinate_transform(self):
+        pairs=[({'role':'user','content':[{'type':'text','text':'pending'}]},('u',)),
+               ({'role':'assistant','content':[{'type':'text','text':'TAIL'}]},('a',))]
+        merged=_merge_anthropic_user_boundary_pairs(pairs,0)
+        self.assertEqual(len(merged),2)
+        # This reproduces prepare()'s present metadata selection: any pending
+        # + any tail selects merged_boundary, even though the merge failed.
+        span=EncodedMessageSpan('a',wire_item_paths=(('messages',0,'content',0),))
+        new=_remap_tail_span(span,container='messages',container_start=1,merged_boundary=0,merged_left_blocks=1)
+>       self.assertEqual(new.wire_item_paths,(('messages',1,'content',0),),
+                         'Use the actual merge outcome, not mere pending/tail presence')
+E       AssertionError: Tuples differ: (('messages', 0, 'content', 1),) != (('messages', 1, 'content', 0),)
+E       
+E       First differing element 0:
+E       ('messages', 0, 'content', 1)
+E       ('messages', 1, 'content', 0)
+E       
+E       - (('messages', 0, 'content', 1),)
+E       ?               ^             ^
+E       
+E       + (('messages', 1, 'content', 0),)
+E       ?               ^             ^
+E        : Use the actual merge outcome, not mere pending/tail presence
+
+tests/test_v3_review_95373ef_draft.py:75: AssertionError
+_ RuntimeAndHistoryContracts.test_cancelled_ordinary_generation_closes_projection_attempt _
+
+self = <tests.test_v3_review_95373ef_draft.RuntimeAndHistoryContracts testMethod=test_cancelled_ordinary_generation_closes_projection_attempt>
+
+    def test_cancelled_ordinary_generation_closes_projection_attempt(self):
+        async def scenario():
+            memory=MemoryService();memory.begin_l1_turn('T',user_message=user('Q','q'))
+            runtime=_runtime(CapturingTransport(['unused']));ex=_executor(memory,runtime)
+            request=_request_for(memory,());ex.build_turn_prompt=lambda *a,**k:request
+            entered=asyncio.Event()
+            async def hanging(*a,**k):
+                entered.set();await asyncio.Event().wait()
+            runtime.agenerate=hanging
+            task=asyncio.create_task(ex._handle_llm_request(LLMRequestEffect(assembly_context=PromptAssemblyContext()),_continuation()))
+            try:
+                await asyncio.wait_for(entered.wait(),2)
+                task.cancel();await asyncio.gather(task,return_exceptions=True)
+                session=runtime.endpoint_projection_session('pal:resident',rebind=False)
+                self.assertIsNone(session._active,'Interrupted ordinary await must release its own prepared projection')
+            finally:
+                if not task.done():task.cancel();await asyncio.gather(task,return_exceptions=True)
+                runtime.close()
+>       asyncio.run(scenario())
+
+tests/test_v3_review_95373ef_draft.py:160: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_v3_review_95373ef_draft.py:156: in scenario
+    self.assertIsNone(session._active,'Interrupted ordinary await must release its own prepared projection')
+E   AssertionError: _ActiveRound(attempt=AttemptKey(identity=ProjectionIdentity(session=LogicalSessionId(scope='pal:resident'), binding=EndpointBinding(endpoint_id='trace-endpoint', model_id='trace-model', wire_shape=<WireShape.OPENAI_COMPLETION: 'openai_completion'>, endpoint_spec_revision='spec-a5fba7a161528da4', continuation_policy_version='openai-completion-verbatim-2', config_fingerprint='fingerprint-31dc7d8960f81c413ec17252c45b7b3276406c5b08120d3b3b8998f3bda0c14a'), projection_generation=0), owner_fence=OwnerFence(fence=0), attempt_id='turn-b8ed3f49c968'), requires_native=False, prepared_items=[{'role': 'user', 'content': [{'type': 'text', 'text': 'Q'}]}], prepared_item_spans=[('q',)], prepared_base_cursor=HistoryCursor(history_epoch=0, block_sequence=0, prefix_digest='e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), prepared_head_system=[]) is not None : Interrupted ordinary await must release its own prepared projection
+_ RuntimeAndHistoryContracts.test_new_summary_occurs_once_after_real_rebase_and_continuity_view _
+
+self = <tests.test_v3_review_95373ef_draft.RuntimeAndHistoryContracts testMethod=test_new_summary_occurs_once_after_real_rebase_and_continuity_view>
+
+    def test_new_summary_occurs_once_after_real_rebase_and_continuity_view(self):
+        memory=MemoryService();root=memory.history_root
+        root.begin_right_turn('T',user_text='old question')
+        root.stream_right_assistant('T',assistant('old answer','old-a'))
+        root.promote(include_active=True)
+        marker='SUMMARY_ONE_COPY_95373EF'
+        root.begin_compact('test-compact',reason='test')
+        root.mark_ready('test-compact',Candidate(summary=marker,rendered=marker))
+        root.commit('test-compact')
+        memory.append_l1_user('T',user('next question','q-next'))
+        runtime=_runtime(CapturingTransport(['unused']));ex=_executor(memory,runtime)
+        ex._rebase_projection_after_left_install(runtime,'pal:resident',root)
+        continuity=memory.l1_store.turns.continuity
+        self.assertIsNotNone(continuity)
+        model_messages=continuity.project_standalone(list(root.right_messages()))
+        request=LLMRequestIR(messages=(LLMMessageIR(role=MessageRole.SYSTEM,parts=(TextPartIR('BASE'),)),*model_messages),
+                             tools=(),policy=GenerationPolicyIR(max_output_tokens=64),
+                             metadata={'prompt_cache_scope_id':'pal:resident'})
+        pack=ex._prepare_turn_projection(runtime,request)
+>       self.assertIsNotNone(pack)
+E       AssertionError: unexpectedly None
+
+tests/test_v3_review_95373ef_draft.py:136: AssertionError
+_ RuntimeAndHistoryContracts.test_old_attempt_native_cannot_replace_a_recovered_accepted_message _
+
+self = <tests.test_v3_review_95373ef_draft.RuntimeAndHistoryContracts testMethod=test_old_attempt_native_cannot_replace_a_recovered_accepted_message>
+
+    def test_old_attempt_native_cannot_replace_a_recovered_accepted_message(self):
+        memory=MemoryService();memory.begin_l1_turn('T',user_message=user('Q','q'))
+        runtime=_runtime(CapturingTransport(['unused']))
+        ex=_executor(memory,runtime)
+        pack=ex._prepare_turn_projection(runtime,_request_for(memory,()))
+        self.assertIsNotNone(pack)
+        encoded,binding,handle=pack
+        outcome=generation_result_from_values(text='FIRST_FRAGMENT RECOVERY_ONLY_SUFFIX')
+        memory.upsert_l1_assistant('T',outcome.response.message)
+        candidate=NativeCandidate(wire_shape=WireShape.OPENAI_COMPLETION,
+                                 endpoint_id=binding.endpoint_id,model_id=binding.model_id,
+                                 payload_json=json.dumps({'message':{'role':'assistant','content':'FIRST_FRAGMENT'}}),call_ids=())
+        receipt=ProjectionSendReceipt(attempt_id=handle['attempt'].attempt_id,
+            resolved_endpoint_id=binding.endpoint_id,resolved_model_id=binding.model_id,
+            resolved_wire_shape=binding.wire_shape.value,applied=True,detail='sent',binding=binding,native=candidate)
+        outcome=replace(outcome,projection_receipt=receipt)
+        ex._observe_turn_projection(pack,SimpleNamespace(turn_id='T'),outcome)
+        session=handle['session']
+        if outcome.response.message.message_id in session.frozen_message_ids():
+>           self.assertIn('RECOVERY_ONLY_SUFFIX',repr([c.items for c in session.chunks]),
+                          'Frozen native must represent the accepted response, not its first attempt only')
+E           AssertionError: 'RECOVERY_ONLY_SUFFIX' not found in "[(mappingproxy({'role': 'user', 'content': (mappingproxy({'type': 'text', 'text': 'Q'}),)}), mappingproxy({'role': 'assistant', 'content': 'FIRST_FRAGMENT'}))]" : Frozen native must represent the accepted response, not its first attempt only
+
+tests/test_v3_review_95373ef_draft.py:111: AssertionError
+_ RuntimeAndHistoryContracts.test_same_endpoint_profile_drift_invalidates_old_projection _
+
+self = <tests.test_v3_review_95373ef_draft.RuntimeAndHistoryContracts testMethod=test_same_endpoint_profile_drift_invalidates_old_projection>
+
+    def test_same_endpoint_profile_drift_invalidates_old_projection(self):
+        memory=MemoryService();memory.begin_l1_turn('T',user_message=user('Q','q'))
+        runtime=_runtime(CapturingTransport(['A']))
+        ex=_executor(memory,runtime)
+        pack=ex._prepare_turn_projection(runtime,_request_for(memory,()))
+        self.assertIsNotNone(pack)
+        endpoint=runtime.active_endpoint()
+        endpoint.capabilities_blob={**dict(endpoint.capabilities_blob or {}),'unsupported_request_parameters':['temperature']}
+>       self.assertIsNone(runtime._projection_for_endpoint(endpoint,pack[0],pack[1]),
+                          'Same endpoint id/model/shape is not the same validated profile')
+E       AssertionError: EncodedRequest(payload={'max_tokens': 512, 'messages': [{'content': 'BASE', 'role': 'system'}, {'content': [{'text': 'Q', 'type': 'text'}], 'role': 'user'}], 'model': 'trace-model'}, message_spans=(EncodedMessageSpan(message_id='base', cache_targets=(('messages', 0),), cache_prefix_fingerprint='76b8af61d8635ee23e7d4da24cf09f5cdbc96dd41caac83f014d7fcf00e70fa2', estimated_cache_prefix_tokens=18, wire_item_paths=(('messages', 0),), continuity_target=()), EncodedMessageSpan(message_id='q', cache_targets=(('messages', 1, 'content', 0),), cache_prefix_fingerprint='de6b12cecc4f9255c3e9640725e233c82ce39eeff9003d8181724596181d8594', estimated_cache_prefix_tokens=23, wire_item_paths=(('messages', 1),), continuity_target=())), extra_body={}, applied_cache_breakpoint_message_ids=()) is not None : Same endpoint id/model/shape is not the same validated profile
+
+tests/test_v3_review_95373ef_draft.py:87: AssertionError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_v3_review_95373ef_draft.py::DiagnosticContracts::test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item
+FAILED tests/test_v3_review_95373ef_draft.py::DiagnosticContracts::test_identical_wire_with_nested_span_coverage_change_is_preserved
+FAILED tests/test_v3_review_95373ef_draft.py::DiagnosticContracts::test_top_level_system_drift_is_not_hidden_by_missing_span
+FAILED tests/test_v3_review_95373ef_draft.py::ProjectionSpanContracts::test_continuity_target_is_remapped_with_cache_and_wire_paths
+FAILED tests/test_v3_review_95373ef_draft.py::ProjectionSpanContracts::test_no_merge_uses_no_merge_coordinate_transform
+FAILED tests/test_v3_review_95373ef_draft.py::RuntimeAndHistoryContracts::test_cancelled_ordinary_generation_closes_projection_attempt
+FAILED tests/test_v3_review_95373ef_draft.py::RuntimeAndHistoryContracts::test_new_summary_occurs_once_after_real_rebase_and_continuity_view
+FAILED tests/test_v3_review_95373ef_draft.py::RuntimeAndHistoryContracts::test_old_attempt_native_cannot_replace_a_recovered_accepted_message
+FAILED tests/test_v3_review_95373ef_draft.py::RuntimeAndHistoryContracts::test_same_endpoint_profile_drift_invalidates_old_projection
+9 failed, 2 warnings in 3.77s

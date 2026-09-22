@@ -34,7 +34,11 @@
 | `3eb036b` | N7 fixup | native_sink 仅传给 send 方法签名可接受的 invoker（收窄签名的子类调用时 TypeError 计为端点失败——全量暴露 3 个真回归 test_llm_runtime_ir stream，单跑 3/3 复现修复后全绿）；全量回归（1900125+本 fix）：3134 passed + 491 subtests + 7 skipped，25 failed = 3 个已修复真回归 + 19 节点 + 3 subtest 行与上轮全量完全同集，单跑 20/20 零复现（logs_flake_rerun_af51d74fix.txt）同族长跑争用归因 |
 | `15196dd` | 主项1 | warm handoff 拆分：executor 在 begin_left_compaction fence 后取最终 LEFT ids 调 `_resident_compaction_replay_request(left_message_ids=...)`（anchor 前缀相等校验、anchor 必须完全在 L 内、不合规诚实冷回退）；test_v3_warm_handoff_split 5红→6绿，138 邻接零回归 |
 | `3621a74` | 主项2 | prompt_cache 读证据确认（`_AnchorReadEvidence`：cached_input_tokens ≥ prefix_tokens 且更晚 sequence 才 confirm，resident-only，TTL；dffb210 边界内重建）；projection_session prepare 产出 spans（tail spans 重映射含 anthropic merge，否则显式缓存规划被绕过）；tests/test_v3_real_provider_e2e.py（gated PAL_V3_E2E，glm/deepseek/openrouter-luna 真跑通过） |
-| 本 commit | 主项3 | **v2 物理删除 + two_segment 唯一模式 + 所有权收权**（详见 §3a/§4/§6） |
+| `1e8b42d` | 主项3 | **v2 物理删除 + two_segment 唯一模式 + 所有权收权**（详见 §3a/§4/§6） |
+| `95373ef` | I11 | cache diagnostics 字节自足枚举：span 降级为路径地图，未认领项按 region 继承；astra chain 10→6（余 6 挂账见 §4.1，本轮 M17 关闭） |
+| `a1058c5` | N8 实现 | review 95373ef R1-R6/S1/S2 修复主体（详见 §9）：配置 digest 准入 / 替换边界剥 native / L 视图覆盖（seed_reference_ids）/ 头部 preamble + 真实 merge 坐标 / 全 wire 诊断枚举 / attempt owner-match 收尾 / eligible anchor 读侧 / shell 只编码 preamble |
+| `a923583` | N8 测试 | `tests/test_v3_review_95373ef_fixes.py` 19 条（reviewer 草案 9 条修 fixture 不弱化断言 + M16/M18 + M04 正反 + M05 异常变体 + M06 迟到清理）；M17 迁移 `test_prompt_cache_v2_runtime.py` 真 v3 compaction 入口 + 字节真相退役断言；warm_handoff_split eligible reader |
+| 本 commit | N8 证据 | DELIVERY §9 + 红基线/全量回归日志（引用同树测试 a1058c5+a923583） |
 
 ## 3. 设计要点
 
@@ -53,9 +57,9 @@
 ## 4. 诚实边界（acceptance 账本同步 NOT_RUN）
 
 0. **主项1/2 已交付**（15196dd warm 拆分、3621a74 读证据+spans+E2E）；主项3 v2 物理删除+模式收权已完成，全量回归 49 failed 归因：17 真回归已修（单跑复现+修复验证），10 个 prompt_cache_v2 astra/chain 失败为翻转预存阻塞（见 1；后续诊断层修复后余 6），余 22 与既有长跑争用族同集（抽样单跑全绿）
-1. **astra chain prefix_preserved 10 失败（翻转预存）——诊断层已修，余 6 挂账归因收敛**：认识论定案（Nathan 2026-09-21，PLAN §7/I11/I12/F15 锚定）：marker 非证据、回执（usage cached tokens）是命中唯一确认、本地唯一主张是出站字节级相同；frozen 前缀 span 不随行是 §6.2「不重写稳定前缀」的设计结果非缺陷，错在 describe_request 以 span 存在性为枚举门槛（无 span 消息字节蒸发→项流不对称→假 prefix_changed）。修复（诊断层 commit）：字节自足枚举——会话容器项全量描述，span 降级为路径地图（未认领项继承无 span 消息 region，混合默认 history）；红先行契约测试 tests/test_cache_diagnostics.py（cold→projected 不对称仍报 prefix_preserved + 真字节漂移仍报 prefix_changed 护栏）。结果 10→6：explicit/hybrid chain 4 例全绿，cache 族零连带。**余 6 同一根族：harness 投影 observe/promote 闭环未闭合**（est 全程平坦 6458、cache_tail=False 从不 prepared；[compaction] 轮 4 后旧 history 项原样保留=从未 promote 进 L，summary 只追加报 history_appended 而测试期望 prefix_changed；[dynamic] 另含 encode 不声明动态 context 项——276B 无主项按字节真相进前缀比对）。修法属 encode/planning 层，超出「修诊断不修投影」切片，挂账 Nathan。**环境警示**：本机 user-site editable 安装（pal_v2→~/Documents/coding/Pal main@4daab5f）会劫持 import，worktree 测试必须 PYTHONPATH=src（曾致一次假绿误判，已纠正）
+1. **astra chain prefix_preserved 10 失败（翻转预存）——诊断层已修，余 6 挂账归因收敛**：认识论定案（Nathan 2026-09-21，PLAN §7/I11/I12/F15 锚定）：marker 非证据、回执（usage cached tokens）是命中唯一确认、本地唯一主张是出站字节级相同；frozen 前缀 span 不随行是 §6.2「不重写稳定前缀」的设计结果非缺陷，错在 describe_request 以 span 存在性为枚举门槛（无 span 消息字节蒸发→项流不对称→假 prefix_changed）。修复（诊断层 commit）：字节自足枚举——会话容器项全量描述，span 降级为路径地图（未认领项继承无 span 消息 region，混合默认 history）；红先行契约测试 tests/test_cache_diagnostics.py（cold→projected 不对称仍报 prefix_preserved + 真字节漂移仍报 prefix_changed 护栏）。结果 10→6：explicit/hybrid chain 4 例全绿，cache 族零连带。**余 6 同一根族：harness 投影 observe/promote 闭环未闭合**（est 全程平坦 6458、cache_tail=False 从不 prepared；[compaction] 轮 4 后旧 history 项原样保留=从未 promote 进 L，summary 只追加报 history_appended 而测试期望 prefix_changed；[dynamic] 另含 encode 不声明动态 context 项——276B 无主项按字节真相进前缀比对）。修法属 encode/planning 层，超出「修诊断不修投影」切片，挂账 Nathan。**环境警示**：本机 user-site editable 安装（pal_v2→~/Documents/coding/Pal main@4daab5f）会劫持 import，worktree 测试必须 PYTHONPATH=src（曾致一次假绿误判，已纠正）。**[N8/M17 关闭（a923583）]** 余 6 已归因关闭：根因是测试侧 legacy `memory.compact` 捷径绕过真实 v3 promote/observe 闭环（est 平坦、cache_tail 永不 prepared、旧 history 项原样保留皆为该捷径产物）；迁移到真 v3 入口（左跑+切割+安装+rebase，transport 应答 schema 合法 summary）后全文件绿，并新增字节真相退役断言（压缩掉的左段 reasoning 不重放、存活段逐字节原样、summary 请求独立记账）。见 §9/M17
 2. **引擎 whole-source 内部残留**：`service.compact` 的 source_stamp 分发与 `_compact_full_source`、compaction.py 的 `capture` whole-source 路径已无生产调用方（executor 只走 capture_left），但引擎内部与其直接测试（p6_perf test_a、runtime_compaction whole-source 族等 8 文件）未删——后续切片
-3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族
+3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族（N8 第四次同集验证，单跑 19/19+3sub 绿，见 §9）
 4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
 5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律；本轮实测 1790s，后续建议 ≥2400s）
 
@@ -113,3 +117,54 @@
 | N26 正常关闭恢复 | PASS(component) | projection_checkpoint 套件（含 span 恢复） |
 | N27 宿主×shape×warm 真实 E2E | PASS(gated) | 3621a74 test_v3_real_provider_e2e（glm/deepseek/openrouter-luna 真跑，PAL_V3_E2E 门控）；luna tail 方言 anchor 读证据为 bounded follow-up |
 | N28 最终矩阵+全量 | 本表+全量日志 | v2 删除后全量 3086+491+8sk/49f（1790s）：17 真回归修复后受影响 19 文件 299+29sub 全绿；10 astra 翻转预存：诊断层修复后余 6（observe/promote 闭环族，§4.1）；余 22 长跑族抽样单跑全绿 |
+
+## 9. N8 — review pal_v3_review_95373ef（基线 95373ef，R1–R6/S1/S2）收口实录（2026-09-22）
+
+固定输入：`95373efff0fe23d4fc4f6292901e97bbe5250dfe`（reviewer 包 MANIFEST 固定）；修复树 `a1058c5`（实现）/`a923583`（测试）/本 commit（证据）。全程 `PYTHONPATH="$PWD/src:$PWD"` 且 `pal.__file__` 指向本 worktree（user-site 劫持警示 §4.1）。未 push、未合 main、未部署、无真实 provider 调用。
+
+### R 项逐条
+
+- **R1（同 ID ≠ 同 profile）已修**：`_endpoint_config_digest` 从活端点重算（capabilities/输出上限/spec revision 全入 digest），drift → 旧投影/旧 plan 冷回退或重编译；runtime 注入选择（cache-policy 代数计数）移出身份视图，无害 refresh 不再毁 lineage。反例 M01；正常对照 M02 后半（配置未变重试复用、不增探测）
+- **R2（恢复/替换后 native 资格）已修**：真 LENGTH→continuation 恢复 receipt.native=None、冻结件带合并全文（M03）；finalization 替换在 F4 边界剥 native（M04 负例）；未改原件 byte-true 冻结（M04 正例）。诚实边界：observe 层未加「伪造 receipt 文本比对」守卫——按 HANDOFF「不三处补独立推测条件」，生产替换路径已被两道防线（F4 剥离 + call_ids 对账）全部闭合；手工伪造 receipt 的 API 滥用不构成产品反例
+- **R3（一份 L 模型视图）已修**：rebase 安装 `seed_reference_ids` 为 L 覆盖，下轮 prepare 不再重注相同 standalone 种子（M07 sentinel 恰一次）；连续两次 compact 共享同一 raw→standalone 映射（M08）
+- **R4（接缝坐标忠于实际 wire）已修**：preamble 只取头部 system/developer 连续段（中段 developer 按时间序留在会话流）；tail span 重映射用真实 merge 结果（M11 未合并→真 assistant 坐标 / 合并→block offset 对照）；continuity_target 与 cache/wire 同一 remapper（M12 主断言）。**PARTIAL**：Completion system seam 变体未单列（M11/M16/M18 completion 全链已隐式覆盖头部 seam），挂账
+- **R5（诊断枚举完整 wire）已修**（95373ef 诊断层基础上补齐负例）：M13 嵌套 span 覆盖变化不误报 / M14 顶层 system 漂移不隐没 / M15 dynamic 子块不吞历史归属；P01/P02 正对照保留于 test_cache_diagnostics
+- **R6（attempt 不失控）已修**：prepare→observe 间一切退出（cancel/接受异常/owner 异常）由同 owner finally 收自己的 draft（M05 两变体）；迟到清理 owner-match：不碰后继轮、不回滚已提交（M06）
+- **S1（合法本地前缀可直接尝试）已定**：`eligible_anchor_request` 只查 scope/endpoint/TTL，`read_confirmed` 是诊断位不是许可位；confirmed 读者不变（hot-only 费用边界原样）（M09 + warm_handoff_split）
+- **S2（性能收尾）已做**：shell envelope 编码只见 preamble，M16 证明 40 消息 shell 下单轮 encode 输入 ≤2 条消息。不承诺固定提速倍数
+
+### M01–M18 实况（node 均在 tests/test_v3_review_95373ef_fixes.py，另注除外）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| M01 | PASS | RuntimeAndHistoryContracts::test_same_endpoint_profile_drift_invalidates_old_projection（实际发送对照见 M02） |
+| M02 | PASS | ::test_sync_stale_refresh_recompiles_with_the_new_profile（真 stale→refresh 收 cap→单发重编译→applied=False） |
+| M03 | PASS | ::test_old_attempt_native_cannot_replace_a_recovered_accepted_message（真恢复路径） |
+| M04 | PASS | ::test_replaced_contribution_through_real_boundary_drops_native（负，经真 F4 边界）+ ::test_unmodified_provider_original_freezes_native_byte_true（正） |
+| M05 | PASS | ::test_cancelled_ordinary_generation_closes_projection_attempt + ::test_failed_l1_acceptance_closes_its_own_draft_and_next_round_prepares |
+| M06 | PASS | ::test_late_cleanup_never_touches_successor_rounds_or_committed_history |
+| M07 | PASS | ::test_new_summary_occurs_once_after_real_rebase_and_continuity_view |
+| M08 | PASS | ::test_consecutive_compacts_share_one_l_identity_mapping |
+| M09 | PASS | ::test_unconfirmed_local_anchor_is_eligible_until_ttl_expiry + tests/test_v3_warm_handoff_split.py |
+| M10 | PARTIAL | 成功路径 final-wire：M18-composed + N20 vertical trace；失败/取消路径：compact_cancel_control / N24 stale-left（既有）；三路径并排单测未做，挂账 |
+| M11 | PASS | ::test_no_merge_uses_no_merge_coordinate_transform + ::test_merged_user_boundary_uses_merged_block_offset（full prepare） |
+| M12 | PASS(主断言)/PARTIAL(变体) | ::test_continuity_target_is_remapped_with_cache_and_wire_paths；Completion system seam 显式变体挂账 |
+| M13 | PASS | DiagnosticContracts::test_identical_wire_with_nested_span_coverage_change_is_preserved |
+| M14 | PASS | ::test_top_level_system_drift_is_not_hidden_by_missing_span |
+| M15 | PASS | ::test_dynamic_subspan_does_not_hide_unspanned_history_in_same_item |
+| M16 | PASS | ProjectionSpanContracts::test_shell_encode_never_scans_the_whole_history |
+| M17 | PASS | tests/test_prompt_cache_v2_runtime.py 全绿（真 v3 入口迁移 + 字节真相退役断言 + summary 独立记账）；§4.1 余 6 挂账关闭 |
+| M18 | PASS(composed) | ::test_composed_trace_normal_recovery_install_next（normal→LENGTH 恢复→install→next，summary 恰一次）；单循环内再插同 ID spec refresh 未做（M02 独立覆盖），如实记录 |
+
+### reviewer 草案与 TLA 边界
+
+- `test_review_95373ef.py`（reviewer 未运行草案）在修复树实跑 6/9 过；3 条失败逐条定性 fixture 漂移（猜参直调内部 helper / 无 live lineage 即 rebase / 手工伪造 receipt），按「修 fixture 不弱化断言」修复后全部进入 a923583（断言面等于或强于草案）
+- 本轮 spec/ 零改动。改动转移（attempt 开/关/迟到清理、native 资格、eligible reader）无既有 TLA 模型覆盖（spec/llm 为端点调用/缓存锚点/条目提交/L1 轮次，不含投影 attempt FSM）——按 HANDOFF 以产品测试为证；`eligible_anchor_request` 为纯增量读侧，PromptCache* 模型语义（frontier 推进需读证据、marker 不授权 dffb210）未动，旧 TLC 结果对其继续有效，未复制为新路径证据
+
+### 本轮测试实况
+
+- 红基线：reviewer 草案 9 条在 95373ef 树 9/9 红（logs_v3_review_95373ef_draft_red_baseline.txt）；修复后成稿 19/19 绿
+- reviewer 草案原样实跑（修复树）：6/9 过，3 失败即上 fixture 漂移定性证据
+- 宽域：projection/prompt_cache/cache/compaction/runtime/continuity/history/v3 族 515 passed + 82 subtests + 1 skip（62s）
+- 全量回归（a1058c5+a923583 树，1356s）：**3134 passed + 491 subtests + 8 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——与上轮长跑族（3eb036b 归因集）完全同集（上轮 3 个 llm_runtime_ir 真回归未复现）；单跑 **19/19 + 3 subtests 全绿（7.6s）**，第四次同族验证（3575e48/29a879f/af51d74fix/本轮）。运行中段受 ollama bge-m3 驻留（1.2GB）内存挤压降速，模型卸载后恢复，总时长仍在历史区间。不宣称全量全绿，干净环境重跑仍为最终归因步（§4.3 挂账继续）
+
