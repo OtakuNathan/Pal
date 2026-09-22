@@ -63,7 +63,7 @@
 3. **v2 flake 族干净环境重跑归因**仍未做（与 N6 轮同一挂账）；本轮全量的 22 长跑失败抽样单跑全绿同族（N8 第四次同集验证，单跑 19/19+3sub 绿，见 §9）
 4. **H 族运行时项**：H02/H04/H06/Q04/B04-B08 未实现——账本 NOT_RUN
 5. bootstrap 全量回归需 ≥1800s 超时（v2 既有纪律；本轮实测 1790s，后续建议 ≥2400s）
-6. **N8 后续安排（2026-09-22，Nathan 授权安排）**：① M10 三路径 final-wire 并排单测（§9 唯一余 PARTIAL）；② whole-source 引擎残留物理删除（见 2）；③ acceptance_status 补账（fill_ledger 逐 node 实跑，31 项 NOT_RUN）；④ 22 长跑族干净环境重跑（等 Nathan 定环境：台式机干净 checkout / Pi 新 venv）；⑤ H 族运行时项（H02/H04/H06/Q04/B04-B08）。M12 seam 变体已收（本日后续 commit）
+6. **N8 后续安排（2026-09-22，Nathan 授权安排）**：① M10 三路径 final-wire 并排单测（✅ 已收，tests/test_v3_m10_final_wire.py）；② whole-source 引擎残留物理删除（见 2）；③ acceptance_status 补账（fill_ledger 逐 node 实跑，31 项 NOT_RUN）；④ 22 长跑族干净环境重跑（台式机干净 checkout，Nathan 授权）；⑤ H 族运行时项（H02/H04/H06/Q04/B04-B08）。M12 seam 变体已收（b80fd1b）
 
 ## 5. 验收证据
 
@@ -148,7 +148,7 @@
 | M07 | PASS | ::test_new_summary_occurs_once_after_real_rebase_and_continuity_view |
 | M08 | PASS | ::test_consecutive_compacts_share_one_l_identity_mapping |
 | M09 | PASS | ::test_unconfirmed_local_anchor_is_eligible_until_ttl_expiry + tests/test_v3_warm_handoff_split.py |
-| M10 | PARTIAL | 成功路径 final-wire：M18-composed + N20 vertical trace；失败/取消路径：compact_cancel_control / N24 stale-left（既有）；三路径并排单测未做，挂账 |
+| M10 | PASS | tests/test_v3_m10_final_wire.py 三路径并排（成功：marker 恰一次 + 左段退役不重播；失败/取消：历史原封不动；R 原件含原生 tool call/result 逐字节保真；三路径工具零重执行）；成功路径物化走诚实冷编码（prepare 返回 None，与 N24 stale-left 守卫一致），continuity 视图的 summary-恰-一次由 M18 互补 |
 | M11 | PASS | ::test_no_merge_uses_no_merge_coordinate_transform + ::test_merged_user_boundary_uses_merged_block_offset（full prepare） |
 | M12 | PASS | ::test_continuity_target_is_remapped_with_cache_and_wire_paths + ::test_completion_system_seam_paths_shift_with_the_head（Completion system seam 全链：全局坐标 + 标记不落错消息；后续切片补入） |
 | M13 | PASS | DiagnosticContracts::test_identical_wire_with_nested_span_coverage_change_is_preserved |
