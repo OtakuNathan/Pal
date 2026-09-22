@@ -15,8 +15,6 @@ ENV = {"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"}
 
 # id -> (test node, note)
 MAP = {
-    "A02": ("tests/test_builder_mode_contract.py::BuilderModeContractTests::test_mode_is_public_and_validated",
-            "mode is a public validated constructor param; builder forwards (post-build private writes removed in 939db45)"),
     "A03": ("tests/test_history_root_authority.py::PartitionTests::test_left_plus_right_partitions_store_exactly",
             "left+right partition the single store exactly, no mirror history"),
     "L01": ("tests/test_history_root_authority.py::LPromoteTests::test_L01_open_group_stays_whole_in_right", ""),
@@ -65,6 +63,7 @@ MAP = {
 }
 
 NOT_RUN_NOTES = {
+    "A02": "OBSOLETE: the mode switch (and its builder-mode contract test) was physically removed with v2 (1e8b42d); two_segment is the only mode — no node can honestly exist",
     "P04": "explicit node not authored; native one-representation pinned by inherited projection suites, two-segment rebase covered by P05",
     "W02": "marker attribution is engine/cache-layer; session test asserts content-only left; NOT honestly claimable",
     "H02": "root snapshot persistence not implemented (see DELIVERY §4)",
@@ -90,6 +89,9 @@ def main() -> int:
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                          capture_output=True, text=True).stdout.strip()
     for path in ledgers:
+        if not path.exists():
+            print(f"skip missing ledger copy: {path}")
+            continue
         data = json.loads(path.read_text())
         for case in data["cases"]:
             case_id = case["id"]
