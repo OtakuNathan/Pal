@@ -67,6 +67,7 @@ def response_to_payload(response: LLMResponseIR) -> dict[str, Any]:
         "returned_model": response.returned_model,
         "actual_provider": response.actual_provider,
         "service_tier": response.service_tier,
+        "reasoning_context": response.reasoning_context,
         "attempt_ids": list(response.attempt_ids),
     }
 
@@ -82,6 +83,7 @@ def response_from_payload(payload: Mapping[str, Any]) -> LLMResponseIR:
         returned_model=str(payload.get("returned_model") or ""),
         actual_provider=str(payload.get("actual_provider") or ""),
         service_tier=str(payload.get("service_tier") or ""),
+        reasoning_context=str(payload.get("reasoning_context") or ""),
         attempt_ids=tuple(payload.get("attempt_ids") or ()),
         provider_response_count=(
             1

@@ -126,6 +126,32 @@ The OpenRouter model id `openai/gpt-6-astra` selects the equivalent
 context remains 1,050,000 tokens, but operators may configure a 272,000-token
 limit to stay below OpenRouter's higher long-context pricing tier.
 
+## Responses reasoning continuation
+
+`openai_response` sends `store=false` and
+`include=["reasoning.encrypted_content"]`: L1 owns conversation state and keeps
+the returned reasoning items in each assistant's `ReplayEnvelope`. The include
+is retained for compatible endpoints using the older opt-in behavior; current
+OpenAI stateless responses return encrypted reasoning by default. This does
+not change the Completion or Anthropic request formats.
+
+`capabilities_blob.reasoning_context` may explicitly select `auto`,
+`current_turn`, or `all_turns` for a Responses endpoint known to support it.
+Omitting this setting keeps the model's default; Pal does not guess support
+from a model name. The resolved value lives in `GenerationPolicyIR` and is
+preserved during warm compact replay. Invalid values and use on other shapes
+are rejected. Existing `unsupported_request_parameters` can omit `store` or
+`include` for incompatible gateways. An explicitly requested
+`reasoning.context` declared unsupported is rejected, not silently ignored.
+
+The returned effective `reasoning.context` is recorded separately in
+`LLMResponseIR`, assistant metadata persisted with L1, and attempt diagnostics.
+It is not injected into prompt text. A missing observation stays unknown;
+Pal never substitutes the requested mode as proof of the effective mode.
+Older serialized responses without the field remain readable.
+
+Reference: [OpenAI reasoning continuation](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-across-calls).
+
 ## Streaming and output recovery
 
 Codecs accumulate partial text, reasoning, usage, and private tool drafts.
@@ -278,6 +304,44 @@ References: [Anthropic effort](https://platform.claude.com/docs/en/build-with-cl
 [DeepSeek Anthropic compatibility](https://api-docs.deepseek.com/guides/anthropic_api/).
 
 ## Cache evidence and attempt settlement
+
+### Provider-specific history preservation
+
+Historical reasoning is stored independently of whether a provider uses it.
+Provider request hooks apply the following controls after cold encoding or
+projection assembly and cache normalization, before final request auditing and
+transport; shape codecs do not select provider history policy.
+Endpoints can opt into their native preservation protocol through
+`capabilities_blob.preserved_thinking`:
+
+- `"glm"` requires `openai_completion` and sends
+  `thinking.clear_thinking=false` through the SDK's `extra_body`. Z.AI's standard
+  API requires this opt-in; Coding Plan already enables preserved thinking by
+  default. This setting preserves history; it does not change thinking effort
+  or force the current request to generate reasoning.
+- `"anthropic"` requires `anthropic_messages` and sends
+  `context_management.edits=[{"type":"clear_thinking_20251015","keep":"all"}]`
+  with the `anthropic-beta: context-management-2025-06-27` header.
+
+Omission leaves the provider's defaults unchanged. Enable only on endpoints
+supporting the selected protocol; shape compatibility alone is insufficient.
+Wrong shape/protocol combinations and explicit unsupported-parameter conflicts
+fail preparation. No existing runtime configuration is modified automatically.
+Reload endpoint configuration after setting the capability; resident codec
+changes require an external host restart.
+
+Anthropic `citations_delta` is merged by the shape codec into the native text
+block's ordered `citations` array in `ReplayEnvelope`. Complete citation objects,
+including unknown extension fields, survive L1 settlement, persistence and
+same-binding reconstruction. They are not flattened into prose or interpreted
+by the generic IR. Malformed citation objects fail decoding rather than silently
+disappearing. This does not claim support for arbitrary unknown delta protocols.
+
+References: [Z.AI thinking](https://docs.z.ai/guides/capabilities/thinking-mode),
+[Anthropic context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing),
+[Anthropic citations](https://platform.claude.com/docs/en/build-with-claude/citations).
+
+### Attempt evidence
 
 Cache marker submission does not establish confirmed cache coverage. Usage carries
 field presence, raw numeric evidence, and protocol-specific input accounting;

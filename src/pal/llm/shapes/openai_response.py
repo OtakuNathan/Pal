@@ -135,6 +135,13 @@ class OpenAIResponseCodec(ShapeCodecBase):
             "input": input_items,
             "max_output_tokens": policy.max_output_tokens,
         }
+        # L1 owns the conversation. Request portable reasoning instead of
+        # relying on provider-side response storage. The explicit include
+        # also supports endpoints predating automatic stateless encryption.
+        if request_parameter_supported(context, "store"):
+            payload["store"] = False
+        if request_parameter_supported(context, "include"):
+            payload["include"] = ["reasoning.encrypted_content"]
         if (
             policy.temperature is not None
             and request_parameter_supported(context, "temperature")
@@ -146,6 +153,10 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 payload["tool_choice"] = policy.tool_choice
         if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
             payload["reasoning"] = {"effort": policy.thinking_level.value}
+        if policy.reasoning_context is not None:
+            if not request_parameter_supported(context, "reasoning.context"):
+                raise ShapeDecodeError("endpoint does not support requested reasoning.context")
+            payload.setdefault("reasoning", {})["context"] = policy.reasoning_context
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":

@@ -20,6 +20,7 @@ from pal.llm.response_evidence import WireResponseEvidence
 from pal.llm.models import LLMEndpointModel
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.response_hooks import ProviderResponseHookRegistry
+from pal.llm.request_hooks import apply_provider_request_hooks
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import EncodedRequest, ShapeContext
 from pal.llm.transport import (
@@ -137,6 +138,7 @@ class ShapeEndpointInvoker:
         evidence = WireResponseEvidence(shape)
         plan, encoded, diagnostics = self.prompt_cache.prepare_attempt(
             request, context, raw_encoded, request_id,
+            finalize_request=lambda value: apply_provider_request_hooks(value, context),
         )
         submitted = False
 
@@ -247,6 +249,7 @@ class ShapeEndpointInvoker:
                 elapsed_seconds=attempt.elapsed_seconds, provider_generation_id=attempt.provider_generation_id,
                 returned_model=attempt.returned_model, actual_provider=attempt.actual_provider,
                 service_tier=attempt.service_tier,
+                reasoning_context=evidence.reasoning_context,
                 prompt_cache_diagnostics=evidence.prompt_cache_diagnostics,
             )
             first_settlement = self.attempt_sink(attempt) if self.attempt_sink is not None else True

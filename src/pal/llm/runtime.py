@@ -1567,6 +1567,11 @@ class LLMRuntime(LLMRuntimePort):
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)
         budget = hooked.policy.thinking_budget_tokens
+        reasoning_context = hooked.policy.reasoning_context
+        if reasoning_context is None:
+            reasoning_context = (endpoint.capabilities_blob or {}).get("reasoning_context")
+        if reasoning_context is not None and endpoint.wire_shape != WireShape.OPENAI_RESPONSE.value:
+            raise LLMRequestPreparationError("reasoning_context is only supported by openai_response")
         if hooked.policy.thinking_selection == "lowest_supported":
             level = next(item for item in ThinkingLevel if item.value in levels)
             budget = None
@@ -1596,6 +1601,7 @@ class LLMRuntime(LLMRuntimePort):
             max_output_tokens=max_output,
             thinking_level=level,
             thinking_budget_tokens=budget,
+            reasoning_context=reasoning_context,
         )
         prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id)
         from pal.llm.replay_acceptance import has_opaque_continuation, validate_native_for_send

@@ -88,7 +88,8 @@ def test_replay_keeps_prefix_tools_and_resolved_generation_settings(shape, polic
                   LLMMessageIR(MessageRole.USER, (TextPartIR("original input"),))),
         tools=(ToolDefinitionIR(name="read_file", description="original description", input_schema={"type": "object", "properties": {}}),),
         policy=GenerationPolicyIR(max_output_tokens=16000, temperature=0.7, thinking_level=ThinkingLevel.HIGH,
-                                  thinking_budget_tokens=budget),
+                                  thinking_budget_tokens=budget,
+                                  reasoning_context="all_turns" if shape == "openai_response" else None),
         logical_scope_id="bunshin:isolated" if policy.kind == "bunshin" else "pal:resident",
         metadata={"retained_marker": "retain-me"},
     )
@@ -100,6 +101,7 @@ def test_replay_keeps_prefix_tools_and_resolved_generation_settings(shape, polic
     assert request.tools == original.tools
     assert request.policy.thinking_level == ThinkingLevel.HIGH
     assert request.policy.thinking_budget_tokens == budget
+    assert request.policy.reasoning_context == original.policy.reasoning_context
     assert request.policy.thinking_selection == "configured"
     assert request.policy.temperature == 0.7
     assert request.policy.tool_choice == ("none" if shape.startswith("openai_") else "auto")

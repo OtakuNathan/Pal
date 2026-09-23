@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from pal.llm import cache_wire as wire
 from pal.llm.cache_tail import TailHistory, POLICY
@@ -614,11 +614,14 @@ class PromptCacheCoordinator:
         return
 
     def prepare_attempt(self, request: LLMRequestIR, context: ShapeContext,
-                        raw_encoded: EncodedRequest, request_id: str):
+                        raw_encoded: EncodedRequest, request_id: str, *,
+                        finalize_request: Callable[[EncodedRequest], EncodedRequest] | None = None):
         # Serialize planning and submission of the bounded tail history.
         with self._lock:
             plan = self.plan(request, context, raw_encoded)
             encoded = self.inject(raw_encoded, plan)
+            if finalize_request is not None:
+                encoded = finalize_request(encoded)
             diagnostics = self.start_attempt(plan, request=request, context=context,
                 encoded=encoded, raw_encoded=raw_encoded, request_id=request_id)
             return plan, encoded, diagnostics

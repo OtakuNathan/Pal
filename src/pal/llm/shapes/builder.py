@@ -157,6 +157,8 @@ class ResponseIRBuilder:
             state=state,
             replay=replay,
             metadata={
+                **({"reasoning_context": self.evidence.reasoning_context}
+                   if self.evidence.reasoning_context else {}),
                 "committed_items": [
                     {"item_id": item_id, "item_kind": kind.value}
                     for item_id, kind in self.committed_items.items()
@@ -171,6 +173,7 @@ class ResponseIRBuilder:
             returned_model=self.evidence.returned_model,
             actual_provider=self.evidence.actual_provider,
             service_tier=self.evidence.service_tier,
+            reasoning_context=self.evidence.reasoning_context,
         )
 
     def update(

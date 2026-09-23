@@ -90,6 +90,25 @@ class LLMEndpointSpec:
                 f"endpoint {endpoint_id} max_output_tokens exceeds context_window"
             )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        preservation = capabilities.get("preserved_thinking")
+        if preservation is not None:
+            expected_shape = {
+                "glm": "openai_completion",
+                "anthropic": "anthropic_messages",
+            }.get(str(preservation))
+            if expected_shape is None or wire_shape != expected_shape:
+                raise LLMEndpointSpecError(
+                    "capabilities_blob.preserved_thinking requires glm with "
+                    "openai_completion or anthropic with anthropic_messages"
+                )
+        reasoning_context = capabilities.get("reasoning_context")
+        if reasoning_context is not None:
+            if (wire_shape != "openai_response"
+                    or reasoning_context not in ("auto", "current_turn", "all_turns")):
+                raise LLMEndpointSpecError(
+                    "capabilities_blob.reasoning_context requires openai_response "
+                    "and auto, current_turn or all_turns"
+                )
         unsupported_parameters = capabilities.get(
             "unsupported_request_parameters"
         )

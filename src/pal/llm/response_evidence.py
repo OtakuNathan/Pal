@@ -17,6 +17,7 @@ class WireResponseEvidence:
     returned_model: str = ""
     actual_provider: str = ""
     service_tier: str = ""
+    reasoning_context: str = ""
     prompt_cache_diagnostics: dict = field(default_factory=dict)
     last_sequence: int = -1
     last_provider_sequence: int = -1
@@ -41,6 +42,11 @@ class WireResponseEvidence:
         )
         final = final or bool(not event and ("output" in payload or "content" in payload or complete_chat))
         for source in objects:
+            if self.wire_shape == WireShape.OPENAI_RESPONSE:
+                reasoning = source.get("reasoning")
+                mode = reasoning.get("context") if isinstance(reasoning, Mapping) else None
+                if isinstance(mode, str) and mode.strip():
+                    self.reasoning_context = mode.strip()
             diagnostics = source.get("prompt_cache_diagnostics")
             if isinstance(diagnostics, Mapping):
                 # Best-effort request diagnostics, never a per-marker receipt.

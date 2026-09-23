@@ -198,8 +198,11 @@ class GenerationPolicyIR:
     thinking_budget_tokens: int | None = None
     tool_choice: str = "auto"
     thinking_selection: Literal["configured", "lowest_supported"] = "configured"
+    reasoning_context: Literal["auto", "current_turn", "all_turns"] | None = None
 
     def __post_init__(self) -> None:
+        if self.reasoning_context not in {None, "auto", "current_turn", "all_turns"}:
+            raise ValueError("invalid reasoning_context")
         if self.thinking_selection not in {"configured", "lowest_supported"}:
             raise ValueError("invalid thinking_selection")
         if self.thinking_budget_tokens is not None and (
@@ -291,6 +294,7 @@ class LLMResponseIR:
     actual_provider: str = ""
     service_tier: str = ""
     attempt_ids: tuple[str, ...] = ()
+    reasoning_context: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(

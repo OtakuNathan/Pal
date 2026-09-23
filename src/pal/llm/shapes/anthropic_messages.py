@@ -382,6 +382,17 @@ class AnthropicMessagesDecoder:
             block["signature"] = str(block.get("signature") or "") + str(delta.get("signature") or "")
             self._refresh_replay()
             return []
+        if delta_type == "citations_delta":
+            # Native block extensions belong to the codec/replay envelope, not
+            # to provider-independent text parts. Preserve the entire object.
+            citation = delta.get("citation")
+            if not isinstance(citation, Mapping):
+                raise ShapeDecodeError("Anthropic citations_delta has no citation object")
+            citations = list(block.get("citations") or ())
+            citations.append(thaw_json(citation))
+            block["citations"] = citations
+            self._refresh_replay()
+            return []
         if delta_type == "input_json_delta":
             draft = self.tool_drafts.setdefault(index, {"id": "", "name": "", "input_json": []})
             draft["input_json"].append(str(delta.get("partial_json") or ""))
