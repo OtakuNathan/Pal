@@ -753,36 +753,48 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 
 `compact` 不是 durable write。
 
-当前实现由 Core 的共享 compaction engine 负责预算防护、原子历史单元裁剪、模型尝试、结果校验和提交编排。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
+当前实现由 Core 的共享 compaction engine 负责预算防护、完整冻结 L 源材料、模型尝试、结果校验和提交编排；源材料超窗时失败，不静默裁剪。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
 
 共享 engine 通过 `pal.core.compaction` 标准日志记录每次失败及整轮结果；systemd 部署可在 journal 中按 `compact attempt_failed` / `compact finished` 检索。记录运行 ID、尝试次数、耗时、endpoint、错误分类、校验原因和输出预算，不写入对话正文、模型输出或原始异常消息。未知自定义校验异常仅记录通用分类。
 
 本体生成的压缩块明确说明其用途是延续先前对话；正常回复应静默使用，不反复提及摘要或压缩过程。用户询问压缩或确需解释上下文缺失时可以说明。已有已渲染的摘要不自动重写，这条说明随后续成功 compact 生效。
 
-host policy 区分两类结构化 compact：
+Pal 与 Bunshin 共用 `pal.compaction.continuity.v1`，由 Core 的同一策略实现提示词、源材料包装、校验和渲染。`kind` 区分宿主；`summary.summary` 保存当前话题或目标、用户意图和总体状态，`continuity` 包含四个字符串数组：
 
-- `pal.compaction.pal.v2`：本体会话连续性。保留当前焦点、用户请求、操作约束、决策、问题和近期对话。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
-- `pal.compaction.bunshin.v3`：只保存工作现场，包括技术路线、当前工作、活跃错误、活跃问题和下一步动作。角色任务由 `task.yaml` 或绑定的 `ModuleWorkView` 机械投影，不能由 compactor 重写。闭合的 tool protocol 增量进入 L1，冻结的 L1 是 compact 唯一输入；不再维护第二份 protocol journal，不生成 `memory_candidates`，也不保存原始思维链。
+- `constraints`：仍有效的约束及必要用户原话。
+- `state`：进展、事实、验证和错误证据、不确定性、阻塞及待回答的问题。
+- `decisions`：当前决定、简短依据、必要纠正及排除方案。
+- `references`：必要路径、提交号、命令、链接和产物引用；引用不延长资源寿命，也不恢复文件编辑权限。
+
+不生成 `search_text`（内部通用记录需要时直接使用摘要正文），也不另存 `open_items` 或重复的近期／较早对话。执行从当前 checklist 继续，摘要保留执行所需现场。普通聊天不要求创建清单。摘要只是历史参考，不是新请求、权限或执行证据。
+
+Pal 可附加最多五条 `memory_candidates`，自动与手动 compact 的候选仍需审批后进入 L3。Bunshin 不生成候选；角色输入、合同、workspace 和工作清单仍由运行时提供，摘要不能重写这些来源。旧 Pal v2 / Bunshin v3 摘要恢复时保留已存正文，下一次成功 compact 才生成新结构。
+
+普通手动／自动 compact 优先复用合法的原请求前缀：保持工具定义、system/developer、冻结 L 的原生历史和已解析思考配置，在末尾追加 user 压缩要求。R 不进入源材料；不为了保留缓存重放过期指导。JSON 格式要求只写在末尾，不新增请求级输出 schema。OpenAI 两种 shape 保留工具定义并设置 tool_choice=none；所有 compact 返回的工具调用均不执行。普通 compact 无法复用时走冷路径；显式趁热入口仍受 epoch/期限保护，失效停止而不降级。
+
+前缀材料按逻辑会话隔离，Pal 与 Bunshin 使用同一读取路径；eager tail 策略从实际规划的闭合边界保存前缀，不依赖已废弃的经济学 anchor 字段或服务端 ACK。保留材料不保证服务端命中。
+
+Pal checklist 作为独立运行时模块随既有加密退出 checkpoint 保存，compact 不修改清单，reset 清空。旧 checkpoint 只允许“增加空 checklist 模块”这一受模块集合与旧 spec hash 校验的迁移；损坏的新清单或其他模块差异不能被忽略。Bunshin 继续使用已有持久化工作清单。
 
 手动 compact 不再传入固定的 8,192 tokens 输入预算，而由 endpoint preflight 解析真实预算。未知预算先以 20,000 tokens 的可见摘要上限准备请求；取得预算后重新构建并检查，小窗口模型仍受其实际预算约束。
 
-本体和 Bunshin 的 compact 请求均使用 `lowest_supported`，在实际 endpoint 选定后取最低声明档位，不继承或修改普通对话的思考设置及手动思考预算。普通、replay、重试和 fallback 共用此规则。声明支持 `off` 的 endpoint 在 compact 时关闭思考；不支持关闭时仍用最低声明档位。不能因为 wire shape 支持 `off` 就推断任意模型都支持它；应按服务商能力配置 endpoint，普通对话的默认档位不变。
+复用请求保留原思考档位、手动思考预算和温度；不重新应用 model hook。若原手动预算无法容纳于本次总输出额度，判为不可复用，而非悄悄调低预算。冷路径继续使用 endpoint 的 `lowest_supported`，不修改普通对话设置。
 
 可见摘要上限 `V` 仍为目标输入预算的一半、最多 20,000 tokens（未知输入预算时为 20,000）。每次请求总输出额度为 `V + max(2048, ceil(V / 4))`，再受引擎显式上限及实际 endpoint 上限约束；preflight 使用相同额度。输入预算反馈改变 `V` 后重新计算，不再直接申请 provider 的全部输出额度。该余量供推理及序列化使用，不保证 provider 的思考用量；截断仍走既有有限重试，失败不提交摘要。
 
 例如，`V=4,096` 时申请总输出 `6,144` tokens；`V=20,000` 时申请 `25,000`，实际仍服从 endpoint 的输出上限。这个额度包含可见输出和可能计入总输出的思考，不是预先承诺的消费量，也不是手动 `thinking_budget_tokens`。
 
-最低档位取声明集合的语义最小值，不取列表第一项：`[high, low]` 选择 `low`，`[high, off, low]` 选择 `off`。replay 保留原消息和闭合工具协议，但更改 effort 或 thinking 参数可能影响提供方的缓存命中；评估节省情况应比较实际总用量、缓存和耗时。各格式的直传字段、`off` 行为与预算校验见 [LLM 合约](pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)。
+冷路径的最低档位取声明集合的语义最小值，不取列表第一项：`[high, low]` 选择 `low`，`[high, off, low]` 选择 `off`。replay 保留原消息、闭合工具协议及原思考配置；是否省钱仍需比较实际总用量、缓存和耗时。各格式的直传字段、`off` 行为与预算校验见 [LLM 合约](pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)。
 
 自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
 ### Compact JSON 与纠错
 
-本体提示词包含完整 JSON 模板和 fact/case 示例。每轮最多提出 **5 条最有用**的候选，按长期价值排序，允许零条，不按最近发生顺序凑数。连续性摘要的必填结构仍需完整；候选是可选产物，单条不合法会被跳过并记录无正文诊断，不拖垮整个 compact。
+两边提示词共用完整 JSON 模板，Pal 附加 fact/case 候选说明。每轮最多提出 **5 条最有用**的候选，按长期价值排序，允许零条，不按最近发生顺序凑数。连续性摘要的必填结构仍需完整；候选是可选产物，单条不合法会被跳过并记录无正文诊断，不拖垮整个 compact。
 
-解析器容忍外围说明、Markdown fence、额外键和字符串外的尾逗号；拒绝重复 JSON 键、多个对象、截断对象和非有限数值。正文字符串的换行、缩进和标点不做紧凑化。case 缺少完整 STAR 时不编造补全。
+解析器容忍外围说明、Markdown fence 和字符串外的尾逗号；正文缺字段、类型错误或出现未声明键会被拒绝并进入有限重试；拒绝重复 JSON 键、多个对象、截断对象和非有限数值。正文字符串的换行、缩进和标点不做紧凑化。渲染完整展示所有已接受条目，不按 12／16 项截断；超出 token 预算时重新生成更短的完整摘要。case 缺少完整 STAR 时不编造补全。
 
-结构错误和输出截断的下一次请求携带最近一次失败的**可见输出**、具体错误及原始源材料，不携带推理内容；不累积所有失败版本。源材料优先于失败输出：若两者超过上下文预算，先省去失败输出。输出截断要求更短的完整 JSON，不接续残缺输出，不仅因 schema 错误删掉源历史。保留三次有限尝试、现有 endpoint 预算及最低思考档位。
+结构错误和输出截断的下一次请求携带最近一次失败的**可见输出**、具体错误及原始源材料，不携带推理内容；不累积所有失败版本。源材料优先于失败输出：若两者超过上下文预算，先省去失败输出。输出截断要求更短的完整 JSON，不接续残缺输出，不仅因 schema 错误删掉源历史。保留三次有限尝试和现有 endpoint 预算；重试沿用本次所选的前缀复用或冷路径思考规则。
 
 ### 本体统一记忆提案审核
 

@@ -70,22 +70,18 @@ def response_payload(index=1, *, tool=False, usage=None):
 
 
 _SUMMARY_JSON = json.dumps({
-    "schema": "pal.compaction.pal.v2",
+    "schema": "pal.compaction.continuity.v1",
     "kind": "pal",
     "continuity": {
-        "current_focus": "fixture chain",
-        "primary_request_and_intent": "exercise the compact chain",
-        "active_operating_instructions": [],
-        "active_requests": [],
-        "temporary_task_state": [],
-        "key_decisions": [],
-        "pending_questions": [],
-        "recent_raw_turns": [],
-        "warm_compressed_turns": [],
-        "retired_or_superseded_context": [],
-        "optional_next_step": "",
+        "constraints": [],
+        "state": [
+            "fixture chain",
+            "exercise the compact chain"
+        ],
+        "decisions": [],
+        "references": []
     },
-    "summary": {"summary": "Compacted fixture history", "search_text": "fixture compacted history"},
+    "summary": {"summary": "Compacted fixture history"},
     "memory_candidates": [],
 })
 
@@ -259,7 +255,7 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
             summary_requests = []
             def frames(self, _endpoint, request):
                 payload_text = json.dumps(thaw_json(request.payload), ensure_ascii=False)
-                if "pal.compaction.pal.v2" in payload_text:
+                if "pal.compaction.continuity.v1" in payload_text:
                     # M17 (review 95373ef): the real v3 compaction asks THIS
                     # runtime for the summary; answer with the engine's
                     # schema-valid JSON and keep the call out of the ordinary

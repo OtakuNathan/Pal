@@ -205,6 +205,14 @@ class _BunshinLLMRuntimeAdapter:
         self._base = base_runtime
         self._state = state
 
+    def prompt_cache_eligible_anchor_request(self, **kwargs: Any) -> dict[str, Any]:
+        reader = getattr(self._base, "prompt_cache_eligible_anchor_request", None)
+        return dict(reader(**kwargs) or {}) if callable(reader) else {}
+
+    def prompt_cache_confirmed_anchor_request(self, **kwargs: Any) -> dict[str, Any]:
+        reader = getattr(self._base, "prompt_cache_confirmed_anchor_request", None)
+        return dict(reader(**kwargs) or {}) if callable(reader) else {}
+
     @property
     def supports_streaming(self) -> bool:
         supports_streaming = getattr(self._base, "supports_streaming", None)

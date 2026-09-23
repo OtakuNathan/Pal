@@ -234,24 +234,18 @@ class _CompactThenFinalLLM:
         if "compaction" in purpose:
             return generation_result_from_values(
                 text=json.dumps({
-                    "schema": "pal.compaction.pal.v2",
+                    "schema": "pal.compaction.continuity.v1",
                     "kind": "pal",
-                    "summary": {
-                        "summary": "I11 handoff summary.",
-                        "search_text": "I11 handoff summary.",
-                    },
+                    "summary": {"summary": "I11 handoff summary."},
                     "continuity": {
-                        "current_focus": "finish the turn",
-                        "primary_request_and_intent": "reply normally",
-                        "active_operating_instructions": [],
-                        "active_requests": [],
-                        "temporary_task_state": [],
-                        "key_decisions": [],
-                        "pending_questions": [],
-                        "recent_raw_turns": [],
-                        "warm_compressed_turns": [],
-                        "retired_or_superseded_context": [],
-                        "optional_next_step": "emit the final answer",
+                        "constraints": [],
+                        "state": [
+                            "finish the turn",
+                            "reply normally",
+                            "emit the final answer"
+                        ],
+                        "decisions": [],
+                        "references": []
                     },
                     "memory_candidates": [],
                 }),
@@ -266,7 +260,7 @@ def test_i11_final_reply_is_real_answer_not_handoff_json():
     outcome = core.process_channel_turn(_turn_envelope())
     # The handoff JSON was never the final reply...
     assert outcome.final_reply == "final after compaction"
-    assert "pal.compaction.pal.v2" not in outcome.final_reply
+    assert "pal.compaction.continuity.v1" not in outcome.final_reply
     # ...old transcript text was not re-emitted...
     assert "Older context" not in outcome.final_reply
     assert all("Older context" not in str(t) for t in outcome.reply_texts)

@@ -296,6 +296,14 @@ class CompactionEngine:
             # Preflight failures must not inherit the preceding model response.
             outcome = None
             attempt_started_at = time.monotonic()
+            if snapshot.replay_request is not None:
+                visible_limit = compaction_visible_token_limit(snapshot)
+                output_allowance = min(max(1, int(self.max_output_tokens)),
+                                       visible_limit + max(2048, (visible_limit + 3) // 4))
+                thinking_budget = snapshot.replay_request.policy.thinking_budget_tokens
+                if thinking_budget is not None and thinking_budget >= output_allowance:
+                    _LOGGER.info("compact replay unavailable reason=thinking_budget_over_output_limit run=%s", run_id)
+                    snapshot = replace(snapshot, replay_request=None, replay_dialect="", replay_wire_shape="")
             if hot_replay_unavailable():
                 return finish(
                     snapshot, status="hot_cache_unavailable", attempts=attempts,
@@ -645,13 +653,8 @@ class CompactionEngine:
                     f"{visible_limit:,} tokens.",
                 ]
             )
-            tail_role = (
-                MessageRole.DEVELOPER
-                if snapshot.replay_wire_shape == "openai_response"
-                else MessageRole.USER
-            )
             tail = LLMMessageIR(
-                role=tail_role,
+                role=MessageRole.USER,
                 parts=(TextPartIR("\n".join(replay_source).strip()),),
                 semantic_kind="memory_compaction_request",
                 prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
@@ -662,10 +665,9 @@ class CompactionEngine:
                 policy=replace(
                     replay.policy,
                     max_output_tokens=max_output,
-                    temperature=0.0,
-                    thinking_level=None,
-                    thinking_budget_tokens=None,
-                    thinking_selection="lowest_supported",
+                    tool_choice=("none" if snapshot.replay_wire_shape in {
+                        "openai_response", "openai_completion"
+                    } else replay.policy.tool_choice),
                 ),
                 model_hint=str(
                     snapshot.metadata.get("preferred_model_id")
@@ -678,7 +680,7 @@ class CompactionEngine:
                     or replay.logical_scope_id
                     or "pal:resident"
                 ).strip(),
-                metadata=metadata,
+                metadata={**dict(replay.metadata), **metadata},
             )
         request = request_ir_from_prompt(
             messages=[

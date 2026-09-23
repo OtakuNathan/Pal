@@ -77,25 +77,20 @@ def _valid_pal_payload(
 ) -> str:
     return json.dumps(
         {
-            "schema": "pal.compaction.pal.v2",
+            "schema": "pal.compaction.continuity.v1",
             "kind": "pal",
             "continuity": {
-                "current_focus": "shared compaction",
-                "primary_request_and_intent": "continue the active request",
-                "active_operating_instructions": [],
-                "active_requests": ["finish the compaction refactor"],
-                "temporary_task_state": [],
-                "key_decisions": [],
-                "pending_questions": [],
-                "recent_raw_turns": [],
-                "warm_compressed_turns": [],
-                "retired_or_superseded_context": [],
-                "optional_next_step": "run focused tests",
+                "constraints": [],
+                "state": [
+                    "shared compaction",
+                    "continue the active request",
+                    "finish the compaction refactor",
+                    "run focused tests"
+                ],
+                "decisions": [],
+                "references": []
             },
-            "summary": {
-                "summary": summary,
-                "search_text": "shared compaction focused tests",
-            },
+            "summary": {"summary": summary},
             "memory_candidates": list(memory_candidates or []),
         },
         ensure_ascii=False,
@@ -105,50 +100,22 @@ def _valid_pal_payload(
 def _valid_bunshin_payload() -> str:
     return json.dumps(
         {
-            "schema": "pal.compaction.bunshin.v3",
+            "schema": "pal.compaction.continuity.v1",
             "kind": "bunshin",
             "continuity": {
-                "technical_route": [
-                    {
-                        "route": "shared engine",
-                        "rationale": "one retry and commit boundary",
-                    }
+                "constraints": [],
+                "state": [
+                    "goal: finish compaction; target: src/pal/core/compaction.py; action: run tests; status: active",
+                    "symptom: one schema test fails; latest_evidence: missing next_actions; current_hypothesis: invalid fixture",
+                    "issue: checkpoint restore; known_facts: ['the L1 checkpoint is complete']; status: open; excluded_paths: ['do not rebuild from truncated prompt']",
+                    "action: rerun focused tests; target: tests/test_runtime_compaction.py; expected_result: pass"
                 ],
-                "active_work": [
-                    {
-                        "goal": "finish compaction",
-                        "target": "src/pal/core/compaction.py",
-                        "action": "run tests",
-                        "status": "active",
-                    }
+                "decisions": [
+                    "route: shared engine; rationale: one retry and commit boundary"
                 ],
-                "active_errors": [
-                    {
-                        "symptom": "one schema test fails",
-                        "latest_evidence": "missing next_actions",
-                        "current_hypothesis": "invalid fixture",
-                    }
-                ],
-                "active_issues": [
-                    {
-                        "issue": "checkpoint restore",
-                        "known_facts": ["the L1 checkpoint is complete"],
-                        "status": "open",
-                        "excluded_paths": ["do not rebuild from truncated prompt"],
-                    }
-                ],
-                "next_actions": [
-                    {
-                        "action": "rerun focused tests",
-                        "target": "tests/test_runtime_compaction.py",
-                        "expected_result": "pass",
-                    }
-                ],
+                "references": []
             },
-            "summary": {
-                "summary": "Bunshin is testing the shared compaction engine.",
-                "search_text": "compaction.py schema restore focused tests",
-            },
+            "summary": {"summary": "Bunshin is testing the shared compaction engine."},
         },
         ensure_ascii=False,
     )
@@ -345,9 +312,9 @@ def test_l1_tool_protocol_discards_provider_specific_fields() -> None:
 
 class SharedCompactionEngineTests(unittest.TestCase):
     def test_policy_prompt_owns_schema_and_llm_runtime_has_no_host_api(self) -> None:
-        self.assertIn("pal.compaction.pal.v2", COMPACT_PAL_STRUCTURED_SYSTEM)
+        self.assertIn("pal.compaction.continuity.v1", COMPACT_PAL_STRUCTURED_SYSTEM)
         self.assertIn("memory_candidates", COMPACT_PAL_STRUCTURED_SYSTEM)
-        self.assertIn("active_operating_instructions", COMPACT_PAL_STRUCTURED_SYSTEM)
+        self.assertIn("constraints", COMPACT_PAL_STRUCTURED_SYSTEM)
         self.assertFalse(hasattr(LLMRuntime, "compact_memory_structured"))
         self.assertFalse(hasattr(LLMRuntime, "summarize_compaction"))
 
@@ -638,7 +605,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(request.logical_scope_id, "pal:resident")
         self.assertEqual(request.messages[:2], cached_request.messages)
         self.assertEqual(request.messages[2].text, "settled final reply")
-        self.assertEqual(request.messages[-1].role, MessageRole.DEVELOPER)
+        self.assertEqual(request.messages[-1].role, MessageRole.USER)
         self.assertIn("Do not call tools", request.messages[-1].text)
         self.assertEqual(
             sum("warm user request" in message.text for message in request.messages),

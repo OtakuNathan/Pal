@@ -3853,24 +3853,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 return generation_result_from_values(
                     text=json.dumps(
                         {
-                            "schema": "pal.compaction.pal.v2",
+                            "schema": "pal.compaction.continuity.v1",
                             "kind": "pal",
-                            "summary": {
-                                "summary": "Compacted fallback context.",
-                                "search_text": "Compacted fallback context.",
-                            },
+                            "summary": {"summary": "Compacted fallback context."},
                             "continuity": {
-                                "current_focus": "resume after compaction",
-                                "primary_request_and_intent": "finish the active turn",
-                                "active_operating_instructions": [],
-                                "active_requests": [],
-                                "temporary_task_state": [],
-                                "key_decisions": [],
-                                "pending_questions": [],
-                                "recent_raw_turns": [],
-                                "warm_compressed_turns": [],
-                                "retired_or_superseded_context": [],
-                                "optional_next_step": "retry the active request",
+                                "constraints": [],
+                                "state": [
+                                    "resume after compaction",
+                                    "finish the active turn",
+                                    "retry the active request"
+                                ],
+                                "decisions": [],
+                                "references": []
                             },
                             "memory_candidates": [],
                         }
@@ -4211,24 +4205,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 return generation_result_from_values(
                     text=json.dumps(
                         {
-                            "schema": "pal.compaction.pal.v2",
+                            "schema": "pal.compaction.continuity.v1",
                             "kind": "pal",
-                            "summary": {
-                                "summary": "Compacted fallback context.",
-                                "search_text": "Compacted fallback context.",
-                            },
+                            "summary": {"summary": "Compacted fallback context."},
                             "continuity": {
-                                "current_focus": "resume after compaction",
-                                "primary_request_and_intent": "finish the active turn",
-                                "active_operating_instructions": [],
-                                "active_requests": [],
-                                "temporary_task_state": [],
-                                "key_decisions": [],
-                                "pending_questions": [],
-                                "recent_raw_turns": [],
-                                "warm_compressed_turns": [],
-                                "retired_or_superseded_context": [],
-                                "optional_next_step": "retry the active request",
+                                "constraints": [],
+                                "state": [
+                                    "resume after compaction",
+                                    "finish the active turn",
+                                    "retry the active request"
+                                ],
+                                "decisions": [],
+                                "references": []
                             },
                             "memory_candidates": [],
                         }

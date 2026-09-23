@@ -49,9 +49,11 @@ Interaction rule:
   occupancy. Sleeping or queued logical sessions consume no capacity
 - Pal and Bunshin use the shared `core.AgentTurnRuntime`; Bunshin supplies only
   host ports, prompt fragments, tool observation hooks, and compaction policy
-- `pal.compaction.bunshin.v3` records only `technical_route`, `active_work`,
-  `active_errors`, `active_issues`, and `next_actions`; it emits neither
-  private chain-of-thought nor durable-memory candidates
+- `pal.compaction.continuity.v1` shares the resident summary policy: current
+  context plus `constraints`, `state`, `decisions`, and `references`. Work
+  continues from the persisted checklist, not a second summary task list.
+  Compaction emits neither private chain-of-thought nor durable-memory candidates;
+  eligible replay prefixes are isolated by the Bunshin logical scope
 - Architect and Architecture Reviewer keep complete `task.yaml` authority.
   Manager renders one Family-specialized `architect.yaml`; Architect fills that
   form and submits it through the Manager's pinned schema validator. Reviewer

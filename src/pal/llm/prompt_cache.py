@@ -1146,7 +1146,7 @@ class PromptCacheCoordinator:
         request: LLMRequestIR,
         context: ShapeContext | None,
     ) -> None:
-        """Retain/refresh the anchor-writing request (resident only).
+        """Retain/refresh the anchor-writing request within its logical scope.
 
         Same anchor re-submitted → keep the ORIGINAL write request (same
         bytes, earliest sequence).  A different anchor → replace with a
@@ -1155,40 +1155,61 @@ class PromptCacheCoordinator:
         """
 
         existing = self._anchor_evidence.get(plan.scope_key)
-        retainable = (
-            plan.enabled
-            and plan.anchor.submitted_message_id
-            and context is not None
-            and str(getattr(request, "logical_scope_id", "") or "")
-            == "pal:resident"
+        message_id = plan.anchor.submitted_message_id
+        fingerprint = plan.anchor.submitted_fingerprint
+        prefix_tokens = plan.anchor.submitted_prefix_tokens
+        ttl = plan.anchor.ttl
+        position = -1
+        # Eager S/T/tail plans no longer populate the old economic anchor
+        # track. Derive replay material from their actual encoded boundaries,
+        # without inventing an ACK or changing any cache-write decisions.
+        if plan.prepared_encoded is not None:
+            from pal.shared.tool_protocol import ToolResultIR
+
+            pending_calls: set[str] = set()
+            closed_positions = {}
+            for index, message in enumerate(request.messages):
+                pending_calls.update(call.call_id for call in message.tool_calls)
+                pending_calls.difference_update(part.call_id for part in message.parts if isinstance(part, ToolResultIR))
+                if (not pending_calls and message.state == MessageState.COMPLETE
+                        and message.role.value not in {"system", "developer"}):
+                    closed_positions[message.message_id] = index
+            for point in sorted(plan.breakpoints, key=lambda point: closed_positions.get(point.message_id, -1), reverse=True):
+                if point.message_id not in closed_positions:
+                    continue
+                boundary = wire.boundary_at(plan.prepared_encoded, point.message_id, point.path)
+                if boundary is not None:
+                    message_id, fingerprint, prefix_tokens, ttl = (
+                        point.message_id, boundary.fingerprint, boundary.coordinate, point.ttl)
+                    position = closed_positions[message_id]
+                    break
+        else:
+            position = next((index for index, message in enumerate(request.messages)
+                             if message.message_id == message_id), -1)
+        if not (plan.enabled and message_id and position >= 0 and context is not None
+                and str(request.logical_scope_id or "")):
+            self._anchor_evidence.pop(plan.scope_key, None)
+            return
+        if (existing is not None and existing.anchor_fingerprint == fingerprint
+                and existing.anchor_message_id == message_id):
+            return
+        # The anchor identifies the end of this exact prefix, not a complete
+        # request which may also contain later dynamic messages or R content.
+        prefix_request = (
+            request if position == len(request.messages) - 1
+            else replace(request, messages=request.messages[:position + 1])
         )
-        if not retainable:
-            if (
-                existing is not None
-                and not plan.anchor.submitted_message_id
-                and plan.anchor.submitted_fingerprint != existing.anchor_fingerprint
-            ):
-                self._anchor_evidence.pop(plan.scope_key, None)
-            return
-        if (
-            existing is not None
-            and existing.anchor_fingerprint == plan.anchor.submitted_fingerprint
-            and existing.anchor_message_id == plan.anchor.submitted_message_id
-        ):
-            return
         self._anchor_evidence[plan.scope_key] = _AnchorReadEvidence(
-            request=request,
-            anchor_message_id=str(plan.anchor.submitted_message_id),
-            anchor_fingerprint=str(plan.anchor.submitted_fingerprint),
-            prefix_tokens=max(0, int(plan.anchor.submitted_prefix_tokens or 0)),
+            request=prefix_request,
+            anchor_message_id=message_id,
+            anchor_fingerprint=fingerprint,
+            prefix_tokens=max(0, int(prefix_tokens)),
             submitted_sequence=int(plan.plan_sequence),
             submitted_at=time.monotonic(),
-            endpoint_id=str(context.endpoint_id if context is not None else ""),
-            wire_shape=str(context.wire_shape.value if context is not None else ""),
+            endpoint_id=str(context.endpoint_id),
+            wire_shape=str(context.wire_shape.value),
             dialect=str(plan.dialect.value),
-            ttl_seconds=_ANCHOR_TTL_SECONDS.get(
-                str(plan.anchor.ttl or "5m"), 300.0
-            ),
+            ttl_seconds=_ANCHOR_TTL_SECONDS.get(str(ttl or "5m"), 300.0),
         )
 
     def _prune_scopes_locked(self, *, now: float, keep: str = "") -> None:

@@ -227,7 +227,7 @@ def _left_snapshot(service, metadata=None):
     )
 
 
-def test_compact_tolerates_wrappers_extras_and_bad_optional_candidates():
+def test_compact_tolerates_wrappers_and_bad_optional_candidates():
     import asyncio
     import json
     from pal.core.compaction import CompactionEngine, extract_json_object
@@ -235,7 +235,6 @@ def test_compact_tolerates_wrappers_extras_and_bad_optional_candidates():
     from pal.llm import generation_result_from_values
     from tests.test_runtime_compaction import _ScriptedLLM, _memory_with_turns, _valid_pal_payload
     payload = json.loads(_valid_pal_payload())
-    payload["summary"]["extra"] = "do not fail"
     payload["memory_candidates"] = [FACT, {**FACT, "kind": "case"}]
     raw = "Here is the JSON:\n```json\n" + json.dumps(payload)[:-1] + ",}\n```"
     service = _memory_with_turns()
@@ -243,6 +242,8 @@ def test_compact_tolerates_wrappers_extras_and_bad_optional_candidates():
         _left_snapshot(service), llm_runtime=_ScriptedLLM([generation_result_from_values(text=raw)]),
         memory_service=service))
     assert result.success
+    assert len(result.summary_entry.payload["memory_candidates"]) == 1
+    assert result.summary_entry.payload["compaction_diagnostics"]
     assert extract_json_object('{"text":"a,}\\n  b",}')["text"] == "a,}\n  b"
     with pytest.raises(ValueError):
         extract_json_object('{"x":1,"x":2}')

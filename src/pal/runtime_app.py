@@ -154,9 +154,7 @@ class PalRuntimeApp:
                 return
             expected_spec = self._runtime_spec_hash()
             if str(snapshot.get("runtime_spec_hash") or "") != expected_spec:
-                raise ResidentCheckpointError(
-                    "resident checkpoint runtime spec does not match this runtime"
-                )
+                snapshot = self._upgrade_legacy_checklist_snapshot(snapshot, expected_spec)
             prepared = _interrupt_active_resident_turns(snapshot)
             await RuntimeSnapshotCoordinator(
                 self.handle.core.context.module_registry
@@ -228,6 +226,25 @@ class PalRuntimeApp:
             self.handle.core.context.module_registry,
             identity_parts={"host": RESIDENT_LOGICAL_COROUTINE_ID},
         )
+
+    def _upgrade_legacy_checklist_snapshot(self, snapshot: dict, expected_spec: str) -> dict:
+        """Only the addition of an empty checklist port may migrate an old exit snapshot."""
+        registry = self.handle.core.context.module_registry
+        ports = {handle.runtime_state_port.module_id: handle.runtime_state_port
+                 for handle in registry.modules.values() if handle.runtime_state_port is not None}
+        modules = snapshot.get("modules")
+        legacy_hash = runtime_spec_hash(
+            registry, identity_parts={"host": RESIDENT_LOGICAL_COROUTINE_ID},
+            exclude_module_ids=frozenset({"checklist"}),
+        )
+        if ("checklist" not in ports or ports["checklist"].schema_version != "1"
+                or not isinstance(modules, dict) or set(modules) != set(ports) - {"checklist"}
+                or snapshot.get("runtime_spec_hash") != legacy_hash):
+            raise ResidentCheckpointError("resident checkpoint runtime spec does not match this runtime")
+        upgraded = deepcopy(snapshot)
+        upgraded["modules"]["checklist"] = {"schema_version": "1", "payload": {"plan": None}}
+        upgraded["runtime_spec_hash"] = expected_spec
+        return upgraded
 
     async def _wait_for_runtime_wakeup(self, stop_event: asyncio.Event) -> None:
         timeout = self.handle.core.next_wakeup_timeout_seconds()

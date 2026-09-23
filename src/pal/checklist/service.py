@@ -33,7 +33,7 @@ class CheckOutcome:
 class ChecklistService:
     """In-memory execution-cursor checklist for Pal's own multi-step work.
 
-    Plain runtime memory: not persisted, not projected into L2/memory, and
+    Runtime state saved in the resident exit checkpoint, not L2/memory and
     never routed by a manager. The active plan is a single slot because Pal
     executes one turn at a time; a new upsert replaces the old plan.
 
@@ -99,6 +99,11 @@ class ChecklistService:
                 return False
             self._active = None
             return True
+
+    def install_restored_items(self, items: tuple[ChecklistItem, ...] | None) -> None:
+        """Install an already validated snapshot without replaying tool mutations."""
+        with self._lock:
+            self._active = None if items is None else [ChecklistItem(item.step, item.status) for item in items]
 
     def _snapshot_locked(self) -> ChecklistSnapshot:
         items = self._active or []

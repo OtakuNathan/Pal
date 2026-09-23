@@ -1,8 +1,8 @@
 """READ-evidence anchor confirmation (dffb210 boundary, v3 warm split).
 
 Submitted marker bytes alone must never authorize a cache-dependent
-compaction request.  An anchor-writing request is retained (resident
-singleton only) and becomes CONFIRMED solely when the provider reports
+compaction request.  An anchor-writing request is retained per logical
+scope and becomes CONFIRMED solely when the provider reports
 serving that anchor prefix from cache on a LATER successful request:
 ``cached_input_tokens >= prefix_tokens`` with a strictly later plan
 sequence than the write.
@@ -177,7 +177,7 @@ class AnchorReadConfirmationTests(unittest.TestCase):
             "the confirmation is bound to the endpoint that holds the cache",
         )
 
-    def test_non_resident_scope_retains_nothing(self):
+    def test_bunshin_scope_retains_its_own_request_without_cross_scope_reads(self):
         context = _anthropic_context()
         coordinator = PromptCacheCoordinator(rolling_net_threshold_tokens=0)
         request = replace(_resident_request(), logical_scope_id="bunshin:x")
@@ -198,11 +198,13 @@ class AnchorReadConfirmationTests(unittest.TestCase):
                                      else 10_000),
             ),
         )
-        self.assertEqual(
-            coordinator.confirmed_anchor_request(logical_scope_id="bunshin:x"),
-            {},
-            "only the resident singleton retains anchor request bytes",
-        )
+        confirmed = coordinator.confirmed_anchor_request(logical_scope_id="bunshin:x")
+        self.assertIs(confirmed["request"], request)
+        for other_scope in ("pal:resident", "bunshin:y"):
+            self.assertEqual(
+                coordinator.confirmed_anchor_request(logical_scope_id=other_scope), {},
+                "retained prefixes must not cross logical scopes",
+            )
 
 
 if __name__ == "__main__":

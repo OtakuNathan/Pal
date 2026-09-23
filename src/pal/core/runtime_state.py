@@ -191,6 +191,7 @@ def runtime_spec_hash(
     module_registry: Any,
     *,
     identity_parts: Mapping[str, Any] | None = None,
+    exclude_module_ids: frozenset[str] = frozenset(),
 ) -> str:
     """Return the deterministic restore contract for one logical coroutine."""
 
@@ -201,6 +202,7 @@ def runtime_spec_hash(
         )
         for handle in module_registry.modules.values()
         if (port := handle.runtime_state_port) is not None
+        and port.module_id not in exclude_module_ids
     )
     payload = {
         "modules": modules,

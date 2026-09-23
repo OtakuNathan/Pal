@@ -329,6 +329,7 @@ class ChecklistIntrospectionProvider:
 
 def register_with_core(context: "MainContext", service: ChecklistService) -> ModuleHandle:
     from pal.checklist.prompt import ChecklistPromptFragmentProvider
+    from pal.checklist.runtime_state import ChecklistRuntimeStatePort
 
     provider = ChecklistIntrospectionProvider(service=service)
     prompt_provider = ChecklistPromptFragmentProvider(service=service)
@@ -339,6 +340,7 @@ def register_with_core(context: "MainContext", service: ChecklistService) -> Mod
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"checklist": service},
+        runtime_state_port=ChecklistRuntimeStatePort(service),
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

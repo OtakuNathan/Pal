@@ -33,12 +33,10 @@ Interaction rule:
 - L1 accepts only closed tool protocol: every assistant tool-call batch must
   contain exactly its matching results in the same transcript. Orphan,
   incomplete, and late unmatched results are rejected before they enter L1
-- L1 stores provider-neutral semantics only. A complete active-turn reasoning
-  record may survive a closed-boundary checkpoint; incomplete stream/reasoning
-  fragments and unmatched or duplicate tool protocol are removed mechanically
-  during crash restore, which marks the damaged turn interrupted. Settled
-  history is rendered as ordinary context, never replayed as an active
-  provider tool envelope
+- L1 preserves accepted reasoning and native provider continuation in IR through
+  turn closure and restart. Recovery repairs unmatched/duplicate tool protocol
+  and incomplete streams without inventing outcomes. Explicit LEFT compaction
+  replaces that history with a lossy continuity summary; RIGHT remains intact.
 - Memory exposes one runtime-state port for L1, L2, top-of-mind, and heat.
   Core orchestrates snapshot/restore/reset; Memory never reaches into Execution
 - Resident Pal quiesces on SIGINT/SIGTERM and writes the fixed L1 runtime

@@ -43,22 +43,18 @@ def _continuation(turn_id: str = "T2"):
     )
 
 _SUMMARY_JSON = json.dumps({
-    "schema": "pal.compaction.pal.v2",
+    "schema": "pal.compaction.continuity.v1",
     "kind": "pal",
     "continuity": {
-        "current_focus": "m10 fixture",
-        "primary_request_and_intent": "exercise L replacement",
-        "active_operating_instructions": [],
-        "active_requests": [],
-        "temporary_task_state": [],
-        "key_decisions": [],
-        "pending_questions": [],
-        "recent_raw_turns": [],
-        "warm_compressed_turns": [],
-        "retired_or_superseded_context": [],
-        "optional_next_step": "",
+        "constraints": [],
+        "state": [
+            "m10 fixture",
+            "exercise L replacement"
+        ],
+        "decisions": [],
+        "references": []
     },
-    "summary": {"summary": MARKER, "search_text": "m10 marker"},
+    "summary": {"summary": MARKER},
     "memory_candidates": [],
 })
 

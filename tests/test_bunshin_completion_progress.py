@@ -29,12 +29,12 @@ def runner_at(root: Path, *, bound: bool = False) -> BunshinRunner:
     )
 
 
-def test_documented_nonempty_checkpoint_passes_real_validator():
+def test_documented_checkpoint_template_passes_real_validator():
     example = BUNSHIN_COMPACTION_SYSTEM_PROMPT.split(
-        "Valid non-empty example (shape only; never copy example facts into the checkpoint): ", 1
-    )[1].split("\n", 1)[0]
+        "Complete JSON template (shape only, not source facts):\n", 1
+    )[1]
     checkpoint = BunshinCompactionPolicy().validate_checkpoint(example, None)
-    assert all(json.loads(example)["continuity"].values())
+    assert set(json.loads(example)["continuity"]) == {"constraints", "state", "decisions", "references"}
     assert checkpoint.summary
 
 

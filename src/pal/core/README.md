@@ -47,21 +47,21 @@ Interaction rule:
   they do not maintain separate prompt compilers or turn executors
 - automatic compaction is requested only by the real model context-budget
   path; host clocks annotate snapshots but never trigger fixed-round compact
-- the immutable L1 snapshot is compaction's sole semantic input. Current input
-  and each closed tool batch are committed to L1 before compaction; provider
-  projections, recall caches, and role anchors are not parallel truth sources
-- exact provider tool-continuation fields belong to the active logical turn.
-  Snapshots occur only at closed protocol boundaries; crash restore removes
-  any unmatched/duplicate protocol and incomplete stream fragments instead of
-  fabricating results. Turn closure releases provider-only continuation data
+- the immutable submitted LEFT snapshot is compaction's sole semantic input;
+  pending RIGHT content stays outside compaction and unchanged at install.
+  Provider projections, recall caches, and role anchors are not parallel truth sources
+- accepted reasoning and native continuation survive turn closure and restart
+  until explicit LEFT compaction. Crash recovery repairs unfinished or invalid
+  protocol without fabricating tool results
 - one logical turn may create at most three compact generations. Semantic
   generation gets three attempts before that compact RPC fails with memory
   unchanged. The prompt plus local validator cap visible checkpoint JSON at
   half the selected input budget or the absolute 20,000-token ceiling,
   whichever is smaller, while preserving provider-declared model reasoning
   headroom
-- a policy owns schema, prompt, validation, rendering, and whether
-  durable-memory candidates are allowed
+- one shared continuity policy owns schema, prompt, validation and full rendering.
+  Host adapters retain only task-source semantics, clocks, and memory-candidate policy;
+  replay keeps the original generation settings and appends a user compaction request
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`
