@@ -542,7 +542,22 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("BUNSHIN_LLM_REQUEST_HOOKS", llm_model_hooks)
         self.assertNotIn("BUNSHIN_BEHAVIOR_ROUTING_HOOK", llm_model_hooks)
         self.assertNotIn("bunshin_behavior_routing", llm_model_hooks)
-        self.assertFalse((ROOT / "src/pal/llm/request_hooks.py").exists())
+        # Provider wire controls may live here; the retired host behavior
+        # routing hooks must not return through that module name.
+        request_hooks_path = ROOT / "src/pal/llm/request_hooks.py"
+        self._assert_no_forbidden_imports(
+            request_hooks_path,
+            forbidden_fragments=("pal.bunshin", "pal.core", "pal.control", "pal.memory"),
+        )
+        request_hooks = request_hooks_path.read_text(encoding="utf-8")
+        for legacy_symbol in (
+            "BUNSHIN_LLM_REQUEST_HOOKS",
+            "BUNSHIN_BEHAVIOR_ROUTING_HOOK",
+            "bunshin_behavior_routing",
+            "InteractionMessageSpec(",
+            "InteractionButtonSpec(",
+        ):
+            self.assertNotIn(legacy_symbol, request_hooks)
         self.assertNotIn("InteractionMessageSpec(", bunshin_source)
         self.assertNotIn("InteractionButtonSpec(", bunshin_source)
         self.assertIn("InteractionMessageSpec(", control_interactions)
