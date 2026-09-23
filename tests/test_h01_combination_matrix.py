@@ -154,6 +154,7 @@ class H01CombinationMatrixTests(unittest.TestCase):
         service.l1_store.append(_seed_transcript())
         service.l1_store.append(_settled("s0"))
         service.l1_store.append(_settled("s1"))
+        service.history_root.promote()  # Imported left history was already submitted.
         service.begin_l1_turn(f"{host}-task", user_text="RIGHT_SENTINEL current work")
         service.upsert_l1_assistant(
             f"{host}-task",

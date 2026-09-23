@@ -120,6 +120,7 @@ class ReplayEnvelope:
     endpoint_id: str
     model_id: str
     payload: Mapping[str, Any]
+    source_payload: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wire_shape", WireShape(self.wire_shape))
@@ -130,6 +131,8 @@ class ReplayEnvelope:
         if not isinstance(self.payload, Mapping):
             raise TypeError("replay payload must be an object")
         object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
+        if self.source_payload is not None:
+            object.__setattr__(self, "source_payload", freeze_json_mapping(self.source_payload))
 
     def matches(self, *, wire_shape: WireShape, endpoint_id: str, model_id: str) -> bool:
         return (
@@ -185,14 +188,6 @@ class LLMMessageIR:
     @property
     def tool_calls(self) -> tuple[_ToolCallIR, ...]:
         return tuple(part for part in self.parts if isinstance(part, _ToolCallIR))
-
-    def retire_reasoning(self) -> "LLMMessageIR":
-        return replace(
-            self,
-            parts=tuple(part for part in self.parts if not isinstance(part, ReasoningPartIR)),
-            replay=None,
-            state=MessageState.COMPLETE,
-        )
 
 
 @dataclass(frozen=True)

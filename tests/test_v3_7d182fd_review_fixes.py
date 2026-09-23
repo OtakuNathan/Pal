@@ -145,9 +145,8 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
         result, _ = compact(service, valid_response("B05 SEED ONE"))
         self.assertTrue(result.success, result.failures)
         _seed_tool_group_in_left(service)
-        # The inspected right group is NEVER promoted before the second
-        # compact: promoting it would retire the whole mixed chunk and
-        # sidestep the seam this file pins (review PLAN step 3).
+        # Admission freezes the input into L; the new assistant output
+        # remains R. Compact must split that projection chunk precisely.
         service.begin_l1_turn("T", user_message=user("New work in R", "b05-r"))
 
         runtime = _shape_runtime(shape, transport)
@@ -160,6 +159,8 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
                 first.count("call-b05"), 2,
                 "declaration + result linkage, never a second call")
 
+            self.assertIn("b05-r", [m.message_id for m in service.history_root.left_messages()])
+            self.assertIn("R ANSWER B05", repr(service.history_root.right_messages()))
             result2, _ = compact(service, valid_response("B05 SEED TWO"),
                                  op="review-operation-2")
             self.assertTrue(result2.success, result2.failures)
@@ -167,7 +168,7 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
             self.assertNotIn(
                 "b05-r",
                 [m.message_id for m in service.history_root.left_messages()],
-                "R must stay on the right side of the second cut")
+                "the admitted input is replaced by the compact summary")
             # The L1-level compact helper bypasses the executor, so drive the
             # post-install rebase exactly like the post-commit path does
             # (same owner interface; c9cb2d2 review node pins this call).
@@ -202,14 +203,14 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
 
         for retired in ("call-b05", "TOOL_RESULT_B05_SENTINEL",
                         "Tool task start", "B05 SEED ONE",
-                        "Old interrupted ask"):
+                        "Old interrupted ask", "New work in R"):
             with self.subTest(round=2, retired=retired):
                 self.assertEqual(second.count(retired), 0)
-        for sentinel in ("B05 SEED TWO", "New work in R",
+        for sentinel in ("B05 SEED TWO",
                          "R ANSWER B05", "Next question B05"):
             with self.subTest(round=2, sentinel=sentinel):
                 self.assertEqual(second.count(sentinel), 1)
-        for sentinel in ("B05 SEED TWO", "New work in R", "R ANSWER B05",
+        for sentinel in ("B05 SEED TWO", "R ANSWER B05",
                          "Next question B05", "T3 ANSWER B05", "Follow-up B05"):
             with self.subTest(round=3, sentinel=sentinel):
                 self.assertEqual(third.count(sentinel), 1)
@@ -223,10 +224,10 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
 
         for retired in ("call-b05", "TOOL_RESULT_B05_SENTINEL",
                         "Tool task start", "B05 SEED ONE",
-                        "Old interrupted ask"):
+                        "Old interrupted ask", "New work in R"):
             with self.subTest(round=2, retired=retired):
                 self.assertEqual(second.count(retired), 0)
-        for sentinel in ("B05 SEED TWO", "New work in R",
+        for sentinel in ("B05 SEED TWO",
                          "R ANSWER B05", "Next question B05"):
             with self.subTest(round=2, sentinel=sentinel):
                 self.assertEqual(second.count(sentinel), 1)

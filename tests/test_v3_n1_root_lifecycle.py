@@ -77,6 +77,7 @@ def executor(memory: MemoryService, llm) -> TurnExecutor:
 def service_with_work() -> MemoryService:
     memory = MemoryService()
     memory.l1_store.turns.append(settled('L'))
+    memory.history_root.promote()  # Fixture represents already submitted history.
     memory.begin_l1_turn('T', user_text='CURRENT RIGHT')
     return memory
 

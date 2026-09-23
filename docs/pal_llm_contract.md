@@ -38,14 +38,29 @@ optional exact-endpoint replay envelope. The turn is one atomic protocol unit.
 - A structured received tool call without an explicit call ID is ill-formed
   and ignored. A provider text-protocol normalizer may generate an internal ID
   only while constructing the first `ToolCallIR` at that Pal-owned boundary.
-- A `length` terminal discards all tool-call intent from that response.
+- A `length` terminal discards uncommitted tool drafts; already committed items survive.
 - `settle`, `interrupt`, and `abort` close the turn atomically.
-- Closing retires reasoning parts and provider replay data.
+- Closing retains reasoning parts and provider replay data unchanged.
 - Interrupt/abort also remove unresolved tool calls; late results are rejected.
-- Compaction freezes L1 and uses that snapshot as its sole truth source.
+- Compaction freezes an L snapshot as its source; R remains appendable.
 
-Historical prompt projections may shorten old tool-result text to fit an input
-budget, but they never mutate L1.
+Historical prompt projections retain accepted result text and native continuation
+values. Context reduction happens through explicit left-segment compaction, not
+reasoning stripping or result truncation. Object key ordering may differ; string
+values, array order, absent fields and explicit nulls must round-trip unchanged.
+
+After preflight and any conditional left compaction, a request captures the
+closed R input prefix. Successful response admission freezes exactly that
+captured input into L, independently of output
+completion or cache hits. Failed admission leaves the cut unchanged. Output
+and subsequently arriving results remain in R. Manual compact may first archive
+closed turns; automatic compact never promotes the pending active tail. Custom
+invokers without admission notifications conservatively leave input in R.
+
+Replay envelopes belong to L1, including optional original `source_payload` for
+provider-specific protocol normalization. Projection caches are disposable.
+Model switching never automatically invokes compact; incompatible opaque replay
+requires compact on the previous model or reset.
 
 ## Endpoint registry
 
@@ -113,7 +128,9 @@ limit to stay below OpenRouter's higher long-context pricing tier.
 
 Codecs accumulate partial text, reasoning, usage, and private tool drafts.
 Only a successful terminal frame can promote a complete tool draft. EOF without
-a terminal state is an error.
+a terminal state is an error. Null delta placeholders do not erase already
+accumulated content or tool identities. Chat `reasoning_details` chunks retain
+their received order, including signatures and opaque values.
 
 Core projects semantic response updates to `ChannelStreamUpdate` only when a
 channel supports incremental display. This is a channel delivery contract, not

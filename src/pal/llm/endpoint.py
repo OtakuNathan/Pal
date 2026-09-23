@@ -12,6 +12,7 @@ from pal.llm.ir import (
     LLMRequestIR,
     LLMResponseIR,
     LLMResponseUpdate,
+    MessageState,
     WireShape,
 )
 from pal.llm.attempts import LLMAttemptResult
@@ -23,6 +24,7 @@ from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import EncodedRequest, ShapeContext
 from pal.llm.transport import (
     DirectSDKTransport,
+    RequestSubmission,
     EncodedTransportRequest,
     LLMJSONTransportPort,
     LLMStreamControl,
@@ -78,11 +80,12 @@ class ShapeEndpointInvoker:
         stream: bool = False, timeout_seconds: float = 600.0,
         projection: EncodedRequest | None = None,
         native_sink: Callable[["NativeCandidate"], None] | None = None,
+        submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> tuple[LLMResponseIR, tuple[LLMResponseUpdate, ...]]:
         updates = tuple(self._iterate(endpoint, request, stream=stream,
                                       timeout_seconds=timeout_seconds,
                                       projection=projection,
-                                      native_sink=native_sink))
+                                      native_sink=native_sink, submission_sink=submission_sink))
         return updates[-1].response, updates
 
     def invoke_updates(
@@ -90,18 +93,20 @@ class ShapeEndpointInvoker:
         timeout_seconds: float = 600.0, stream_control: LLMStreamControl | None = None,
         projection: EncodedRequest | None = None,
         native_sink: Callable[["NativeCandidate"], None] | None = None,
+        submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         yield from self._iterate(endpoint, request, stream=True,
                                  timeout_seconds=timeout_seconds,
                                  stream_control=stream_control,
                                  projection=projection,
-                                 native_sink=native_sink)
+                                 native_sink=native_sink, submission_sink=submission_sink)
 
     def _iterate(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
         stream: bool, timeout_seconds: float, stream_control: LLMStreamControl | None = None,
         projection: EncodedRequest | None = None,
         native_sink: Callable[["NativeCandidate"], None] | None = None,
+        submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         shape = WireShape(str(endpoint.wire_shape))
         capabilities = dict(endpoint.capabilities_blob or {})
@@ -133,10 +138,26 @@ class ShapeEndpointInvoker:
         plan, encoded, diagnostics = self.prompt_cache.prepare_attempt(
             request, context, raw_encoded, request_id,
         )
+        submitted = False
+
+        def observe_submission() -> None:
+            nonlocal submitted
+            if submitted:
+                return
+            submitted = True
+            if submission_sink is not None:
+                submission_sink(RequestSubmission(
+                    request_id=request_id,
+                    endpoint_id=str(endpoint.endpoint_id),
+                    model_id=str(endpoint.model_id),
+                    message_ids=tuple(message.message_id for message in request.messages),
+                ))
+
         transport_request = EncodedTransportRequest(
             request_id=request_id, wire_shape=shape, timeout_seconds=float(timeout_seconds),
             payload=encoded.payload, extra_body=encoded.extra_body,
             stream=stream, stream_control=stream_control,
+            on_submitted=observe_submission,
         )
         status, error_type = "failed", ""
         last: LLMResponseUpdate | None = None
@@ -147,6 +168,7 @@ class ShapeEndpointInvoker:
             nonlocal frames
             frames = iter(self._transport().frames(endpoint, transport_request))
             for frame in frames:
+                observe_submission()
                 evidence.observe(frame)
                 yield frame
 
@@ -168,6 +190,12 @@ class ShapeEndpointInvoker:
             )
             for update in decoded:
                 response = replace(update.response, attempt_ids=(request_id,))
+                if response.message.state == MessageState.COMPLETE:
+                    from pal.llm.replay_acceptance import bind_accepted_replay
+
+                    response = replace(response, message=bind_accepted_replay(
+                        response.message, capture.replay, provider_id=str(endpoint.provider),
+                    ))
                 last = replace(update, response=response)
                 yield last
             if last is None or (not last.response.message.parts and last.response.finish_reason != LLMFinishReason.LENGTH):

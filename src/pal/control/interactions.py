@@ -212,6 +212,7 @@ def render_model_status_text(endpoints: list[Any] | tuple[Any, ...], active_endp
     lines = [
         f"Model: {active or '-'}",
         "Select an endpoint for new turns.",
+        "Before switching models, consider completing /compact to reduce history replay cost.",
         "",
         "Models:",
     ]

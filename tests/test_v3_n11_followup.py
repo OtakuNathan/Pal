@@ -61,12 +61,12 @@ class PrefixSettlementTests(unittest.TestCase):
         self.assertEqual(settled.state, L1TurnState.SETTLED)
         self.assertEqual(root.left_messages(), left)
 
-    def test_legacy_no_cut_settlement_still_retires_neutral_reasoning(self):
+    def test_legacy_no_cut_settlement_preserves_neutral_reasoning(self):
         root = HistoryRoot()
         root.begin_right_turn('T', user_text='Q')
         root.stream_right_assistant('T', assistant('A', 'a', ReasoningPartIR('reason')))
         settled = root.settle_right_turn('T')
-        self.assertTrue(all(not m.reasoning_text for m in settled.messages))
+        self.assertTrue(any(m.reasoning_text == "reason" for m in settled.messages))
 
     def test_plain_text_named_reasoning_is_only_a_positive_control(self):
         root = HistoryRoot()

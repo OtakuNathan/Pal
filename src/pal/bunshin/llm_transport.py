@@ -122,6 +122,8 @@ class ManagerProxyTransport:
                 if event == "provider_started":
                     provider_started = True
                     control.mark_provider_started()
+                    if request.on_submitted is not None:
+                        request.on_submitted()
                     continue
                 frame_payload = item.get("frame")
                 if not isinstance(frame_payload, Mapping):

@@ -22,6 +22,7 @@ from pal.shared import PromptAssemblyContext
 from pal.memory import MemoryService
 
 from tests.test_v3_n1_root_lifecycle import user, assistant
+from tests.test_v3_4b14ce4_review_fixes import _model_view_request
 from tests.test_v3_n3_vertical_trace import (
     CapturingTransport, _runtime, _executor, _request_for,
 )
@@ -69,7 +70,8 @@ def _seeded_memory() -> MemoryService:
     memory = MemoryService()
     memory.begin_l1_turn("T1", user_message=user("L1 QUESTION", "l1-q"))
     memory.upsert_l1_assistant("T1", assistant("L1 ANSWER", "l1-a"))
-    memory.history_root.promote(include_active=True)
+    memory.settle_l1_turn("T1")
+    memory.history_root.promote()
     memory.begin_l1_turn(
         "T2",
         user_message=user("deploy the release, check CI first", "q2"))
@@ -85,7 +87,7 @@ def _seeded_memory() -> MemoryService:
 
 def _final_wire_payload(ex, runtime, memory) -> str:
     """Materialize the next real request and return its wire payload."""
-    request = _request_for(memory, ())
+    request = _model_view_request(memory)
     pack = ex._prepare_turn_projection(runtime, request)
     if pack is None:
         # Honest cold fallback is legal; use the codec path directly.
@@ -132,13 +134,9 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
     def test_success_path_replaces_left_only(self):
         async def scenario():
             memory = _seeded_memory()
-            transport = CapturingTransport(["ROUND_OK", _SUMMARY_JSON])
+            transport = CapturingTransport([_SUMMARY_JSON])
             runtime, ex, executions = self._armed_executor(memory, transport)
-            first = await ex._handle_llm_request(
-                LLMRequestEffect(assembly_context=PromptAssemblyContext()),
-                _continuation())
-            self.assertEqual(
-                str(getattr(first.status, "value", first.status)), "ok")
+            # Preflight compacts L before this still-unsent R enters a request.
             result = await ex.compact_memory_async(
                 memory, target_input_budget=8192, reserved_output_tokens=1024,
                 continuation=_continuation())
@@ -158,13 +156,9 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
     def test_failure_path_leaves_history_untouched(self):
         async def scenario():
             memory = _seeded_memory()
-            transport = CapturingTransport(["ROUND_OK", "NOT_JSON"])
+            transport = CapturingTransport(["NOT_JSON"])
             runtime, ex, executions = self._armed_executor(memory, transport)
-            first = await ex._handle_llm_request(
-                LLMRequestEffect(assembly_context=PromptAssemblyContext()),
-                _continuation())
-            self.assertEqual(
-                str(getattr(first.status, "value", first.status)), "ok")
+            # Preflight compacts L before this still-unsent R enters a request.
             result = await ex.compact_memory_async(
                 memory, target_input_budget=8192, reserved_output_tokens=1024,
                 continuation=_continuation())
@@ -185,13 +179,9 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
     def test_cancel_path_leaves_history_untouched(self):
         async def scenario():
             memory = _seeded_memory()
-            transport = CapturingTransport(["ROUND_OK", "unused"])
+            transport = CapturingTransport(["unused"])
             runtime, ex, executions = self._armed_executor(memory, transport)
-            first = await ex._handle_llm_request(
-                LLMRequestEffect(assembly_context=PromptAssemblyContext()),
-                _continuation())
-            self.assertEqual(
-                str(getattr(first.status, "value", first.status)), "ok")
+            # Preflight compacts L before this still-unsent R enters a request.
             entered = asyncio.Event()
             real_agenerate = runtime.agenerate
 

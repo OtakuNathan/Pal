@@ -86,7 +86,7 @@ class BunshinScopeGateTests(unittest.TestCase):
             task = asyncio.create_task(
                 core.turn_executor.execute_turn_effect_async(continuation, effect)
             )
-            await engine.entered.wait()
+            await asyncio.wait_for(engine.entered.wait(), timeout=5)
             # v3: the executor claims no admission tickets at all — a
             # Bunshin worker never touches the resident scope (I17/Q15).
             self.assertFalse(core.state.compaction_tickets)
@@ -181,7 +181,7 @@ class BunshinCheckpointRecoveryTests(unittest.TestCase):
                         reserved_output_tokens=2_048,
                     ),
                 ))
-                await engine.entered.wait()
+                await asyncio.wait_for(engine.entered.wait(), timeout=5)
                 engine.release.set()
                 result = await task
                 return result
@@ -249,7 +249,7 @@ class CancellationTests(unittest.TestCase):
             task = asyncio.create_task(
                 core.turn_executor.execute_turn_effect_async(continuation, effect)
             )
-            await engine.entered.wait()
+            await asyncio.wait_for(engine.entered.wait(), timeout=5)
             # The run is live on the history owner; interrupt-style
             # cancellation lands on the awaiting coroutine (X01).
             self.assertIsNotNone(service.history_root.active_run)

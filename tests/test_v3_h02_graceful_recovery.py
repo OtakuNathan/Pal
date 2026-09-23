@@ -34,6 +34,7 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
+from pal.memory.turn_ir import L1TurnState
 from pal.memory import MemoryService
 from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 from pal.memory.runtime_state import (
@@ -252,8 +253,7 @@ class H02GracefulRecoveryTests(unittest.TestCase):
 
     def test_H02_v2_era_payload_migrates_explicitly(self):
         """A payload without history_root (pre-two-segment authority) is an
-        explicit migration: turns restore, the authority stays lazy/fresh —
-        no cut is invented."""
+        explicit migration: closed imported turns form L; active work stays R."""
         service = _service_with_history()
         root = service.history_root
         root.promote()
@@ -265,15 +265,15 @@ class H02GracefulRecoveryTests(unittest.TestCase):
         restored_service = MemoryService()
         port = MemoryRuntimeStatePort(restored_service)
         port.install_prepared_state(port.prepare_restore_state(legacy))
-        # Turns restored; authority fresh and uncut.
+        # Turns restored; authority fresh with closed imported history archived.
         self.assertEqual(
             len(restored_service.l1_store.turns.turns),
             len(service.l1_store.turns.turns),
         )
         fresh_root = restored_service.history_root
         self.assertNotEqual(fresh_root.incarnation, original_incarnation)
-        self.assertEqual(fresh_root.cut.turn_count, 0)
-        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "3")
+        self.assertEqual(fresh_root.cut.turn_count, sum(t.state != L1TurnState.ACTIVE for t in restored_service.l1_store.turns.turns))
+        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "4")
 
     def test_H03_failed_publish_keeps_previous_checkpoint_readable(self):
         """H03: a shutdown write that fails mid-replace leaves the previous

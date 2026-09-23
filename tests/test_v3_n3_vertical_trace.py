@@ -235,8 +235,10 @@ class VerticalTraceTests(unittest.TestCase):
         left_blob = repr(root.left_messages())
         self.assertIn("Q1", left_blob)
         self.assertIn("A1", left_blob)
-        self.assertIn("Q3", repr(root.right_messages()),
-                      "the newest work tail stays on the right")
+        self.assertIn("Q3", left_blob, "the admitted request includes Q3")
+        self.assertNotIn("Q3", repr(root.right_messages()))
+        self.assertIn("A3 answer", repr(root.right_messages()),
+                      "new output remains R until a later request sends it")
 
         # Compaction now has benefit and succeeds through the real engine,
         # the real install, and the post-commit rebase.

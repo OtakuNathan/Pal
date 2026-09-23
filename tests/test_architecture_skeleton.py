@@ -3505,13 +3505,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         # v3 (request-boundary promote, N1-R1): the sealed round's IR is
         # provider-neutral — reasoning rides the frozen wire envelope /
         # projection native chunks, never the cold IR rebuild.
-        self.assertEqual(assistant_tool_message.reasoning_text, "")
+        self.assertEqual(assistant_tool_message.reasoning_text, "hidden protocol reasoning")
         tool_message = next(message for message in followup_messages if message.role.value == "tool")
         self.assertIn("stable-result", str(tool_message.parts[0].content))
         system_message = next(message for message in followup_messages if message.role.value == "system")
         self.assertNotIn("Tool Observation", system_message.text)
 
-    def test_closed_turn_tool_history_is_provider_neutral_on_next_turn(self) -> None:
+    def test_closed_turn_tool_history_retains_reasoning_on_next_turn(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
@@ -3578,12 +3578,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for message in first_followup.messages
             if message.role.value == "assistant" and message.tool_calls
         )
-        # v3 (request-boundary promote, N1-R1): the closed round is sealed
-        # when the cut advances at the follow-up request boundary, so the
-        # provider-neutral IR no longer carries reasoning even mid-turn.
-        # Same-endpoint reasoning fidelity rides the frozen wire envelope /
-        # projection native chunks, never the cold IR rebuild.
-        self.assertEqual(active_tool_call.reasoning_text, "")
+        # L1 remains the complete source even when a projection is rebuilt.
+        # Closing a round or turn does not retire accepted reasoning.
+        self.assertEqual(active_tool_call.reasoning_text, "ephemeral provider reasoning")
 
         run_turn("second request")
         second_request = [
@@ -3604,7 +3601,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(closed_call.tool_calls[0].args["value"], "first turn")
         self.assertIn("stable-result", closed_result.text)
         self.assertNotIn("full result retired", closed_result.text)
-        self.assertNotIn("ephemeral provider reasoning", closed_call.reasoning_text)
+        self.assertIn("ephemeral provider reasoning", closed_call.reasoning_text)
         self.assertNotIn(
             "ephemeral provider reasoning",
             json.dumps(
@@ -4248,6 +4245,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         memory_service.l1_store.append(
             [L1TranscriptMessage(role="user", content="Older context that must be compacted before retry.")]
         )
+        memory_service.history_root.promote()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = FallbackBudgetLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm

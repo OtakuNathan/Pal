@@ -48,9 +48,8 @@ class MemoryL1IRServiceTests(unittest.TestCase):
 
         settled = service.settle_l1_turn("turn-1")
         self.assertEqual(settled.state, L1TurnState.SETTLED)
-        self.assertFalse(any(message.reasoning_text for message in settled.messages))
-        # Settlement retires provider-neutral reasoning parts but keeps the
-        # wire replay envelope: same-endpoint replays must stay byte-identical.
+        self.assertTrue(any(message.reasoning_text for message in settled.messages))
+        # Settlement preserves reasoning and the native replay together.
         assistant_settled = next(
             message for message in settled.messages if message.role == MessageRole.ASSISTANT
         )

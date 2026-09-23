@@ -167,6 +167,7 @@ def _core_with_llm(llm, engine) -> tuple[PalCore, MemoryService]:
             content="Older context that sits across the auto threshold.",
         )
     ])
+    memory_service.history_root.promote()  # Imported closed history was already submitted.
     register_memory_with_core(core.context, memory_service)
     core.context.port_registry["llm:llm"] = llm
     core.turn_executor._compaction_engine = engine

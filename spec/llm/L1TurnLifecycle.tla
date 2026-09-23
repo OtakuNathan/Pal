@@ -118,10 +118,9 @@ Settle ==
     /\ calls = results
     /\ drafts = {}
     /\ turnState' = "settled"
-    /\ resultBodies' = {}
+    /\ UNCHANGED resultBodies
     /\ receipts' = results
-    /\ reasoning' = FALSE
-    /\ replay' = FALSE
+    /\ UNCHANGED <<reasoning, replay>>
     /\ executable' = {}
     /\ assistantClosure' = TRUE
     /\ UNCHANGED <<calls, results, pagers, drafts, completeDrafts>>
@@ -130,13 +129,12 @@ Interrupt ==
     /\ turnState = "active"
     /\ turnState' = "interrupted"
     /\ calls' = results
-    /\ resultBodies' = {}
+    /\ UNCHANGED resultBodies
     /\ receipts' = results
     /\ drafts' = {}
     /\ completeDrafts' = {}
     /\ executable' = {}
-    /\ reasoning' = FALSE
-    /\ replay' = FALSE
+    /\ UNCHANGED <<reasoning, replay>>
     /\ assistantClosure' = TRUE
     /\ UNCHANGED <<results, pagers>>
 
@@ -144,13 +142,12 @@ Abort ==
     /\ turnState = "active"
     /\ turnState' = "aborted"
     /\ calls' = results
-    /\ resultBodies' = {}
+    /\ UNCHANGED resultBodies
     /\ receipts' = results
     /\ drafts' = {}
     /\ completeDrafts' = {}
     /\ executable' = {}
-    /\ reasoning' = FALSE
-    /\ replay' = FALSE
+    /\ UNCHANGED <<reasoning, replay>>
     /\ assistantClosure' = TRUE
     /\ UNCHANGED <<results, pagers>>
 
@@ -193,7 +190,7 @@ ExecutableCallsWerePromoted == executable \subseteq calls
 ResultBodiesAreResults == resultBodies \subseteq results
 ReceiptsAreResults == receipts \subseteq results
 PagersAreResults == pagers \subseteq results
-FullResultsAreActive == resultBodies # {} => turnState = "active"
+FullResultsAreRetained == resultBodies = results
 
 ClosedProtocol ==
     turnState \in ClosedStates =>
@@ -201,11 +198,10 @@ ClosedProtocol ==
         /\ drafts = {}
         /\ completeDrafts = {}
         /\ executable = {}
-        /\ resultBodies = {}
+        /\ resultBodies = results
         /\ receipts = results
         /\ assistantClosure
 
-ClosedRetiresPrivateState ==
-    turnState \in ClosedStates => ~reasoning /\ ~replay
+ReasoningAndReplayRemainAssociated == reasoning = replay
 
 =============================================================================

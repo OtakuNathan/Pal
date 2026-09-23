@@ -203,7 +203,10 @@ class BootstrapCoverageTests(unittest.TestCase):
             _ok(self, _drive(executor, _model_view_request(service)))
             # The next request boundary closes the second group: both groups
             # move into L while nothing new waits on the right yet.
-            executor._promote_closed_groups_at_request_boundary()
+            # Simulate admission of the next request before its output arrives.
+            root = service.history_root
+            submitted = root.prepare_submission(m.message_id for m in root.right_messages())
+            self.assertTrue(root.commit_submission(submitted, submitted.required_ids))
             left_ids = [m.message_id for m in service.history_root.left_messages()]
             self.assertIn("b04-q1", left_ids)
             self.assertIn("b04-q2", left_ids)
@@ -328,7 +331,10 @@ class BootstrapCoverageTests(unittest.TestCase):
             _ok(self, _drive(executor, _model_view_request(service)))
             service.append_l1_user("T", user("B06 Q2", "b06-q2"))
             _ok(self, _drive(executor, _model_view_request(service)))
-            executor._promote_closed_groups_at_request_boundary()
+            # Simulate admission of the next request before its output arrives.
+            root = service.history_root
+            submitted = root.prepare_submission(m.message_id for m in root.right_messages())
+            self.assertTrue(root.commit_submission(submitted, submitted.required_ids))
         finally:
             runtime.close()
 
@@ -371,13 +377,13 @@ class BootstrapCoverageTests(unittest.TestCase):
             _ok(self, _drive(executor2, _model_view_request(restored)))
 
             sent = _blob(transport2.captured[-1].payload)
-            for sentinel in ("B06 SEED TWO", "B06 Q4"):
+            for sentinel in ("B06 SEED TWO", "B06 Q4", "RE1 answer"):
                 with self.subTest(sentinel=sentinel):
                     self.assertEqual(sent.count(sentinel), 1)
             # Retired L (including the rounds the second cut folded into the
             # new summary) must not replay as standalone wire content.
             for sentinel in ("B06 SEED ONE", "B06 Q1", "B06 Q2",
-                             "B06 Q3", "RE1 answer"):
+                             "B06 Q3"):
                 with self.subTest(sentinel=sentinel):
                     self.assertEqual(sent.count(sentinel), 0)
 

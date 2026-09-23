@@ -68,6 +68,7 @@ def _service_with_history() -> MemoryService:
     service.l1_store.append(_seed())
     for mark in ("s0", "s1"):
         service.l1_store.append(_settled(mark))
+    service.history_root.promote()
     return service
 
 
@@ -166,6 +167,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
     def test_B04_r_growth_kept_next_normal_blocked_on_current_view(self):
         service = _service_with_history()
         root = service.history_root
+        service.history_root.promote()
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         network = _ResidentNetwork(
             on_generate=lambda: service.upsert_l1_assistant(
@@ -259,6 +261,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
     def test_B05_base_over_budget_is_distinct_and_never_summarizes(self):
         service = _service_with_history()
         root = service.history_root
+        service.history_root.promote()
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         root.promote()
         left_snapshot = service.begin_left_compaction("run-b05", reason="auto")
@@ -338,6 +341,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         ))
         service.settle_l1_turn("t-l")
         # An active right turn with its own paged result (R side).
+        service.history_root.promote()
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         service.upsert_l1_assistant("task-R", LLMMessageIR(
             role=MessageRole.ASSISTANT,
@@ -407,6 +411,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
 
     def test_B07_total_deadline_ends_run_with_attempts_unconsumed(self):
         service = _service_with_history()
+        service.history_root.promote()
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         # Per-attempt budget 0.25s x 5 attempts = absolute run cutoff 1.25s.
         # Every attempt burns ~0.65s of wall time (slow preflight + slow
@@ -444,6 +449,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
 
     def test_B08_compaction_does_not_reset_work_budget_or_permissions(self):
         service = _service_with_history()
+        service.history_root.promote()
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         service.upsert_l1_assistant("task-R", LLMMessageIR(
             role=MessageRole.ASSISTANT, parts=(TextPartIR("A_DECISION"),),

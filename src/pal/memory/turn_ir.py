@@ -52,11 +52,6 @@ class L1TurnIR:
             for message in self.messages:
                 if message.state == MessageState.IN_PROGRESS:
                     raise L1TurnProtocolError("settled L1 turn contains an in-progress message")
-                if message.reasoning_text:
-                    raise L1TurnProtocolError(
-                        "settled L1 turn retains provider-neutral reasoning parts; "
-                        "wire replay envelopes are allowed and stay frozen"
-                    )
 
     @classmethod
     def begin(
@@ -280,12 +275,11 @@ class L1TurnIR:
                 message = replace(
                     message,
                     parts=parts,
-                    # Pruned protocol content must not survive in the wire
-                    # replay envelope: same-endpoint encoders prefer replay
-                    # over parts, so a stale envelope would re-emit the pruned
-                    # dangling call onto the wire. Re-encode pruned messages
-                    # from their repaired parts instead.
-                    replay=None if protocol_changed else message.replay,
+                    # Revoke unresolved calls without destroying independent
+                    # reasoning or the original native source.
+                    replay=(
+                        _repair_replay(message.replay, parts) if protocol_changed else message.replay
+                    ),
                     semantic_kind=(
                         "assistant_reply"
                         if not any(isinstance(part, ToolCallIR) for part in parts)
@@ -569,19 +563,15 @@ def left_span_stamp(turns: Iterable["L1TurnIR"]) -> str:
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
+def _repair_replay(replay, parts):
+    from pal.llm.replay_acceptance import repair_replay_calls
+
+    return repair_replay_calls(replay, {part.call_id for part in parts if isinstance(part, ToolCallIR)})
+
+
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:
-    if message.role == MessageRole.ASSISTANT:
-        # Keep the wire replay envelope across settlement: same-endpoint replays
-        # stay byte-identical so the prompt-cache prefix survives turn boundaries.
-        # Provider-neutral reasoning parts are still stripped: they are the
-        # cross-endpoint fallback projection, which must not leak reasoning.
-        closed = message.retire_reasoning()
-        return replace(closed, replay=message.replay)
-    return replace(
-        message,
-        state=MessageState.COMPLETE,
-        replay=None,
-    )
+    # Closure changes lifecycle state, never the accepted model input.
+    return replace(message, state=MessageState.COMPLETE)
 
 
 def _ensure_assistant_closure(

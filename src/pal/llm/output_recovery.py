@@ -14,6 +14,8 @@ from pal.llm.ir import (
     LLMUsageIR,
     MessageRole,
     MessageState,
+    ReplayEnvelope,
+    WireShape,
     TextPartIR,
 )
 
@@ -152,6 +154,10 @@ def safe_truncated_message(message: LLMMessageIR) -> LLMMessageIR:
     keep_provider_replay = bool(
         message.metadata.get("preserve_replay_for_output_recovery")
     )
+    # Text/reasoning-only completed material needs no protocol surgery.
+    keep_provider_replay = keep_provider_replay or not message.tool_calls
+    from pal.llm.replay_acceptance import repair_replay_calls
+
     return replace(
         message,
         parts=tuple(
@@ -162,7 +168,7 @@ def safe_truncated_message(message: LLMMessageIR) -> LLMMessageIR:
         replay=(
             message.replay
             if keep_committed_tools or keep_provider_replay
-            else None
+            else repair_replay_calls(message.replay, set())
         ),
         state=MessageState.COMPLETE,
     )
@@ -190,12 +196,14 @@ def merge_responses(
     from pal.llm.usage_normalization import sum_usage
     usage = sum_usage([item.usage for item in usage_sources])
     final = responses[-1]
+    replay = _merge_replay(responses)
     return replace(
         final,
         message=replace(
             final.message,
             message_id=responses[0].message.message_id,
             parts=parts,
+            replay=replay,
         ),
         usage=usage,
         attempt_ids=tuple(dict.fromkeys(a for item in usage_sources for a in item.attempt_ids)),
@@ -203,6 +211,36 @@ def merge_responses(
             item.provider_response_count for item in usage_sources
         ),
     )
+
+
+def _merge_replay(responses: list[LLMResponseIR]) -> ReplayEnvelope | None:
+    """Keep every accepted continuation piece; usage-only retries are excluded."""
+    from pal.shared.json_values import thaw_json
+
+    envelopes = [response.message.replay for response in responses]
+    if not envelopes or all(envelope is None for envelope in envelopes):
+        return None
+    if any(envelope is None for envelope in envelopes):
+        raise ValueError("output recovery cannot discard a partially available native continuation")
+    first = envelopes[0]
+    if any(not envelope.matches(wire_shape=first.wire_shape,
+                                endpoint_id=first.endpoint_id,
+                                model_id=first.model_id) for envelope in envelopes):
+        raise ValueError("cannot merge continuation from different provider bindings")
+    if len(envelopes) == 1:
+        return first
+    values = [thaw_json(envelope.payload) for envelope in envelopes]
+    if first.wire_shape == WireShape.OPENAI_COMPLETION:
+        payload = {"messages": [message for value in values
+                                for message in value.get("messages", [value.get("message")])
+                                if message is not None]}
+    else:
+        key = "output" if first.wire_shape == WireShape.OPENAI_RESPONSE else "content"
+        payload = {key: [item for value in values for item in value.get(key, ())]}
+    return replace(first, payload=payload, source_payload={"attempts": [
+        thaw_json(envelope.source_payload if envelope.source_payload is not None else envelope.payload)
+        for envelope in envelopes
+    ]})
 
 
 def stream_recovery_updates(

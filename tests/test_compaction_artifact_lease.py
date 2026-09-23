@@ -107,7 +107,7 @@ def test_r08_seed_referenced_artifact_survives_cleanup_and_restart():
                 core.turn_executor.execute_turn_effect_async(continuation, _effect())
             )
             engine = core.turn_executor._compaction_engine
-            await engine.entered.wait()
+            await asyncio.wait_for(engine.entered.wait(), timeout=5)
             engine.release.set()
             result = await task
             assert result.status == RuntimeStatus.OK

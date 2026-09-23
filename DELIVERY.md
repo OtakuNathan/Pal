@@ -249,3 +249,127 @@ reviewer 结论：原 B1 关闭；新开 S1·P1——Anthropic user seam 合并�
 - 全量回归（修复树，1359.85s）：**3100 passed + 557 subtests passed + 7 skipped，22 failed（19 FAILED + 3 SUBFAILED）**——FAILED/SUBFAILED 集与基线 `logs_full_regression_4b14ce4_review_fixes.txt` 逐项 diff 为空，无新增失败；passed 增量 3100-3098=2、subtests 增量 557-533=24 均为本轮新测试节点（S02 纵向 + S03 对照，2 tests + 22 subtests），不宣称全量全绿。日志 `logs_full_regression_7d182fd_s1_seam_fix.txt`。
 
 
+
+## 13. 58eaadf 复审修复：指导可见性与冻结断点映射（2026-09-23）
+
+基线 `58eaadf`，本节工作尚未提交、合并或激活。无真实 provider 请求。
+
+- **过期指导退出投影**：原检查只验证 frozen id 仍在 L1，导致已被正常视图过滤的 turn-scoped 指导仍被重放。现在对照 effective request 的可见 context id；已覆盖指导失效时，使用既有 rebind 边界重建一次。原始 L1 不改写，同一可见视图重复 prepare 不重复换代。恢复/重绑的左段 bootstrap 同样过滤过期和 excluded context，同时保留 compact source 的既有 continuity 替换。
+- **冻结位置索引随字节保留**：codec 产生的 cache targets、wire paths、continuity target 按 item 相对坐标保存；冻结、pending、接缝合并、逐块退休和 checkpoint 均携带索引。最终组装时重定位，再按实际 payload 计算前缀描述。不重新编码冻结历史，不猜测断点位置；native accepted output 沿 codec 既有 target 规则映射。无 ACK/controller/收益策略改动。
+- 回归 `tests/test_projection_visibility_cache.py`：原两条反例在基线实跑失败；新增三 shape 地址保留、恢复后左替换、Anthropic pending 合并/部分退休、explicit 三轮 T/P/C、bootstrap 过期指导、hoisted system 地址恢复等覆盖。
+- 验证（均 `PYTHONPATH="$PWD/src:$PWD"`）：投影/v3 最终套件 **257 passed + 145 subtests，1 skipped**，日志 `/tmp/pal-v3-projection-final-tests.txt`；压缩/历史 owner/checkpoint 相关 **95 passed + 24 subtests**，日志 `/tmp/pal-v3-visibility-final-tests.txt`。较早的投影/v3/cache/prompt_cache 联合回归 **358 passed + 145 subtests，1 skipped**，日志 `/tmp/pal-v3-visibility-cache-tests.txt`。这些集合有重叠，不相加作为总数。
+- 本轮未跑全仓、macOS、真实 provider 或新增 TLC；不将既有全量 22 项失败宣称为已解决。修复复用既有 rebind/commit/rebase 生命周期，位置索引为派生数据。
+
+## 14. Lossless L1 and post-admission round freezing (2026-09-23)
+
+This section supersedes earlier claims that round/turn closure retires reasoning.
+Changes remain on `refactor/two-segment-session-v3`; no runtime activation,
+commit, push, or paid provider request was performed.
+
+- L1 retains accepted reasoning, native replay, opaque continuation fields,
+  exact argument strings and full tool results. Codec capture reaches the
+  accepted L1 message even when a provider hook clears its temporary replay.
+  Textual DeepSeek tool adaptation keeps both the legal executable inventory
+  and original source evidence; abort/recovery repairs only revoked calls.
+- After preflight/conditional compact, the owner captures a closed R prefix.
+  SDK response admission (headers, before nonstream body parsing) or Bunshin's
+  provider-start event delivers an idempotent submission receipt on the owner
+  loop. Only the captured prefix moves to L. Send failure, reset, changed
+  input and duplicate receipts cannot promote new work. Later output stays R;
+  generation failure after admission does not undo the already submitted input.
+- Automatic compact replaces existing L only. Manual compact may archive a
+  settled closed tail, but cannot absorb active unsent work. Checkpoint schema
+  4 preserves replay and the cut; schemas 1/2/3 remain readable. Legacy snapshots
+  without an owner cut initialize L from closed imported turns.
+- Model-selection UI/tool affordances recommend successful compact before
+  switching. Incompatible opaque continuation fails explicitly instead of
+  silently deleting reasoning. Cache modes and eager chase-tail are unchanged.
+- A legal L/R cut may split a projection round between sent input and newly
+  accepted output. Per-message item/block ownership now permits that split,
+  retires only the covered wire content and its cache addresses, and keeps
+  surviving native output. Ambiguous legacy ownership still fails explicitly.
+- Projection remains disposable: restart/rebind/bootstrap rebuild from L1.
+  The 100-tool-round regression verifies unchanged serialized message values
+  through settlement, restore and a cold projection rebuild; all three codec
+  shapes also retain their settlement/recovery replay tests.
+- The LLM TLC script checks six models, including new `RoundSubmission`.
+  All six passed locally. The new bounded model explored 1,277 generated /
+  420 distinct states; three deliberately broken configurations found the
+  expected counterexamples (early freeze, R loss during compact, reasoning
+  deletion). These are local lifecycle proofs, not claims about provider cache
+  hits or all possible SDK/provider behavior.
+
+Validation used `PYTHONPATH="$PWD/src:$PWD"` on Linux / Python 3.13. Source
+compile and whitespace checks passed. No macOS or real-provider test was run.
+
+Final validation evidence (counts are separate runs, not an additive total):
+
+- `core-a`: **1166 passed, 6 skipped, 121 subtests passed**;
+  `/tmp/pal-lossless-core-a-verified.txt`.
+- `bunshin-a`: **464 passed, 77 subtests passed**;
+  `/tmp/pal-lossless-bunshin-a-verified.txt`.
+- `bunshin-b`: **478 passed, 124 subtests passed**;
+  `/tmp/pal-lossless-bunshin-b-verified.txt`. The earlier sandbox timeout also
+  passed standalone on both the original baseline and modified tree.
+- Core B was split after the slow bootstrap/repository tests: the initial run
+  passed **205 tests** before manual interruption, covering the first two files
+  and part of the remaining selection (`/tmp/pal-lossless-core-b.txt`).
+  The remaining 78 files were rerun separately against the final implementation:
+  **859 passed, 1 skipped, 240 subtests passed**
+  (`/tmp/pal-lossless-core-b-verified.txt`).
+- Final projection/compact regression: **151 passed, 74 subtests passed**
+  (`/tmp/pal-lossless-projection-last.txt`); gate/cancel/artifact regression:
+  **26 passed** (`/tmp/pal-lossless-gates-final.txt`).
+- Native output surviving compact + restart: **1 passed**;
+  precise vs ambiguous partial-chunk boundary checks: **2 passed**.
+  The 100-round test is also included in the final Core B remainder.
+- TLC evidence: `/tmp/pal-lossless-llm-tlc.txt`; deliberate mutation logs:
+  `/tmp/pal-round-early.log`, `/tmp/pal-round-erase_right.log`,
+  `/tmp/pal-round-strip_reasoning.log`.
+
+## 15. Main-to-v3 final review (2026-09-23)
+
+Reviewed the accumulated branch against local `main` (`4daab5f`), including
+projection ownership, lossless L1 replay, request admission, left-only compact,
+checkpoint migration, cancellation and the resident/Bunshin transport paths.
+The final follow-up fixes are:
+
+- Chat stream null placeholders no longer overwrite accumulated text,
+  reasoning, call IDs, function names or argument strings.
+- Chat `reasoning_details` retains every received chunk in order instead of
+  overwriting earlier chunks. This follows the streaming sequence described in
+  [OpenRouter's reasoning documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+  The `reasoning` alias also participates in the incompatible-model guard.
+- Memory checkpoint schema 1 (the current main format) can enter the existing
+  legacy migration path. A coordinator-level regression checks that settled
+  imported history becomes L while active input remains R.
+- Scheduled channel admission again releases its ingress reservation in a
+  `finally` block. Preparation failure and cancellation cannot permanently
+  prevent memory maintenance.
+
+New null-delta, reasoning-chunk and schema-1 regressions reproduced their
+failures before the fixes. The ingress regression likewise reproduced the
+leaked reservation on both failure and cancellation.
+
+Offline verification on Linux / Python 3.13, with worktree `PYTHONPATH`:
+
+- Projection/v3/history/continuation suite: **340 passed, 1 skipped,
+  162 subtests passed** (`/tmp/pal-v3-final-review.txt`). This run precedes
+  the follow-up fixes above; the affected paths were retested below.
+- Final lossless/codec/recovery/checkpoint/recall suite: **94 passed,
+  61 subtests passed** (`/tmp/pal-v3-review-fixes.txt`), including the
+  100-tool-round replay through settlement, restore and cold rebuild.
+- Compact/cancel/artifact/recovery/Bunshin transport suite: **66 passed,
+  2 subtests passed** (`/tmp/pal-v3-review-compaction.txt`).
+- Endpoint/runtime/hooks/FD ownership: **82 passed, 11 subtests passed**
+  (`/tmp/pal-v3-review-transport.txt`).
+- Final ingress/compact-gate/cancellation suite: **31 passed,
+  2 subtests passed** (`/tmp/pal-v3-review-ingress.txt`).
+- All six LLM TLC models passed (`/tmp/pal-v3-review-tlc.txt`).
+- `git diff --check` passed. Earlier full CI-batch evidence is in section 14;
+  the above overlapping suites are not an additive test total.
+
+No remaining blocker was found within the reviewed paths. This establishes
+local preservation and lifecycle behavior, not upstream cache-hit guarantees.
+No paid provider calls, macOS checks, merge to main, push or runtime activation
+were performed during this review.

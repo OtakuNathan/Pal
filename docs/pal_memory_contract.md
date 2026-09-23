@@ -27,10 +27,19 @@ Current prompt projection:
 - Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
 
-L1 tool-result compaction:
+L1 round history and compaction:
 
-- Old tool protocol messages are cleared by complete turn groups.
-- A single tool-heavy turn is not partially cleared inside itself.
+- L1 retains all accepted reasoning, native replay values and full tool results,
+  including after turn settlement and checkpoint restore. Projection is a
+  rebuildable view, not the only copy of provider continuation.
+- A request captures its closed input prefix after preflight and conditional
+  compaction. Transport admission moves only that captured R prefix into L;
+  a failed send moves nothing, and new output remains R.
+- Automatic compaction atomically replaces existing L, including submitted
+  closed rounds inside an active turn, while leaving R untouched.
+- Manual compaction may first archive closed settled turns. It cannot absorb
+  an active unsent tail. Legacy snapshots without a cut initialize L from
+  closed imported turns; snapshots carrying an owner cut restore it exactly.
 
 Storage boundary:
 

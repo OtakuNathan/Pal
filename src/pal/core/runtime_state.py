@@ -101,7 +101,8 @@ class RuntimeSnapshotCoordinator:
         prepared: list[tuple[RuntimeStatePort, Any]] = []
         for port in ports:
             record = dict(modules[port.module_id])
-            if str(record.get("schema_version") or "") != str(port.schema_version):
+            readable_versions = getattr(port, "readable_schema_versions", (str(port.schema_version),))
+            if str(record.get("schema_version") or "") not in readable_versions:
                 raise ValueError(
                     f"runtime snapshot schema mismatch for {port.module_id}"
                 )

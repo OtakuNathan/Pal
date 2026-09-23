@@ -42,6 +42,7 @@ def _service_with_active(*, seed: bool = True, settled: int = 1) -> tuple[Memory
         service.l1_store.append(_seed_transcript())
     for index in range(settled):
         service.l1_store.append(_settled_transcript(f"settled-{index}"))
+    service.history_root.promote()  # Previous turns are already submitted history.
     turn_id = "logical-task-T"
     service.begin_l1_turn(turn_id, user_text="Q_ORIGINAL: implement the feature")
     service.upsert_l1_assistant(

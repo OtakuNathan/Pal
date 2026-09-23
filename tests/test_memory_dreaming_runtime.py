@@ -71,6 +71,18 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.core.state.pending_channel_turns)
         self.assertEqual(self.channel.last_user_route(), self.route)
 
+    async def test_scheduled_turn_releases_ingress_on_failure_and_cancellation(self):
+        self.core.remember_user_route = Mock()
+        for error in (RuntimeError("prepare failed"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                self.core.state.memory_maintenance_changed.clear()
+                self.core._schedule_admitted_channel_turn_async = AsyncMock(side_effect=error)
+                with self.assertRaises(type(error)):
+                    await self.core.schedule_channel_turn_async(SimpleNamespace())
+                self.assertEqual(self.core.state.memory_ingress_reservations, 0)
+                self.assertTrue(self.core.state.memory_maintenance_changed.is_set())
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+
     async def test_admission_does_not_wait_for_bunshin_processes(self):
         self.core.context.port_registry["bunshin:bunshin"] = SimpleNamespace(active_runs=["long-running-worker"])
         self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))

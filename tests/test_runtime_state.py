@@ -171,7 +171,7 @@ class RuntimeStateTests(unittest.TestCase):
 
         turn = restored.l1_store.turns.get("turn-legacy")
         self.assertEqual(turn.state.value, "settled")
-        self.assertNotIn("legacy transient reasoning", repr(turn.messages))
+        self.assertIn("legacy transient reasoning", repr(turn.messages))
         results = [
             part
             for message in turn.messages

@@ -12,6 +12,7 @@ the inherited v2 warm/cold suite; the session-side facts are pinned here.
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from pal.llm.ir import (
     GenerationPolicyIR,
@@ -442,14 +443,27 @@ class HandoffRequestTests(unittest.TestCase):
         with self.assertRaises(ProjectionSessionError):
             lineage.rebase_left((_seed("S"),), r1)
 
-    def test_rebase_refuses_straddling_chunk(self):
+    def test_rebase_preserves_precisely_owned_output_after_input_retires(self):
         shape = WireShape.OPENAI_COMPLETION
         lineage = _Lineage(shape)
         r1 = (_user("q", "u1"), _assistant("a", "s1"))
         lineage.round_trip(r1, "a1")
-        # Claim only half the chunk's span survives: an illegal cut.
+        # Request admission may freeze the input before output is sent.
+        lineage.rebase_left((_seed("S"),), (r1[1],))
+        self.assertEqual(lineage.session.frozen_message_ids(), ("s1",))
+
+    def test_rebase_refuses_ambiguous_partial_chunk(self):
+        lineage = _Lineage(WireShape.OPENAI_COMPLETION)
+        messages = (_user("q", "u1"), _assistant("a", "s1"))
+        lineage.round_trip(messages, "a1")
+        chunk = lineage.session.chunks[0]
+        lineage.session.chunks = (replace(
+            chunk,
+            item_spans=(("u1", "s1"),) * len(chunk.items),
+            item_block_spans=(),
+        ),)
         with self.assertRaises(ProjectionSessionError):
-            lineage.rebase_left((_seed("S"),), (r1[1],))
+            lineage.rebase_left((_seed("S"),), (messages[1],))
 
     def test_rebase_refuses_mismatched_kept_messages(self):
         shape = WireShape.OPENAI_COMPLETION

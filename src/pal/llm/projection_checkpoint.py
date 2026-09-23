@@ -26,6 +26,7 @@ from pal.llm.projection_contracts import (
     ProjectionIdentity,
 )
 from pal.llm.projection_session import EndpointProjectionSession
+from pal.llm.projection_spans import dump_spans, load_spans as _decode_cache_spans
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 
 __all__ = [
@@ -43,6 +44,13 @@ _PROJECTION_SECTION_KEY = "projection"
 
 class ProjectionCheckpointError(ValueError):
     """A projection checkpoint could not be validated or restored."""
+
+
+def load_spans(entries):
+    try:
+        return _decode_cache_spans(entries)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ProjectionCheckpointError(f"invalid cache span index: {exc}") from exc
 
 
 def _cursor_fields(cursor: HistoryCursor) -> dict[str, Any]:
@@ -99,6 +107,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
         "pending_wire_tail": [
             {
                 "item": thaw_json(dict(entry.item)),
+                "cache_spans": dump_spans(entry.cache_spans),
                 "span_ids": list(entry.span_ids),
                 "block_spans": [
                     list(span) for span in entry.block_spans
@@ -110,6 +119,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
             {
                 "span_ids": list(entry.span_ids),
                 "parts": thaw_json(list(entry.parts)),
+                "cache_spans": [dump_spans(spans) for spans in entry.cache_spans],
             }
             for entry in session._committed_head_system
         ],
@@ -123,6 +133,7 @@ def snapshot_projection(session: EndpointProjectionSession) -> dict[str, Any]:
                 "semantic_span": list(chunk.semantic_span),
                 # F5: per-item span ownership (absent in pre-F5 snapshots).
                 "item_spans": [list(span) for span in chunk.item_spans],
+                "item_cache_spans": [dump_spans(entries) for entries in chunk.item_cache_spans],
                 # S1 (review 7d182fd): per-block ownership (absent in
                 # pre-S1 snapshots → whole-item rules on restore).
                 "item_block_spans": [
@@ -380,6 +391,7 @@ def restore_projection(
 
     chunks: list[ProjectionChunk] = []
     prefix_items: list[dict] = []
+    prefix_cache_spans: list[tuple] = []
     prefix_item_spans: list[tuple[str, ...]] = []
     # S1 (review 7d182fd): per-item BLOCK ownership axis for the prefix.
     prefix_item_block_spans: list[tuple[tuple[str, ...], ...]] = []
@@ -457,6 +469,9 @@ def restore_projection(
                 )
             if valid_blocks:
                 chunk_item_block_spans = tuple(parsed_blocks)
+        cache_spans = tuple(load_spans(entries) for entries in raw.get("item_cache_spans", ()))
+        if cache_spans and len(cache_spans) != len(items):
+            raise ProjectionCheckpointError("chunk cache spans length does not match items")
         chunks.append(
             ProjectionChunk(
                 round_attempt_id=str(raw.get("attempt_id") or ""),
@@ -470,11 +485,13 @@ def restore_projection(
                 semantic_span=tuple(str(mid) for mid in span_raw),
                 item_spans=chunk_item_spans,
                 item_block_spans=chunk_item_block_spans,
+                item_cache_spans=cache_spans,
             )
         )
         # The restored private prefix holds the deep-copied owned dicts (the
         # public chunk snapshot is deep-frozen); the two share nothing.
         prefix_items.extend(dict(item) for item in items)
+        prefix_cache_spans.extend(cache_spans or [()] * len(items))
         if chunk_item_spans:
             prefix_item_spans.extend(chunk_item_spans)
         else:
@@ -528,6 +545,7 @@ def restore_projection(
                     item=dict(entry_raw["item"]),
                     span_ids=tuple(str(mid) for mid in span_ids_raw),
                     block_spans=entry_block_spans,
+                    cache_spans=load_spans(entry_raw.get("cache_spans", ())),
                 )
             )
         else:
@@ -570,6 +588,7 @@ def restore_projection(
             committed_head_system.append(
                 _HeadSystemEntry(
                     span_ids=tuple(str(mid) for mid in span_ids_raw),
+                    cache_spans=tuple(load_spans(spans) for spans in entry_raw.get("cache_spans", ())),
                     parts=tuple(
                         freeze_json_mapping(part)
                         for part in json.loads(json.dumps(list(parts_raw)))
@@ -651,6 +670,7 @@ def restore_projection(
     session.frontier = frontier
     session.chunks = tuple(chunks)
     session._prefix_items = prefix_items
+    session._prefix_cache_spans = prefix_cache_spans
     session._prefix_item_spans = prefix_item_spans
     session._prefix_item_block_spans = prefix_item_block_spans
     session._frontier_item_count = len(prefix_items)

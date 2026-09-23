@@ -8,12 +8,12 @@ from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, ReasoningPartIR
 from pal.llm.serde import message_from_payload, message_to_payload
 from pal.memory.contracts import CompactionReceipt, L2Entry
 from pal.memory.service import MemoryService
-from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore
+from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore, _repair_replay
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
 
-MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "3"
+MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "4"
 
 _RECEIPT_FIELDS = (
     "op_id", "status", "epoch_before", "epoch_after", "summary_source_id",
@@ -95,6 +95,7 @@ class MemoryRuntimeStatePort:
     service: MemoryService
     module_id: str = "memory"
     schema_version: str = MEMORY_RUNTIME_STATE_SCHEMA_VERSION
+    readable_schema_versions = ("1", "2", "3", "4")
     state_order: int = 100
 
     def snapshot_state(self) -> Mapping[str, Any]:
@@ -267,8 +268,10 @@ class MemoryRuntimeStatePort:
             )
         else:
             # Explicit migration (v2-era payload / root never attached):
-            # the authority stays lazy and fresh — no cut is invented.
+            # closed imported turns form the initial compressible history;
+            # active work remains R and no transport receipt is invented.
             self.service._history_root = None
+            self.service.history_root.promote()
 
     def reset_state(self, reason: str) -> None:
         _ = reason
@@ -404,26 +407,8 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
 def _normalize_closed_turn_projection(
     messages: tuple[LLMMessageIR, ...],
 ) -> tuple[LLMMessageIR, ...]:
-    """Strip provider-neutral reasoning transients while preserving evidence.
-
-    Wire replay envelopes survive restore: same-endpoint encodes stay
-    byte-identical, so the prompt-cache prefix crosses restart boundaries.
-    """
-
-    migrated: list[LLMMessageIR] = []
-    for message in messages:
-        parts = tuple(
-            part for part in message.parts if not isinstance(part, ReasoningPartIR)
-        )
-        migrated.append(
-            replace(
-                message,
-                parts=parts,
-                state=MessageState.COMPLETE,
-                replay=message.replay,
-            )
-        )
-    return tuple(migrated)
+    """Restore closure without changing any accepted continuation content."""
+    return tuple(replace(message, state=MessageState.COMPLETE) for message in messages)
 
 
 def _normalize_tool_protocol(
@@ -469,10 +454,11 @@ def _normalize_tool_protocol(
                 # wire replay envelope still carries the removed/modified
                 # protocol items, and same-endpoint encoders prefer replay
                 # over parts, which would smuggle dangling calls back onto
-                # the wire. Re-encode changed messages from their repaired
-                # IR instead; untouched messages keep their byte-stable
-                # envelope.
-                replay=None if changed else message.replay,
+                # the wire. Repair only revoked calls in native replay;
+                # retain accepted reasoning and original source evidence.
+                replay=(
+                    _repair_replay(message.replay, parts) if changed else message.replay
+                ),
             )
             if changed
             else message

@@ -59,7 +59,9 @@ Invariants:
   path after the response iterator closes
 - streaming and single-shot responses pass through the same codec-owned JSON-frame iterator
 - decoder state and provider stream events never escape the codec
-- closed L1 turns contain neither reasoning parts nor replay envelopes
+- closed L1 turns preserve reasoning parts and replay envelopes until explicit compaction
+- transport admission and accepted output are separate owner-side lifecycle events
+- L1 is the replay authority; frozen projections can be rebuilt without native loss
 
 The [LLM contract](../../../docs/pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)
 defines accepted configuration vocabulary, per-shape `off` behavior, manual

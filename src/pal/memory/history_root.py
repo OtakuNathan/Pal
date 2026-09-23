@@ -198,6 +198,15 @@ class ProducerToken:
     turn_id: str
 
 
+@dataclass(frozen=True)
+class PreparedHistorySubmission:
+    incarnation: str
+    cut: CutPosition
+    target: CutPosition
+    messages: tuple[LLMMessageIR, ...]
+    required_ids: frozenset[str]
+
+
 def _summary_turn(text: str, payload: Mapping[str, Any] | None = None) -> L1TurnIR:
     from pal.llm.ir import TextPartIR
 
@@ -516,6 +525,62 @@ class HistoryRoot:
     # Promote — cut movement at request boundaries only (§3.3)
     # ------------------------------------------------------------------
 
+    def prepare_submission(self, message_ids: Iterable[str]) -> PreparedHistorySubmission:
+        """Capture the closed input prefix without moving the cut."""
+        if self.active_run is not None:
+            raise FrozenLeftDuringCompact("cannot submit during compaction")
+        available = frozenset(message_ids)
+        turns = self._ordered_turns()
+        whole, intra = self._cut.turn_count, self._cut.intra_messages
+        captured: list[LLMMessageIR] = []
+        required: set[str] = set()
+        for index in range(whole, len(turns)):
+            turn = turns[index]
+            start = intra if index == whole else 0
+            limit = len(turn.messages)
+            for offset in range(start, limit):
+                message = turn.messages[offset]
+                if message.state != MessageState.COMPLETE or (
+                    message.message_id not in available
+                    and message.semantic_kind != "pal_prompt_context"
+                ):
+                    limit = offset
+                    break
+            while limit > start:
+                calls, results = _protocol_ids(turn.messages[:limit])
+                if calls == results:
+                    break
+                limit -= 1
+            selected = turn.messages[start:limit]
+            captured.extend(selected)
+            required.update(m.message_id for m in selected if m.message_id in available)
+            if limit == len(turn.messages) and turn.state != L1TurnState.ACTIVE:
+                whole, intra = index + 1, 0
+            else:
+                whole, intra = index, limit
+                break
+        return PreparedHistorySubmission(
+            self._incarnation, self._cut,
+            CutPosition(whole, intra), tuple(captured), frozenset(required),
+        )
+
+    def commit_submission(self, prepared: PreparedHistorySubmission, message_ids: Iterable[str]) -> bool:
+        """Freeze only the captured prefix after transport admission."""
+        if (prepared.incarnation != self._incarnation or prepared.cut != self._cut
+                or self.active_run is not None
+                or not prepared.required_ids.issubset(message_ids)):
+            return False
+        if not prepared.messages:
+            return False
+        current = self.right_messages()
+        if current[:len(prepared.messages)] != prepared.messages:
+            return False
+        self._cut = self._cut.advanced(
+            turn_count=prepared.target.turn_count,
+            intra_messages=prepared.target.intra_messages,
+        )
+        return True
+
     def promotable_turn_count(self, *, include_active: bool = False) -> tuple[int, int]:
         """Return (whole_turns, intra_messages) promotable under the cut rules."""
 
@@ -535,6 +600,8 @@ class HistoryRoot:
             if boundary is None:
                 return whole, intra  # defensive: stale cut against a shrunken store
             if boundary.state == L1TurnState.ACTIVE:
+                if not include_active:
+                    return whole, intra
                 extended = self._closed_prefix_length(boundary)
                 return (whole, extended) if extended > intra else (whole, intra)
             # Boundary turn closed since the last promote: it becomes wholly L.
@@ -605,13 +672,9 @@ class HistoryRoot:
     def _seal_frozen_boundary_prefix(self) -> None:
         """Closed-group sealing at the cut (review N1-R1).
 
-        Assistant messages the cut freezes into L receive the existing
-        neutral-reasoning retirement (``_close_message``) exactly once, at
-        the moment the group closes — before any compact run can capture
-        them.  After this the frozen prefix is representation-final:
-        settlement and interrupt of the boundary turn reuse the same sealed
-        objects (F2: L is never rewritten), and non-ACTIVE validation stays
-        legal because no neutral reasoning remains under a closing turn.
+        Sealing marks lifecycle closure without retiring reasoning or replay.
+        Submission promotion already captures complete messages and does not
+        rewrite them; this helper serves explicit closed-history promotion.
         """
 
         if self._cut.intra_messages <= 0:

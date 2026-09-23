@@ -18,7 +18,7 @@ from pal.memory.turn_ir import L1TurnProtocolError, L1TurnState, L1TurnStore
 
 
 class L1TurnIRTests(unittest.TestCase):
-    def test_active_turn_retains_reasoning_and_settlement_retires_it_atomically(self) -> None:
+    def test_active_turn_and_settlement_preserve_reasoning(self) -> None:
         store = L1TurnStore()
         turn = store.begin("turn-1", user_text="hello")
         assistant = LLMMessageIR(
@@ -33,9 +33,9 @@ class L1TurnIRTests(unittest.TestCase):
         settled = store.require_active("turn-1").settle()
         store.replace(settled)
         self.assertEqual(settled.state, L1TurnState.SETTLED)
-        # Provider-neutral reasoning parts are retired atomically at settlement...
-        self.assertEqual(settled.messages[-1].reasoning_text, "")
-        # ...but the wire replay envelope survives: same-endpoint replays stay
+        # Reasoning and native replay are retained together at settlement.
+        self.assertEqual(settled.messages[-1].reasoning_text, "inspect")
+        # The wire replay envelope survives: same-endpoint replays stay
         # byte-identical so the prompt-cache prefix crosses turn boundaries.
         self.assertIsNotNone(settled.messages[-1].replay)
         self.assertEqual(settled.messages[-1].replay.payload, {"message": {}})

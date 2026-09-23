@@ -884,9 +884,11 @@ class PalCore(MemoryMaintenanceMixin):
         if sleeping:
             await self.deliver_memory_notice_async(self._route_from_channel_envelope(channel_envelope), SLEEP_REPLY, require_provider=False)
             return
-        await self._schedule_admitted_channel_turn_async(channel_envelope)
-        self.state.memory_ingress_reservations -= 1
-        self.state.memory_maintenance_changed.set()
+        try:
+            await self._schedule_admitted_channel_turn_async(channel_envelope)
+        finally:
+            self.state.memory_ingress_reservations -= 1
+            self.state.memory_maintenance_changed.set()
 
     async def _schedule_admitted_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         # Any new user activity makes the old idle-cache deadline irrelevant,

@@ -63,6 +63,11 @@ class _BarrierEngine:
         self.calls += 1
         self.entered.set()
         await self.release.wait()
+        # This gate-only stub does not install a candidate. Release the
+        # history owner's lane as a real engine would before waking turns.
+        root = memory_service.history_root
+        if root.active_run is not None:
+            root.fail(root.active_run.run_id, reason="gate fixture completed")
         memory_result = SimpleNamespace(
             summary="gate summary",
             projected_entries=[],

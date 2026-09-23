@@ -64,6 +64,7 @@ from pal.llm.response_hooks import (
 )
 from pal.llm.usage import LLMUsageLedger
 from pal.llm.transport import (
+    RequestSubmission,
     DirectSDKTransport,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
@@ -91,8 +92,8 @@ def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
     return collect
 
 
-def _invoker_accepts_native_sink(invoker: Any, method: str = "invoke_updates") -> bool:
-    """Whether the invoker's send method can take the native_sink kwarg.
+def _invoker_accepts_native_sink(invoker: Any, method: str = "invoke_updates", *, keyword: str = "native_sink") -> bool:
+    """Whether the invoker's send method accepts an optional observer.
 
     Subclasses that narrow the base signature (historically: without
     ``**kwargs``) must not receive the kwarg — a TypeError at call time
@@ -105,7 +106,7 @@ def _invoker_accepts_native_sink(invoker: Any, method: str = "invoke_updates") -
         signature = inspect.signature(getattr(invoker, method))
     except (TypeError, ValueError, AttributeError):
         return False
-    if "native_sink" in signature.parameters:
+    if keyword in signature.parameters:
         return True
     return any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
@@ -810,12 +811,14 @@ class LLMRuntime(LLMRuntimePort):
         projection_binding: "EndpointBinding | None" = None,
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
     ) -> LLMGenerationResult:
         return self._generate(
             request, allow_stale_refresh=True,
             projection=projection, projection_binding=projection_binding,
             projection_attempt_id=projection_attempt_id,
             generation_plan=generation_plan,
+            on_submitted=on_submitted,
         )
 
     def _generate(
@@ -827,6 +830,7 @@ class LLMRuntime(LLMRuntimePort):
         projection_binding: "EndpointBinding | None" = None,
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
     ) -> LLMGenerationResult:
         self.last_request = request
         # F2: receipts are per generation; clearing here keeps a stale
@@ -885,6 +889,10 @@ class LLMRuntime(LLMRuntimePort):
                     if isinstance(self._invoker(), ShapeEndpointInvoker):
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
+                        if on_submitted is not None and _invoker_accepts_native_sink(
+                            self._invoker(), "invoke", keyword="submission_sink"
+                        ):
+                            invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: the codec-level native capture for THIS attempt
@@ -958,6 +966,7 @@ class LLMRuntime(LLMRuntimePort):
                             projection_binding=projection_binding,
                             projection_attempt_id=projection_attempt_id,
                             generation_plan=None,
+                            on_submitted=on_submitted,
                         )
                     last_error = exc
                     error_kind = self._record_failure(endpoint, exc, attempt)
@@ -1064,12 +1073,16 @@ class LLMRuntime(LLMRuntimePort):
         projection_binding: "EndpointBinding | None" = None,
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
     ) -> LLMGenerationResult:
+        loop = asyncio.get_running_loop()
+        notify = (lambda receipt: loop.call_soon_threadsafe(on_submitted, receipt)) if on_submitted else None
         return await asyncio.to_thread(
             self.generate, request,
             projection=projection, projection_binding=projection_binding,
             projection_attempt_id=projection_attempt_id,
             generation_plan=generation_plan,
+            on_submitted=notify,
         )
 
     def _iter_stream_updates(
@@ -1082,6 +1095,7 @@ class LLMRuntime(LLMRuntimePort):
         projection_binding: "EndpointBinding | None" = None,
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
         self.last_request = request
         # F2: per-generation receipt; cleared so late readers cannot see a
@@ -1147,6 +1161,10 @@ class LLMRuntime(LLMRuntimePort):
                         invoke_kwargs["stream_control"] = stream_control
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
+                        if on_submitted is not None and _invoker_accepts_native_sink(
+                            self._invoker(), keyword="submission_sink"
+                        ):
+                            invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: native capture travels back with the receipt.
@@ -1232,6 +1250,7 @@ class LLMRuntime(LLMRuntimePort):
                             projection_binding=projection_binding,
                             projection_attempt_id=projection_attempt_id,
                             generation_plan=None,
+                            on_submitted=on_submitted,
                         )
                         return
                     last_error = exc
@@ -1299,6 +1318,7 @@ class LLMRuntime(LLMRuntimePort):
         projection_binding: "EndpointBinding | None" = None,
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
     ) -> AsyncIterator[LLMResponseUpdate]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
@@ -1325,6 +1345,7 @@ class LLMRuntime(LLMRuntimePort):
                     projection_binding=projection_binding,
                     projection_attempt_id=projection_attempt_id,
                     generation_plan=generation_plan,
+                    on_submitted=enqueue if on_submitted is not None else None,
                 ):
                     enqueue(update)
             except BaseException as exc:  # noqa: BLE001
@@ -1358,6 +1379,10 @@ class LLMRuntime(LLMRuntimePort):
                     break
                 if isinstance(item, BaseException):
                     raise item
+                if isinstance(item, RequestSubmission):
+                    if on_submitted is not None:
+                        on_submitted(item)
+                    continue
                 yield item  # type: ignore[misc]
         finally:
             stream_control.cancel("consumer_closed")
@@ -1573,6 +1598,20 @@ class LLMRuntime(LLMRuntimePort):
             thinking_budget_tokens=budget,
         )
         prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id)
+        from pal.llm.replay_acceptance import has_opaque_continuation, validate_native_for_send
+
+        for message in prepared.messages:
+            replay = message.replay
+            if replay is not None and has_opaque_continuation(message) and not replay.matches(
+                wire_shape=WireShape(endpoint.wire_shape),
+                endpoint_id=endpoint.endpoint_id, model_id=endpoint.model_id,
+            ):
+                raise LLMRequestPreparationError(
+                    "History contains reasoning/replay bound to another model. "
+                    "Complete /compact on the previous model before switching, or use /reset."
+                )
+            if replay is not None and has_opaque_continuation(message):
+                validate_native_for_send(message)
         target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)
         return PreparedLLMRequest(
             endpoint=endpoint,
@@ -1864,7 +1903,14 @@ class LLMRuntime(LLMRuntimePort):
             raise ProviderResponseHookError(
                 f"provider response hook produced no output for {endpoint.endpoint_id}"
             )
-        return updates[-1].response
+        normalized = updates[-1].response
+        if response.message.replay is not None and normalized.message.replay is None:
+            if normalized.message.tool_calls != response.message.tool_calls:
+                raise ProviderResponseHookError("recovery changed accepted tool inventory")
+            normalized = replace(normalized, message=replace(
+                normalized.message, replay=response.message.replay,
+            ))
+        return normalized
 
     def _success(
         self,
@@ -2100,6 +2146,11 @@ def _public_failure_text(exc: Exception | None) -> str:
 def _estimate_request_tokens(request: LLMRequestIR) -> int:
     chars = 0
     for message in request.messages:
+        if message.replay is not None:
+            # The continuation replaces the semantic representation on the
+            # wire. Count it once; source_payload is local provenance only.
+            chars += len(json.dumps(thaw_json(message.replay.payload), ensure_ascii=False))
+            continue
         chars += len(message.text) + len(message.reasoning_text)
         for call in message.tool_calls:
             chars += len(call.name) + len(json.dumps(thaw_json(call.arguments), ensure_ascii=False))

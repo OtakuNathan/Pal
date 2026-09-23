@@ -192,6 +192,12 @@ class OpenAIResponseDecoder:
         elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
             if isinstance(response, Mapping) and not self.builder.parts:
                 return self._feed_complete_response(dict(response))
+            if isinstance(response, Mapping) and isinstance(response.get("output"), (list, tuple)):
+                # Final items can carry opaque fields absent from deltas.
+                self.replay_items = {
+                    index: dict(item) for index, item in enumerate(response["output"])
+                    if isinstance(item, Mapping)
+                }
             status_reason = (
                 "length"
                 if event_type == "response.incomplete"

@@ -277,7 +277,7 @@ class LLMIntrospectionProvider:
         family="management",
         action_name="set_active_endpoint",
         guidance=ToolGuidance(
-            purpose="Switch the active LLM endpoint for future requests.",
+            purpose="Switch the active LLM endpoint for future requests. Recommend completing compact on the current model first to reduce history replay cost; switching does not automatically compact.",
             use_when="The user asks to switch models (e.g. to a different provider, a faster/cheaper model, or one with vision).",
             do_not_use_when="Checking the current model (use llm_active). Listing endpoints (use llm_list).",
             failure_next_steps="If NOT_FOUND, verify the endpoint name with llm_list. Only enabled endpoints can be activated.",

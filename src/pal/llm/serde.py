@@ -105,6 +105,10 @@ def message_to_payload(message: LLMMessageIR) -> dict[str, Any]:
                 "endpoint_id": message.replay.endpoint_id,
                 "model_id": message.replay.model_id,
                 "payload": thaw_json(message.replay.payload),
+                "source_payload": (
+                    thaw_json(message.replay.source_payload)
+                    if message.replay.source_payload is not None else None
+                ),
             }
             if message.replay
             else None
@@ -122,6 +126,7 @@ def message_from_payload(payload: Mapping[str, Any]) -> LLMMessageIR:
             endpoint_id=str(replay_payload.get("endpoint_id") or ""),
             model_id=str(replay_payload.get("model_id") or ""),
             payload=dict(replay_payload.get("payload") or {}),
+            source_payload=replay_payload.get("source_payload"),
         )
     return LLMMessageIR(
         role=MessageRole(str(payload.get("role") or "user")),

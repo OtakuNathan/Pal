@@ -64,6 +64,14 @@ class OpenAICompletionCodec(ShapeCodecBase):
                     )
                 ):
                     replay_message = message.replay.payload.get("message")
+                    replay_messages = message.replay.payload.get("messages")
+                    if isinstance(replay_messages, (list, tuple)):
+                        targets = []
+                        for item in replay_messages:
+                            messages.append(thaw_json(item))
+                            targets.extend(_chat_message_cache_targets(messages, len(messages) - 1))
+                        spans.append(EncodedMessageSpan(message.message_id, tuple(targets)))
+                        continue
                     if isinstance(replay_message, Mapping):
                         messages.append(thaw_json(replay_message))
                         spans.append(
@@ -253,6 +261,8 @@ class OpenAICompletionDecoder:
         self.builder = ResponseIRBuilder(context)
         self.tool_drafts: dict[int, dict[str, Any]] = {}
         self.tool_calls_finalized = False
+        self.native_message: dict[str, Any] = {}
+        self.native_tools: dict[int, dict[str, Any]] = {}
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
         self.builder.observe_frame(frame)
@@ -268,6 +278,7 @@ class OpenAICompletionDecoder:
         delta = first.get("delta")
         if not isinstance(delta, Mapping):
             delta = {}
+        self._capture_delta(delta)
         updates: list[LLMResponseUpdate] = []
         reasoning = delta.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
@@ -307,6 +318,7 @@ class OpenAICompletionDecoder:
         return self.builder.finish()
 
     def _feed_complete_message(self, message: dict[str, Any], finish_reason: Any) -> tuple[LLMResponseUpdate, ...]:
+        self.native_message = thaw_json(message)
         updates: list[LLMResponseUpdate] = []
         reason = canonical_finish_reason(finish_reason, has_tools=bool(message.get("tool_calls")))
         reasoning = message.get("reasoning_content")
@@ -407,27 +419,72 @@ class OpenAICompletionDecoder:
         self.tool_calls_finalized = True
         return updates
 
+    def _capture_delta(self, delta: Mapping[str, Any]) -> None:
+        # Preserve protocol values independently of the executable IR. In
+        # particular arguments are a STRING, not a dict to re-serialize.
+        for key, value in delta.items():
+            # Null in a delta is not a replacement for accumulated content.
+            # Retain an initial null (e.g. tool-only content), but don't let
+            # later placeholder fields erase an accepted prefix.
+            if (value is None and key in self.native_message
+                    and key in {"role", "content", "reasoning_content", "reasoning",
+                                "refusal", "tool_calls", "reasoning_details"}):
+                continue
+            if key == "tool_calls":
+                for position, item in enumerate(value or ()):
+                    if not isinstance(item, Mapping):
+                        continue
+                    index = item.get("index", position)
+                    if not isinstance(index, int):
+                        raise ShapeDecodeError("tool delta index must be an integer")
+                    target = self.native_tools.setdefault(index, {})
+                    for field, part in item.items():
+                        if field == "index":
+                            continue
+                        if part is None and field in target:
+                            continue
+                        if field == "function" and isinstance(part, Mapping):
+                            if not isinstance(target.get("function"), dict):
+                                target["function"] = {}
+                            function = target["function"]
+                            for name, fragment in part.items():
+                                if fragment is None and name in function:
+                                    continue
+                                if name == "arguments" and isinstance(fragment, str):
+                                    function[name] = str(function.get(name) or "") + fragment
+                                elif name == "name" and isinstance(fragment, str):
+                                    current = str(function.get(name) or "")
+                                    function[name] = (fragment if fragment.startswith(current)
+                                                      else current if current.endswith(fragment)
+                                                      else current + fragment)
+                                else:
+                                    function[name] = thaw_json(fragment)
+                        else:
+                            target[field] = thaw_json(part)
+                self.native_message[key] = [self.native_tools[i] for i in sorted(self.native_tools)]
+            elif key == "reasoning_details" and isinstance(value, (list, tuple)):
+                # OpenRouter emits an ordered sequence of detail chunks,
+                # including opaque/signature blocks. Keep every chunk;
+                # replacing the array loses all but the last frame.
+                previous = self.native_message.get(key) or []
+                self.native_message[key] = [*previous, *thaw_json(value)]
+            elif key in {"content", "reasoning_content", "reasoning", "refusal"} and isinstance(value, str):
+                self.native_message[key] = str(self.native_message.get(key) or "") + value
+            else:
+                self.native_message[key] = thaw_json(value)
+
     def _refresh_replay(self) -> None:
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": text_content(self.builder.parts),
-        }
-        reasoning = "".join(
-            part.text for part in self.builder.parts if isinstance(part, ReasoningPartIR)
-        )
-        if reasoning:
-            message["reasoning_content"] = reasoning
-        calls = [part for part in self.builder.parts if isinstance(part, ToolCallIR)]
-        if calls:
-            message["tool_calls"] = [
-                {
-                    "id": call.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": json.dumps(thaw_json(call.arguments), ensure_ascii=False),
-                    },
-                }
-                for call in calls
-            ]
+        message = thaw_json(self.native_message)
+        message.setdefault("role", "assistant")
+        source = None
+        if self.tool_calls_finalized and message.get("tool_calls"):
+            accepted = {part.call_id for part in self.builder.parts if isinstance(part, ToolCallIR)}
+            calls = [item for item in message["tool_calls"] if str(item.get("id") or "") in accepted]
+            if calls != message["tool_calls"]:
+                source = {"message": thaw_json(message)}
+                if calls:
+                    message["tool_calls"] = calls
+                else:
+                    message.pop("tool_calls", None)
         self.builder.replay_payload = {"message": message}
+        self.builder.replay_source_payload = source

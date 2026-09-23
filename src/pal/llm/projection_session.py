@@ -51,6 +51,7 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
+from pal.llm.projection_spans import ItemSpans, split_spans, join_spans, shift_blocks, retire_spans
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
@@ -123,6 +124,8 @@ class ProjectionChunk:
     # an empty entry marks an item without block ownership (whole-item
     # rules apply, e.g. legacy snapshots or non-list content).
     item_block_spans: tuple[tuple[tuple[str, ...], ...], ...] = ()
+    # Codec addresses relative to each frozen item; distinct from ownership.
+    item_cache_spans: tuple[ItemSpans, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,7 @@ class _HeadSystemEntry:
 
     span_ids: tuple[str, ...]
     parts: tuple[Mapping[str, Any], ...]
+    cache_spans: tuple[ItemSpans, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -183,6 +187,7 @@ class _PendingWireItem:
     item: dict
     span_ids: tuple[str, ...]
     block_spans: tuple[tuple[str, ...], ...] = ()
+    cache_spans: ItemSpans = ()
 
 
 @dataclass
@@ -197,11 +202,13 @@ class _ActiveRound:
     prepared_item_block_spans: list[tuple[tuple[str, ...], ...]] = field(
         default_factory=list
     )
+    prepared_cache_spans: list[ItemSpans] = field(default_factory=list)
     prepared_base_cursor: HistoryCursor | None = None
     # Top-level system parts hoisted from THIS round's tail-head messages
     # (review G2 persistence): container coordinates cannot freeze them, so
     # observe_commit transfers them into the session-owned head-system list.
     prepared_head_system: list[dict] = field(default_factory=list)
+    prepared_head_cache_spans: list[ItemSpans] = field(default_factory=list)
 
 
 class EndpointProjectionSession:
@@ -229,6 +236,7 @@ class EndpointProjectionSession:
         # deepcopy of old chunks).  Private mutable dicts: the public chunk
         # view holds deep-frozen snapshots (review R7).
         self._prefix_items: list[dict] = []
+        self._prefix_cache_spans: list[ItemSpans] = []
         # Per-item span ownership aligned with _prefix_items (F5).
         self._prefix_item_spans: list[tuple[str, ...]] = []
         # S1 (review 7d182fd): per-item BLOCK ownership aligned with
@@ -309,6 +317,8 @@ class EndpointProjectionSession:
         self._committed_attempts = {}
         self.frontier = HistoryCursor.initial()
         self._prefix_items = []
+        self._prefix_cache_spans = []
+        self._prefix_item_block_spans = []
         self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
@@ -321,6 +331,8 @@ class EndpointProjectionSession:
         self.native_by_attempt = {}
         self.chunks = ()
         self._prefix_items = []
+        self._prefix_cache_spans = []
+        self._prefix_item_block_spans = []
         self._prefix_item_spans = []
         self._pending_wire_tail = []
         self._committed_head_system = []
@@ -461,6 +473,7 @@ class EndpointProjectionSession:
         *,
         accepted_messages: Sequence[LLMMessageIR] = (),
         span_message_ids: Sequence[str] = (),
+        native_message_id: str = "",
     ) -> None:
         """Advance the frontier with a trusted joint commit (idempotent).
 
@@ -473,6 +486,8 @@ class EndpointProjectionSession:
         span_ids = tuple(str(value) for value in span_message_ids)
         if len(set(span_ids)) != len(span_ids):
             raise ProjectionSessionError("commit span repeats a message id")
+        if native_message_id and native_message_id not in span_ids:
+            raise ProjectionSessionError("native message is outside the accepted span")
 
         self._require_identity()
         previous = self._committed_attempts.get(receipt.attempt.attempt_id)
@@ -506,6 +521,7 @@ class EndpointProjectionSession:
             raise ProjectionSessionError("commit receipt epoch does not match frontier")
         # Materialize the accepted output beyond the prepared request input.
         materialized: list[dict] = []
+        materialized_cache_spans: list[ItemSpans] = []
         if accepted_native is not None:
             materialized.extend(
                 dict(item)
@@ -525,17 +541,31 @@ class EndpointProjectionSession:
                         "accepted IR messages repeat the assistant turn "
                         "already carried by the native material"
                     )
+        materialized_cache_spans.extend([()] * len(materialized))
+        if accepted_native is not None and native_message_id:
+            from pal.llm.projection_spans import native_spans
+            materialized_cache_spans = native_spans(
+                self.binding.wire_shape.value, materialized, native_message_id)
         if accepted_messages:
-            materialized.extend(
-                dict(item) for item in self._encode_messages(tuple(accepted_messages))
-            )
+            encoded_accepted = self._encode_request(tuple(accepted_messages))
+            container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
+            accepted_items = list(encoded_accepted.payload.get(container) or [])
+            materialized.extend(dict(item) for item in accepted_items)
+            materialized_cache_spans.extend(split_spans(
+                encoded_accepted.message_spans, container, len(accepted_items)))
         # S1 (review 7d182fd): accepted output beyond the frontier is
         # owned by THIS commit's span at block granularity — every content
         # block the encode materialized.  A later seam merge concatenates
         # blocks from two owners, so the per-block axis must exist here
         # first or mixed items could never be retired partially.
+        materialized_spans = [
+            tuple(dict.fromkeys(entry.message_id for entry in entries))
+            or ((native_message_id,) if native_message_id else span_ids)
+            for entries in materialized_cache_spans
+        ]
         materialized_block_spans = [
-            _uniform_block_spans(item, span_ids) for item in materialized
+            _uniform_block_spans(item, owner)
+            for item, owner in zip(materialized, materialized_spans)
         ]
         # Everything below is computed on LOCAL candidates and installed in
         # ONE block at the very end (review H1): a refusal must leave every
@@ -546,7 +576,7 @@ class EndpointProjectionSession:
         extended = [*self._active.prepared_items, *materialized]
         extended_spans = [
             *self._active.prepared_item_spans,
-            *((span_ids,) * len(materialized)),
+            *materialized_spans,
         ]
         if len(extended_spans) < len(extended):
             # Legacy draft state without ownership: pad with unknown spans.
@@ -561,7 +591,10 @@ class EndpointProjectionSession:
             extended_block_spans.extend(
                 [()] * (len(extended) - len(extended_block_spans))
             )
+        prepared_cache_spans = self._active.prepared_cache_spans or [()] * len(self._active.prepared_items)
+        extended_cache_spans = [*prepared_cache_spans, *materialized_cache_spans]
         items = tuple(extended[self._frontier_item_count :])
+        item_cache_span_list = extended_cache_spans[self._frontier_item_count :]
         item_span_list = list(extended_spans[self._frontier_item_count :])
         item_block_span_list = list(
             extended_block_spans[self._frontier_item_count :]
@@ -587,11 +620,13 @@ class EndpointProjectionSession:
                         item=dict(items[-1]),
                         span_ids=tuple(item_span_list[-1]),
                         block_spans=tuple(item_block_span_list[-1]),
+                        cache_spans=tuple(item_cache_span_list[-1]),
                     ),
                 )
                 items = items[:-1]
                 item_span_list = item_span_list[:-1]
                 item_block_span_list = item_block_span_list[:-1]
+                item_cache_span_list = item_cache_span_list[:-1]
                 frozen_item_count -= 1
         # A zero-freeze commit is ACCEPTED, not refused (review H1): Anthropic
         # can legitimately close a round whose items beyond the frontier are
@@ -620,6 +655,7 @@ class EndpointProjectionSession:
             item_block_spans=tuple(
                 tuple(blocks) for blocks in item_block_span_list
             ),
+            item_cache_spans=tuple(item_cache_span_list),
         )
         head_system_parts = [dict(part) for part in self._active.prepared_head_system]
         # -- single install boundary: no session-visible failure past here --
@@ -628,6 +664,7 @@ class EndpointProjectionSession:
                 item=dict(entry.item),
                 span_ids=tuple(entry.span_ids),
                 block_spans=tuple(entry.block_spans),
+                cache_spans=tuple(entry.cache_spans),
             )
             for entry in unfrozen_suffix
         ]
@@ -635,6 +672,7 @@ class EndpointProjectionSession:
         # The private amortized prefix keeps the mutable dicts; it is never
         # exposed and shares nothing with the frozen chunk snapshot above.
         self._prefix_items.extend(items)
+        self._prefix_cache_spans.extend(item_cache_span_list)
         self._prefix_item_spans.extend(tuple(span) for span in item_span_list)
         self._prefix_item_block_spans.extend(
             tuple(blocks) for blocks in item_block_span_list
@@ -648,6 +686,7 @@ class EndpointProjectionSession:
             self._committed_head_system.append(
                 _HeadSystemEntry(
                     span_ids=tuple(span_ids),
+                    cache_spans=tuple(self._active.prepared_head_cache_spans),
                     parts=tuple(
                         freeze_json_mapping(part) for part in head_system_parts
                     ),
@@ -780,9 +819,10 @@ class EndpointProjectionSession:
         at commit time — so the rebuilt prefix replays exactly what the
         provider saw (review F4), never an IR re-encode that silently drops
         native-only material.  Only the new seed pays a fresh encode (the
-        generation-change cost, not a per-round path).  A chunk whose span
-        straddles the replacement boundary is an illegal cut and fails
-        loudly instead of corrupting the prefix.  Head-system parts
+        generation-change cost, not a per-round path). Submitted input can
+        retire while its newly accepted output remains R. Such a cut needs
+        exact item/block ownership; ambiguous legacy chunks fail explicitly.
+        Head-system parts
         re-own to their surviving rounds, and the history-authority
         revision must advance monotonically.
         """
@@ -811,13 +851,21 @@ class EndpointProjectionSession:
                 )
             covered = set(chunk.semantic_span)
             if covered & kept_set:
-                if covered <= kept_set:
-                    surviving_chunks.append(chunk)
-                    surviving_spans.extend(chunk.semantic_span)
-                    continue
-                raise ProjectionSessionError(
-                    "replacement boundary splits a frozen round; illegal cut"
-                )
+                kept_span = tuple(mid for mid in chunk.semantic_span if mid in kept_set)
+                if not covered <= kept_set:
+                    if (chunk.semantic_span[-len(kept_span):] != kept_span
+                            or len(chunk.item_spans) != len(chunk.items)
+                            or any(not owner for owner in chunk.item_spans)):
+                        raise ProjectionSessionError("replacement cut lacks precise suffix ownership")
+                    for index, owner in enumerate(chunk.item_spans):
+                        if set(owner) & kept_set and not set(owner) <= kept_set:
+                            blocks = chunk.item_block_spans[index] if chunk.item_block_spans else ()
+                            if not blocks or any(not block or (
+                                set(block) & kept_set and not set(block) <= kept_set
+                            ) for block in blocks):
+                                raise ProjectionSessionError("replacement cut splits an indivisible wire item")
+                surviving_chunks.append(replace(chunk, semantic_span=kept_span))
+                surviving_spans.extend(kept_span)
         if sorted(surviving_spans) != sorted(kept_ids):
             raise ProjectionSessionError(
                 "kept frozen messages do not match the surviving chunks"
@@ -827,6 +875,7 @@ class EndpointProjectionSession:
         container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         rebuilt_items: list[dict] = []
         rebuilt_spans: list[tuple[str, ...]] = []
+        rebuilt_cache_spans: list[ItemSpans] = []
         rebuilt_block_spans: list[tuple[tuple[str, ...], ...]] = []
         # S1 (review 7d182fd): the seed's wire bytes are OWNED BY the left
         # reference its coverage names — not unconditionally-owned flotsam.
@@ -853,6 +902,7 @@ class EndpointProjectionSession:
                 for item in (dict(encoded.payload).get(container) or [])
             ]
             rebuilt_items.extend(seed_items)
+            rebuilt_cache_spans.extend(split_spans(encoded.message_spans, container, len(seed_items)))
             rebuilt_spans.extend([seed_span] * len(seed_items))
             rebuilt_block_spans.extend(
                 _uniform_block_spans(item, seed_span) for item in seed_items
@@ -870,7 +920,9 @@ class EndpointProjectionSession:
         # the item from the surviving blocks — whole-item keep/drop would
         # either resurrect the retired left (span names only right ids) or
         # misdelete the surviving right (union span escapes kept_set).
+        retained_chunks: list[ProjectionChunk] = []
         for chunk in surviving_chunks:
+            chunk_start = len(rebuilt_items)
             spans = chunk.item_spans
             blocks_per_item = chunk.item_block_spans
             has_item_spans = bool(spans) and len(spans) == len(chunk.items)
@@ -889,32 +941,36 @@ class EndpointProjectionSession:
                     continue
                 kept_item, kept_span, kept_blocks = surviving
                 rebuilt_items.append(dict(kept_item))
+                entries = chunk.item_cache_spans[index] if chunk.item_cache_spans else ()
+                rebuilt_cache_spans.append(retire_spans(
+                    entries, thaw_json(item), item_blocks, kept_set))
                 rebuilt_spans.append(kept_span)
                 rebuilt_block_spans.append(kept_blocks)
+            retained_chunks.append(replace(
+                chunk,
+                items=tuple(freeze_json_mapping(item) for item in rebuilt_items[chunk_start:]),
+                item_spans=tuple(rebuilt_spans[chunk_start:]),
+                item_block_spans=tuple(rebuilt_block_spans[chunk_start:]),
+                item_cache_spans=tuple(rebuilt_cache_spans[chunk_start:]),
+            ))
+        surviving_chunks = retained_chunks
         # F5: the session-owned pending tail is right-side territory by
         # definition (items trimmed from commits that are not yet frozen),
         # but each entry belongs to the ROUND that produced it: entries
         # whose owning span died with the compacted-away L retire here
         # instead of reappearing after the summary.  S1: block ownership
         # retires only the retired-left blocks of a merged entry.
-        surviving_pending = [
-            entry
-            for entry in (
-                _retire_wire_item(
-                    thaw_json(entry.item),
-                    tuple(entry.span_ids),
-                    tuple(entry.block_spans),
-                    kept_set,
-                )
-                for entry in self._pending_wire_tail
-            )
-            if entry is not None
-        ]
-        rebuilt_items.extend(kept_item for kept_item, _, _ in surviving_pending)
-        rebuilt_spans.extend(kept_span for _, kept_span, _ in surviving_pending)
-        rebuilt_block_spans.extend(
-            kept_blocks for _, _, kept_blocks in surviving_pending
-        )
+        for entry in self._pending_wire_tail:
+            surviving = _retire_wire_item(
+                thaw_json(entry.item), tuple(entry.span_ids), tuple(entry.block_spans), kept_set)
+            if surviving is None:
+                continue
+            kept_item, kept_span, kept_blocks = surviving
+            rebuilt_items.append(kept_item)
+            rebuilt_spans.append(kept_span)
+            rebuilt_block_spans.append(kept_blocks)
+            rebuilt_cache_spans.append(retire_spans(
+                entry.cache_spans, thaw_json(entry.item), entry.block_spans, kept_set))
         # Anthropic merges adjacent user-role wire messages, so a rebuilt
         # prefix ending in role "user" is not a stable freeze point (the
         # same rule commit-time trimming applies).  Hand the trailing user
@@ -930,6 +986,7 @@ class EndpointProjectionSession:
                         item=rebuilt_items.pop(),
                         span_ids=rebuilt_spans.pop(),
                         block_spans=rebuilt_block_spans.pop(),
+                        cache_spans=rebuilt_cache_spans.pop(),
                     ),
                 )
         # -- single install section.
@@ -944,6 +1001,7 @@ class EndpointProjectionSession:
             self._committed_attempts.pop(attempt_id, None)
         self.chunks = tuple(surviving_chunks)
         self._prefix_items = rebuilt_items
+        self._prefix_cache_spans = rebuilt_cache_spans
         self._prefix_item_spans = rebuilt_spans
         self._prefix_item_block_spans = rebuilt_block_spans
         self._pending_wire_tail = unfrozen_tail
@@ -1190,13 +1248,18 @@ class EndpointProjectionSession:
             (dict(entry.item), tuple(entry.span_ids), tuple(entry.block_spans))
             for entry in self._pending_wire_tail
         )
+        tail_item_cache_spans = split_spans(tail_spans, container, len(tail_items))
+        tail_item_owners = [
+            tuple(dict.fromkeys(entry.message_id for entry in entries)) or tail_message_ids
+            for entries in tail_item_cache_spans
+        ]
         conversation.extend(
             (
                 dict(item),
-                tail_message_ids,
-                _uniform_block_spans(item, tail_message_ids),
+                owner,
+                _uniform_block_spans(item, owner),
             )
-            for item in tail_items
+            for item, owner in zip(tail_items, tail_item_owners)
         )
         # Anthropic merges adjacent user-role wire messages (source-verified
         # _append_message behavior), so the pending/tail boundary must merge
@@ -1204,6 +1267,11 @@ class EndpointProjectionSession:
         # requests differ from full encodings by one split user message.
         # Boundary index is in conversation coordinates (review G1); the
         # merged item owns the UNION of both sides' spans (F5).
+        cache_spans = [
+            *(self._prefix_cache_spans or [()] * len(self._prefix_items)),
+            *(entry.cache_spans for entry in self._pending_wire_tail),
+            *tail_item_cache_spans,
+        ]
         anthropic_boundary_merged = False
         if (
             self.binding.wire_shape.value == "anthropic_messages"
@@ -1220,6 +1288,11 @@ class EndpointProjectionSession:
             # a user USER boundary keeps both items, and a user + assistant
             # boundary never merges at all.
             anthropic_boundary_merged = len(conversation) != conversation_length_before
+            if anthropic_boundary_merged:
+                left_blocks = len(self._pending_wire_tail[-1].item["content"])
+                cache_spans[boundary:boundary + 2] = [
+                    (*cache_spans[boundary], *shift_blocks(cache_spans[boundary + 1], left_blocks))]
+        self._active.prepared_cache_spans = cache_spans
         self._active.prepared_items = [item for item, _, _ in conversation]
         self._active.prepared_item_spans = [
             span for _, span, _ in conversation
@@ -1270,49 +1343,17 @@ class EndpointProjectionSession:
                 # preamble size is unchanged.
                 seam_merged = True
         payload: dict[str, Any] = {**shell_fields, container: assembled}
-        # W2/warm (主项1): spans travel WITH the assembled projection so the
-        # prompt-cache coordinator can plan anchors/frontiers on the PROJECTED
-        # payload exactly like a cold encode — without them the projected path
-        # silently bypasses explicit cache planning and can never confirm a
-        # warm anchor.  Preamble spans index the assembled head unchanged;
-        # tail spans remap into conversation coordinates, including the
-        # anthropic boundary merge (merged item = pending[-1] + tail[0]).
-        merged_boundary = (
-            len(preamble_items) + len(self._prefix_items)
-            + len(self._pending_wire_tail) - 1
-            if anthropic_boundary_merged
-            else None
-        )
-        _left_pending = self._pending_wire_tail[-1].item if self._pending_wire_tail else {}
-        merged_left_blocks = (
-            len(_left_pending.get("content") or [])
-            if merged_boundary is not None
-            and isinstance(_left_pending.get("content"), list)
-            else 0
-        )
-        tail_container_start = (
-            len(preamble_items)
-            - (1 if seam_merged else 0)
-            + len(self._prefix_items)
-            + len(self._pending_wire_tail)
-        )
+        # Frozen, pending and new items carry the same codec-authored
+        # address map. Only coordinates change; old bytes are not re-encoded.
+        conversation_spans = join_spans(cache_spans, container)
         assembled_spans: list = [
-            *(
-                span for span in encoded_shell.message_spans
-                if span.message_id in {
-                    message.message_id for message in preamble_only
-                }
-            ),
-            *(
-                _remap_tail_span(
-                    span,
-                    container=container,
-                    container_start=tail_container_start,
-                    merged_boundary=merged_boundary,
-                    merged_left_blocks=merged_left_blocks,
-                )
-                for span in tail_spans
-            ),
+            *(span for span in encoded_shell.message_spans
+              if span.message_id in {message.message_id for message in preamble_only}),
+            *(_remap_tail_span(
+                span, container=container,
+                container_start=len(preamble_items) - int(seam_merged),
+                merged_boundary=None, merged_left_blocks=0,
+            ) for span in conversation_spans),
         ]
         # Position-sensitive codecs may hoist tail-head system/developer
         # content into the TAIL encode's top-level ``system`` when this batch
@@ -1331,6 +1372,8 @@ class EndpointProjectionSession:
                 if isinstance(part, Mapping)
             ]
         self._active.prepared_head_system = tail_system_parts
+        self._active.prepared_head_cache_spans = split_spans(
+            tail_spans, "system", len(tail_system_parts))
         merged_system: list[dict] = [
             *(dict(thaw_json(part)) for entry in self._committed_head_system
               for part in entry.parts),
@@ -1345,6 +1388,20 @@ class EndpointProjectionSession:
                 ]
             else:
                 payload["system"] = merged_system
+        head_cache_spans = [
+            *(spans for entry in self._committed_head_system
+              for spans in (entry.cache_spans or ((),) * len(entry.parts))),
+            *self._active.prepared_head_cache_spans,
+        ]
+        shell_system_count = (
+            len(shell_fields["system"])
+            if isinstance(shell_fields.get("system"), (list, tuple)) else 0
+        )
+        assembled_spans.extend(
+            _remap_tail_span(span, container="system", container_start=shell_system_count,
+                             merged_boundary=None, merged_left_blocks=0)
+            for span in join_spans(head_cache_spans, "system")
+        )
         if controls:
             payload["controls"] = dict(controls)
         # R4/M17 (review 95373ef): finalize the assembled spans against the
@@ -1459,9 +1516,13 @@ class EndpointProjectionSession:
         return receipt
 
     def _encode_messages(self, messages: tuple[LLMMessageIR, ...]) -> list[dict]:
+        encoded = self._encode_request(messages)
+        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
+        return list(encoded.payload.get(container) or [])
+
+    def _encode_request(self, messages: tuple[LLMMessageIR, ...]):
         codec = codec_for_shape(self.binding.wire_shape)
         context = self._shape_context()
-        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
         encoded = codec.encode(
             LLMRequestIR(
                 messages=messages,
@@ -1470,7 +1531,7 @@ class EndpointProjectionSession:
             ),
             context,
         )
-        return list(dict(encoded.payload).get(container) or [])
+        return encoded
 
 
 def _merge_system_instruction_text(left: str, right: str) -> str:

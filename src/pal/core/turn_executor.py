@@ -450,7 +450,6 @@ class TurnExecutor:
             )
         continuation.llm_round_index = getattr(continuation, "llm_round_index", 0) + 1
         llm_runtime = self.context.require_port("llm:llm")
-        self._promote_closed_groups_at_request_boundary()
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -479,6 +478,7 @@ class TurnExecutor:
         # canonical acceptance boundary, authorized by the send receipt.
         # None everywhere means the honest cold codec path.
         projection_pack = self._prepare_turn_projection(llm_runtime, request)
+        on_submitted = self._history_submission_observer(request)
         # R6 (review 95373ef): the prepared projection draft belongs to THIS
         # attempt.  Any exit between prepare and canonical observation —
         # cancellation of the provider await, a failed L1 acceptance, an
@@ -488,7 +488,8 @@ class TurnExecutor:
         try:
             if self._llm_runtime_supports_streaming(llm_runtime, request):
                 outcome = await self.stream_llm_request_async(
-                    continuation, llm_runtime, request, projection_pack=projection_pack)
+                    continuation, llm_runtime, request, projection_pack=projection_pack,
+                    on_submitted=on_submitted)
             else:
                 if projection_pack is not None:
                     outcome = await llm_runtime.agenerate(
@@ -497,7 +498,10 @@ class TurnExecutor:
                         projection_binding=projection_pack[1],
                         projection_attempt_id=projection_pack[2]["attempt"].attempt_id,
                         generation_plan=projection_pack[2]["plan"],
+                        on_submitted=on_submitted,
                     )
+                elif callable(getattr(llm_runtime, "agenerate", None)) and "on_submitted" in inspect.signature(llm_runtime.agenerate).parameters:
+                    outcome = await llm_runtime.agenerate(request, on_submitted=on_submitted)
                 else:
                     outcome = await self._call_port_async(
                         llm_runtime, "agenerate", "generate", request)
@@ -997,6 +1001,7 @@ class TurnExecutor:
         request: LLMRequestIR,
         *,
         projection_pack: tuple | None = None,
+        on_submitted: Any = None,
     ) -> LLMGenerationResult:
         final_response: LLMResponseIR | None = None
         stream = getattr(llm_runtime, "astream", None)
@@ -1012,7 +1017,10 @@ class TurnExecutor:
                 projection_binding=projection_pack[1],
                 projection_attempt_id=projection_pack[2]["attempt"].attempt_id,
                 generation_plan=projection_pack[2]["plan"],
+                on_submitted=on_submitted,
             ).__aiter__()
+        elif "on_submitted" in inspect.signature(stream).parameters:
+            iterator = stream(request, on_submitted=on_submitted).__aiter__()
         else:
             iterator = stream(request).__aiter__()
         schedule = self._llm_wait_status_schedule()
@@ -2235,7 +2243,8 @@ class TurnExecutor:
                 clock_kind=engine.policy.clock_kind,
             )
         try:
-            root.promote()
+            if continuation is None:
+                root.promote()
         except Exception as exc:
             return CompactionRunResult(
                 status="error",
@@ -2506,32 +2515,19 @@ class TurnExecutor:
         self.clear_execution_cursors(continuation)
         return run_result
 
-    def _promote_closed_groups_at_request_boundary(self) -> None:
-        """Advance the cut over closed old groups at a request boundary (W1/N20).
-
-        A long-lived active turn accumulates closed rounds; without this the
-        left segment stays empty forever and compaction is permanently
-        no_benefit.  Only CLOSED groups move (protocol-matched, sealed at the
-        cut per N1-R1); the newest work tail and any unclosed group stay on
-        the right.  A live compact run freezes the cut — the refusal is an
-        expected boundary outcome, not an error.
-        """
-
-        port_registry = getattr(self.context, "port_registry", None)
-        if port_registry is None:
-            # Stub hosts (no port registry) have no memory owner: the cut
-            # simply does not advance on them.
-            return
-        memory_service = port_registry.get("memory:memory")
-        root = getattr(memory_service, "history_root", None)
+    def _history_submission_observer(self, request: LLMRequestIR):
+        memory = getattr(self.context, "port_registry", {}).get("memory:memory")
+        root = getattr(memory, "history_root", None)
         if root is None:
-            return
-        try:
-            root.promote(include_active=True)
-        except Exception:
-            # FrozenLeftDuringCompact while a compact run is live: the cut
-            # moves at the next boundary instead.  Never blocks the request.
-            return
+            return None
+        prepared = root.prepare_submission(m.message_id for m in request.messages)
+
+        def submitted(receipt):
+            # Runs on the owner loop, never the SDK worker. The root fences
+            # reset, retries and mutations after this request's snapshot.
+            root.commit_submission(prepared, receipt.message_ids)
+
+        return submitted
 
     def _prepare_turn_projection(
         self, llm_runtime: Any, request: LLMRequestIR
@@ -2600,6 +2596,24 @@ class TurnExecutor:
         if root_generation is None:
             root_generation = getattr(root, "left_revision", 0)
         root_generation = int(root_generation or 0)
+        # Durable storage is not visibility: scoped/excluded control records
+        # remain in L1 after the compiler stops sending them. Rebuild once at
+        # that legal projection boundary; never replay a hidden instruction.
+        visible_ids = {m.message_id for m in plan.effective_request.messages}
+        stored_turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        durable_ids: set[str] = set()
+        hidden_context_ids: set[str] = set()
+        for turn in getattr(stored_turns, "turns", ()):
+            for message in turn.messages:
+                durable_ids.add(str(message.message_id))
+                if message.semantic_kind == "pal_prompt_context" and message.message_id not in visible_ids:
+                    hidden_context_ids.add(message.message_id)
+        continuity = getattr(stored_turns, "continuity", None)
+        if continuity is not None:
+            durable_ids.add(str(continuity.standalone_id))
+        if hidden_context_ids.intersection(session.covered_message_ids()):
+            session.rebind(binding, capabilities=plan.capabilities)
+            identity = session.identity
         session_generation = int(getattr(session, "history_left_revision", 0) or 0)
         if root_generation != session_generation:
             # C3 (review c9cb2d2): a fresh or rebound lineage owns no frozen or
@@ -2643,15 +2657,6 @@ class TurnExecutor:
         # continuity reference).  A request message whose id is NOT durable
         # is transient compiler content: it must never freeze into the
         # prefix, so the whole round falls back to the cold codec path.
-        durable_ids: set[str] = set()
-        turns_reader = getattr(getattr(memory_service, "l1_store", None), "turns", None)
-        if turns_reader is not None:
-            for turn in getattr(turns_reader, "turns", ()) or ():
-                for message in turn.messages:
-                    durable_ids.add(str(message.message_id))
-            continuity = getattr(turns_reader, "continuity", None)
-            if continuity is not None:
-                durable_ids.add(str(continuity.standalone_id))
         # F6 (review af51d74): a lineage whose frozen chunk spans reference
         # history that is no longer durable (soft reset, out-of-band clear)
         # must fall back cold instead of replaying retired history.  Reset
@@ -2899,6 +2904,7 @@ class TurnExecutor:
                 ),
                 accepted_messages=accepted_messages,
                 span_message_ids=span_ids,
+                native_message_id=accepted_id if native_committed else "",
             )
         except Exception as exc:
             diagnostics = getattr(self.state, "diagnostics", None)
@@ -3069,7 +3075,20 @@ class TurnExecutor:
                 )
             )
 
-        messages = tuple(root.left_messages())
+        from pal.memory.context_view import projected_messages
+        from pal.memory.turn_ir import L1TurnState
+
+        # Bootstrap uses the same visibility rules as ordinary compilation.
+        # Raw L1 still retains expired instructions and excluded revisions.
+        selected = []
+        for turn in root.left_turns():
+            visible = {m.message_id for m in projected_messages(
+                turn, settled=turn.state != L1TurnState.ACTIVE)}
+            selected.extend(
+                message for message in turn.messages
+                if message.semantic_kind != "pal_prompt_context" or message.message_id in visible
+            )
+        messages = tuple(selected)
         turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
         continuity = getattr(turns, "continuity", None)
         if continuity is None or not str(getattr(continuity, "source_id", "") or ""):

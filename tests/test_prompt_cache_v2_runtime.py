@@ -349,17 +349,17 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                     assert encrypted == f"opaque-{reason_id.split('-')[1]}"
                 if mutation == "compaction":
                     # M17 (review 95373ef): the REAL v3 compaction retires the
-                    # compacted left segment.  Pre-cut reasoning (rounds 1-4,
-                    # folded into the summary seed) must NOT replay; the post-
-                    # cut rounds must, byte-true.
+                    # compacted left segment. Requests 1-3 were submitted
+                    # again; output from request 4 still belongs to R and
+                    # must survive with its original encrypted payload.
                     if index < 4:
                         for old in range(1, index + 1):
                             assert f"reason-{old}" in present
                     else:
                         assert not [
-                            rid for rid in present if int(rid.split("-")[1]) <= 4
+                            rid for rid in present if int(rid.split("-")[1]) < 4
                         ], "compacted-away reasoning must not replay"
-                        for old in range(5, index + 1):
+                        for old in range(4, index + 1):
                             assert f"reason-{old}" in present
                 else:
                     # No replacement of active history: every prior round's

@@ -88,6 +88,16 @@ class LLMProviderStartedError(LLMTransportError):
 
 
 @dataclass(frozen=True)
+class RequestSubmission:
+    """Observed response admission, independent of output or cache success."""
+
+    request_id: str
+    endpoint_id: str
+    model_id: str
+    message_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class EncodedTransportRequest:
     """Provider-shaped request passed beneath the shared LLM pipeline."""
 
@@ -98,6 +108,7 @@ class EncodedTransportRequest:
     stream: bool
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     stream_control: "LLMStreamControl | None" = None
+    on_submitted: Callable[[], None] | None = None
 
 
 class LLMJSONTransportPort(Protocol):
@@ -172,6 +183,7 @@ class SDKTransportRequest:
     stream: bool
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     stream_control: LLMStreamControl | None = None
+    on_submitted: Callable[[], None] | None = None
 
 
 @dataclass
@@ -205,6 +217,7 @@ class DirectSDKTransport:
                 extra_body=request.extra_body,
                 stream=bool(request.stream),
                 stream_control=request.stream_control,
+                on_submitted=request.on_submitted,
             )
         )
 
@@ -398,6 +411,7 @@ class _ClientEntry:
 class _SDKClientGraph:
     client: Any
     response: Any = None
+    response_context: Any = None
     frames: Iterator[_JSONFrame] | None = None
     close_errors: list[str] = field(default_factory=list)
     response_close_attempted: bool = False
@@ -424,12 +438,27 @@ def _open_sdk_response(
     if graph.response is not None or graph.frames is not None:
         raise FdLeaseInvariantError("SDK client graph already has an active response")
     if request.wire_shape == WireShape.ANTHROPIC_MESSAGES:
-        operation = graph.client.messages.create
+        resource = graph.client.messages
     elif request.wire_shape == WireShape.OPENAI_RESPONSE:
-        operation = graph.client.responses.create
+        resource = graph.client.responses
     else:
-        operation = graph.client.chat.completions.create
-    response = operation(**payload)
+        resource = graph.client.chat.completions
+    streaming_response = getattr(resource, "with_streaming_response", None)
+    if streaming_response is not None:
+        manager = streaming_response.create(**payload)
+        raw = manager.__enter__()
+        graph.response_context = manager
+        graph.response = raw
+        graph.response_close_attempted = False
+        if request.on_submitted is not None:
+            request.on_submitted()
+        if request.stream_control is not None:
+            request.stream_control.mark_provider_started()
+        response = raw.parse()
+    else:
+        response = resource.create(**payload)
+        if request.on_submitted is not None:
+            request.on_submitted()
     graph.response = response
     graph.frames = iter(_iter_json_frames(response))
     graph.response_close_attempted = False
@@ -461,6 +490,9 @@ def _close_active_sdk_response(graph: _SDKClientGraph) -> bool:
     graph.response_close_attempted = True
     try:
         _close_stream_response_or_raise(response)
+        if graph.response_context is not None:
+            graph.response_context.__exit__(None, None, None)
+            graph.response_context = None
     except BaseException as exc:
         graph.close_errors.append(f"response:{type(exc).__name__}:{exc}")
         # An uncertain close keeps the response and iterator strongly bound to
@@ -485,6 +517,12 @@ def _close_sdk_graph(graph: _SDKClientGraph) -> FdCloseOutcome:
             graph.response = None
             graph.frames = None
             graph.response_close_attempted = False
+    try:
+        if graph.response_context is not None:
+            graph.response_context.__exit__(None, None, None)
+            graph.response_context = None
+    except BaseException as exc:
+        errors.append(f"response_context:{type(exc).__name__}:{exc}")
     try:
         _close_client_or_raise(graph.client)
     except BaseException as exc:
@@ -560,7 +598,7 @@ def _json_mapping(value: Any) -> dict[str, Any]:
         return dict(value)
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        payload = model_dump(mode="json", exclude_none=True)
+        payload = model_dump(mode="json", exclude_unset=True, exclude_none=False)
         if isinstance(payload, Mapping):
             return dict(payload)
     to_dict = getattr(value, "to_dict", None)

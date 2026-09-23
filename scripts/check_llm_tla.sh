@@ -15,6 +15,7 @@ cd "${repo_root}"
 
 for model in \
     L1TurnLifecycle \
+    RoundSubmission \
     EndpointInvocationLifecycle \
     ItemCommitLifecycle \
     BrokerTransportLifecycle \

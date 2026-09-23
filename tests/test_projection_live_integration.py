@@ -147,6 +147,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
         service = MemoryService()
         service.l1_store.append(_seed())
         service.l1_store.append(_settled("s0"))
+        service.history_root.promote()  # Existing closed turns form L.
         service.begin_l1_turn("task", user_text="RIGHT live work")
         root = service.history_root
 
@@ -197,6 +198,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
         service = MemoryService()
         service.l1_store.append(_seed())
         service.l1_store.append(_settled("s0"))
+        service.history_root.promote()
         root = service.history_root
 
         class _Boom:

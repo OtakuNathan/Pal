@@ -66,6 +66,11 @@ class NativeCapture:
         if calls:
             self._call_ids = calls
 
+    @property
+    def replay(self) -> ReplayEnvelope | None:
+        """Latest immutable decoder snapshot, before provider normalization."""
+        return self._final_replay
+
     def result(self) -> NativeCandidate | None:
         """The captured native candidate, or None when the attempt had none.
 

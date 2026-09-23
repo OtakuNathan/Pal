@@ -3,9 +3,8 @@
 The regression these tests guard: ``_close_message`` used to drop the wire
 replay envelope when a turn settled, so the same-endpoint prefix silently
 changed bytes at every turn boundary and the whole cached prefix had to be
-rewritten.  Provider-neutral reasoning parts are still retired (they are the
-cross-endpoint fallback projection); only the endpoint-bound envelope is
-preserved so same-endpoint replays stay byte-identical.
+rewritten.  Reasoning parts and endpoint-bound envelopes are both preserved so that
+same-endpoint replays survive settlement and restoration.
 """
 
 from __future__ import annotations
@@ -112,7 +111,7 @@ class SettledReplayIdentityTests(unittest.TestCase):
                     _payload_hash(settled_payload),
                     f"settlement changed wire bytes for {shape}",
                 )
-                self.assertEqual(settled.messages[-1].reasoning_text, "")
+                self.assertEqual(settled.messages[-1].reasoning_text, "chain of thought")
 
     def test_settled_cross_endpoint_encoding_omits_reasoning(self) -> None:
         store = L1TurnStore()
@@ -139,7 +138,7 @@ class SettledReplayIdentityTests(unittest.TestCase):
 
         self.assertEqual(interrupted.state, L1TurnState.INTERRUPTED)
         self.assertIsNotNone(interrupted.messages[-1].replay)
-        self.assertEqual(interrupted.messages[-1].reasoning_text, "")
+        self.assertEqual(interrupted.messages[-1].reasoning_text, "chain of thought")
 
     def test_serde_roundtrip_preserves_settled_replay(self) -> None:
         store = L1TurnStore()
@@ -469,11 +468,9 @@ class RestoreProtocolRepairTests(unittest.TestCase):
             any(isinstance(part, ToolCallIR) for part in assistant.parts),
             "dangling call survived restore normalization in parts",
         )
-        # ...and the stale envelope no longer rides along.
-        self.assertIsNone(
-            assistant.replay,
-            "repaired message kept its stale replay envelope",
-        )
+        # Original source survives locally; only the repaired envelope is sent.
+        self.assertIsNotNone(assistant.replay)
+        self.assertIn("call-1", repr(assistant.replay.source_payload))
 
         encoded = _encode_messages(
             WireShape.OPENAI_RESPONSE,
@@ -484,7 +481,7 @@ class RestoreProtocolRepairTests(unittest.TestCase):
         self.assertIn("let me check", dumped)
 
     def test_restore_keeps_replay_for_protocol_intact_messages(self) -> None:
-        """Only repaired messages lose their envelope; a healthy
+        """Only revoked calls change their envelope; a healthy
         call+result pair keeps its byte-stable replay across restore."""
 
         envelope = {

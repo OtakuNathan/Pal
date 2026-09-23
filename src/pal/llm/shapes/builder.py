@@ -33,6 +33,7 @@ class ResponseIRBuilder:
         self.finish_reason = LLMFinishReason.STOP
         self.usage = LLMUsageIR()
         self.replay_payload: dict[str, Any] = {}
+        self.replay_source_payload: dict[str, Any] | None = None
         self.committed_items: dict[str, LLMResponseItemKind] = {}
         self.complete = False
         self.evidence = WireResponseEvidence(context.wire_shape)
@@ -146,6 +147,7 @@ class ResponseIRBuilder:
                 endpoint_id=self.context.endpoint_id,
                 model_id=self.context.model_id,
                 payload=dict(self.replay_payload),
+                source_payload=self.replay_source_payload,
             )
         state = MessageState.COMPLETE if self.complete else MessageState.IN_PROGRESS
         message = LLMMessageIR(

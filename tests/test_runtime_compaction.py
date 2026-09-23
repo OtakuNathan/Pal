@@ -231,6 +231,7 @@ def _memory_with_turns(count: int = 4) -> MemoryService:
                 ),
             ]
         )
+    service.history_root.promote()  # Existing fixture turns represent submitted history.
     return service
 
 
@@ -853,6 +854,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             ),
         )
         service.settle_l1_turn(turn_id)
+        service.history_root.promote()  # Submitted result belongs to the compact source.
         continuation = SimpleNamespace(
             turn_id=turn_id,
             pending_tool_call_batch=[],
