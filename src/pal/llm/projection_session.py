@@ -635,7 +635,7 @@ class EndpointProjectionSession:
         # while the full item span stays in the session-owned open tail — the
         # same rule F2 already applies to trailing user items — and the round
         # is sealed as an empty chunk so the chunk chain still ends at the
-        # frontier for checkpoint/restore.  Refusing here instead would leave
+        # frontier for subsequent commits.  Refusing here instead would leave
         # the projection lineage permanently behind the durable L1 cursor.
         chunk = ProjectionChunk(
             round_attempt_id=receipt.attempt.attempt_id,
@@ -1702,7 +1702,9 @@ def _retire_wire_item(
         rebuilt["content"] = [block for block, _ in kept_pairs]
         merged_span = tuple(
             dict.fromkeys(
-                block_span for _, block_span in kept_pairs if block_span
+                message_id
+                for _, block_span in kept_pairs
+                for message_id in block_span
             )
         )
         return (

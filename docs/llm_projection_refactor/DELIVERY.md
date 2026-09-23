@@ -1,5 +1,9 @@
 # LLM Projection Refactor v2 — 交付报告
 
+> 2026-09-23 更新：下文独立 projection checkpoint 的实现与验证属于历史记录。
+> 该未接入运行时的接口现已移除；当前恢复以 canonical L1 为唯一真相源，
+> 重建进程内 projection。详见仓库根目录 DELIVERY.md 的后续记录。
+
 **分支：`refactor/llm-projection-session-v2`（worktree `~/Documents/coding/Pal-projection-v2`）。**
 **基线：`7e0b1f74`。安全分支：`safety/llm-projection-before-v2-7e0b1f7`（本地）。**
 **日期：2026-09-18。执行者：Pal。main / 线上 Pal / 生产配置全程未动。**

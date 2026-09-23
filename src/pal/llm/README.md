@@ -12,6 +12,9 @@ Owns:
 - endpoint retry, fallback, timeout, preflight, and usage accounting reused by
   ordinary and compaction requests
 
+Projection sessions are process-local derived state. Recovery restores L1,
+including native replay envelopes, then rebuilds the projection.
+
 Does not own:
 - durable state other than endpoint registry
 - durable token, cache, or cost history

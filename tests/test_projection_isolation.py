@@ -1,19 +1,13 @@
-"""P5: multi-session isolation and worker-restart resume on the SHARED implementation.
+"""Multi-session isolation on the shared projection implementation.
 
-Bunshin coder/verifier/resident reuse one EndpointProjectionSession class;
-only transports differ and the session never sees them.  These tests pin
-the isolation matrix: S20 (same endpoint + same call ids, no crossing),
-S13/S21 (restart resume via checkpoint; late receipts idempotent or
-refused), S22 (role end releases state), and direct/proxy parity at the
-session layer.
-"""
+Bunshin coder/verifier/resident share the projection class, while session state
+stays isolated. Tests cover scope separation, role retirement and wire parity."""
 from __future__ import annotations
 
 import json
 import unittest
 
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, WireShape
-from pal.llm.projection_checkpoint import snapshot_projection, restore_projection
 from pal.llm.projection_contracts import (
     AppendReceipt,
     AttemptKey,
@@ -115,75 +109,6 @@ class ScopeIsolationTests(unittest.TestCase):
                 ),
                 requires_native=False,
             )
-
-
-class WorkerRestartTests(unittest.TestCase):
-    def test_checkpoint_resume_restores_lineage_and_late_receipt_is_idempotent(self) -> None:
-        worker, receipt = _driven_session("bunshin:coder:run-3", "a1")
-
-        payload = {"projection": snapshot_projection(worker)}
-        successor = EndpointProjectionSession(LogicalSessionId("bunshin:coder:run-3"))
-        bound = restore_projection(
-            payload, l1_history_cursor=HistoryCursor(0, 1, "d" * 64), session=successor
-        )
-        self.assertTrue(bound)
-        self.assertEqual(successor.frontier, HistoryCursor(0, 1, "d" * 64))
-        # The materialized prefix is REBUILT from the snapshot (review R5):
-        # a restored session with a non-zero frontier and an empty prefix
-        # would silently drop every committed block from the next request.
-        self.assertEqual(len(successor.chunks), 1)
-        self.assertEqual(len(successor._prefix_items), 2)  # q + a wire items
-
-        # A late (idempotent) replay of the pre-restart receipt: no-op.
-        successor.observe_commit(receipt)
-        self.assertEqual(successor.frontier, HistoryCursor(0, 1, "d" * 64))
-
-        # The successor opens its own rounds with a bumped owner fence.
-        successor.begin_round(_attempt(successor, "a2", fence=1), requires_native=False)
-        request = successor.prepare(
-            HistoryView(cursor=successor.frontier, messages=(_user("q2"), _assistant("a2")))
-        )
-        items = json.loads(request.payload_json)["messages"]
-        # The pre-restart history must actually be present in the next wire
-        # request — not merely "some items" (review R5 test-strength fix).
-        contents = [
-            "".join(
-                block.get("text", "")
-                for block in (message.get("content") or [])
-                if isinstance(block, dict)
-            )
-            if isinstance(message.get("content"), list)
-            else str(message.get("content") or "")
-            for message in items
-        ]
-        self.assertIn("q", contents)
-        self.assertIn("a", contents)
-        self.assertIn("q2", contents)
-        self.assertIn("a2", contents)
-
-    def test_conflicting_late_receipt_refused_after_restart(self) -> None:
-        worker, _ = _driven_session("bunshin:verifier:run-4", "a1")
-        payload = {"projection": snapshot_projection(worker)}
-        successor = EndpointProjectionSession(LogicalSessionId("bunshin:verifier:run-4"))
-        restore_projection(
-            payload, l1_history_cursor=HistoryCursor(0, 1, "d" * 64), session=successor
-        )
-        conflicting = HistoryCommitReceipt(
-            attempt=AttemptKey(
-                identity=successor.identity,  # type: ignore[arg-type]
-                owner_fence=OwnerFence(0),
-                attempt_id="a1",
-            ),
-            append=AppendReceipt(
-                before=HistoryCursor.initial(),
-                after=HistoryCursor(0, 1, "f" * 64),  # different digest
-                block_count=1,
-            ),
-            closed_call_ids=("call-a",),
-            native_committed=False,
-        )
-        with self.assertRaisesRegex(ProjectionSessionError, "conflicting"):
-            successor.observe_commit(conflicting)
 
 
 class SessionLayerParityTests(unittest.TestCase):

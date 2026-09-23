@@ -12,7 +12,7 @@ The scenario matrix pins the stronger contract this round establishes: for
 all three wire shapes the assembled incremental request equals the
 whole-history codec encoding of the same conversation, container and
 top-level system included, across multi-round commits, head/tail developer
-insertions, and checkpoint/restore.
+insertions, and subsequent continuation requests.
 """
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from pal.llm.ir import (
     GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole,
     PromptRegionIR, TextPartIR, WireShape,
 )
-from pal.llm.projection_checkpoint import restore_projection, snapshot_projection
 from pal.llm.projection_contracts import (
     AppendReceipt, AttemptKey, ClosedRound, EndpointBinding,
     HistoryCommitReceipt, HistoryCursor, LogicalSessionId,
@@ -107,6 +106,12 @@ def text_occurrences(payload, sentinel: str) -> int:
             return sum(visit(v) for v in value)
         return 0
     return visit(payload)
+def assert_incremental_matches_reference(test, shape, prepared, reference):
+    wire = body(prepared)
+    container = container_key(shape)
+    test.assertEqual(wire[container], reference[container])
+    test.assertEqual(wire.get("system"), reference.get("system"))
+
 
 
 def start_committed(s, request_shell):
@@ -128,13 +133,6 @@ def reference_encode(shape, messages):
         context,
     )
     return thaw_json(dict(encoded.payload))
-
-
-def assert_incremental_matches_reference(test, shape, prepared, reference):
-    wire = body(prepared)
-    container = container_key(shape)
-    test.assertEqual(wire[container], reference[container])
-    test.assertEqual(wire.get("system"), reference.get("system"))
 
 
 class ThirdReviewRegressions(unittest.TestCase):
@@ -168,18 +166,6 @@ class ThirdReviewRegressions(unittest.TestCase):
                 for text in ("Q1", "A1", "Q2", "A2", "Q3", "PREAMBLE_SENTINEL"):
                     self.assertEqual(text_occurrences(body(third), text), 1, text)
 
-    def test_openai_restart_does_not_duplicate_preamble(self):
-        for shape in OPENAI_SHAPES:
-            with self.subTest(shape=shape.value):
-                s = make_session(shape)
-                request_shell = shell(msg(MessageRole.SYSTEM, "PREAMBLE_SENTINEL"))
-                start_committed(s, request_shell)
-                successor = EndpointProjectionSession(s.session_id)
-                restore_projection({"projection": snapshot_projection(s)},
-                                   l1_history_cursor=s.frontier, session=successor)
-                prepared = prepare(successor, key(successor, "new-owner", 1),
-                                   (msg(MessageRole.USER, "Q2"),), request_shell)
-                self.assertEqual(text_occurrences(body(prepared), "PREAMBLE_SENTINEL"), 1)
 
     # -- G2 ----------------------------------------------------------------
 
@@ -354,7 +340,7 @@ class ScenarioMatrix(unittest.TestCase):
     head), round 2 inserts one mid-tail, round 3 is plain.  Every assembled
     incremental request must EQUAL the whole-history codec encoding of the
     same logical conversation — container and top-level system included —
-    and a snapshot/restore round trip must preserve that equality.
+    including subsequent requests after multiple accepted rounds.
     """
 
     def test_matrix_incremental_equals_whole_history_across_shapes(self):
@@ -397,7 +383,7 @@ class ScenarioMatrix(unittest.TestCase):
                 for text in ("Q1", "A1", "Q2", "A2", "Q3"):
                     self.assertEqual(text_occurrences(body(third), text), 1, text)
 
-    def test_matrix_restore_preserves_incremental_equality(self):
+    def test_matrix_multiple_commits_preserve_incremental_equality(self):
         for shape in ALL_SHAPES:
             with self.subTest(shape=shape.value):
                 s = make_session(shape)
@@ -414,21 +400,14 @@ class ScenarioMatrix(unittest.TestCase):
                 prepare(s, k2, (q2,), request_shell)
                 s.observe_commit(receipt(s, k2), accepted_messages=(a2,))
 
-                successor = EndpointProjectionSession(s.session_id)
-                restored = restore_projection(
-                    {"projection": snapshot_projection(s)},
-                    l1_history_cursor=s.frontier,
-                    session=successor,
-                )
-                self.assertTrue(restored)
                 q3 = msg(MessageRole.USER, "Q3")
-                prepared = prepare(successor, key(successor, "after-restart", 1),
+                prepared = prepare(s, key(s, "next-round", 1),
                                    (q3,), request_shell)
                 assert_incremental_matches_reference(
                     self, shape, prepared,
                     reference_encode(shape, (system, d_head, q1, a1, q2, a2, q3)),
                 )
-                # Content survives restore in every shape (substring level;
+                # Content survives successive commits in every shape (substring level;
                 # Completion merges preamble+head-dev into one system text).
                 self.assertIn("MATRIX_PREAMBLE", prepared.payload_json)
                 self.assertIn("MATRIX_HEAD_DEV", prepared.payload_json)

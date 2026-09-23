@@ -82,36 +82,6 @@ def retire_spans(entries: ItemSpans, item: Mapping[str, Any],
     return tuple(result)
 
 
-def dump_spans(entries: ItemSpans) -> list[dict[str, Any]]:
-    return [dict(message_id=s.message_id, cache_targets=list(s.cache_targets),
-                 wire_item_paths=list(s.wire_item_paths), continuity_target=s.continuity_target)
-            for s in entries]
-
-
-def load_spans(entries: Any) -> ItemSpans:
-    if not isinstance(entries, (list, tuple)):
-        raise ValueError("cache spans must be a list")
-
-    def path(value: Any) -> Path:
-        if not isinstance(value, (list, tuple)) or any(
-            type(part) not in (str, int) or isinstance(part, int) and part < 0 for part in value
-        ):
-            raise ValueError("invalid cache span path")
-        return tuple(value)
-
-    result = []
-    for entry in entries:
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("message_id"), str):
-            raise ValueError("invalid cache span message")
-        result.append(EncodedMessageSpan(
-            message_id=entry["message_id"],
-            cache_targets=tuple(path(p) for p in entry.get("cache_targets", ())),
-            wire_item_paths=tuple(path(p) for p in entry.get("wire_item_paths", ())),
-            continuity_target=path(entry.get("continuity_target") or ()),
-        ))
-    return tuple(result)
-
-
 def native_spans(shape: str, items: list[dict], message_id: str) -> list[ItemSpans]:
     """Use the codec's target rules on accepted native bytes, without encoding."""
     container = "input" if shape == "openai_response" else "messages"

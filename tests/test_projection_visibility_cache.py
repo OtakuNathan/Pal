@@ -67,14 +67,13 @@ import json
 import pytest
 from pal.llm.projection_session import EndpointProjectionSession, HistoryView, LeftReplacement
 from pal.llm.projection_contracts import LogicalSessionId
-from pal.llm.projection_checkpoint import snapshot_projection, restore_projection
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
 from tests.test_projection_two_segment import _Lineage, _user, _assistant, _attempt, _cursor
 
 
 @pytest.mark.parametrize('shape', list(WireShape))
-def test_frozen_span_paths_survive_checkpoint_and_left_replacement(shape):
+def test_frozen_span_paths_survive_left_replacement(shape):
     if shape not in (WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION, WireShape.ANTHROPIC_MESSAGES):
         pytest.skip('not a projection codec')
     lineage = _Lineage(shape)
@@ -83,10 +82,7 @@ def test_frozen_span_paths_survive_checkpoint_and_left_replacement(shape):
     lineage.round_trip(old, 'old')
     lineage.round_trip(keep, 'keep')
     session = lineage.session
-    restored = EndpointProjectionSession(LogicalSessionId('pal:resident'))
-    restore_projection({'projection': snapshot_projection(session)},
-                       l1_history_cursor=session.frontier, session=restored)
-    for current in (session, restored):
+    for current in (session,):
         seed = _user('NEW SUMMARY', 'summary')
         current.on_left_replaced(LeftReplacement(
             seed_messages=(seed,), kept_frozen_messages=keep,
@@ -191,16 +187,13 @@ def test_bootstrap_left_view_does_not_reintroduce_expired_context():
     assert {'q', 'a'} <= set(coverage)
 
 
-def test_hoisted_head_span_survives_commit_and_restore():
+def test_hoisted_head_span_survives_commit():
     lineage = _Lineage(WireShape.ANTHROPIC_MESSAGES)
     developer = LLMMessageIR(role=MessageRole.DEVELOPER, parts=(TextPartIR('HEAD_GUIDE'),),
                              message_id='head')
     lineage.round_trip((developer, _user('ASK', 'ask'), _assistant('ANSWER', 'answer')), 'first')
     original = lineage.session
-    restored = EndpointProjectionSession(LogicalSessionId('pal:resident'))
-    restore_projection({'projection': snapshot_projection(original)},
-                       l1_history_cursor=original.frontier, session=restored)
-    for session in (original, restored):
+    for session in (original,):
         session.begin_round(_attempt(session, 'next'), requires_native=False)
         prepared = session.prepare(HistoryView(session.frontier, (_user('NEXT', 'next'),)))
         spans = {s.message_id: s.cache_targets for s in prepared.message_spans}

@@ -3,7 +3,7 @@
 Source: ~/Documents/coding/pal_branch_review_2026-09-18/test_astra_projection_review.py
 (review of 96b9140).  These tests assert the PLAN's intended invariants.
 They are adapted to the repaired interfaces (materializing observe_commit,
-binding-checked attach_native, prefix-rebuilding restore) WITHOUT weakening
+binding-checked attach_native) WITHOUT weakening
 the original assertions: full-prefix survival, native existence/identity,
 and inventory consistency must all hold.
 
@@ -22,11 +22,6 @@ from pal.llm.continuation_policy import (
     validate_candidate,
 )
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, WireShape
-from pal.llm.projection_checkpoint import (
-    ProjectionCheckpointError,
-    restore_projection,
-    snapshot_projection,
-)
 from pal.llm.projection_contracts import (
     AppendReceipt,
     AttemptKey,
@@ -121,30 +116,7 @@ def seeded(fence=0):
 
 
 class AstraProjectionReview(unittest.TestCase):
-    def test_restore_then_tail_keeps_old_prefix(self):
-        old, sent, _ = seeded()
-        snapshot = {"projection": snapshot_projection(old)}
-        restored = EndpointProjectionSession(old.session_id)
-        restore_projection(snapshot, l1_history_cursor=old.frontier, session=restored)
-        restored.begin_round(attempt(restored, "a2", fence=1), requires_native=False)
-        after = restored.prepare(HistoryView(restored.frontier, (user("new-question"),)))
-        self.assertEqual(wire_texts(after), wire_texts(sent) + ["new-question"])
 
-    def test_restore_rejects_equal_position_different_digest(self):
-        old, _, _ = seeded()
-        snapshot = {"projection": snapshot_projection(old)}
-        restored = EndpointProjectionSession(old.session_id)
-        different = replace(old.frontier, prefix_digest="e" * 64)
-        with self.assertRaises(ProjectionCheckpointError):
-            restore_projection(snapshot, l1_history_cursor=different, session=restored)
-
-    def test_restore_rejects_native_from_pre_compaction_epoch(self):
-        old, _, _ = seeded()
-        snapshot = {"projection": snapshot_projection(old)}
-        restored = EndpointProjectionSession(old.session_id)
-        compacted = HistoryCursor(1, 1, "f" * 64)
-        with self.assertRaises(ProjectionCheckpointError):
-            restore_projection(snapshot, l1_history_cursor=compacted, session=restored)
 
     def test_required_native_cannot_be_committed_by_boolean_claim(self):
         s = session()
@@ -276,14 +248,6 @@ class AstraProjectionReview(unittest.TestCase):
         with self.assertRaises((ProjectionSessionError, ProjectionContractError)):
             s.attach_native(old, stale)
 
-    def test_restore_does_not_rewrite_receipt_source_owner_fence_to_zero(self):
-        old, _, old_receipt = seeded(fence=7)
-        restored = EndpointProjectionSession(old.session_id)
-        restore_projection({"projection": snapshot_projection(old)},
-                           l1_history_cursor=old.frontier, session=restored)
-        # A duplicate already-committed receipt must remain idempotent.
-        # A source receipt is NOT a fresh write permission for the new owner.
-        restored.observe_commit(old_receipt)
 
     def test_empty_wire_call_inventory_does_not_match_nonempty_semantic_inventory(self):
         for shape, native in (

@@ -8,8 +8,7 @@ review's verification gate requires:
     -> REQUIRED-native repair with a real tool call/result
     -> joint commit (tool result survives as session-owned pending)
     -> incremental next request
-    -> checkpoint
-    -> fresh owner restore
+    -> close unsent draft
     -> next complete request
 
 The final assembled request is compared against a trusted whole-history
@@ -31,7 +30,6 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
-from pal.llm.projection_checkpoint import restore_projection, snapshot_projection
 from pal.llm.projection_contracts import (
     AppendReceipt,
     AttemptKey,
@@ -105,7 +103,7 @@ def _receipt(
 
 
 class OfflineVerticalPathTests(unittest.TestCase):
-    def test_vertical_system_answer_repair_checkpoint_restore(self) -> None:
+    def test_vertical_system_answer_repair_continuation(self) -> None:
         s = EndpointProjectionSession(LogicalSessionId("vertical:resident"))
         s.bind(_binding())
         shell = _shell()
@@ -176,18 +174,16 @@ class OfflineVerticalPathTests(unittest.TestCase):
             [("call-a", '"V_RESULT_42"')],
         )
 
-        # Checkpoint and a fresh-owner restore.
-        saved = {"projection": snapshot_projection(s)}
-        successor = EndpointProjectionSession(s.session_id)
-        restore_projection(saved, l1_history_cursor=s.frontier, session=successor)
+        # Close the unsent continuation draft before preparing another round.
+        s.close_round()
 
-        # Round 4 on the successor: one more user turn, full request assembled.
+        # Round 4 on the s: one more user turn, full request assembled.
         q2 = _user("V_Q2")
-        key4 = _key(successor, "r4", fence=3)
-        successor.begin_round(key4, requires_native=False)
+        key4 = _key(s, "r4", fence=3)
+        s.begin_round(key4, requires_native=False)
         final = json.loads(
-            successor.prepare(
-                HistoryView(successor.frontier, (q2,)), request_shell=shell
+            s.prepare(
+                HistoryView(s.frontier, (q2,)), request_shell=shell
             ).payload_json
         )
         self.assertEqual(final["system"], first["system"])

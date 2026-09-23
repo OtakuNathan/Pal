@@ -23,7 +23,6 @@ from pal.llm.ir import (
     TextPartIR,
     WireShape,
 )
-from pal.llm.projection_checkpoint import restore_projection, snapshot_projection
 from pal.llm.projection_contracts import (
     AppendReceipt,
     AttemptKey,
@@ -172,13 +171,10 @@ class ProjectionFollowupReview(unittest.TestCase):
         ).payload)
         self.assertEqual(incremental["messages"], full["messages"])
 
-    def test_restored_nonempty_history_accepts_zero_tail_with_explicit_shell(self):
+    def test_committed_history_accepts_zero_tail_with_explicit_shell(self):
         original, request_shell, _, _ = seeded()
-        saved = {"projection": snapshot_projection(original)}
-        restored = EndpointProjectionSession(original.session_id)
-        restore_projection(saved, l1_history_cursor=original.frontier, session=restored)
-        restored.begin_round(key_for(restored, "after-restart", fence=1), requires_native=False)
-        wire = payload(restored.prepare(HistoryView(restored.frontier, ()),
+        original.begin_round(key_for(original, "next-round", fence=1), requires_native=False)
+        wire = payload(original.prepare(HistoryView(original.frontier, ()),
                                         request_shell=request_shell))
         self.assertEqual(wire["model"], "test-model")
         self.assertIn("ORIGINAL_QUESTION", json.dumps(wire))
@@ -275,22 +271,6 @@ class ProjectionFollowupReview(unittest.TestCase):
                 payload_json=encoded,
                 payload_digest=hashlib.sha256(encoded.encode()).hexdigest(),
             )
-
-    def test_restore_does_not_alias_callers_mutable_snapshot(self):
-        original, request_shell, _, _ = seeded()
-        saved = {"projection": snapshot_projection(original)}
-        restored = EndpointProjectionSession(original.session_id)
-        restore_projection(saved, l1_history_cursor=original.frontier, session=restored)
-        old_cursor = restored.frontier
-        # Alter the caller-owned input AFTER a successful restore. No private
-        # session field or public frozen chunk is modified by this test.
-        saved["projection"]["chunks"][0]["items"][0]["content"][0]["text"] = "CORRUPTED_BY_CALLER"
-        restored.begin_round(key_for(restored, "after-restart", fence=1), requires_native=False)
-        prepared = restored.prepare(HistoryView(restored.frontier, (user("next question"),)),
-                                    request_shell=request_shell)
-        self.assertEqual(restored.frontier, old_cursor)
-        self.assertIn("ORIGINAL_QUESTION", prepared.payload_json)
-        self.assertNotIn("CORRUPTED_BY_CALLER", prepared.payload_json)
 
 
 if __name__ == "__main__":

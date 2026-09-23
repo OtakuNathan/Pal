@@ -12,13 +12,14 @@ H3: a missing or explicit-null native arguments field is NOT an empty
     comparison (OpenAI: JSON string, Anthropic: JSON object).
 
 Positive controls re-exercise the committed-head-system lifecycle
-(cancel, replay+restart, binding switch) alongside the new paths.
+(cancel, receipt replay, binding switch) alongside the new paths.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import unittest
+from tests.projection_state_assertions import committed_state
 from dataclasses import replace
 
 from pal.llm.continuation_policy import NativeCandidate
@@ -26,7 +27,6 @@ from pal.llm.ir import (
     GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole,
     PromptRegionIR, TextPartIR, WireShape,
 )
-from pal.llm.projection_checkpoint import restore_projection, snapshot_projection
 from pal.llm.projection_contracts import (
     AppendReceipt, AttemptKey, ClosedRound, EndpointBinding,
     HistoryCommitReceipt, HistoryCursor, LogicalSessionId,
@@ -112,28 +112,6 @@ def text_occurrences(payload, sentinel: str) -> int:
             return sum(visit(v) for v in value)
         return 0
     return visit(payload)
-
-
-def reference_encode(shape, messages):
-    """Whole-history encoding of the same logical request."""
-    codec = codec_for_shape(shape)
-    context = ShapeContext(wire_shape=shape,
-                           endpoint_id="review4-endpoint", model_id="review4-model")
-    encoded = codec.encode(
-        LLMRequestIR(messages=tuple(messages), tools=(),
-                     policy=GenerationPolicyIR(max_output_tokens=128)),
-        context,
-    )
-    return thaw_json(dict(encoded.payload))
-
-
-def assert_incremental_matches_reference(test, shape, prepared, reference):
-    wire = body(prepared)
-    container = container_key(shape)
-    test.assertEqual(wire[container], reference[container])
-    test.assertEqual(wire.get("system"), reference.get("system"))
-
-
 def native_call(shape, args=..., text="NATIVE_ANSWER"):
     """A provider-native assistant turn with one call; args may be missing."""
     if shape == WireShape.OPENAI_COMPLETION:
@@ -159,6 +137,27 @@ def valid_args(shape):
     return "{}" if shape in (WireShape.OPENAI_COMPLETION, WireShape.OPENAI_RESPONSE) else {}
 
 
+
+def reference_encode(shape, messages):
+    """Whole-history encoding of the same logical request."""
+    codec = codec_for_shape(shape)
+    context = ShapeContext(wire_shape=shape,
+                           endpoint_id="review4-endpoint", model_id="review4-model")
+    encoded = codec.encode(
+        LLMRequestIR(messages=tuple(messages), tools=(),
+                     policy=GenerationPolicyIR(max_output_tokens=128)),
+        context,
+    )
+    return thaw_json(dict(encoded.payload))
+
+
+def assert_incremental_matches_reference(test, shape, prepared, reference):
+    wire = body(prepared)
+    container = container_key(shape)
+    test.assertEqual(wire[container], reference[container])
+    test.assertEqual(wire.get("system"), reference.get("system"))
+
+
 class FourthReviewRegressions(unittest.TestCase):
     # -- H1 ----------------------------------------------------------------
 
@@ -179,9 +178,8 @@ class FourthReviewRegressions(unittest.TestCase):
         proof = receipt(s, k)
         s.observe_commit(proof)
         self.assertEqual(s.frontier, proof.append.after)
-        snap = snapshot_projection(s)
-        self.assertEqual(snap["chunks"][-1]["items"], [])
-        self.assertTrue(snap["pending_wire_tail"])
+        self.assertEqual(s.chunks[-1].items, ())
+        self.assertTrue(s._pending_wire_tail)
         # Next round supplies NO tail: the pending item carries Q alone.
         s.begin_round(key(s, "next"), requires_native=False)
         prepared = s.prepare(HistoryView(s.frontier, ()), request_shell=request_shell)
@@ -205,7 +203,7 @@ class FourthReviewRegressions(unittest.TestCase):
         prepared = s.prepare(HistoryView(s.frontier, ()), request_shell=request_shell)
         self.assertEqual(text_occurrences(body(prepared), "Q_EXACTLY_ONCE"), 1)
 
-    def test_zero_freeze_round_restores_and_freezes_on_next_commit(self):
+    def test_zero_freeze_round_freezes_on_next_commit(self):
         shape = WireShape.ANTHROPIC_MESSAGES
         s = make_session(shape)
         request_shell = shell(msg(MessageRole.SYSTEM, "P"))
@@ -215,19 +213,13 @@ class FourthReviewRegressions(unittest.TestCase):
                   request_shell=request_shell)
         s.observe_commit(receipt(s, k))
 
-        successor = EndpointProjectionSession(s.session_id)
-        restored = restore_projection(
-            {"projection": snapshot_projection(s)},
-            l1_history_cursor=s.frontier, session=successor,
-        )
-        self.assertTrue(restored)
         q2, a2 = msg(MessageRole.USER, "Q2"), msg(MessageRole.ASSISTANT, "A2")
-        k2 = key(successor, "second", fence=1)
-        prepare(successor, k2, (q2,), request_shell)
-        successor.observe_commit(receipt(successor, k2), accepted_messages=(a2,))
+        k2 = key(s, "second", fence=1)
+        prepare(s, k2, (q2,), request_shell)
+        s.observe_commit(receipt(s, k2), accepted_messages=(a2,))
 
-        k3 = key(successor, "third", fence=2)
-        prepared = prepare(successor, k3, (msg(MessageRole.USER, "Q3"),), request_shell)
+        k3 = key(s, "third", fence=2)
+        prepared = prepare(s, k3, (msg(MessageRole.USER, "Q3"),), request_shell)
         system = msg(MessageRole.SYSTEM, "P")
         assert_incremental_matches_reference(
             self, shape, prepared,
@@ -243,7 +235,7 @@ class FourthReviewRegressions(unittest.TestCase):
         k1 = key(s, "first")
         prepare(s, k1, (msg(MessageRole.USER, "Q1"),), request_shell)
         s.observe_commit(receipt(s, k1), accepted_messages=(msg(MessageRole.ASSISTANT, "A1"),))
-        before = snapshot_projection(s)
+        before = committed_state(s)
 
         k2 = key(s, "empty")
         s.begin_round(k2, requires_native=False)
@@ -251,7 +243,7 @@ class FourthReviewRegressions(unittest.TestCase):
         for _ in range(2):
             with self.assertRaisesRegex(ProjectionSessionError, "nothing to seal"):
                 s.observe_commit(receipt(s, k2))
-            self.assertEqual(snapshot_projection(s), before)
+            self.assertEqual(committed_state(s), before)
         s.close_round()
 
         k3 = key(s, "next")
@@ -319,15 +311,10 @@ class FourthReviewRegressions(unittest.TestCase):
                     [item for item in wire[container_key(shape)]
                      if isinstance(item, dict)]))
 
-                # Commit the continuation, restart, and repeat the assertions.
+                # Commit the continuation and repeat the assertions on the next round.
                 s.observe_commit(receipt(s, k2), accepted_messages=(msg(MessageRole.ASSISTANT, "A2"),))
-                successor = EndpointProjectionSession(s.session_id)
-                self.assertTrue(restore_projection(
-                    {"projection": snapshot_projection(s)},
-                    l1_history_cursor=s.frontier, session=successor,
-                ))
-                k3 = key(successor, "after-restart", fence=1)
-                prepared = prepare(successor, k3, (msg(MessageRole.USER, "Q2"),), request_shell)
+                k3 = key(s, "next-round", fence=1)
+                prepared = prepare(s, k3, (msg(MessageRole.USER, "Q2"),), request_shell)
                 assert_incremental_matches_reference(
                     self, shape, prepared,
                     reference_encode(shape, (system, msg(MessageRole.USER, "Q"), assistant, tool,
@@ -551,7 +538,7 @@ class FourthReviewRegressions(unittest.TestCase):
                              request_shell=shell(msg(MessageRole.SYSTEM, "BASE_SYSTEM")))
         self.assertNotIn("CANCELLED_HEAD", prepared.payload_json)
 
-    def test_committed_head_survives_receipt_replay_and_restart(self):
+    def test_committed_head_survives_receipt_replay(self):
         s = make_session(WireShape.ANTHROPIC_MESSAGES)
         request_shell = shell(msg(MessageRole.SYSTEM, "BASE_SYSTEM"))
         k = key(s, "committed")
@@ -563,13 +550,10 @@ class FourthReviewRegressions(unittest.TestCase):
         s.observe_commit(proof, accepted_messages=(msg(MessageRole.ASSISTANT, "A"),))
         s.observe_commit(proof)  # replayed receipt is a no-op
 
-        restored_session = EndpointProjectionSession(s.session_id)
-        restore_projection({"projection": snapshot_projection(s)},
-                           l1_history_cursor=s.frontier, session=restored_session)
-        restored_session.begin_round(key(restored_session, "restored", fence=1),
+        s.begin_round(key(s, "continued", fence=1),
                                      requires_native=False)
-        wire = body(restored_session.prepare(
-            HistoryView(restored_session.frontier, (msg(MessageRole.USER, "Q2"),)),
+        wire = body(s.prepare(
+            HistoryView(s.frontier, (msg(MessageRole.USER, "Q2"),)),
             request_shell=request_shell))
         self.assertEqual(text_occurrences(wire, "COMMITTED_HEAD"), 1)
         self.assertEqual(text_occurrences(wire, "BASE_SYSTEM"), 1)
@@ -584,7 +568,7 @@ class FourthReviewRegressions(unittest.TestCase):
         s.observe_commit(receipt(s, k),
                          accepted_messages=(msg(MessageRole.ASSISTANT, "A"),))
         s.bind(replace(s.binding, endpoint_id="new-endpoint", config_fingerprint="new-config"))
-        self.assertEqual(snapshot_projection(s)["committed_head_system"], [])
+        self.assertEqual(s._committed_head_system, [])
 
 
 if __name__ == "__main__":

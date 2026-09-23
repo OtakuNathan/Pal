@@ -373,3 +373,85 @@ No remaining blocker was found within the reviewed paths. This establishes
 local preservation and lifecycle behavior, not upstream cache-hit guarantees.
 No paid provider calls, macOS checks, merge to main, push or runtime activation
 were performed during this review.
+
+## 16. External 6b0e914 review: partial-retirement ownership (2026-09-23)
+
+D1 is confirmed on baseline `6b0e914ac11d4fbcde46a88ef620d02931c6b4ee`.
+The review package's real component tests reproduced **3 failed, 1 passed,
+3 subtests passed** (`/tmp/pal-review-6b0e914-before.txt`): retained text was
+correct, but item-level ownership contained owner tuples instead of string IDs.
+The error also reached installed chunks and the projection snapshot exporter.
+
+The fix flattens the surviving block owners into an ordered, deduplicated
+message-ID union. Block-level ownership remains nested; retirement content,
+legacy unknown-owner behavior and checkpoint validation are unchanged.
+`tests/test_projection_retirement_ownership.py` incorporates the four review
+regressions and adds a partially retired item containing an unowned block.
+
+Validation uses this worktree's `src/pal/__init__.py` via
+`PYTHONPATH="$PWD/src:$PWD"`:
+
+- Ownership + S1 + visibility/cache + B1 + partial-chunk/native + checkpoint
+  + lossless regressions: **64 passed, 71 subtests passed, 1 deselected**
+  (`/tmp/pal-review-6b0e914-after.txt`). The 100-tool-round test was deliberately
+  deselected; the run preceded the additional unowned-block subtest.
+- Final in-repo ownership regressions and the unchanged external test file:
+  **8 passed, 7 subtests passed**
+  (`/tmp/pal-review-6b0e914-ownership.txt`). These overlap the preceding suite.
+- `git diff --check` passed.
+
+Results refer to the uncommitted D1 patch on the baseline above, not a new
+product SHA. No full-suite/TLC rerun, full rebased projection restore claim,
+paid provider request, commit, push, merge or runtime activation in this step.
+
+Follow-up inspection of ownership producers/consumers and repeated-rebase
+boundaries: **155 passed, 134 subtests passed** across `test_projection*.py`
+and the 4b14ce4/7d182fd review regressions
+(`/tmp/pal-v3-ownership-followup-review.txt`). No additional ownership defect
+was confirmed in those paths.
+
+The previously excluded standalone projection-checkpoint limitation remains:
+exporting a rebased session and restoring that derived snapshot can raise
+`ProjectionCheckpointError: chunk chain is not contiguous`. Reproduced using
+the real `_merged_session` review fixture, `on_left_replaced`,
+`snapshot_projection` and `restore_projection`. Surviving chunks retain their
+original cursor chain while rebase advances the frontier. Repository source
+search finds these snapshot/restore APIs defined but not called by production
+runtime code; resident recovery restores canonical L1 and rebuilds projection.
+This is an existing component API limitation, not evidence that ordinary Pal
+restart loses history. No checkpoint redesign is included in D1.
+
+## 17. Remove unused standalone projection persistence (2026-09-23)
+
+Following explicit user approval, removed `llm/projection_checkpoint.py` and
+its exclusive cache-span dump/load helpers. Source reference audit found no
+production caller of the standalone export/restore APIs. Canonical memory
+checkpoint schema 4, L1 replay persistence, resident recovery and runtime
+projection/rebase remain in place. The independent checkpoint limitation in
+section 16 is now obsolete because that unused API no longer exists.
+
+Removed tests specific to its serialized format/restore protocol. Mixed tests
+retain their runtime continuation, native cancellation, receipt idempotency,
+wire equality and cache-address assertions; they no longer claim checkpoint
+restoration. The invoker native-capture integration test moved to
+`tests/test_invoker_native_capture.py`. Failure atomicity uses a test-only
+in-memory state comparison, not a replacement persistence mechanism. D1 tests
+now verify installed chunk/prefix/pending owner shapes instead of the removed
+exporter. Historical v2 delivery notes are marked as superseded on this point.
+
+Validation on the uncommitted worktree based on `6b0e914`, with worktree
+`PYTHONPATH` (overlapping selections, not additive):
+
+- Final projection + invoker tests: **126 passed, 66 subtests passed**;
+  `/tmp/pal-remove-projection-checkpoint-final.txt`.
+- Lossless 100-round/L1 recovery, graceful shutdown, runtime snapshot,
+  compaction recovery and adjacent v3 review regressions: **43 passed,
+  63 subtests passed**; `/tmp/pal-projection-l1-recovery.txt`.
+- Repository-wide collection: **3145 tests collected**, no import errors;
+  `/tmp/pal-projection-removal-collection.txt`. This is collection, not a
+  full-suite execution.
+- No remaining deleted API references in `src` or `tests`;
+  `git diff --check` passed.
+
+No commit, push, merge, runtime activation, paid provider request or new
+TLA model in this step. Existing D1 fix remains part of the working tree.

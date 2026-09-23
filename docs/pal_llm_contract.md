@@ -58,7 +58,9 @@ closed turns; automatic compact never promotes the pending active tail. Custom
 invokers without admission notifications conservatively leave input in R.
 
 Replay envelopes belong to L1, including optional original `source_payload` for
-provider-specific protocol normalization. Projection caches are disposable.
+provider-specific protocol normalization. Projection caches are disposable and are not persisted separately. Restart
+restores canonical L1 and builds a fresh projection; there is no independent
+projection snapshot/restore API.
 Model switching never automatically invokes compact; incompatible opaque replay
 requires compact on the previous model or reset.
 
