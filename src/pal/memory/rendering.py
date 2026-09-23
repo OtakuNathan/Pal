@@ -3,7 +3,6 @@ from __future__ import annotations
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 
 _MAX_RECALL_ITEMS = 3
-_MAX_RECALL_LINE_CHARS = 240
 
 
 def normalize_recall_view(raw: object) -> L3RecallView:
@@ -115,11 +114,6 @@ def _content_for_view(hit: dict[str, object], *, view: L3RecallView) -> str:
         raw = hit.get("search_text") or hit.get("rendered") or hit.get("summary") or ""
     else:
         raw = hit.get("summary") or hit.get("rendered") or hit.get("search_text") or ""
-    return _clip(str(raw or "").strip(), limit=_MAX_RECALL_LINE_CHARS)
-
-
-def _clip(text: str, *, limit: int) -> str:
-    normalized = str(text or "").strip()
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: max(limit - 3, 0)].rstrip() + "..."
+    # Keep the selected record intact; the shared tool-result pager owns
+    # delivery limits and retains later pages for read_tool_result.
+    return str(raw or "")

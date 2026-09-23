@@ -26,6 +26,9 @@ Current prompt projection:
 - The old single `Working Memory` prompt label is no longer the current projection.
 - Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
+- Recall tools preserve the complete selected `summary` or `origin` body; no
+  240-character clipping occurs before delivery. Long results use the shared
+  tool-result pager and expose `read_tool_result` for subsequent pages.
 
 L1 round history and compaction:
 
