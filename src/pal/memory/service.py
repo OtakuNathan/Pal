@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.result_snapshot import ResultSnapshotRef
+
 from pal.shared.tool_protocol import (
     ToolCallIR,
     ToolResultIR,
@@ -1051,6 +1053,7 @@ def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -
                             or "ok"
                         ),
                         structured=result_state or None,
+                        snapshot_refs=tuple(ResultSnapshotRef.from_dict(r) for r in result_state.get("snapshot_refs", ())),
                         replay_result_ref=str(
                             result_state.get("replay_result_ref") or ""
                         ),
@@ -1101,6 +1104,7 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
                 "kind": str(structured.get("kind") or result.status or "ok"),
                 "effect": str(structured.get("effect") or ""),
                 "replay_result_ref": result.replay_result_ref,
+                "snapshot_refs": [r.to_dict() for r in result.snapshot_refs],
             }
             transcript.append(
                 L1TranscriptMessage(

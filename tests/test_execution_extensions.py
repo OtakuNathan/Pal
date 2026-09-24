@@ -64,18 +64,18 @@ def test_replace_restore_preserves_state_and_unrelated_tools(execution):
     core, slot = execution
     original = slot.implementation
     generation = slot.registry_generation
-    state, pager, pool = slot.logical_state, slot.tool_result_pager, slot.sync_executor
+    state, pager, pool = slot.logical_state, slot.execution_sessions, slot.sync_executor
     extension = Extension()
     handle = ModuleHandle('test', MODULE_TIER_DETACHABLE)
     slot.install(extension, core.context, handle)
     assert slot.execution_diagnostics()['backend'] == 'test-extension'
     assert set(slot.registry_generation.search_records) == set(generation.search_records)
-    assert slot.logical_state is state and slot.tool_result_pager is pager and slot.sync_executor is pool
+    assert slot.logical_state is state and slot.execution_sessions is pager and slot.sync_executor is pool
     result = asyncio.run(slot.execute_tool_async(new_tool_call(name='run_shell', args={'cmd': 'printf replacement'})))
     assert result.ok and 'replacement' in result.text
     slot.uninstall(core.context, handle)
     assert slot.implementation is original
-    assert slot.logical_state is state and slot.tool_result_pager is pager and slot.sync_executor is pool
+    assert slot.logical_state is state and slot.execution_sessions is pager and slot.sync_executor is pool
     assert len(extension.closed) == 1
     assert core.context.require_port('execution:execution') is slot
 

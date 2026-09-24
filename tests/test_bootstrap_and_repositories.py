@@ -4004,6 +4004,65 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.endpoint._turn_stream_text)
         self.assertFalse(self.endpoint.outbox)
 
+    async def test_real_checklist_completion_echo_cleans_telegram_for_both_paths(self) -> None:
+        from types import SimpleNamespace
+        from pal.checklist.capabilities import ChecklistIntrospectionProvider
+        from pal.checklist.service import ChecklistService
+        from pal.core.turn_executor import TurnExecutor
+        from pal.execution.contracts import CapabilityCall
+
+        for method in ("check", "upsert"):
+            for streaming in (False, True):
+                with self.subTest(method=method, streaming=streaming):
+                    self.fake_bot.actions.clear()
+                    provider = ChecklistIntrospectionProvider(ChecklistService())
+                    handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42", "thread_id": "7"})
+                    executor = object.__new__(TurnExecutor)
+                    async def deliver(continuation, effect):
+                        message = effect.update.message if streaming else effect.message
+                        await self.endpoint._send_channel_message_async(handle, message)
+                    executor.execute_turn_effect_async = deliver
+                    continuation = SimpleNamespace(echoed_keys=set(), delivery_binding=object(),
+                                                   channel_stream_active=streaming, emitted_reply_texts=[])
+                    plan = [{"step": str(i) + "x" * 899, "status": "completed" if i < 4 else "pending"} for i in range(5)]
+                    created = provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": plan}))
+                    self.assertGreater(len(created.structured["markdown"]), 4000)
+                    self.assertLess(len(created.structured["echo"]["markdown"]), 2000)
+                    await executor._maybe_echo_tool_result_async(continuation, SimpleNamespace(name="upsert", call_id="create"), created)
+                    args = {"step": plan[-1]["step"]} if method == "check" else {
+                        "plan": [{**item, "status": "completed"} for item in plan]}
+                    completed = getattr(provider, method)(CapabilityCall(name=method, args=args))
+                    await executor._maybe_echo_tool_result_async(continuation, SimpleNamespace(name=method, call_id="finish"), completed)
+                    self.assertIsNone(provider.service.show())
+                    self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+                    actions = [name for name, _ in self.fake_bot.actions]
+                    self.assertEqual(actions, ["message", "pin_chat_message", "unpin_chat_message", "delete_message"])
+                    # A retried clear must not send a new notification or card.
+                    event = completed.structured["channel_event"]
+                    self.assertNotIn("echo", completed.structured)
+                    await self.endpoint._send_channel_message_async(handle, ChannelMessage(
+                        text=event["text"], tag=event["tag"], payload=event["payload"]))
+                    self.assertEqual(len(self.fake_bot.actions), 4)
+
+    async def test_legacy_inactive_check_clears_only_its_thread_and_retries_delete(self) -> None:
+        from unittest.mock import AsyncMock
+        handles = [self.endpoint.build_response_handle(reply_target={"chat_id": "42", "thread_id": thread})
+                   for thread in ("7", "8")]
+        for handle in handles:
+            await self.endpoint._send_channel_message_async(handle, ChannelMessage(
+                text="Checklist progress 0/1", tag="checklist", payload={"action": "upsert", "active": True}))
+        clear = ChannelMessage(text="Checklist progress 1/1", tag="checklist", payload={"action": "check", "active": False})
+        original = self.fake_bot.delete_message
+        self.fake_bot.delete_message = AsyncMock(side_effect=RuntimeError("temporary delete failure"))
+        from pal.channel.contracts import ChannelDeliveryError
+        with self.assertRaises(ChannelDeliveryError):
+            await self.endpoint._send_channel_message_async(handles[0], clear)
+        self.assertIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+        self.fake_bot.delete_message = original
+        await self.endpoint._send_channel_message_async(handles[0], clear)
+        self.assertNotIn(("42", "7", "checklist"), self.endpoint._tagged_message_targets)
+        self.assertIn(("42", "8", "checklist"), self.endpoint._tagged_message_targets)
+
     async def test_checklist_tag_sends_edits_and_clears_one_native_message(self) -> None:
         handle = self.endpoint.build_response_handle(
             reply_target={"chat_id": "42", "thread_id": "7"},

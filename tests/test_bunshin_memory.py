@@ -420,58 +420,16 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(stale_result.content, "stale contents")
         self.assertIsNotNone(service.active_l1_turn(active_turn_id))
 
-    def test_bunshin_pager_retention_advances_by_tool_call(self) -> None:
-        base_runtime = ExecutionRuntime()
-        scoped_runtime = BunshinScopedExecutionRuntime(
-            base_runtime,
-            [],
-            workspace={"run_id": "memory-run"},
-        )
-        turn_id = "memory-run:invocation:input"
-        scoped_runtime.begin_tool_result_turn(
-            turn_id=turn_id,
-            scope_key="bunshin:memory-run",
-            retention_user_turns=5,
-            input_id="input",
-        )
-        manifest = base_runtime.tool_result_pager.store(
-            runtime_root=None,
-            turn_id=turn_id,
-            result_ref="bunshin-pager-result",
-            tool_name="read_file",
-            status="ok",
-            ok=True,
-            rendered="full paged output",
-            page_size=256,
-        )
-
-        for index in range(1, 5):
-            scoped_runtime.advance_tool_result_clock(
-                turn_id=turn_id,
-                clock_id=f"tool:{index}",
-                retention_steps=5,
-            )
-        self.assertEqual(
-            scoped_runtime.read_tool_result_page(
-                result_ref=manifest.result_ref,
-                turn_id=turn_id,
-            ).state,
-            "ok",
-        )
-
-        scoped_runtime.advance_tool_result_clock(
-            turn_id=turn_id,
-            clock_id="tool:5",
-            retention_steps=5,
-        )
-
-        self.assertEqual(
-            scoped_runtime.read_tool_result_page(
-                result_ref=manifest.result_ref,
-                turn_id=turn_id,
-            ).state,
-            "expired_handle",
-        )
+    def test_bunshin_snapshots_survive_tool_clock_advancement(self):
+        base = ExecutionRuntime()
+        scoped = BunshinScopedExecutionRuntime(base, [], workspace={"run_id": "memory-run"})
+        turn_id = "memory-run:input"
+        scoped.begin_tool_result_turn(turn_id=turn_id, scope_key="bunshin:memory-run", input_id="input")
+        ref = base.result_snapshots.capture("full result", call_id="c", lifetime="bunshin:memory-run")
+        for i in range(20):
+            scoped.advance_tool_result_clock(turn_id=turn_id, clock_id=f"tool:{i}", retention_steps=5)
+        self.assertEqual(Path(ref.path).read_text(), "full result")
+        base.shutdown()
 
     def test_bunshin_renders_closed_tool_protocol_with_result_body(self) -> None:
         service, _provider = self._memory_service()
@@ -562,7 +520,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             "current input is supplied by the turn",
         )
 
-    def test_recall_projects_into_the_same_cache_bunshin_prompt_renders(self) -> None:
+    def test_recall_keeps_cache_without_duplicate_bunshin_prompt_projection(self) -> None:
         service, provider = self._memory_service(
             {
                 "document_id": "case:queue-repair",
@@ -598,13 +556,9 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         ]
         recalled = [fragment for fragment in fragments if fragment.title == "Recalled memories"]
 
-        self.assertEqual(len(recalled), 1)
-        self.assertEqual(recalled[0].metadata["block_id"], "memory_recalled_context")
-        self.assertIn('<recalled_memories view="summary">', recalled[0].content)
-        self.assertIn(
-            "[case:queue-repair]: Use the bounded wake-up protocol after closing the queue.",
-            recalled[0].content,
-        )
+        self.assertEqual(recalled, [])
+        self.assertTrue(pack.l2_working_memory)
+        self.assertFalse(any("Use the bounded wake-up protocol" in fragment.content for fragment in fragments))
 
 
     def test_pending_memory_candidates_are_not_rendered_as_recalled_memory(self) -> None:

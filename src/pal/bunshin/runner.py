@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
@@ -460,6 +461,7 @@ class BunshinRunner:
                 self.runtime_root,
                 run_id=self.run_id,
                 llm_authority="manager_proxy",
+                snapshot_root=Path(self.pack.workspace["run_dir"]) if self.pack.workspace.get("run_dir") else None,
                 memory_workflow_id=str((self.pack.workspace.get("bunshin_v2") or {}).get("workflow_id")
                     or (self.pack.metadata.get("bunshin_v2") or {}).get("workflow_id") or ""),
             )
@@ -2712,6 +2714,7 @@ def build_slim_bunshin_runtime(
     run_id: str = "",
     llm_authority: Literal["manager_proxy", "host", "none"],
     memory_workflow_id: str = "",
+    snapshot_root: Path | None = None,
 ) -> BunshinRuntimeBundle:
     """Build one runtime with an explicit LLM owner.
 
@@ -2752,7 +2755,15 @@ def build_slim_bunshin_runtime(
     config = RuntimeConfig.load(Path(runtime_root))
     from pal.execution.backend import build_execution_runtime
     context = MainContext(execution_runtime=build_execution_runtime())
-    context.execution_runtime.runtime_root = Path(runtime_root)
+    context.execution_runtime.configure_runtime_root(Path(runtime_root))
+    # Each role owns writable output storage inside its existing run mount.
+    # Never expose the resident's or another role's output directory.
+    from pal.execution.result_snapshots import ResultSnapshotStore
+    if snapshot_root is not None:
+        context.execution_runtime.result_snapshots = ResultSnapshotStore(snapshot_root)
+    elif run_id:
+        context.execution_runtime.result_snapshots = ResultSnapshotStore(
+            Path(tempfile.gettempdir()) / "pal-role-output" / run_id)
     lifecycle = ModuleLifecycle(context, CoreRuntimeState())
     artifact_service = ArtifactManager(
         runtime_root=Path(runtime_root),

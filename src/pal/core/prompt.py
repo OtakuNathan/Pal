@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.core.continuity_compaction import COMPACTION_WORKFLOW_GUIDANCE
-
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 from pal.shared.tool_routing import (
     TOOL_EFFICIENCY_DEVELOPER_GUIDANCE,
@@ -80,7 +78,6 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "stale. Never claim an operation succeeded without a confirming result. Do not stop, restart, or kill"
                     " your own hosting service from an active turn. Actual tool protocols and execution-time gates remain"
                     " enforced."
-                    + " " + COMPACTION_WORKFLOW_GUIDANCE
                 ),
                 priority=90,
                 metadata={"prompt_target": "system"},

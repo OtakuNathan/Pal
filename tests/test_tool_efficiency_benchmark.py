@@ -29,14 +29,14 @@ def test_fixture_isolates_shell_and_validates_real_lsp_chain(tmp_path, monkeypat
 
 
 def test_fixture_read_cannot_escape_and_page_contains_exact_tail(tmp_path):
-    fixture = FixtureExecution(tmp_path, 'page-evidence')
+    fixture = FixtureExecution(tmp_path, 'snapshot-evidence')
     async def run():
         result = await fixture.execute_tool_async(new_tool_call(name='read_file',args={'file_path':'/etc/passwd'}),turn_id='t')
         assert not result.ok
-        result = await fixture.execute_tool_async(new_tool_call(name='read_tool_result',args={'result_ref':'fixture-long','anchor':'tail','page':1}),turn_id='t')
+        result = await fixture.execute_tool_async(new_tool_call(name='read_file',args={'file_path':str(tmp_path/'fixture-output.txt'),'offset':101,'limit':2}),turn_id='t')
         assert result.ok, result.llm_text
-        assert result.structured['page_text'].endswith('FINAL_MARKER\n \t')
-        assert result.invocation_result.llm_text.endswith('FINAL_MARKER\n \t')
+        assert 'FINAL_MARKER' in result.llm_text
+        assert (tmp_path/'fixture-output.txt').read_bytes().endswith(b'FINAL_MARKER\n \t')
     try:
         asyncio.run(run())
     finally:

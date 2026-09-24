@@ -20,7 +20,6 @@ from pal.execution.tool_facade import (
     FailedResult,
     Idempotency,
     InvocationMode,
-    PagedResult,
     PagingMode,
     RejectedResult,
     RetryDirective,
@@ -434,16 +433,11 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             ),
             turn_id="turn-1",
         )
-        self.assertIsInstance(result, PagedResult)
-        self.assertEqual(result.result_handle["result_ref"], "call-page")
-        self.assertTrue(result.affordances)
-        page = self.runtime.read_tool_result_page(
-            result_ref="call-page",
-            page=2,
-            turn_id="turn-1",
-        )
-        self.assertIsNotNone(page)
-        self.assertEqual(page.state, "ok")
+        self.assertIsInstance(result, CompleteResult)
+        self.assertEqual(len(result.snapshot_refs), 1)
+        from pathlib import Path
+        self.assertTrue(Path(result.snapshot_refs[0].path).exists())
+        self.assertIn(result.snapshot_refs[0].path, result.llm_text)
 
     async def test_generation_swap_is_atomic_and_old_call_can_finish(self) -> None:
         started = asyncio.Event()

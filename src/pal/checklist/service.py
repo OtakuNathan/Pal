@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 ChecklistStatus = Literal["pending", "in_progress", "completed"]
@@ -72,7 +72,11 @@ class ChecklistService:
                     raise ValueError(f"invalid checklist status: {status!r}")
                 items.append(ChecklistItem(step=step, status=status))  # type: ignore[arg-type]
             self._active = items
-            return self._snapshot_locked()
+            snapshot = self._snapshot_locked()
+            if snapshot.done == snapshot.total:
+                self.clear()
+                snapshot = replace(snapshot, active=False)
+            return snapshot
 
     def check(self, step: str) -> CheckOutcome:
         step = str(step or "").strip()
@@ -108,7 +112,10 @@ class ChecklistService:
     def install_restored_items(self, items: tuple[ChecklistItem, ...] | None) -> None:
         """Install an already validated snapshot without replaying tool mutations."""
         with self._lock:
-            self._active = None if items is None else [ChecklistItem(item.step, item.status) for item in items]
+            self._active = (
+                [ChecklistItem(item.step, item.status) for item in items]
+                if items and any(item.status != "completed" for item in items) else None
+            )
 
     def _snapshot_locked(self) -> ChecklistSnapshot:
         items = self._active or []

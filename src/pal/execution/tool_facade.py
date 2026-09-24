@@ -12,7 +12,6 @@ from pal.shared.tool_protocol import (
     CompleteResult,
     EffectOutcome,
     FailedResult,
-    PagedResult,
     RejectedResult,
     RetryDirective,
     ToolAffordance,
@@ -261,7 +260,7 @@ def compile_tool_description(
             f"effect_kind={execution.effect_kind.value}; "
             f"idempotency={execution.idempotency.value}; "
             f"retry_policy={execution.retry_policy.value}; "
-            f"paging={execution.paging.value}."
+
         ),
     ]
     if enum_values:
@@ -332,7 +331,6 @@ __all__ = [
     "InvocationMode",
     "McpToolOutput",
     "NextToolHint",
-    "PagedResult",
     "PagingMode",
     "RejectedResult",
     "RetryDirective",

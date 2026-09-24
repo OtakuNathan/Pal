@@ -52,30 +52,33 @@ def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
     }
 
 
-def _checklist_echo(action: str, snapshot: Any | None) -> dict[str, Any]:
-    if snapshot is None:
-        payload = {
-            "action": str(action),
-            "active": False,
-            "plan": [],
-            "done": 0,
-            "total": 0,
-        }
-        markdown = "Checklist cleared."
-    else:
-        snapshot_payload = _snapshot_payload(snapshot)
-        payload = {
-            "action": str(action),
-            "active": bool(snapshot_payload["active"]),
-            "plan": list(snapshot_payload["plan"]),
-            "done": int(snapshot_payload["done"]),
-            "total": int(snapshot_payload["total"]),
-        }
-        markdown = str(snapshot_payload["markdown"])
+def _checklist_clear_event() -> dict[str, Any]:
+    # Control delivery is independent of the full snapshot and its display budget.
+    return {"tag": "checklist", "text": "Checklist cleared.",
+            "payload": {"action": "clear", "active": False}}
+
+
+def _checklist_echo(action: str, snapshot: Any) -> dict[str, Any]:
+    plan = snapshot.plan
+    cursor = next((index for index, item in enumerate(plan) if item["status"] != "completed"), 0)
+    start = max(0, cursor - 2)
+    end = min(len(plan), start + 8)
+    lines = [f"Checklist progress {snapshot.done}/{snapshot.total}"]
+    if start:
+        lines.append(f"… {start} earlier steps")
+    for item in plan[start:end]:
+        step = " ".join(item["step"].split())
+        if len(step) > 160:
+            step = step[:159] + "…"
+        mark = "✅" if item["status"] == "completed" else "⬜"
+        lines.append(f"{mark} {step}")
+    if end < len(plan):
+        lines.append(f"… {len(plan) - end} more steps")
     return {
-        "markdown": markdown,
+        "markdown": "\n".join(lines),
         "tag": "checklist",
-        "payload": payload,
+        "payload": {"action": action, "active": snapshot.active,
+                    "done": snapshot.done, "total": snapshot.total},
     }
 
 
@@ -104,10 +107,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
-            purpose="Create or replace Pal's active execution-cursor checklist, including multiple status updates in one call.",
+            purpose="Create or replace Pal's active execution-cursor checklist, including multiple status updates in one call. A fully completed plan closes automatically.",
             use_when=(
                 "Unless the user specifies otherwise, use before the first mutation in work with multiple delivery phases, long execution, or resumption needs"
-                "; update when phases materially change. Routine edit-and-test work needs no checklist."
+                "; update when phases materially change. Batch creation or updates with independent useful calls. Routine edit-and-test work needs no checklist."
             ),
             do_not_use_when="The active checklist already matches the work.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
@@ -141,13 +144,16 @@ class ChecklistIntrospectionProvider:
         payload = _snapshot_payload(snapshot)
         changed = previous is None or previous.plan != snapshot.plan
         payload["changed"] = changed
-        if changed:
+        payload["cleared"] = not snapshot.active
+        if not snapshot.active:
+            payload["channel_event"] = _checklist_clear_event()
+        elif changed:
             payload["echo"] = _checklist_echo("upsert", snapshot)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="checklist upserted",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Checklist upserted", {key: payload[key] for key in ("changed", "active", "done", "total")}),
+            llm_text=render_titled_structured_for_llm("Checklist upserted", {key: payload[key] for key in ("changed", "active", "done", "total", "cleared")}),
         )
 
     @capability_action(
@@ -167,7 +173,7 @@ class ChecklistIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="checklist_clear",
-                    use_when="Cancel or retire remaining work, or close a plan completed through batch upsert. The last check closes automatically.",
+                    use_when="Cancel or retire remaining work. Both the last check and a fully completed upsert close automatically.",
                 ),
             ),
         ),
@@ -202,7 +208,9 @@ class ChecklistIntrospectionProvider:
             "step": step,
             **_snapshot_payload(outcome.snapshot),
         }
-        if outcome.changed or outcome.cleared:
+        if outcome.cleared:
+            payload["channel_event"] = _checklist_clear_event()
+        elif outcome.changed:
             payload["echo"] = _checklist_echo("check", outcome.snapshot)
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -287,7 +295,7 @@ class ChecklistIntrospectionProvider:
                 retired_payload = _snapshot_payload(retired)
                 retired_payload["active"] = False
                 payload["retired_checklist"] = retired_payload
-            payload["echo"] = _checklist_echo("clear", None)
+            payload["channel_event"] = _checklist_clear_event()
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="checklist cleared" if cleared else "no active checklist",

@@ -678,7 +678,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         generation = core.context.execution_runtime.registry_generation
-        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "edit_file", "write_file"):
+        for alias in ("run_shell", "search_tools", "read_tool", "read_file", "edit_file", "write_file"):
             self.assertIn(alias, generation.direct_aliases)
         for alias in ("delete_path", "file_state"):
             self.assertIn(alias, generation.indirect_aliases)
@@ -1405,7 +1405,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             exposed_names = [item.name for item in request.tools]
             self.assertIn("search_tools", exposed_names)
             self.assertIn("read_tool", exposed_names)
-            self.assertIn("read_tool_result", exposed_names)
+            self.assertNotIn("read_tool_result", exposed_names)
             self.assertIn("run_shell", exposed_names)
             self.assertIn("read_file", exposed_names)
             self.assertIn("edit_file", exposed_names)
@@ -1843,7 +1843,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.metadata["reminder_sections"], ("current_date",))
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
-                ("l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"),
+                ("l1_recent_context_0", "l1_recent_context_1"),
             )
             self.assertEqual(prompt_ir.turn_kind, "chat")
             self.assertEqual(prompt.messages[0].role.value, "system")
@@ -1906,10 +1906,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("If recalled memories are already present in the prompt", final_text)
             self.assertNotIn("MUST call memory_recall", final_text)
             self.assertNotIn("custom Pal/project term", final_text)
-            self.assertIn('<runtime_context_update kind="memory">', final_text)
-            self.assertIn("This is not a new user message. Do not answer this block directly.", final_text)
-            self.assertIn('<recalled_memories view="summary">', final_text)
-            self.assertIn("[summary-1]: The user prefers replies in Asia/Shanghai context.", final_text)
+            self.assertNotIn('<runtime_context_update kind="memory">', final_text)
+            self.assertNotIn("This is not a new user message. Do not answer this block directly.", final_text)
+            self.assertNotIn('<recalled_memories view="summary">', final_text)
+            self.assertNotIn("[summary-1]: The user prefers replies in Asia/Shanghai context.", final_text)
             self.assertNotIn("Working Memory", final_text)
             self.assertNotIn("Timezone Preference", final_text)
             self.assertNotIn("Timezone Preference", system_text)
@@ -2658,29 +2658,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(contract_names, set(generation.direct_aliases))
         self.assertFalse(contract_names & set(generation.indirect_aliases))
 
-    def test_tool_result_page_is_resident_llm_tool(self) -> None:
+    def test_retired_pager_is_not_a_tool(self):
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
-
-        tools = core.tool_surface.build_llm_tool_contracts()
-        page_tool = next(
-            item
-            for item in tools
-            if item.get("function", {}).get("name") == "read_tool_result"
-        )
-
-        schema = page_tool["function"]["input_schema"]
-        self.assertIn("result_ref", schema["properties"])
-        self.assertIn("page", schema["properties"])
-        self.assertIn("anchor", schema["properties"])
-        self.assertIn("tail", schema["properties"])
-        self.assertEqual(schema["required"], ["result_ref"])
-        read_result = core.context.execution_runtime.execute_tool(
-            new_tool_call(name="read_tool", args={"name": "read_tool_result"})
-        )
-        self.assertTrue(read_result.ok)
-        self.assertIn("result_ref", read_result.llm_text)
+        names = {item["function"]["name"] for item in core.tool_surface.build_llm_tool_contracts()}
+        self.assertNotIn("read_tool_result", names)
+        self.assertIn("read_file", names)
 
     def test_llm_tool_aliases_route_to_internal_canonical_capabilities(self) -> None:
         core = PalCore()
@@ -3912,8 +3896,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0].text)
         tool_message = next(message for message in generate_requests[-1].messages if message.role.value == "tool")
-        self.assertIn('"kind":"paged"', tool_message.text)
-        self.assertIn('"tool":"read_tool_result"', tool_message.text)
+        self.assertTrue(tool_message.parts[0].snapshot_refs)
+        self.assertIn("Complete output snapshot:", tool_message.text)
 
     def test_turn_runtime_preserves_delivered_tool_results_until_compaction(self) -> None:
         class MultiToolLLMRuntime:
@@ -3979,206 +3963,81 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(tool_messages[0].parts[0].content, "X" * 12_000)
         self.assertEqual(tool_messages[1].parts[0].content, "X" * 12_000)
 
-    def test_execution_runtime_pages_large_tool_results_in_memory(self) -> None:
+    def test_large_result_is_an_exact_file_copy(self):
         core = PalCore()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            core.context.execution_runtime.runtime_root = Path(tmpdir)
-            register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
-            result = core.context.execution_runtime.execute_tool(
-                new_tool_call(name="huge", args={"value": "spill"}, call_id="call_spill"),
-                budget=ToolCallBudget(
-                    max_output_chars=10_000,
-                    max_output_tokens_estimate=25_000,
-                    max_result_spill_chars=50_000,
-                    preview_chars=500,
-                    artifact_bucket_id="turn_spill",
-                ),
-            )
-
-            self.assertTrue(result.ok)
-            self.assertEqual(result.structured["kind"], "paged")
-            result_handle = result.structured["result_handle"]
-            self.assertEqual(result_handle["result_ref"], "call_spill")
-            self.assertNotIn("backing_path", result_handle)
-            self.assertIn('"result_ref":"call_spill"', result.llm_text)
-            self.assertIn('"tool":"read_tool_result"', result.llm_text)
-            self.assertNotIn("backing_path", result.llm_text)
-            self.assertNotIn(str(tmpdir), result.llm_text)
-
-    def test_execution_runtime_budget_fallback_without_runtime_root(self) -> None:
-        core = PalCore()
-        core.context.execution_runtime.runtime_root = None
         register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
         result = core.context.execution_runtime.execute_tool(
-            new_tool_call(name="huge", args={"value": "head-tail"}),
-            budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000),
-        )
-
+            new_tool_call(name="huge", args={"value": "spill"}, call_id="spill"),
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
         self.assertTrue(result.ok)
-        self.assertEqual(result.structured["kind"], "paged")
-        self.assertTrue(str(result.structured["result_handle"]["result_ref"]))
-        self.assertIn('"kind":"paged"', result.llm_text)
+        self.assertEqual(result.invocation_result.kind, "complete")
+        self.assertEqual(Path(result.snapshot_refs[0].path).read_text(), "X" * 60_000)
+        self.assertIn(result.snapshot_refs[0].path, result.llm_text)
+        self.assertNotIn("read_tool_result", result.llm_text)
 
-    def test_shell_output_uses_runtime_pager_without_tool_level_truncation(self) -> None:
+    def test_snapshot_without_runtime_root_uses_private_directory(self):
+        core = PalCore()
+        register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
+        result = core.context.execution_runtime.execute_tool(new_tool_call(name="huge", args={"value": "x"}),
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
+        self.assertTrue(result.ok)
+        self.assertTrue(Path(result.snapshot_refs[0].path).is_file())
+
+    def test_shell_snapshot_keeps_head_middle_and_tail(self):
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            core.context.execution_runtime.runtime_root = Path(tmpdir)
-            result = core.context.execution_runtime.execute_tool(
-                new_tool_call(
-                    name="run_shell",
-                    args={
-                        "cmd": (
-                            "python - <<'PY'\n"
-                            "print('SHELL-PAGER-HEAD')\n"
-                            "print('x' * 20000)\n"
-                            "print('SHELL-PAGER-TAIL')\n"
-                            "PY"
-                        )
-                    },
-                    call_id="call_shell_pager",
-                ),
-                budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_shell_pager"),
-            )
-            page_count = int(result.structured["result_handle"]["page_count"])
-            later = core.context.execution_runtime.execute_tool(
-                new_tool_call(
-                    name="read_tool_result",
-                    args={"result_ref": "call_shell_pager", "page": page_count},
-                )
-            )
+        result = core.context.execution_runtime.execute_tool(new_tool_call(name="run_shell", args={
+            "cmd": "printf HEAD; head -c 20000 /dev/zero; printf TAIL"}),
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
+        self.assertTrue(result.ok, result.text)
+        text = Path(result.snapshot_refs[0].path).read_text()
+        self.assertIn("HEAD", text)
+        self.assertIn("TAIL", text)
+        self.assertIn("\0" * 20000, text)
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.structured["kind"], "paged")
-        self.assertIn("SHELL-PAGER-HEAD", result.llm_text)
-        self.assertTrue(later.ok)
-        self.assertIn("SHELL-PAGER-TAIL", later.llm_text)
-
-    def test_execution_runtime_tool_result_page_reads_later_page(self) -> None:
+    def test_snapshot_can_be_read_through_file_tool(self):
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            core.context.execution_runtime.runtime_root = Path(tmpdir)
-            register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
-            result = core.context.execution_runtime.execute_tool(
-                new_tool_call(name="head_tail_huge", args={}, call_id="call_head_tail"),
-                budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_page"),
-            )
-            page_count = int(result.structured["result_handle"]["page_count"])
-            later = core.context.execution_runtime.execute_tool(
-                new_tool_call(
-                    name="read_tool_result",
-                    args={"result_ref": "call_head_tail", "page": page_count},
-                )
-            )
+        register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
+        result = core.context.execution_runtime.execute_tool(new_tool_call(name="head_tail_huge", args={}),
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
+        ref = result.snapshot_refs[0]
+        read = core.context.execution_runtime.execute_tool(new_tool_call(name="read_file", args={"file_path": ref.path}), turn_id="snapshot-read",
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
+        self.assertTrue(read.ok, read.text)
+        self.assertEqual(read.snapshot_refs, (ref,))
+        self.assertIsNone(read.invocation_result.context_delivery)
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.structured["kind"], "paged")
+    def test_snapshot_preview_includes_both_ends(self):
+        core = PalCore()
+        register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
+        result = core.context.execution_runtime.execute_tool(new_tool_call(name="head_tail_huge", args={}),
+            budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
         self.assertIn("HEAD-SIGNAL", result.llm_text)
-        self.assertTrue(later.ok)
-        self.assertEqual(later.structured["page"], page_count)
-        self.assertIn("page_text", later.structured)
-        self.assertIn("TAIL-SIGNAL", later.llm_text)
-        self.assertNotIn("backing_path", later.llm_text)
+        self.assertIn("TAIL-SIGNAL", result.llm_text)
 
-    def test_execution_runtime_tool_result_page_reads_tail_anchor(self) -> None:
+    def test_snapshot_lifetime_does_not_expire_by_turn_count(self):
         core = PalCore()
-        register_execution_with_core(core.context)
-        core.publish_module_capabilities("execution")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            core.context.execution_runtime.runtime_root = Path(tmpdir)
-            register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
-            result = core.context.execution_runtime.execute_tool(
-                new_tool_call(name="head_tail_huge", args={}, call_id="call_tail_anchor"),
-                budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_tail_anchor"),
-            )
-            tail = core.context.execution_runtime.execute_tool(
-                new_tool_call(
-                    name="read_tool_result",
-                    args={"result_ref": "call_tail_anchor", "anchor": "tail"},
-                )
-            )
-            second_from_tail = core.context.execution_runtime.execute_tool(
-                new_tool_call(
-                    name="read_tool_result",
-                    args={"result_ref": "call_tail_anchor", "tail": True, "page": 2},
-                )
-            )
+        runtime = core.context.execution_runtime
+        register_test_tool(runtime, HugeTool(size=60_000))
+        result = runtime.execute_tool(new_tool_call(name="huge", args={"value": "x"}),
+            budget=ToolCallBudget(max_output_chars=2000))
+        for index in range(20):
+            runtime.begin_tool_result_turn(turn_id=f"t-{index}", retention_user_turns=5)
+        self.assertTrue(Path(result.snapshot_refs[0].path).exists())
 
-        self.assertTrue(result.ok)
-        self.assertTrue(tail.ok)
-        self.assertEqual(tail.structured["anchor"], "tail")
-        self.assertEqual(tail.structured["anchor_page"], 1)
-        self.assertFalse(tail.structured["has_more_after"])
-        self.assertTrue(tail.structured["has_more_before"])
-        self.assertIn("TAIL-SIGNAL", tail.llm_text)
-        self.assertEqual(
-            tail.invocation_result.affordances[0].arguments,
-            {"result_ref": "call_tail_anchor", "page": 2, "anchor": "tail"},
-        )
-        self.assertTrue(second_from_tail.ok)
-        self.assertEqual(second_from_tail.structured["anchor"], "tail")
-        self.assertEqual(second_from_tail.structured["anchor_page"], 2)
-        self.assertEqual(
-            second_from_tail.invocation_result.affordances[0].arguments,
-            {"result_ref": "call_tail_anchor", "page": 1, "anchor": "tail"},
-        )
-
-    def test_execution_runtime_tool_result_page_expires_after_retention_turns(self) -> None:
-        core = PalCore()
-        register_execution_with_core(core.context)
-        core.publish_module_capabilities("execution")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            core.context.execution_runtime.runtime_root = Path(tmpdir)
-            register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
-            core.context.execution_runtime.begin_tool_result_turn(turn_id="turn_1", retention_user_turns=5)
-            core.context.execution_runtime.execute_tool(
-                new_tool_call(name="huge", args={"value": "expire"}, call_id="call_expire"),
-                budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_1"),
-            )
-
-            for index in range(2, 7):
-                core.context.execution_runtime.begin_tool_result_turn(turn_id=f"turn_{index}", retention_user_turns=5)
-            expired = core.context.execution_runtime.execute_tool(
-                new_tool_call(name="read_tool_result", args={"result_ref": "call_expire", "page": 1})
-            )
-
-        self.assertFalse(expired.ok)
-        self.assertEqual(expired.structured["details"]["reason"], "expired_handle")
-
-    def test_expired_pager_recovery_replays_reads_but_never_mutations(self) -> None:
+    def test_missing_snapshot_never_reexecutes_source(self):
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
-
-        def details(alias: str, arguments: dict[str, object]) -> dict[str, object]:
-            record = runtime.registry_generation.record_for_alias(alias)
-            self.assertIsNotNone(record)
-            return {
-                "origin": {
-                    "alias": alias,
-                    "arguments": arguments,
-                    "invocation_mode": record.execution.invocation_mode.value,
-                    "execution": record.execution.model_dump(mode="json"),
-                }
-            }
-
-        read_recovery = runtime._pager_recovery_affordances(
-            details("read_file", {"path": "/tmp/example.txt"})
-        )
-        write_recovery = runtime._pager_recovery_affordances(
-            details("write_file", {"path": "/tmp/example.txt", "content": "new"})
-        )
-
-        self.assertEqual(read_recovery[0].tool, "read_file")
-        self.assertIn("idempotent read", read_recovery[0].reason)
-        self.assertEqual(write_recovery[0].tool, "read_tool")
-        self.assertEqual(write_recovery[0].arguments, {"name": "write_file"})
-        self.assertNotEqual(write_recovery[0].tool, "write_file")
-        self.assertIn("do not automatically repeat", write_recovery[0].reason)
+        ref = runtime.result_snapshots.capture("old", call_id="mutation", lifetime="s")
+        Path(ref.path).unlink()
+        result = runtime.execute_tool(new_tool_call(name="read_file", args={"file_path": ref.path}), turn_id="snapshot-read")
+        self.assertFalse(result.ok)
+        self.assertIn("FILE_NOT_FOUND", result.text)
 
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
         class FallbackBudgetLLMRuntime:
@@ -4523,7 +4382,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("probe_tool", l1_fragments[0].content)
         self.assertIn("probe result", l1_fragments[0].content)
 
-    def test_memory_prompt_preserves_distinct_refs_with_the_same_canonical_key(self) -> None:
+    def test_memory_prompt_does_not_reinject_l2_entries(self) -> None:
         from pal.memory import MemoryPack
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
@@ -4558,16 +4417,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             PromptAssemblyContext(metadata={"memory_pack": pack})
         )
 
-        remembered_facts = next(fragment for fragment in fragments if fragment.metadata.get("block_id") == "memory_recalled_context")
-        self.assertIn("The test user built Pal.", remembered_facts.content)
-        self.assertIn("[fact:1]: The test user built Pal.", remembered_facts.content)
-        self.assertNotIn("Recalled memory references are operational metadata.", remembered_facts.content)
-        self.assertIn('<recalled_memories view="summary">', remembered_facts.content)
-        self.assertNotIn("Test user profile:", remembered_facts.content)
-        self.assertNotIn("origin available", remembered_facts.content)
-        self.assertIn("[fact:2]: The test user built Pal again.", remembered_facts.content)
+        self.assertFalse(any(fragment.metadata.get("block_id") == "memory_recalled_context" for fragment in fragments))
+        self.assertEqual([entry.source_ref or entry.entry_id for entry in pack.l2_working_memory], ["fact:1", "fact:2"])
 
-    def test_typed_l1_projection_leaves_summary_to_l1_and_keeps_recalled_memory(self) -> None:
+    def test_typed_l1_projection_leaves_summary_and_tool_observations_to_l1(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
         pack = MemoryPack(
@@ -4613,7 +4466,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             any(block_id.startswith("l1_recent_context") for block_id in block_ids)
         )
         self.assertNotIn("memory_current_summary", block_ids)
-        self.assertIn("memory_recalled_context", block_ids)
+        self.assertNotIn("memory_recalled_context", block_ids)
 
     def test_memory_query_defaults_to_summary_view_enum(self) -> None:
         self.assertEqual(MemoryQuery().view, L3RecallView.SUMMARY)

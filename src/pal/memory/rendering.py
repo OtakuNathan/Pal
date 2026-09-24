@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 
-_MAX_RECALL_ITEMS = 3
-
-
 def normalize_recall_view(raw: object) -> L3RecallView:
     if isinstance(raw, L3RecallView):
         return raw
@@ -86,7 +83,7 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult) -> str
 
 def _render_hit_lines(hits: list[dict[str, object]], *, view: L3RecallView) -> list[str]:
     lines: list[str] = []
-    for hit in hits[:_MAX_RECALL_ITEMS]:
+    for hit in hits:
         mem_ref = str(hit.get("mem_ref") or hit.get("document_id") or "").strip()
         body = _content_for_view(hit, view=view)
         if not mem_ref or not body:
@@ -98,7 +95,7 @@ def _render_hit_lines(hits: list[dict[str, object]], *, view: L3RecallView) -> l
 def _render_hit_previews(hits: list[dict[str, object]], *, view: L3RecallView) -> list[dict[str, str]]:
     previews: list[dict[str, str]] = []
     content_key = "search_text" if view == L3RecallView.ORIGIN else "summary"
-    for hit in hits[:_MAX_RECALL_ITEMS]:
+    for hit in hits:
         mem_ref = str(hit.get("mem_ref") or hit.get("document_id") or "").strip()
         content = _content_for_view(hit, view=view)
         preview = {
@@ -114,6 +111,6 @@ def _content_for_view(hit: dict[str, object], *, view: L3RecallView) -> str:
         raw = hit.get("search_text") or hit.get("rendered") or hit.get("summary") or ""
     else:
         raw = hit.get("summary") or hit.get("rendered") or hit.get("search_text") or ""
-    # Keep the selected record intact; the shared tool-result pager owns
-    # delivery limits and retains later pages for read_tool_result.
+    # Keep the selected record intact; the shared output-snapshot delivery owns
+    # delivery limits and preserves large output in an immutable file.
     return str(raw or "")

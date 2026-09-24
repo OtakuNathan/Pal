@@ -312,6 +312,27 @@ Run the workflow.
         self.assertEqual(read_without_manual.structured["skill"]["manual_text"], "[omitted; call skill_inject or read with include_manual=true if needed]")
         self.assertEqual(read_with_manual.structured["skill"]["manual_text"], "1. Review changes.\n2. Commit.")
 
+    def test_search_ignores_function_words_and_matches_compound_identifiers(self):
+        from pal.skill.builtin_skills import builtin_declared_skills
+        for descriptor in builtin_declared_skills():
+            self.service.repository.upsert_skill(descriptor)
+        self.service.repository.upsert_skill(SkillDescriptor(
+            skill_id="pal.remote.setup", module_id="remote", title="Pal Remote Host Setup",
+            summary="Install and upgrade a remote worker", manual_text="Upgrade the worker.",
+            activation_terms=("remote worker", "worker upgrade", "远端升级"),
+            use_when="Existing worker upgrades and remote host installation via SSH",
+        ))
+        tool = SkillSearchTool(self.service)
+        query = "Upgrade and deploy pal-shell-native pal-shell-worker to a Linux x86_64 SSH server using the existing systemd user service"
+        for query in (query, "pal.remote.setup", "远端升级"):
+            result = tool.invoke({"query": query})
+            self.assertEqual(result.structured["hits"][0]["skill_id"], "pal.remote.setup")
+            self.assertNotIn("MUST", result.llm_text)
+        self.assertEqual(tool.invoke({"query": "a and to the"}).structured["hits"], [])
+        self.assertEqual(tool.invoke({"query": "zzznomatchzzz"}).structured["hits"], [])
+        self.assertEqual(tool.invoke({"query": "worker worker worker"}).structured["hits"],
+                         tool.invoke({"query": "worker"}).structured["hits"])
+
     def test_search_defaults_to_active_and_can_filter_status(self) -> None:
         self.skill_repository.upsert_skill(
             SkillDescriptor(

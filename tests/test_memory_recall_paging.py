@@ -1,5 +1,5 @@
-"""Memory bodies reach the shared pager intact, through both recall entrypoints."""
-import json
+"""Memory bodies reach the output snapshots intact, through both recall entrypoints."""
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +13,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.mark.parametrize("view", ["summary", "origin"])
 @pytest.mark.parametrize("alias", ["recall_memory", "memory_provider_recall"])
-def test_long_memory_can_be_read_completely_across_pages(view, alias):
+def test_long_memory_can_be_read_completely_from_snapshot(view, alias):
     core = PalCore()
     runtime = core.context.execution_runtime
     memory = MemoryService(l3_selector=L3ProviderSelector(
@@ -42,21 +42,51 @@ def test_long_memory_can_be_read_completely_across_pages(view, alias):
             budget=ToolCallBudget(max_output_chars=500, preview_chars=300),
             turn_id="read-memory",
         )
-        assert result.kind == "paged", result
-        assert any(hint.tool == "read_tool_result" for hint in result.affordances)
-        pages = [
-            runtime.read_tool_result_page(
-                result_ref="memory-result", page=number, turn_id="read-memory")
-            for number in range(1, result.result_handle["page_count"] + 1)
-        ]
-        restored = "".join(page.content for page in pages)
+        assert result.kind == "complete", result
+        assert len(result.snapshot_refs) == 1
+        restored = Path(result.snapshot_refs[0].path).read_text(encoding="utf-8")
         assert f"[fact:paging]: {body}\n</recalled_memories>" in restored
-        assert len(restored) == result.result_handle["original_size"]
-        handle = runtime.logical_state.read_pager(
-            execution_lifetime_id="paging-test", result_ref="memory-result",
-            page=1, page_size=None, anchor="head").manifest
-        payload = json.loads(handle.output_json)
+        from pal.memory.contracts import MemoryPackRequest
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+        from pal.shared import PromptAssemblyContext
+        pack = memory.build_pack(MemoryPackRequest(turn_kind="chat"))
+        for turn_id in ("read-memory", "read-memory", "next-turn"):
+            fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(
+                metadata={"memory_pack": pack, "typed_l1_projection": True, "turn_id": turn_id}))
+            assert not any("recalled_memories" in fragment.content for fragment in fragments)
+        payload = result.output
         key = "summary" if view == "summary" else "search_text"
         assert payload["hits_preview"][0][key] == body
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize("alias", ["recall_memory", "memory_provider_recall"])
+def test_all_selected_hits_remain_available_in_snapshot(alias):
+    core = PalCore()
+    runtime = core.context.execution_runtime
+    memory = MemoryService(l3_selector=L3ProviderSelector(resolver=runtime.l3_plugin_registry.require))
+    records = [{"document_id": f"fact:item-{index}", "scope": "system", "title": "many hits",
+                "summary": f"record-{index}: " + "complete body " * 40} for index in range(6)]
+    try:
+        register_memory(core.context, memory)
+        provider = MockL3Plugin(records=records)
+        register_l3(core.context, provider)
+        memory.l3_selector.active_provider_id = provider.provider_id
+        core.publish_module_capabilities("memory")
+        core.publish_module_capabilities(provider.module_id)
+        runtime.begin_tool_result_turn(turn_id="many", scope_key="many")
+        args = {"queries": ["many hits"], "limit": 6}
+        if alias == "memory_provider_recall":
+            args["name"] = provider.provider_id
+        invoke = runtime.invoke_direct_tool if alias == "recall_memory" else runtime.invoke_indirect_tool
+        result = invoke(new_tool_call(name=alias, args=args, call_id="many-result"),
+                        budget=ToolCallBudget(max_output_chars=500, preview_chars=300), turn_id="many")
+        assert result.kind == "complete"
+        content = Path(result.snapshot_refs[0].path).read_text(encoding="utf-8")
+        for record in records:
+            assert f"[{record['document_id']}]: {record['summary']}" in content
+        payload = result.output
+        assert payload["hit_count"] == len(payload["hits_preview"]) == 6
     finally:
         runtime.shutdown()

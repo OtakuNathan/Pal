@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.result_snapshot import ResultSnapshotRef
+
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -98,6 +100,7 @@ class CapabilityResult:
     structured: dict[str, Any] | None = None
     effect_receipt: EffectReceipt | None = None
     context_delivery: dict[str, Any] | None = None
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     context_messages: tuple[ToolContextMessageIR, ...] = ()
 
     def __post_init__(self) -> None:

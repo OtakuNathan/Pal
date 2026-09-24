@@ -155,3 +155,13 @@ If a past experience could become a workflow, create a skill candidate first. Do
 - no artifact/file path input for assimilation
 - no `allowed-tools` support
 - no direct execution from skill
+
+
+### Scenario search
+
+Search uses deduplicated Chinese/English terms, ignores English function words,
+and matches Latin terms rather than arbitrary substrings. Compound identifiers
+retain both their complete spelling and searchable components. Exact skill IDs
+rank first; nonpositive matches are omitted. Searching returns metadata only;
+load a matched manual only when its procedure is needed. An injectable result is
+not a command to inject an unrelated manual.

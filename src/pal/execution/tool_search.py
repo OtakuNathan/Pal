@@ -8,8 +8,6 @@ from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput,
-    ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput,
-    ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput,
 )
@@ -168,90 +166,6 @@ class ExecutionDiscoveryCapabilityMixin:
             llm_text=render_tool_definition(payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="discovery",
-        action_name="result_page",
-        guidance=ToolGuidance(
-            purpose="Read a page of a prior large tool result.",
-            use_when="When a prior tool result was truncated or paginated. Use anchor='tail' for log-like output ends.",
-            do_not_use_when="Not for new tool invocations.",
-            failure_next_steps="Use the result_ref returned by the original paged result (normally its tool_call_id). For an unknown or expired handle, follow the returned recovery affordance: rerun only an idempotent read marked safe to retry; otherwise inspect the registered origin with read_tool, or use search_tools only if that origin was retired, and reconcile its effect before any retry.",
-        ),
-        aliases=("read_tool_result",),
-        InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput,
-        OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput,
-        execution=DIRECT_NONE,
-        metadata={"canonical_path": "op_tool_result_page"},
-    )
-    def result_page(self, call: IntrospectionCall) -> CapabilityResult:
-        page = self.runtime.read_tool_result_page(
-            result_ref=str(call.args.get("result_ref") or ""),
-            page=int(call.args.get("page") or 1),
-            page_size=call.args.get("page_size"),
-            anchor="tail" if bool(call.args.get("tail")) else str(call.args.get("anchor") or "head"),
-            turn_id=str(call.meta.get("turn_id") or "") or None,
-        )
-        if page is None:
-            return CapabilityResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="tool result handle is unknown in this logical session",
-                structured={"reason": "unknown_result_handle"},
-                llm_text="tool result handle is unknown in this logical session",
-            )
-        if page.state != "ok":
-            reason = (
-                "expired_handle"
-                if page.state == "expired_handle"
-                else page.state
-            )
-            return CapabilityResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text=(
-                    "tool result handle expired"
-                    if reason == "expired_handle"
-                    else "tool result page is unavailable"
-                ),
-                structured={
-                    "reason": reason,
-                    "result_ref": page.result_ref,
-                    "origin": dict(page.origin),
-                    "expires_at_user_turn": page.expires_at_user_turn,
-                    "current_user_turn": page.current_user_turn,
-                },
-                llm_text=(
-                    "tool result handle expired"
-                    if reason == "expired_handle"
-                    else "tool result page is unavailable"
-                ),
-            )
-        payload = {
-            "result_ref": page.result_ref,
-            "page": page.page,
-            "page_count": page.page_count,
-            "has_more": page.has_more,
-            "has_more_before": page.has_more_before,
-            "has_more_after": page.has_more_after,
-            "anchor": page.anchor,
-            "anchor_page": page.anchor_page,
-            "start_offset": page.start_offset,
-            "end_offset": page.end_offset,
-            "original_size": page.original_size,
-            "page_size": page.page_size,
-            "page_text": page.content,
-        }
-        return CapabilityResult(
-            status=RuntimeStatus.OK,
-            text=page.content,
-            structured=payload,
-            llm_text=page.content,
-            context_delivery=(
-                dict(page.context_delivery)
-                if page.context_delivery
-                else None
-            ),
-        )
 
 
 def _invocation_capability_result(runtime: object, name: str, result: object) -> CapabilityResult:
@@ -262,4 +176,5 @@ def _invocation_capability_result(runtime: object, name: str, result: object) ->
         text=canonical.text,
         structured=canonical.structured,
         llm_text=canonical.llm_text,
+        snapshot_refs=canonical.snapshot_refs,
     )

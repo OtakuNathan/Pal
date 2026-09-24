@@ -115,6 +115,10 @@ class RuntimeSnapshotCoordinator:
         # install prepared state using non-failing pointer/state swaps only.
         for port, candidate in prepared:
             await _maybe_await(port.install_prepared_state(candidate))
+        for port in ports:
+            finish = getattr(port, "finish_restore_state", None)
+            if callable(finish):
+                await _maybe_await(finish(ports))
 
     async def reset(self, reason: str) -> tuple[str, ...]:
         failures: list[str] = []

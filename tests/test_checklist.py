@@ -212,19 +212,42 @@ class TestChecklistCapabilities:
         assert result.status == RuntimeStatus.ERROR
         assert result.structured is not None and result.structured["error"] == "no_active_checklist"
 
-    def test_last_check_emits_one_completed_echo_without_clear_echo(self):
+    def test_last_check_emits_independent_clear_event_with_completed_result(self):
         self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
         result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
         assert result.status == RuntimeStatus.OK
         assert result.structured["cleared"] is True
         assert result.structured["active"] is False
         assert self.provider.service.show() is None
-        echo = result.structured["echo"]
-        assert echo["payload"]["active"] is False
-        assert echo["payload"]["done"] == echo["payload"]["total"] == 1
-        assert "✅ a" in echo["markdown"]
-        assert "Checklist cleared." not in echo["markdown"]
+        assert "echo" not in result.structured
+        event = result.structured["channel_event"]
+        assert event["payload"] == {"action": "clear", "active": False}
+        assert "plan" not in event["payload"]
+        assert "✅ a" in result.structured["markdown"]
         assert "completed and closed" in result.llm_text
+
+    def test_completed_upsert_closes_without_an_extra_clear_call(self):
+        plan = [{"step": "a", "status": "completed"}, {"step": "b", "status": "completed"}]
+        result = self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": plan}))
+        assert self.provider.service.show() is None
+        assert result.structured["cleared"] is True
+        assert result.structured["done"] == result.structured["total"] == 2
+        assert result.structured["plan"] == plan
+        assert result.structured["channel_event"]["payload"]["action"] == "clear"
+        assert result.structured["channel_event"]["payload"]["active"] is False
+
+    def test_long_active_card_is_bounded_and_full_plan_remains_available(self):
+        plan = [{"step": f"phase-{i}: " + "x" * 900,
+                 "status": "completed" if i < 50 else "pending"} for i in range(64)]
+        result = self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": plan}))
+        echo = result.structured["echo"]
+        assert len(echo["markdown"]) < 2000
+        assert "phase-50:" in echo["markdown"]
+        assert "48 earlier steps" in echo["markdown"]
+        assert "8 more steps" in echo["markdown"]
+        shown = self.provider.show(CapabilityCall(name="checklist_show", args={}))
+        assert shown.structured["plan"] == plan
+        assert result.structured["plan"] == plan
 
     def test_check_unknown_step_returns_error_without_echo(self):
         self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
@@ -247,17 +270,11 @@ class TestChecklistCapabilities:
         assert cleared.structured["retired_checklist"]["plan"] == [
             {"step": "a", "status": "pending"},
         ]
-        assert cleared.structured["echo"] == {
-            "markdown": "Checklist cleared.",
-            "tag": "checklist",
-            "payload": {
-                "action": "clear",
-                "active": False,
-                "plan": [],
-                "done": 0,
-                "total": 0,
-            },
+        assert cleared.structured["channel_event"] == {
+            "text": "Checklist cleared.", "tag": "checklist",
+            "payload": {"action": "clear", "active": False},
         }
+        assert "echo" not in cleared.structured
         repeated = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
         assert repeated.structured == {"cleared": False}
 
@@ -281,7 +298,7 @@ class TestChecklistPrompt:
         assert task_flow.section == "task_flow"
         assert "checklist_check" in task_flow.content
         assert "checklist_clear" in task_flow.content
-        assert "automatically closes" in task_flow.content
+        assert "automatically close" in task_flow.content
         assert "cancel or replace" in task_flow.content
         assert "review the user's requirements" in task_flow.content
         assert "Do not perform remaining work just to clear" in task_flow.content
@@ -359,6 +376,28 @@ class TestChecklistPrompt:
         assert result.structured["echo"]["payload"]["total"] == 2
         assert "echo" not in result.llm_text
         assert "markdown" not in result.llm_text
+
+    def test_control_event_survives_tool_result_budget_without_reaching_llm_text(self):
+        from pal.execution.contracts import ToolCallBudget
+        from pal.shared.tool_protocol import new_tool_call
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_checklist_with_core(core.context, ChecklistService())
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("checklist")
+        runtime = core.context.execution_runtime
+        try:
+            result = runtime.execute_tool(new_tool_call(name="checklist_upsert", args={"plan": [
+                {"step": str(i) + "x" * 899, "status": "completed"} for i in range(64)
+            ]}), budget=ToolCallBudget(max_output_chars=500))
+            assert result.ok
+            assert result.structured["channel_event"]["payload"] == {"action": "clear", "active": False}
+            assert len(result.structured["plan"]) == 64
+            assert "channel_event" not in result.llm_text
+            assert "echo" not in result.structured
+        finally:
+            runtime.shutdown()
+            core.close()
 
 
 class TestToolEchoFanOut:
@@ -452,6 +491,20 @@ class TestToolEchoFanOut:
         result = _tool_result("checklist_check", structured={"changed": True})
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert captured == []
+
+    def test_control_event_survives_oversized_echo_and_is_idempotent(self):
+        captured = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        result = _tool_result("checklist_check", structured={
+            "echo": {"markdown": "x" * 5000},
+            "channel_event": {"tag": "checklist", "payload": {"action": "clear", "active": False}},
+        })
+        for _ in range(2):
+            asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert len(captured) == 1
+        assert captured[0][1].message.payload == {"action": "clear", "active": False}
+        assert captured[0][1].message.text == ""
 
     def test_empty_or_oversized_markdown_ignored(self):
         captured: list = []

@@ -470,6 +470,11 @@ class TurnExecutor:
             tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools),
             metadata=dict(prompt.metadata),
         )
+        snapshot_store = getattr(getattr(self.context, "execution_runtime", None), "result_snapshots", None)
+        memory = getattr(self.context, "port_registry", {}).get("memory:memory")
+        history = getattr(getattr(memory, "l1_store", None), "turns", None)
+        if snapshot_store is not None and history is not None:
+            snapshot_store.pin_history_request(history, str(continuation.turn_id))
         self._debug_log_prompt(continuation, request)
         # N3 (review §4) + F1/F2/F4 (review af51d74): the projection is
         # prepared owner-side for THIS round from the runtime's immutable
@@ -818,24 +823,35 @@ class TurnExecutor:
 
         A tool declares that its side effect should be visible to the user by
         returning structured ``{"echo": {"markdown": ..., "dedupe_key": ...}}``.
+        Independent tagged control delivery uses ``channel_event`` with tag/payload
+        and optional fallback text, through the same ordered delivery path.
         Core is the only actor that touches the output port; the tool itself
         never knows the envelope or the channel. Only channel turns carry an
         envelope, so service/bunshin turns silently ignore echo declarations —
         there is physically no path to send "to the LLM itself".
         """
         structured = dict(tool_result.structured or {})
-        echo = structured.get("echo")
-        if not isinstance(echo, dict):
-            return
-        markdown = str(echo.get("markdown") or "").strip()
-        if not markdown or len(markdown) > self._ECHO_MARKDOWN_MAX_CHARS:
-            return
-        tag = str(echo.get("tag") or "").strip() or None
-        raw_payload = echo.get("payload")
+        event = structured.get("channel_event")
+        if isinstance(event, dict):
+            # A control event does not depend on the size/existence of visual echo.
+            declaration = event
+            tag = str(event.get("tag") or "").strip()
+            if not tag:
+                return
+            markdown = str(event.get("text") or "").strip()[:self._ECHO_MARKDOWN_MAX_CHARS]
+        else:
+            declaration = structured.get("echo")
+            if not isinstance(declaration, dict):
+                return
+            markdown = str(declaration.get("markdown") or "").strip()
+            if not markdown or len(markdown) > self._ECHO_MARKDOWN_MAX_CHARS:
+                return
+            tag = str(declaration.get("tag") or "").strip() or None
+        raw_payload = declaration.get("payload")
         payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
         message = ChannelMessage(text=markdown, tag=tag, payload=payload)
         dedupe_key = (
-            str(echo.get("dedupe_key") or "").strip()
+            str(declaration.get("dedupe_key") or "").strip()
             or f"{getattr(tool_call, 'name', '')}:{getattr(tool_call, 'call_id', None) or ''}"
         )
         if not dedupe_key:
@@ -1712,33 +1728,6 @@ class TurnExecutor:
             return str(result.llm_text)
         return default_tool_result_text(result)
 
-    @staticmethod
-    def _is_memory_recall_tool_call(name: str) -> bool:
-        normalized = str(name or "").strip()
-        return normalized in {"op_memory_recall", "recall_memory"} or normalized.endswith("_memory_recall")
-
-    def _render_memory_recall_tool_observation(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
-        provider_id = str(tool_call.args.get("target_id") or "").strip() or "default"
-        queries = [str(value).strip() for value in list(tool_call.args.get("queries") or []) if str(value).strip()]
-        topic_scope = [str(value).strip() for value in list(tool_call.args.get("topic_scope") or []) if str(value).strip()]
-        hit_count = 0
-        if isinstance(result.structured, dict):
-            raw_count = result.structured.get("hit_count")
-            if isinstance(raw_count, int):
-                hit_count = raw_count
-            else:
-                hit_count = len(list(result.structured.get("hits") or []))
-        lines = [f"L3 recall {'completed' if result.ok else 'failed'}.", f"provider: {provider_id}"]
-        if queries:
-            lines.append(f"queries: {', '.join(queries)}")
-        if topic_scope:
-            lines.append(f"topics: {', '.join(topic_scope)}")
-        if result.ok:
-            lines.append(f"retrieved: {hit_count} memories")
-        elif str(result.text or "").strip():
-            lines.append(f"status: {str(result.text).strip()}")
-        return "\n".join(lines)
-
     # ── response / temperature helpers ───────────────────────────────────
 
     @staticmethod
@@ -1878,6 +1867,9 @@ class TurnExecutor:
         memory_service = self.context.port_registry.get("memory:memory")
         if memory_service is None:
             return False
+        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
+        if callable(bind):
+            bind(memory_service)
         event = getattr(assembly_context, "event", None)
         event_payload = getattr(event, "payload", None)
         user_message = event_payload if isinstance(event_payload, LLMMessageIR) else None
@@ -1906,6 +1898,9 @@ class TurnExecutor:
         method = getattr(memory_service, "append_l1_tool_result", None)
         if not callable(method):
             return
+        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
+        if callable(bind):
+            bind(memory_service)
         content = self._render_tool_result_content(call, result)
         turn_id = str(continuation.turn_id)
         previous = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(
@@ -1924,6 +1919,7 @@ class TurnExecutor:
                     else None
                 ),
                 replay_result_ref=str(result.replay_result_ref or ""),
+                snapshot_refs=result.snapshot_refs,
         )
         try:
             method(turn_id, tool_result)
@@ -1963,6 +1959,11 @@ class TurnExecutor:
                 )
                 raise
 
+        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
+        if snapshots is not None:
+            scope = self.context.execution_runtime.logical_context_for_turn(turn_id)
+            snapshots.finish_delivery(lifetime=scope.execution_lifetime_id, call_id=call.call_id)
+            snapshots.finish_references(result.snapshot_refs)
         observe = getattr(self.context.execution_runtime, "observe_tool_delivery", None)
         if callable(observe):
             observe(call, result)
@@ -2033,6 +2034,9 @@ class TurnExecutor:
     # ── post-turn commit ─────────────────────────────────────────────────
 
     async def schedule_post_turn_commit_async(self, outcome) -> Any:
+        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
+        if snapshots is not None:
+            snapshots.finish_turn(str(outcome.commit_payload.turn_id))
         llm = self.context.port_registry.get("llm:llm")
         close_cache = getattr(llm, "end_prompt_cache_turn", None)
         if callable(close_cache):
@@ -2164,6 +2168,9 @@ class TurnExecutor:
         except Exception:
             clock_value = 0
         execution_runtime = getattr(self.context, "execution_runtime", None)
+        bind = getattr(execution_runtime, "bind_result_history", None)
+        if callable(bind):
+            bind(memory_service)
 
         def current_l1_result_ids() -> tuple[str, ...]:
             turns = getattr(

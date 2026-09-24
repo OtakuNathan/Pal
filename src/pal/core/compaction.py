@@ -581,6 +581,14 @@ class CompactionEngine:
         validation_error: str = "",
     ) -> LLMRequestIR:
         snapshot = _scope_safe_snapshot(snapshot)
+        inventory = {}
+        for transcript in snapshot.memory_items:
+            for message in transcript:
+                meta = dict(message.payload or {})
+                for ref in (*meta.get("result_snapshots", ()), *dict(meta.get("_pal_result_state") or {}).get("snapshot_refs", ())):
+                    inventory[ref["snapshot_id"]] = dict(ref)
+        inventory_text = "\nAvailable output snapshots (retain only needed IDs):\n" + json.dumps(list(inventory.values()), ensure_ascii=False)
+        source += inventory_text
         visible_limit = compaction_visible_token_limit(snapshot)
         user_prompt = (
             f"{source.rstrip()}\n\n"
@@ -630,7 +638,7 @@ class CompactionEngine:
         if snapshot.replay_request is not None:
             replay = snapshot.replay_request
             replay_source = [
-                self.policy.system_prompt(snapshot).strip(),
+                self.policy.system_prompt(snapshot).strip() + inventory_text,
                 "",
                 "## Source Semantics",
                 "The preceding resident conversation prefix and its closed tool protocol are the frozen L1 truth source for this compaction.",

@@ -14,7 +14,6 @@ from pal.core.runtime_state import (
 )
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.runtime_state import ExecutionRuntimeStatePort
-from pal.execution.session_state import PagerHandleManifest
 from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, ReasoningPartIR, TextPartIR
 from pal.memory.runtime_state import MemoryRuntimeStatePort
 from pal.memory.service import MemoryService
@@ -181,94 +180,39 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].content, "legacy full file result")
 
-    def test_execution_restore_and_reset_owns_in_memory_pager(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="pal_execution_snapshot_"))
-        source = ExecutionRuntime(runtime_root=root)
-        context = source.begin_tool_result_turn(
-            turn_id="turn-1",
-            scope_key="role-1",
-            input_id="input-1",
-        )
-        source.logical_state.store_pager(
-            PagerHandleManifest(
-                result_ref="ref-1",
-                execution_lifetime_id=context.execution_lifetime_id,
-                tool_name="read_file",
-                status="ok",
-                ok=True,
-                page_size=256,
-                original_size=13,
-                page_count=1,
-                created_user_turn=1,
-                expires_at_user_turn=6,
-                output_json="{}",
-                rendered="secret result",
-            )
-        )
-        payload = dict(ExecutionRuntimeStatePort(source).snapshot_state())
-        restored = ExecutionRuntime(runtime_root=root)
-        port = ExecutionRuntimeStatePort(restored)
-        port.install_prepared_state(port.prepare_restore_state(payload))
-        self.assertEqual(
-            restored.read_tool_result_page(
-                result_ref="ref-1",
-                execution_lifetime_id="role-1",
-            ).content,
-            "secret result",
-        )
-        port.reset_state("soft_reset")
-        self.assertIsNone(
-            restored.read_tool_result_page(
-                result_ref="ref-1",
-                execution_lifetime_id="role-1",
-            )
-        )
-        source.shutdown()
-        restored.shutdown()
+    def test_execution_restore_preserves_context_and_reset_retires_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = ExecutionRuntime(runtime_root=Path(tmp))
+            restored = ExecutionRuntime(runtime_root=Path(tmp))
+            try:
+                context = source.begin_tool_result_turn(
+                    turn_id="turn-1", scope_key="role-1", input_id="input-1",
+                )
+                payload = dict(ExecutionRuntimeStatePort(source).snapshot_state())
+                port = ExecutionRuntimeStatePort(restored)
+                port.install_prepared_state(port.prepare_restore_state(payload))
+                self.assertEqual(restored.execution_sessions._turn_contexts["turn-1"], context)
+                port.reset_state("soft_reset")
+                self.assertEqual(restored.execution_sessions._turn_contexts, {})
+                self.assertEqual(restored.logical_state.snapshot_state(), {"sessions": {}})
+            finally:
+                source.shutdown()
+                restored.shutdown()
 
-    def test_execution_restore_rejects_cross_lifetime_pager_and_turn_context(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="pal_execution_snapshot_identity_"))
-        source = ExecutionRuntime(runtime_root=root)
-        context = source.begin_tool_result_turn(
-            turn_id="turn-1",
-            scope_key="role-1",
-            input_id="input-1",
-        )
-        source.logical_state.store_pager(
-            PagerHandleManifest(
-                result_ref="ref-1",
-                execution_lifetime_id=context.execution_lifetime_id,
-                tool_name="read_file",
-                status="ok",
-                ok=True,
-                page_size=256,
-                original_size=6,
-                page_count=1,
-                created_user_turn=1,
-                expires_at_user_turn=6,
-                output_json="{}",
-                rendered="secret",
-            )
-        )
-        payload = dict(ExecutionRuntimeStatePort(source).snapshot_state())
-        wrong_pager = copy.deepcopy(payload)
-        wrong_pager["logical_execution"]["sessions"]["role-1"]["handles"][
-            "ref-1"
-        ]["execution_lifetime_id"] = "role-2"
-        pager_runtime = ExecutionRuntime(runtime_root=root)
-        with self.assertRaisesRegex(ValueError, "pager identity"):
-            ExecutionRuntimeStatePort(pager_runtime).prepare_restore_state(wrong_pager)
-
-        wrong_context = copy.deepcopy(payload)
-        wrong_context["turn_contexts"]["turn-1"]["execution_lifetime_id"] = (
-            "missing-role"
-        )
-        context_runtime = ExecutionRuntime(runtime_root=root)
-        with self.assertRaisesRegex(ValueError, "owning lifetime"):
-            ExecutionRuntimeStatePort(context_runtime).prepare_restore_state(wrong_context)
-        pager_runtime.shutdown()
-        context_runtime.shutdown()
-        source.shutdown()
+    def test_execution_restore_rejects_unowned_turn_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ExecutionRuntime(runtime_root=Path(tmp))
+            try:
+                runtime.begin_tool_result_turn(
+                    turn_id="turn-1", scope_key="role-1", input_id="input-1",
+                )
+                port = ExecutionRuntimeStatePort(runtime)
+                payload = dict(port.snapshot_state())
+                payload["turn_contexts"]["turn-1"]["execution_lifetime_id"] = "missing-role"
+                with self.assertRaisesRegex(ValueError, "owning lifetime"):
+                    port.prepare_restore_state(payload)
+            finally:
+                runtime.shutdown()
 
 
 if __name__ == "__main__":

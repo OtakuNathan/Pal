@@ -605,3 +605,22 @@ logged; endpoint shutdown cancels all remaining typing loops.
 
 A transient chat-action delivery failure is logged and retried at the normal
 interval while owners remain. It does not count as an END or affect model work.
+
+
+### Checklist completion delivery
+
+The final `checklist_check` and a fully completed `checklist_upsert` close the
+local cursor atomically and declare one independent `channel_event` with
+`tag=checklist`, `action=clear` and `active=false`. Core routes it through the same
+ordered message/stream queue as display updates, independently of echo text limits.
+The complete snapshot remains in the tool result;
+closure is not an extra verification requirement. Telegram unpins and deletes
+its tracked checklist message. Explicit `active=false` also retires legacy check
+messages. A missing tracked message is a no-op, not a new chat notification.
+Delete failures preserve the target for existing channel delivery retries.
+
+Active checklist echoes display at most eight steps near the first unfinished
+step, with each step shortened to 160 characters and omitted counts shown. This
+presentation limit does not shorten the stored plan or `checklist_show` result.
+Clear events carry no plan or completion markdown, so a long checklist cannot
+suppress cleanup. Channel control metadata stays out of the LLM-facing text.

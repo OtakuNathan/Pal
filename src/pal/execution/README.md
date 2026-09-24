@@ -37,19 +37,20 @@ Notes:
   `read_tool`/`call_tool` route for the current surface. Unknown first-party
   aliases fail compilation, while detachable and scoped projections render an
   unavailable/rediscovery fallback
-- invocation returns a discriminated `complete`, `paged`, `rejected`, or
+- invocation returns a discriminated `complete`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
-- complete output is validated before paging, and paged results expose only an
-  opaque result handle plus exact `read_tool_result` affordances
+- complete output is validated before budgeting. Large output is saved as an
+  immutable UTF-8 file with a bounded head/tail preview and its local path. Use
+  `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
 - tool-result delivery metadata is stored on the L1 `ToolResultIR`. A delivered
   read result remains verbatim in prompt history and owns its file grant until
-  compaction retires that result. Pager payloads have an independent bounded
-  replay TTL and expiring a pager does not retire the delivered read
+  compaction retires that result. Snapshot files are owned by explicit L1 references, pending delivery and
+  in-flight request pins; there is no elapsed-turn TTL
 - Core commits L1 tool-result delivery and Execution file authority as one
   rollback boundary. If either side rejects a late or malformed delivery, the
-  other side is rolled back and its uncommitted pager payload is retired
-- Execution exposes one runtime-state port for logical input clocks, pager
-  handles, file snapshots, and grants. Core alone coordinates whole-runtime
+  other side is rolled back and its uncommitted snapshot is retired
+- Execution exposes one runtime-state port for logical input clocks, output
+  references, file-read snapshots, and grants. Core alone coordinates whole-runtime
   snapshot/restore/reset
 - instance-level actions are hydrated at runtime and compiled into exact bound
   actions

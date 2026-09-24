@@ -145,8 +145,8 @@ Aggregate state remains first-class. Business mutation uses table-driven
 `ActionEnvelope` transitions with snapshot CAS, event append, action
 deduplication, and outbox insertion in one transaction.
 
-A logical role session owns continuation, file-read snapshots, and pager
-handles. One assignment may be open per session:
+A logical role session owns continuation, file-read authority, and output
+snapshots. One assignment may be open per session:
 
 ```text
 QUEUED -> CLAIMED -> RUNNING -> RESULT_RECORDED -> SETTLED

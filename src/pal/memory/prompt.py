@@ -115,23 +115,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 )
             )
 
-        memory_entries = [entry for entry in pack.l2_working_memory if _is_recalled_memory_entry(entry)]
-        memory_lines = _render_memory_entry_lines(memory_entries)
-        if memory_lines:
-            fragments.append(
-                PromptFragment(
-                    section="memory",
-                    title="Recalled memories",
-                    content=_render_recalled_memories_context(memory_lines),
-                    priority=56,
-                    metadata={
-                        "prompt_target": "user_context",
-                        "block_id": "memory_recalled_context",
-                        "raw_user_context": True,
-                        "runtime_context_kind": "memory",
-                    },
-                )
-            )
         return fragments
 
 
@@ -217,42 +200,5 @@ def _is_synthetic_compaction_summary(message) -> bool:
     )
 
 
-def _render_memory_entry_lines(entries) -> list[str]:
-    lines: list[str] = []
-    seen_keys: set[str] = set()
-    for entry in entries:
-        dedupe_key = _entry_render_dedupe_key(entry)
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
-        rendered = entry.rendered.strip() or entry.summary.strip() or entry.title.strip()
-        if not rendered:
-            continue
-        mem_ref = _entry_mem_ref(entry)
-        if not mem_ref:
-            continue
-        lines.append(f"[{mem_ref}]: {rendered}")
-    return lines
-
-
-def _render_recalled_memories_context(lines: list[str]) -> str:
-    return "<recalled_memories view=\"summary\">\n" + "\n".join(lines) + "\n</recalled_memories>"
-
-
 def _render_conversation_summary_context(summary_text: str) -> str:
     return "<conversation_summary>\n" + summary_text.strip() + "\n</conversation_summary>"
-
-
-def _is_recalled_memory_entry(entry) -> bool:
-    return str(getattr(entry, "scope", "") or "").strip() != "behavior"
-
-
-def _entry_render_dedupe_key(entry) -> str:
-    return f"{entry.kind}:{entry.scope}:{entry.task_id or ''}:{entry.source_ref or entry.entry_id}"
-
-
-def _entry_mem_ref(entry) -> str:
-    source_ref = str(getattr(entry, "source_ref", "") or "").strip()
-    if source_ref:
-        return source_ref
-    return str(getattr(entry, "entry_id", "") or "").strip()

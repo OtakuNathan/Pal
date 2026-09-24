@@ -76,8 +76,8 @@ Interaction rule:
 - the Bunshin compaction clock advances only for successful consumable LLM
   rounds. Provider errors, truncation, `compact_required`, tools, and
   compaction calls do not advance it
-- one logical role session owns file snapshots and pager handles; they expire
-  at semantic input `N+5` and become inaccessible when that role session exits
+- output snapshots remain available while referenced by role L1 or active
+  delivery/read pins; source-file edit authority belongs to delivered results
 - invocation directories and prepared role-workspace clones are disposable
   session-owned runtime state. A completed or cancelled session deletes them
   after its durable database transition; Manager startup reconciles terminal
@@ -105,7 +105,7 @@ Interaction rule:
   the harness discards the uncommitted response and forces one bounded file,
   checklist, finding, question, or submit action instead of generic continuation
 - compaction retires file authority owned by tool results it removes from L1.
-  It does not advance the independent pager clock or expire an `N+5` handle
+  Output copies survive only when the replacement L1 retains their references
 - Bunshin runtime schema v29 is a fresh cutover. Older or unrecognized runtime
   databases are archived atomically; only explicit profile and family
   overrides are copied after validation

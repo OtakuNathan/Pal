@@ -296,11 +296,11 @@ async def _run_case(
     effective = [item["effective_alias"] for item in calls]
     expected_positions = [index for index, alias in enumerate(effective) if alias == case.expected_alias]
     successful = [item["effective_alias"] for item in calls
-                  if item.get("ok") and item["result_kind"] in {"complete", "paged"}]
+                  if item.get("ok") and item["result_kind"] in {"complete"}]
     remaining = iter(successful)
     chain_complete = all(any(alias == wanted for alias in remaining) for wanted in case.required_aliases)
     completed = any(calls[index].get("ok") and calls[index].get("output_matches")
-                    and calls[index]["result_kind"] in {"complete", "paged"} for index in expected_positions)
+                    and calls[index]["result_kind"] in {"complete"} for index in expected_positions)
     dangerous_retry = _detect_dangerous_retry(calls, forbidden_aliases=case.forbidden_aliases)
     return {
         "case_id": case.case_id,

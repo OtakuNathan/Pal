@@ -132,14 +132,10 @@
       }
     },
     {
-      "id": "page-evidence",
-      "category": "paging",
-      "prompt": "The existing result_ref \"fixture-long\" holds a large file result. Use read_tool_result with anchor=\"tail\", page=1 to read its end. Do not reacquire the file or execute any other tool.",
-      "expected_alias": "read_tool_result",
-      "expected_output": {
-        "anchor": "tail",
-        "has_more_after": false
-      }
+      "id": "snapshot-evidence",
+      "category": "snapshot",
+      "prompt": "The immutable tool output copy fixture-output.txt has 102 lines. Read its last two lines with read_file; do not rerun the original command.",
+      "expected_alias": "read_file"
     }
   ],
   "max_output_tokens": 8192

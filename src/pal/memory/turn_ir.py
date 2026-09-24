@@ -346,6 +346,8 @@ class L1TurnStore:
     """L1 owns streaming rounds; immutable history is indexed only for a request."""
 
     def __init__(self, turns: Iterable[L1TurnIR] = ()) -> None:
+        self._change_listeners = []
+        self._change_validators = []
         self._turns = []
         self._positions = {}
         self._rounds: dict[str, _ActiveRound] = {}
@@ -354,6 +356,25 @@ class L1TurnStore:
         self.continuity: Continuity | None = None
         self._summary_turn_id = ""
         self.replace_all(turns)
+
+    def add_change_listener(self, listener, *, validate=None) -> None:
+        if listener not in self._change_listeners:
+            self._change_listeners.append(listener)
+            self._change_validators.append(validate)
+
+    def remove_change_listener(self, listener) -> None:
+        if listener in self._change_listeners:
+            self._change_validators.pop(self._change_listeners.index(listener))
+            self._change_listeners.remove(listener)
+
+    def _validate_change(self, turns) -> None:
+        for validate in self._change_validators:
+            if validate is not None:
+                validate(turns)
+
+    def _notify_change(self, old, new) -> None:
+        for listener in self._change_listeners:
+            listener(old, new)
 
     def _invalidate_view(self) -> None:
         self._view_sources = None
@@ -372,8 +393,10 @@ class L1TurnStore:
         if turn.turn_id in self._positions:
             raise L1TurnProtocolError(f"L1 turn already exists: {turn.turn_id}")
         continuity = self.continuity or self._read_continuity(turn)
+        self._validate_change((turn,))
         self._positions[turn.turn_id] = len(self._turns)
         self._turns.append(turn)
+        self._notify_change((), (turn,))
         if self.continuity is None:
             self.continuity = continuity
             if self.continuity is not None:
@@ -459,9 +482,11 @@ class L1TurnStore:
         if self.get(turn.turn_id) is not expected:
             raise L1TurnProtocolError("L1 changed during rollback")
         continuity = self._read_continuity(turn) if turn.turn_id == self._summary_turn_id else self.continuity
+        self._validate_change((turn,))
         self._turns[self._positions[turn.turn_id]] = turn
         self.continuity = continuity
         self._rounds.pop(turn.turn_id, None)
+        self._notify_change((expected,), (turn,))
         self._invalidate_view()
 
     def has_open_round(self, turn_id: str) -> bool:
@@ -483,9 +508,12 @@ class L1TurnStore:
             if continuity is not None:
                 summary_turn_id = turn.turn_id
                 break
+        previous = self.turns
+        self._validate_change(values)
         self._turns, self._positions = values, positions
         self._summary_turn_id, self.continuity = summary_turn_id, continuity
         self._rounds.clear()
+        self._notify_change(previous, tuple(values))
         self._invalidate_view()
 
     def context_view(self, active_turn_id: str, settled_turns: Iterable[L1TurnIR] = ()) -> "L1ContextView":

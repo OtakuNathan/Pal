@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from uuid import uuid4
 
 from pal.execution.generated_tool_models import (
@@ -46,15 +48,17 @@ FILE_READ_GUIDANCE = ToolGuidance(
         "re-read only if the file changed."
     ),
     use_when=(
-        "Reading local source, configuration, or other UTF-8 text. Use ranges for multiple "
+        "Reading local source, configuration, immutable output snapshots, or other UTF-8 text. Use ranges for multiple "
         "blocks of the same file (for example scattered definitions found by rg) instead of "
         "several single-range calls; each block renders with its own header and truncation note. "
         "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. "
-        "Reuse valid delivered reads. Shell output alone does not register a file-tool read snapshot."
+        "Reuse valid delivered reads. Shell output and reads of output snapshots do not authorize edits to the original file."
     ),
     do_not_use_when=(
         "Binary files, images, PDFs, or channel-delivered artifacts. Reading several different "
         "files at once (read_file reads one file per call; batch ranges apply within one file). "
+        "For character slices within an unusually long line, use run_shell with awk/sed and wc to inspect a bounded excerpt; "
+        "offset and limit here count lines, not characters. "
         "Do not re-read an unchanged covered block after read_file returns an unchanged marker; "
         "use the earlier result unless the file changed or another range is needed."
     ),
@@ -66,7 +70,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
     next_tool_hints=(
         NextToolHint(
             name="edit_file",
-            use_when="The affected lines are visible and a focused exact replacement is required.",
+            use_when="The affected source-file lines were delivered by read_file and a focused exact replacement is required; an output snapshot is not the source file.",
         ),
         NextToolHint(
             name="write_file",
@@ -132,7 +136,24 @@ def _file_tool_result(
     defer_delivery: bool,
     context: object,
 ) -> IntrospectionResult:
-    result = _tool_capability_result(tool, call.args)
+    runtime = call.meta.get("execution_runtime")
+    snapshots = getattr(runtime, "result_snapshots", None)
+    path = str(call.args.get("file_path") or "")
+    ref = snapshots.lookup_path(path) if snapshots is not None and path else None
+    if (snapshots is not None and path and snapshots.manages_path(path)
+            and isinstance(tool, (FileEditTool, FileWriteTool))):
+        raise ToolRejectedError("Output snapshots are immutable copies, not editable source files.", error_code="immutable_result_snapshot")
+    delivery_id = getattr(call.meta.get("tool_call"), "call_id", "") or uuid4().hex
+    if ref is not None:
+        snapshots.retain_delivery((ref,), lifetime=context.execution_lifetime_id, call_id=delivery_id)
+    try:
+        result = _tool_capability_result(tool, call.args)
+    except BaseException:
+        if ref is not None:
+            snapshots.finish_delivery(lifetime=context.execution_lifetime_id, call_id=delivery_id)
+        raise
+    if ref is not None:
+        return replace(result, context_delivery=None, snapshot_refs=(ref,))
     delivery = getattr(result, "context_delivery", None)
     if defer_delivery or not isinstance(delivery, dict):
         return result
@@ -278,6 +299,10 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_path_delete"},
     )
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
+        snapshots = getattr(call.meta.get("execution_runtime"), "result_snapshots", None)
+        path = str(call.args.get("file_path") or "")
+        if snapshots is not None and path and snapshots.manages_path(path, include_parents=True):
+            raise ToolRejectedError("Output snapshots are retired with their context references.", error_code="immutable_result_snapshot")
         return _tool_capability_result(PathDeleteTool(), call.args)
 
     @capability_action(

@@ -332,16 +332,12 @@ class MemoryIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Recall durable memory records from the active memory provider.",
             use_when=(
-                "Before acting when the task depends on prior decisions, user preferences, project history, "
-                "known failures, or repair lessons. Before creating/changing/forgetting memory records. "
-                "When the user mentions personal relationships, family information, personal preferences, "
-                "or personal state you are not fully confident about — recall first to confirm before answering. "
-                "When hitting errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging "
-                "during project work — recall with kind='case' and concrete error/symptom/fix terms before improvising a fix."
+                "The task depends on durable facts or past experience missing from the current context. "
+                "For recurring failures or past repair decisions, use kind='case' with concrete error, symptom or fix terms."
             ),
             do_not_use_when=(
-                "Not for current runtime state (inspect live capabilities). "
-                "Not for current external facts (verify externally). "
+                "Current context already provides sufficient evidence, including a first error with a clear recovery. "
+                "Current runtime state needs live introspection; current external facts need external verification."
             ),
             failure_next_steps=(
                 "Use targeted queries with limit 3-5. "

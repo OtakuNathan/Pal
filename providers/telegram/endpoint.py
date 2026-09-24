@@ -1598,9 +1598,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         action = str(message.payload.get("action") or "update").strip().lower()
         target = self._tagged_message_targets.get(key)
 
-        if action == "clear":
+        if action == "clear" or message.payload.get("active") is False:
             if target is None:
-                await self._send_reply_async(response_handle, message.text)
                 return
             # Checklist is going away: drop the pin first, best-effort.
             try:

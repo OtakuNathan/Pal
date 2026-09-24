@@ -65,18 +65,16 @@ class FixtureExecution:
 
     async def execute_tool_async(self, call, *, turn_id):
         self.runtime.begin_tool_result_turn(turn_id=turn_id, scope_key='fixture', input_id=self.case_id)
-        if self.case_id == 'page-evidence' and self.runtime.read_tool_result_page(result_ref='fixture-long', turn_id=turn_id) is None:
-            self.runtime.tool_result_pager.store(runtime_root=self.root, turn_id=turn_id,
-                result_ref='fixture-long', tool_name='read_file', status='ok', ok=True,
-                rendered=('    row\r\n' * 100 + 'FINAL_MARKER\n \t'), page_size=300)
+        if self.case_id == 'snapshot-evidence' and not (self.root / 'fixture-output.txt').exists():
+            (self.root / 'fixture-output.txt').write_bytes(('    row\r\n' * 100 + 'FINAL_MARKER\n \t').encode())
         alias = call.args.get('name') if call.name == 'call_tool' else call.name
         args = call.args.get('args', {}) if call.name == 'call_tool' else call.args
-        allowed = {'search_tools','read_tool','read_tool_result','exec_show','exec_tools','read_file',
+        allowed = {'search_tools','read_tool','exec_show','exec_tools','read_file',
                    'lsp_prepare_workspace','lsp_status','lsp_doctor','lsp_diagnostics','lsp_document_symbols'}
         blocked = alias not in allowed and self.registry_generation.record_for_alias(alias) is not None
         if alias == 'read_file':
             target = (self.root / str(args.get('file_path') or '')).resolve()
-            blocked = target not in {self.root/'pyproject.toml',self.root/'sample.py'}
+            blocked = target not in {self.root/'pyproject.toml',self.root/'sample.py',self.root/'fixture-output.txt'}
         if call.name == 'run_shell':
             if args.get('cmd') == 'pwd' and (self.root / str(args.get('cwd') or '.')).resolve() == self.root:
                 record = self.registry_generation.record_for_alias('run_shell')

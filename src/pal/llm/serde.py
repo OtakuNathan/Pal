@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.result_snapshot import ResultSnapshotRef
+
 from typing import Any, Mapping
 
 from pal.llm.ir import (
@@ -175,6 +177,7 @@ def part_to_payload(part: Any) -> dict[str, Any]:
                 else None
             ),
             "replay_result_ref": part.replay_result_ref,
+            "snapshot_refs": [ref.to_dict() for ref in part.snapshot_refs],
         }
     raise TypeError(f"unsupported LLM IR part: {type(part).__name__}")
 
@@ -216,5 +219,6 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
                 else None
             ),
             replay_result_ref=str(payload.get("replay_result_ref") or ""),
+            snapshot_refs=tuple(ResultSnapshotRef.from_dict(item) for item in payload.get("snapshot_refs", ())),
         )
     raise ValueError(f"unknown LLM IR part kind: {kind}")

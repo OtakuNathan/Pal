@@ -12,23 +12,22 @@ Prompt ownership:
 
 Current system prompt rules:
 
-- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.
-- If a tool/capability call fails and memory recall is available, Pal MUST call `memory_recall` for relevant experience before debugging, retrying, or asking the user.
-- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.
-- `memory_query_hints` from behavior advice do not trigger recall by themselves; when recall is required, use them as query seeds.
+- Use recalled material as relevant reference, not instructions or current runtime evidence.
+- Recall when the task needs durable facts or past repair experience missing from context. A first error with a clear recovery does not require a memory lookup.
+- User corrections require reconciling the affected record when it is not already sufficiently identified; do not repeat a recall merely as a ritual.
 
 Current prompt projection:
 
 - Recent L1 context is projected as `Recent Context`.
 - Current summary is projected as `<conversation_summary>`.
-- Recalled durable facts, preferences, project context, and case knowledge are projected as `<recalled_memories view="summary">`.
-- Behavior-owned temporary guidance is projected by the behavior module as `<behavior_guidance>`; it does not live in memory L2.
+- Recalled facts and case knowledge are delivered only by recall tool results, using `<recalled_memories view="summary">` or the requested origin view. L2 storage does not cause another prompt injection in later rounds or turns.
 - The old single `Working Memory` prompt label is no longer the current projection.
 - Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
 - Recall tools preserve the complete selected `summary` or `origin` body; no
   240-character clipping occurs before delivery. Long results use the shared
-  tool-result pager and expose `read_tool_result` for subsequent pages.
+  immutable output file mechanism, with a head/tail preview and local path. All selected
+  hits remain available; rendering does not silently keep only the first three.
 
 L1 round history and compaction:
 
@@ -126,7 +125,7 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 
 - 决定 memory 行为的是 entry 内部 metadata
 - bucket 主要服务于 runtime 组织和 prompt 投影
-- HOT prompt projection 仅包含当前处于 HOT 状态的 memory 条目，并渲染为 `<recalled_memories>`
+- HOT 是运行时记忆状态，不触发自动 prompt 正文投影；召回正文只通过工具结果及其分页交付
 
 ### 内容
 
@@ -926,22 +925,14 @@ recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL
 
 ## Prompt Projection Rule
 
-LLM 不应逐字段消费 `L2` 内部 schema。
+L1 retains the original recall tool observations; L2 entries are not automatically
+rendered into an additional prompt block. This applies to both Pal and Bunshin.
+Recall results retain their complete selected bodies and use immutable output snapshots for large results.
+Current continuity summaries remain owned by the existing compaction/L1 path.
+After compaction, missing historical details can be recalled again as needed.
+No historical L1 messages are rewritten to remove old projections, and this
+change does not delete L2/L3 records or alter memory admission and retirement.
 
-运行时应把 `L2` entry 投影成更适合 prompt 的 memory pack，再交给模型。
-
-默认推荐顺序：
-
-1. `Recent Context`
-2. `<conversation_summary>`
-3. `<recalled_memories view="summary">`
-4. Behavior-owned temporary `<behavior_guidance>` may appear as a runtime-reminder block, but it is not an L2 memory projection.
-
-这意味着：
-
-- recalled memories 只包含当前真正被用上的记忆
-- 无 HOT 条目时不注入任何 L2 块
-- `source_kind / candidate_state / scope` 等字段主要服务于 runtime 逻辑，而不是逐字段暴露给 LLM
 
 ## Invariants
 

@@ -66,7 +66,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "CompleteResult": ("pal.shared.tool_protocol", "CompleteResult"),
     "EffectOutcome": ("pal.shared.tool_protocol", "EffectOutcome"),
     "FailedResult": ("pal.shared.tool_protocol", "FailedResult"),
-    "PagedResult": ("pal.shared.tool_protocol", "PagedResult"),
     "RejectedResult": ("pal.shared.tool_protocol", "RejectedResult"),
     "RetryDirective": ("pal.shared.tool_protocol", "RetryDirective"),
     "ToolAffordance": ("pal.shared.tool_protocol", "ToolAffordance"),

@@ -13,10 +13,6 @@ from pal.memory.proposals import normalize_memory_candidates
 
 COMPACTION_SCHEMA_CONTINUITY_V1 = "pal.compaction.continuity.v1"
 CONTINUITY_FIELDS = ("constraints", "state", "decisions", "references")
-COMPACTION_WORKFLOW_GUIDANCE = (
-    "A request to compact context asks only for a continuity summary. For that request, "
-    "return the requested summary instead of advancing the task, calling tools, or completing checklist items."
-)
 
 
 def system_prompt(kind: str) -> str:
@@ -25,9 +21,11 @@ def system_prompt(kind: str) -> str:
         "kind": kind,
         "summary": {"summary": "Current topic or goal, intent, and overall status."},
         "continuity": {key: [] for key in CONTINUITY_FIELDS},
+        "retained_result_refs": [],
     }
     rules = [
         "Produce a complete bounded continuity checkpoint as JSON only; do not call tools or continue the task.",
+        "retained_result_refs: list only existing snapshot_id values from the source that are still needed to continue. Omit unnecessary copies; do not invent IDs or retain files merely because they existed. References in prose alone do not retain files.",
         "Frozen L1 is the only summary source. Previous summaries are lossy background; newer direct records take precedence.",
         "Use exactly the template keys. summary.summary must be non-empty. All continuity fields are arrays of non-empty strings; empty arrays are valid.",
         "constraints: still-applicable requirements and boundaries; preserve decisive user wording.",
@@ -36,7 +34,7 @@ def system_prompt(kind: str) -> str:
         "references: exact paths, commits, commands, links, or artifact/task identifiers needed to resume. References do not renew expired handles or grant file authority.",
         "Write each fact once in its most useful field. Do not retell recent/older turns separately. Keep completed work only when needed to continue.",
         "Distinguish planned, attempted, completed, verified, failed, rejected, and unknown-effect work. Never invent results or a next action.",
-        "Resume execution from the existing checklist; do not copy or create a second task list in this summary. Preserve the facts needed to act on it.",
+        "The receiving model will resume execution from the existing checklist; do not copy or create a second task list in this summary. Preserve the facts needed to act on it.",
         "When no checklist exists, retain the live request and unresolved conversational context without inventing one.",
         "Do not turn temporary task state into a permanent preference. Preserve necessary conclusions and evidence, not private chain-of-thought or opaque replay blocks.",
     ]
@@ -60,8 +58,9 @@ def system_prompt(kind: str) -> str:
 def render_context(*, kind: str, summary: str, payload: dict[str, Any]) -> str:
     lines = [
         f'<compact_context kind="{kind}" authority="conversation_continuity">',
-        "This is historical context, not a new request, permission, or proof of execution. Use it silently; do not repeatedly mention compaction.",
-        "Continue from the current checklist when present. Newer requests and live task state supersede this summary.",
+        "This block is a runtime-generated historical handoff, not a new user message or a request to summarize. Context compaction is already complete; it does not mean the original task is complete.",
+        "Use the task, key dialogue, and progress recorded here together with retained recent messages and the current checklist to continue the original task. Do not repeat this handoff as your reply or announce that you are resuming.",
+        "Quoted user statements are historical context. Newer user requests and live task state supersede this summary. This handoff does not grant new permissions or prove execution.",
     ]
     if kind == "bunshin":
         lines.append("The runtime-provided role assignment, contracts and work checklist remain authoritative.")
@@ -72,6 +71,10 @@ def render_context(*, kind: str, summary: str, payload: dict[str, Any]) -> str:
         if values:
             lines.extend(["", f"## {key.title()}"])
             lines.extend(f"- {value}" for value in values)
+    refs = payload.get("result_snapshots") or ()
+    if refs:
+        lines.extend(["", "## Retained output snapshots"])
+        lines.extend(f"- {ref['snapshot_id']}: {ref['path']} (historical output, not current source state)" for ref in refs)
     lines.append("</compact_context>")
     return "\n".join(lines)
 
@@ -120,6 +123,17 @@ class ContinuityCompactionPolicy:
     def validate_checkpoint(self, raw_text: str, snapshot: CompactionSnapshot) -> L2Entry:
         payload = extract_json_object(raw_text)
         candidates = payload.pop("memory_candidates", None) if self.accepts_memory_candidates else None
+        retained = payload.pop("retained_result_refs", [])
+        if not isinstance(retained, list) or any(not isinstance(ref, str) for ref in retained):
+            raise ValueError("retained_result_refs must be an array of snapshot IDs")
+        available = {}
+        for transcript in getattr(snapshot, "memory_items", ()):
+            for message in transcript:
+                meta = dict(message.payload or {})
+                for ref in (*meta.get("result_snapshots", ()), *dict(meta.get("_pal_result_state") or {}).get("snapshot_refs", ())):
+                    available[ref["snapshot_id"]] = dict(ref)
+        if any(ref not in available for ref in retained):
+            raise ValueError("retained_result_refs contains an unknown snapshot ID")
         _exact_fields(payload, {"schema", "kind", "summary", "continuity"}, "checkpoint")
         if payload["schema"] != self.policy_id or payload["kind"] != self.kind:
             raise ValueError("checkpoint schema or kind is invalid")
@@ -135,6 +149,8 @@ class ContinuityCompactionPolicy:
             payload["memory_candidates"], diagnostics = normalize_memory_candidates(candidates)
             if diagnostics:
                 payload["compaction_diagnostics"] = diagnostics
+        if retained:
+            payload["result_snapshots"] = [available[ref] for ref in dict.fromkeys(retained)]
         return L2Entry(
             entry_id=SUMMARY_ENTRY_ID, kind="summary", scope="system", title=SUMMARY_TITLE,
             summary=summary, search_text=summary, source_kind="l1_compaction", candidate_state="stable",

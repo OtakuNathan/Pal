@@ -427,7 +427,7 @@ class FileReadTool:
             # Spans must reference the rendered content, so the block header
             # (and its newline) is part of the offset math before line spans
             # are generated; otherwise manifest.slice() credits lines that the
-            # pager window never actually showed.
+            # result preview never actually showed.
             cursor = len(bom_notice) + (
                 len("\n\n".join(rendered_blocks)) + 2 if rendered_blocks else 0
             ) + len(header) + (1 if header else 0)

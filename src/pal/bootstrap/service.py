@@ -126,7 +126,7 @@ def compose_runtime(
     from pal.core.main_context import MainContext
     from pal.execution.backend import build_execution_runtime
     core = PalCore(config=config, context=MainContext(execution_runtime=build_execution_runtime()))
-    core.context.execution_runtime.runtime_root = registration.runtime.runtime_root
+    core.context.execution_runtime.configure_runtime_root(registration.runtime.runtime_root)
     channel_runtime = ChannelRuntime(user_route_path=registration.runtime.runtime_root / "channel" / "last_user_route.json")
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))

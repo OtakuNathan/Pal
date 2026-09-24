@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from pal.execution.runtime import ExecutionRuntime
@@ -10,13 +10,14 @@ from pal.execution.session_state import (
 )
 
 
-EXECUTION_RUNTIME_STATE_SCHEMA_VERSION = "1"
+EXECUTION_RUNTIME_STATE_SCHEMA_VERSION = "2"
 
 
 @dataclass(frozen=True)
 class _PreparedExecutionState:
     backend: InMemoryLogicalExecutionState
     turn_contexts: dict[str, LogicalExecutionContext]
+    snapshots: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -24,18 +25,20 @@ class ExecutionRuntimeStatePort:
     runtime: ExecutionRuntime
     module_id: str = "execution"
     schema_version: str = EXECUTION_RUNTIME_STATE_SCHEMA_VERSION
+    readable_schema_versions = ("2",)
     state_order: int = 200
 
     def snapshot_state(self) -> Mapping[str, Any]:
         backend = self._backend()
-        with self.runtime.tool_result_pager._lock:
+        with self.runtime.execution_sessions._lock:
             turn_contexts = {
                 key: value.to_dict()
-                for key, value in self.runtime.tool_result_pager._turn_contexts.items()
+                for key, value in self.runtime.execution_sessions._turn_contexts.items()
             }
         return {
             "logical_execution": backend.snapshot_state(),
             "turn_contexts": turn_contexts,
+            "result_snapshots": self.runtime.result_snapshots.snapshot_state(),
         }
 
     def prepare_restore_state(self, payload: Mapping[str, Any]) -> _PreparedExecutionState:
@@ -63,28 +66,36 @@ class ExecutionRuntimeStatePort:
                 raise ValueError(
                     "execution runtime snapshot turn context has no owning lifetime"
                 )
-            if (
-                state.current_user_turn
-                >= context.current_user_turn + state.retention_user_turns
-            ):
-                continue
             restored_contexts[turn_id] = context
+        from pal.shared.result_snapshot import ResultSnapshotRef
+        for item in dict(value.get("result_snapshots") or {}).get("refs", ()):
+            self.runtime.result_snapshots._validate_path(ResultSnapshotRef.from_dict(item))
         return _PreparedExecutionState(
             backend=backend,
             turn_contexts=restored_contexts,
+            snapshots=dict(value.get("result_snapshots") or {}),
         )
 
     def install_prepared_state(self, prepared: _PreparedExecutionState) -> None:
+        self.runtime.result_snapshots.restore_refs(prepared.snapshots)
         self.runtime.logical_state = prepared.backend
-        with self.runtime.tool_result_pager._lock:
-            self.runtime.tool_result_pager.state_backend = prepared.backend
-            self.runtime.tool_result_pager._turn_contexts = prepared.turn_contexts
+        with self.runtime.execution_sessions._lock:
+            self.runtime.execution_sessions.state_backend = prepared.backend
+            self.runtime.execution_sessions._turn_contexts = prepared.turn_contexts
+
+    def finish_restore_state(self, ports) -> None:
+        self.runtime.result_snapshots.detach_histories()
+        for port in ports:
+            if getattr(port, "module_id", "") == "memory":
+                self.runtime.bind_result_history(port.service)
+        self.runtime.result_snapshots.finish_restore()
 
     def reset_state(self, reason: str) -> None:
         _ = reason
+        self.runtime.result_snapshots.reset_transient()
         self._backend().reset_state()
-        with self.runtime.tool_result_pager._lock:
-            self.runtime.tool_result_pager._turn_contexts.clear()
+        with self.runtime.execution_sessions._lock:
+            self.runtime.execution_sessions._turn_contexts.clear()
 
     def _backend(self) -> InMemoryLogicalExecutionState:
         backend = self.runtime.logical_state

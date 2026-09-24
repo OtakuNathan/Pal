@@ -53,6 +53,10 @@ def package(root: Path, name="demo", version="1.0", *, backend: Path | None = No
 
 
 def test_conflicting_dependencies_and_repeated_preparation_are_isolated(tmp_path):
+    # Establish the host's dependency paths before measuring package isolation.
+    # A cold Debian setuptools import may add its own vendor directory; that
+    # is independent of either installed package's private environment.
+    importlib.import_module("pal.plugins.host")
     dependency = "pal_test_private_dependency"
     assert importlib.util.find_spec(dependency) is None
     before_path = list(sys.path)

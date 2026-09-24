@@ -107,10 +107,11 @@ def test_paging_uses_visible_text_and_restores_every_character(large_internal):
         mount_test_capability(runtime, **_echo_kwargs(handler=lambda _: ToolHandlerResult(output=output,llm_text=body),paging=PagingMode.SUPPORTED))
         runtime.begin_tool_result_turn(turn_id='t',scope_key='test',input_id='test')
         result = runtime.invoke_indirect_tool(new_tool_call(name='echo',args={'value':'x'},call_id='r'),budget=ToolCallBudget(max_output_chars=500,preview_chars=300),turn_id='t')
-        assert result.kind == ('complete' if large_internal else 'paged')
+        assert result.kind == 'complete'
         if not large_internal:
-            pages = [runtime.read_tool_result_page(result_ref='r',page=i,turn_id='t') for i in range(1,result.result_handle['page_count']+1)]
-            assert ''.join(page.content for page in pages) == body
-            assert pages[-1].end_offset == len(body)
+            from pathlib import Path
+            assert Path(result.snapshot_refs[0].path).read_bytes().decode("utf-8") == body
+        else:
+            assert not result.snapshot_refs
     finally:
         runtime.shutdown()

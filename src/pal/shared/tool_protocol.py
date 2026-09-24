@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.result_snapshot import ResultSnapshotRef
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any, Generic, Literal, Mapping, TypeVar
@@ -89,6 +91,7 @@ class ToolResultIR:
     status: str = "ok"
     structured: Mapping[str, Any] | None = None
     context_delivery: Mapping[str, Any] | None = None
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     replay_result_ref: str = ""
 
     def __post_init__(self) -> None:
@@ -173,23 +176,14 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
     replay_result_ref: str = Field(default="", exclude=True)
-    context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
-
-
-class PagedResult(_StrictProtocolModel):
-    kind: Literal["paged"] = "paged"
-    result_handle: dict[str, Any]
-    page_text: str
-    effect: EffectOutcome
-    llm_text: str
-    affordances: list[ToolAffordance]
-    context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
     context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
 
 
 class RejectedResult(_StrictProtocolModel):
     kind: Literal["rejected"] = "rejected"
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
     error_code: str
     error: str
     effect: Literal[EffectOutcome.NOT_STARTED] = EffectOutcome.NOT_STARTED
@@ -201,6 +195,7 @@ class RejectedResult(_StrictProtocolModel):
 
 class FailedResult(_StrictProtocolModel):
     kind: Literal["failed"] = "failed"
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
     error_code: str
     error: str
     effect: EffectOutcome
@@ -211,7 +206,7 @@ class FailedResult(_StrictProtocolModel):
 
 
 ToolInvocationResult = Annotated[
-    CompleteResult[Any] | PagedResult | RejectedResult | FailedResult,
+    CompleteResult[Any] | RejectedResult | FailedResult,
     Field(discriminator="kind"),
 ]
 TOOL_INVOCATION_RESULT_ADAPTER = TypeAdapter(ToolInvocationResult)
@@ -230,6 +225,7 @@ class ToolExecutionResult:
     status: str = ""
     invocation_result: ToolInvocationResult | None = None
     context_delivery: dict[str, Any] | None = None
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     replay_result_ref: str = ""
     context_messages: tuple[ToolContextMessageIR, ...] = ()
 
@@ -264,7 +260,6 @@ __all__ = [
     "CompleteResult",
     "EffectOutcome",
     "FailedResult",
-    "PagedResult",
     "RejectedResult",
     "RetryDirective",
     "TOOL_INVOCATION_RESULT_ADAPTER",

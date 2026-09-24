@@ -31,7 +31,6 @@ from pal.execution.tool_facade import (
     Idempotency,
     InvocationMode,
     PagingMode,
-    PagedResult,
     RejectedResult,
     RetryPolicy,
     StrictToolModel,
@@ -272,7 +271,7 @@ def _workflow_capability(
         if isinstance(result, ToolExecutionResult):
             if isinstance(
                 result.invocation_result,
-                (CompleteResult, PagedResult, RejectedResult, FailedResult),
+                (CompleteResult, RejectedResult, FailedResult),
             ):
                 return result.invocation_result
             if not result.ok:
@@ -383,13 +382,14 @@ class _ExecutionOverlay:
             runtime_root=getattr(delegate, "runtime_root", None),
             sync_executor=getattr(delegate, "sync_executor", None),
         )
-        # The overlay changes only the immutable registry view. Pager handles,
+        # The overlay changes only the immutable registry view. Output snapshots,
         # file delivery grants, and the user-turn clock belong to the same
         # logical role session as the delegate runtime.
-        delegate_pager = getattr(delegate, "tool_result_pager", None)
+        delegate_sessions = getattr(delegate, "execution_sessions", None)
         delegate_state = getattr(delegate, "logical_state", None)
-        if delegate_pager is not None:
-            self.runtime.tool_result_pager = delegate_pager
+        if delegate_sessions is not None:
+            self.runtime.execution_sessions = delegate_sessions
+            self.runtime.result_snapshots = delegate.result_snapshots
         if delegate_state is not None:
             self.runtime.logical_state = delegate_state
         project = getattr(delegate, "project_execution_view", None)
@@ -475,9 +475,6 @@ class _ExecutionOverlay:
         if callable(begin):
             begin(**kwargs)
 
-    def read_tool_result_page(self, **kwargs: Any) -> Any:
-        read = getattr(self.delegate, "read_tool_result_page", None)
-        return read(**kwargs) if callable(read) else None
 
 
 class _OriginalAdapter:
@@ -512,8 +509,7 @@ class BunshinScopedExecutionRuntime:
         expand = getattr(self._original_runtime, "role_capabilities", None)
         if expand is not None:
             self.allowed_capabilities = expand(self.allowed_capabilities)
-        if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
-            self.allowed_capabilities.append("op_tool_result_page")
+
         self.capability_guidance_overrides = normalize_tool_guidance_overrides(
             self.capability_guidance_overrides
         )
@@ -657,8 +653,6 @@ class BunshinScopedExecutionRuntime:
         hook = getattr(self._original_runtime, "stagnation_payload", None)
         return hook(call, result) if hook else {"ok": result.ok, "text": result.text, "structured": result.structured}
 
-    def read_tool_result_page(self, **kwargs: Any) -> Any:
-        return self.base_runtime.read_tool_result_page(**kwargs)
 
     def advance_tool_result_clock(self, **kwargs: Any) -> Any:
         advance = getattr(self._original_runtime, "advance_tool_result_clock", None)
@@ -671,6 +665,16 @@ class BunshinScopedExecutionRuntime:
         if not callable(retire):
             return ()
         return tuple(retire(**kwargs) or ())
+
+    @property
+    def result_snapshots(self):
+        return self._original_runtime.result_snapshots
+
+    def bind_result_history(self, memory_service):
+        return self._original_runtime.bind_result_history(memory_service)
+
+    def logical_context_for_turn(self, turn_id):
+        return self._original_runtime.logical_context_for_turn(turn_id)
 
     def commit_tool_delivery(self, **kwargs: Any) -> Any:
         commit = getattr(

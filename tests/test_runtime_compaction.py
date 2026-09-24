@@ -744,7 +744,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             ),
         )
         service.settle_l1_turn(turn_id)
-        runtime.tool_result_pager._turn_contexts.pop(turn_id, None)
+        runtime.execution_sessions._turn_contexts.pop(turn_id, None)
         self.assertIsNotNone(
             runtime.logical_state.file_grant(
                 execution_lifetime_id="pal:resident",

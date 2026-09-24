@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint
+
 from pal.shared.tool_protocol import ToolCallIR, ToolContextMessageIR
 
 from pal.shared.tool_protocol import new_tool_call
@@ -10,10 +12,9 @@ import inspect
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
@@ -37,7 +38,6 @@ from pal.execution.tool_facade import (
     InvocationMode,
     McpToolOutput,
     PagingMode,
-    PagedResult,
     RejectedResult,
     RetryDirective,
     RetryPolicy,
@@ -61,11 +61,8 @@ from pal.shared import ToolExecutionResult
 from pal.plugins.l3.registry import L3PluginRegistry
 from pal.plugins.l3.stubs import NullL3Plugin
 from pal.plugins.lifecycle import WriterPreferredRWGate
-from pal.execution.tool_result_pager import (
-    DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
-    ToolResultPage,
-    ToolResultPagerStore,
-)
+from pal.execution.logical_sessions import LogicalExecutionSessions
+from pal.execution.session_state import DEFAULT_RESULT_RETENTION_USER_TURNS
 from pal.execution.session_state import (
     FileDeliveryManifest,
     InMemoryLogicalExecutionState,
@@ -143,7 +140,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
     logical_state: LogicalExecutionStateBackend = field(
         default_factory=InMemoryLogicalExecutionState
     )
-    tool_result_pager: ToolResultPagerStore = field(default_factory=ToolResultPagerStore)
+    execution_sessions: LogicalExecutionSessions = field(default_factory=LogicalExecutionSessions)
+    result_snapshots: ResultSnapshotStore | None = None
     lifecycle_controller: Any | None = None
     lifecycle_gate: WriterPreferredRWGate = field(default_factory=WriterPreferredRWGate)
     sync_executor_max_workers: int = 4
@@ -159,7 +157,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
     )
 
     def __post_init__(self) -> None:
-        self.tool_result_pager.state_backend = self.logical_state
+        self.execution_sessions.state_backend = self.logical_state
+        if self.result_snapshots is None:
+            self.result_snapshots = ResultSnapshotStore(self.runtime_root)
         default_l3 = NullL3Plugin()
         self.provider_registry.setdefault(default_l3.provider_id, default_l3)
         if self.l3_plugin_registry.get(default_l3.provider_id) is None:
@@ -218,6 +218,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         pass
 
     def shutdown(self) -> None:
+        self.result_snapshots.discard_pending()
         with self._interrupt_state_lock:
             handles = {
                 handle
@@ -266,34 +267,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         turn_id: str,
         scope_key: str = "",
-        retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
+        retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS,
         input_id: str = "",
     ) -> LogicalExecutionContext:
-        return self.tool_result_pager.begin_turn(
+        return self.execution_sessions.begin_turn(
             runtime_root=self.runtime_root,
             turn_id=turn_id,
             scope_key=scope_key,
             retention_user_turns=retention_user_turns,
             input_id=input_id,
-        )
-
-    def read_tool_result_page(
-        self,
-        *,
-        result_ref: str,
-        page: int = 1,
-        page_size: int | None = None,
-        anchor: str = "head",
-        turn_id: str | None = None,
-        execution_lifetime_id: str = "",
-    ) -> ToolResultPage | None:
-        return self.tool_result_pager.read_page(
-            result_ref,
-            page=page,
-            page_size=page_size,
-            anchor=anchor,
-            turn_id=turn_id,
-            execution_lifetime_id=execution_lifetime_id,
         )
 
     def advance_tool_result_clock(
@@ -303,7 +285,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         clock_id: str,
         retention_steps: int | None = None,
     ) -> LogicalExecutionContext:
-        """Advance one host-defined pager/cache retention step in this lifetime.
+        """Advance the logical input clock; output files do not expire by this clock.
 
         Resident Pal advances the same backend with semantic user inputs.
         Autonomous runtimes such as Bunshin may instead advance it per tool
@@ -311,7 +293,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         """
 
         context = self.logical_context_for_turn(turn_id)
-        return self.tool_result_pager.begin_turn(
+        return self.execution_sessions.begin_turn(
             runtime_root=self.runtime_root,
             turn_id=turn_id,
             scope_key=context.execution_lifetime_id,
@@ -320,7 +302,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
 
     def logical_context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
-        return self.tool_result_pager.context_for_turn(turn_id)
+        return self.execution_sessions.context_for_turn(turn_id)
 
     def retire_tool_results(
         self,
@@ -329,7 +311,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         result_ids: tuple[str, ...],
         execution_lifetime_id: str = "",
     ) -> tuple[str, ...]:
-        """Retire result-owned authority while leaving pager bytes on their TTL."""
+        """Retire file-read authority; L1 ownership separately retires output files."""
 
         normalized = tuple(
             result_id
@@ -376,10 +358,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str,
         result_ref: str,
     ) -> None:
-        self.tool_result_pager.discard_uncommitted(
-            turn_id=str(turn_id),
-            result_ref=str(result_ref),
-        )
+        context = self.logical_context_for_turn(turn_id)
+        self.result_snapshots.finish_delivery(lifetime=context.execution_lifetime_id, call_id=result_ref)
 
     def list_tool_specs(self) -> list[dict[str, Any]]:
         generation = self._registry_generation
@@ -861,13 +841,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 budget=budget,
                 turn_id=turn_id,
             )
-        if record.alias == "read_tool_result":
-            return self._read_tool_result_builtin(
-                record,
-                call,
-                args,
-                turn_id=turn_id,
-            )
         return None
 
     async def _invoke_facade_builtin_async(
@@ -908,150 +881,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 budget=budget,
                 turn_id=turn_id,
             )
-        if record.alias == "read_tool_result":
-            return self._read_tool_result_builtin(
-                record,
-                call,
-                args,
-                turn_id=turn_id,
-            )
         return None
-
-    def _read_tool_result_builtin(
-        self,
-        record: CompiledToolRecord,
-        call: ToolCallIR,
-        args: dict[str, Any],
-        *,
-        turn_id: str | None,
-    ) -> ToolInvocationResult:
-        raw = record.binding.callable(
-            CapabilityCall(
-                name=record.canonical_path,
-                args=args,
-                meta={
-                    "tool_call": call,
-                    "turn_id": str(turn_id or ""),
-                    "execution_runtime": self,
-                },
-            )
-        )
-        if not isinstance(raw, CapabilityResult):
-            return FailedResult(
-                error_code="invalid_pager_result",
-                error="read_tool_result returned an invalid internal result",
-                effect=EffectOutcome.NONE,
-                retry=RetryDirective.DO_NOT_RETRY,
-                llm_text="read_tool_result returned an invalid internal result",
-            )
-        if raw.status != RuntimeStatus.OK:
-            details = dict(raw.structured or {})
-            reason = str(details.get("reason") or "expired_handle")
-            affordances = self._pager_recovery_affordances(details)
-            return FailedResult(
-                error_code=reason,
-                error=raw.text,
-                effect=EffectOutcome.NONE,
-                retry=RetryDirective.DO_NOT_RETRY,
-                llm_text=raw.llm_text,
-                details=details,
-                affordances=affordances,
-            )
-        output = {**dict(raw.structured or {}), "page_text": raw.text}
-        affordances: list[ToolAffordance] = []
-        result_ref = str(output.get("result_ref") or "")
-        page = int(output.get("anchor_page") or output.get("page") or 1)
-        anchor = str(output.get("anchor") or "head")
-        if bool(output.get("has_more_after")):
-            next_page = page - 1 if anchor == "tail" else page + 1
-            affordances.append(
-                ToolAffordance(
-                    tool="read_tool_result",
-                    arguments={"result_ref": result_ref, "page": next_page, "anchor": anchor},
-                    reason="Read the exact adjacent newer/next page.",
-                )
-            )
-        if bool(output.get("has_more_before")):
-            previous_page = page + 1 if anchor == "tail" else max(1, page - 1)
-            affordances.append(
-                ToolAffordance(
-                    tool="read_tool_result",
-                    arguments={"result_ref": result_ref, "page": previous_page, "anchor": anchor},
-                    reason="Read the exact adjacent older/previous page.",
-                )
-            )
-        return self._complete_builtin(
-            record,
-            output,
-            llm_text=raw.llm_text,
-            affordances=affordances,
-            context_delivery=raw.context_delivery,
-        )
-
-    def _pager_recovery_affordances(
-        self,
-        details: dict[str, Any],
-    ) -> list[ToolAffordance]:
-        origin = dict(details.get("origin") or {})
-        alias = str(origin.get("alias") or "")
-        arguments = dict(origin.get("arguments") or {})
-        execution = dict(origin.get("execution") or {})
-        retry_policy = str(execution.get("retry_policy") or "")
-        idempotency = str(execution.get("idempotency") or "")
-        effect_kind = str(execution.get("effect_kind") or "")
-        current = self.registry_generation.record_for_alias(alias) if alias else None
-        replayable_effects = {
-            EffectKind.NONE.value,
-            EffectKind.LOCAL_READ.value,
-            EffectKind.EXTERNAL_READ.value,
-        }
-        if (
-            current is not None
-            and retry_policy == "automatic"
-            and idempotency == "idempotent"
-            and effect_kind in replayable_effects
-            and current.execution.effect_kind.value in replayable_effects
-            and current.execution.idempotency is Idempotency.IDEMPOTENT
-            and current.execution.retry_policy is RetryPolicy.AUTOMATIC
-        ):
-            if current.execution.invocation_mode is InvocationMode.INDIRECT:
-                return [
-                    ToolAffordance(
-                        tool="call_tool",
-                        arguments={"name": alias, "args": arguments},
-                        reason="The materialized result expired; reacquire it with the current idempotent read.",
-                    )
-                ]
-            return [
-                ToolAffordance(
-                    tool=alias,
-                    arguments=arguments,
-                    reason="The materialized result expired; reacquire it with the current idempotent read.",
-                )
-            ]
-        if current is not None:
-            return [
-                ToolAffordance(
-                    tool="read_tool",
-                    arguments={"name": alias},
-                    reason=(
-                        "The result expired. Inspect the current tool's retry semantics and reconcile "
-                        "whether its effect happened; do not automatically repeat an effectful or "
-                        "non-idempotent call."
-                    ),
-                )
-            ]
-        query = str(origin.get("search_text") or alias or "original tool")
-        return [
-            ToolAffordance(
-                tool="search_tools",
-                arguments={"query": query},
-                reason=(
-                    "The result expired and the original tool is no longer registered. Rediscover its "
-                    "replacement and inspect retry semantics before taking further action."
-                ),
-            )
-        ]
 
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
@@ -1237,7 +1067,26 @@ class ExecutionRuntime(ExecutionRuntimePort):
         result = await loop.run_in_executor(self.sync_executor, lambda: binding.callable(capability_call))
         return await result if inspect.isawaitable(result) else result
 
-    def _normalize_invocation_result(
+    def _normalize_invocation_result(self, record, call, raw, *, budget, turn_id):
+        result = self._normalize_invocation_result_inner(record, call, raw, budget=budget, turn_id=turn_id)
+        if not isinstance(result, (FailedResult, RejectedResult)):
+            return result
+        refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
+        limit = self._resolve_char_limit(budget) if budget else None
+        text = result.llm_text
+        if limit is not None and len(text) > limit:
+            try:
+                lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
+                ref = refs[0] if refs else self.result_snapshots.capture(text, call_id=call.call_id, lifetime=lifetime)
+                refs = (ref,)
+                hint = render_snapshot_hint(ref)
+                text, _ = head_tail(text, max(0, min(int(budget.preview_chars or 1000), limit-len(hint)-2)))
+                text += "\n\n" + hint
+            except OSError as exc:
+                text = text[:max(0, limit)] + "\nComplete output could not be saved: " + str(exc)
+        return result.model_copy(update={"llm_text": text, "snapshot_refs": refs})
+
+    def _normalize_invocation_result_inner(
         self,
         record: CompiledToolRecord,
         call: ToolCallIR,
@@ -1246,7 +1095,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         turn_id: str | None,
     ) -> ToolInvocationResult:
-        if isinstance(raw, (CompleteResult, PagedResult, RejectedResult, FailedResult)):
+        if isinstance(raw, (CompleteResult, RejectedResult, FailedResult)):
             return raw
         receipt: EffectReceipt | None = None
         affordances: list[ToolAffordance] = []
@@ -1345,113 +1194,57 @@ class ExecutionRuntime(ExecutionRuntimePort):
         # Handler text is data, including leading/trailing whitespace. Only
         # Pal-owned structured serialization may change presentation.
         rendered = llm_text or render_structured_for_llm(output)
-        paged, replay_result_ref = self._page_validated_output(
-            record,
-            call,
-            output,
-            rendered,
-            outcome,
-            budget,
-            turn_id=turn_id,
-            context_delivery=context_delivery,
-            context_messages=context_messages,
-        )
-        if paged is not None:
-            return paged
+        refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
+        char_limit = self._resolve_char_limit(budget) if budget is not None else None
+        if char_limit is not None and len(rendered) > char_limit:
+            try:
+                context = self.logical_context_for_turn(turn_id or call.call_id)
+                # Reads of a managed snapshot refer back to that same immutable
+                # file; never spill the read into another snapshot.
+                existing = self.result_snapshots.lookup_path(call.args.get("file_path", "")) if call.args.get("file_path") else None
+                ref = existing or (refs[0] if refs else self.result_snapshots.capture(
+                    rendered, call_id=call.call_id, lifetime=context.execution_lifetime_id))
+                refs = tuple(dict.fromkeys((*refs, ref)))
+                hint = render_snapshot_hint(ref)
+                preview_budget = max(0, min(int(budget.preview_chars or 1000), char_limit - len(hint) - 2))
+                preview, intervals = head_tail(rendered, preview_budget)
+                rendered = preview + "\n\n" + hint
+                if context_delivery:
+                    manifest = FileDeliveryManifest.from_dict(context_delivery)
+                    # Preserve only actually displayed source ranges. The file
+                    # containing the rest grants no authority over its source.
+                    spans = []
+                    if manifest:
+                        for index, (a, b) in enumerate(intervals):
+                            part = manifest.slice(a, b)
+                            display_offset = 0 if index == 0 else len(preview) - (b - a)
+                            if part:
+                                spans.extend(replace(span, start_offset=span.start_offset + display_offset,
+                                    end_offset=span.end_offset + display_offset) for span in part.spans)
+                    context_delivery = replace(manifest, spans=tuple(spans), complete_file=False,
+                                               inherited_ranges=(), parent_result_ids=(), empty_file=False).to_dict() if manifest else None
+            except OSError as exc:
+                return FailedResult(error_code="output_snapshot_failed", error=str(exc), effect=outcome,
+                    retry=derive_retry_directive(record.execution, outcome),
+                    llm_text="Operation finished, but its complete output could not be saved: " + str(exc))
         return CompleteResult(
-            output=output,
-            effect=outcome,
-            llm_text=rendered,
-            affordances=affordances,
-            context_delivery=context_delivery,
-            replay_result_ref=replay_result_ref,
-            context_messages=context_messages,
+            output=output, effect=outcome, llm_text=rendered,
+            affordances=affordances, context_delivery=context_delivery,
+            snapshot_refs=refs, replay_result_ref=call.call_id if refs else "", context_messages=context_messages,
         )
 
-    def _page_validated_output(
-        self,
-        record: CompiledToolRecord,
-        call: ToolCallIR,
-        output: Any,
-        rendered: str,
-        outcome: EffectOutcome,
-        budget: ToolCallBudget | None,
-        *,
-        turn_id: str | None,
-        context_delivery: dict[str, Any] | None,
-        context_messages: tuple[ToolContextMessageIR, ...],
-    ) -> tuple[PagedResult | None, str]:
-        if budget is None or record.execution.paging is PagingMode.NEVER:
-            return None, ""
-        char_limit = self._resolve_char_limit(budget)
-        serialized = json.dumps(output, ensure_ascii=False, sort_keys=True)
-        result_ref = str(call.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
-        if isinstance(context_delivery, dict):
-            context_delivery["replay_result_ref"] = result_ref
-        page_size = max(256, int(budget.preview_chars or 1000))
-        if char_limit is not None:
-            page_size = min(page_size, char_limit)
-        handle = self.tool_result_pager.store(
-            runtime_root=self.runtime_root,
-            turn_id=str(turn_id or budget.artifact_bucket_id or result_ref),
-            result_ref=result_ref,
-            tool_name=record.alias,
-            status=RuntimeStatus.OK,
-            ok=True,
-            rendered=rendered,
-            page_size=page_size,
-            output_json=serialized,
-            origin={
-                "alias": record.alias,
-                "arguments": dict(call.args or {}),
-                "invocation_mode": record.execution.invocation_mode.value,
-                "search_text": record.search_document,
-                "execution": record.execution.model_dump(mode="json"),
-                "effect": outcome.value,
-            },
-            context_delivery=context_delivery,
-        )
-        if char_limit is None or len(rendered) <= char_limit:
-            return None, handle.result_ref
-        page = self.tool_result_pager.read_page(
-            result_ref,
-            page=1,
-            execution_lifetime_id=handle.execution_lifetime_id,
-        )
-        page_text = page.content if page is not None else rendered[:page_size]
-        page_delivery = (
-            dict(page.context_delivery)
-            if page is not None
-            and isinstance(page.context_delivery, dict)
-            else None
-        )
-        affordances: list[ToolAffordance] = []
-        if handle.page_count > 1:
-            affordances.append(
-                ToolAffordance(
-                    tool="read_tool_result",
-                    arguments={"result_ref": result_ref, "page": 2, "anchor": "head"},
-                    reason="Read the exact next page of the validated complete output.",
-                )
-            )
-        return PagedResult(
-            result_handle={
-                "result_ref": handle.result_ref,
-                "page_size": handle.page_size,
-                "original_size": handle.original_size,
-                "page_count": handle.page_count,
-                "created_user_turn": handle.created_user_turn,
-                "expires_at_user_turn": handle.expires_at_user_turn,
-            },
-            page_text=page_text,
-            effect=outcome,
-            llm_text=page_text,
-            affordances=affordances,
-            # Pager backing data is replayable evidence, not live authority.
-            # The initial result owns only the exact first page delivered.
-            context_delivery=page_delivery,
-            context_messages=context_messages,
-        ), handle.result_ref
+    def bind_result_history(self, memory_service) -> None:
+        history = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        if history is not None and hasattr(history, "add_change_listener"):
+            self.result_snapshots.bind_history(history)
+
+    def configure_runtime_root(self, root) -> None:
+        root = Path(root)
+        if self.result_snapshots.references():
+            raise RuntimeError("Cannot move runtime storage while output snapshots are live")
+        self.runtime_root = root
+        self.result_snapshots = ResultSnapshotStore(root)
+
 
     @staticmethod
     def _rejected_error_result(exc: ToolRejectedError) -> RejectedResult:
@@ -1535,35 +1328,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     else None
                 ),
                 replay_result_ref=str(result.replay_result_ref or ""),
+                snapshot_refs=result.snapshot_refs,
                 context_messages=tuple(result.context_messages),
             )
-        payload = result.model_dump(mode="json")
-        return ToolExecutionResult(
-            name=alias,
-            ok=False if isinstance(result, (RejectedResult, FailedResult)) else True,
-            text=rendered,
-            structured=payload,
-            call_id=call_id,
-            llm_text=rendered,
-            status=result.error_code if isinstance(result, (RejectedResult, FailedResult)) else "paged",
-            invocation_result=result,
-            context_delivery=(
-                dict(result.context_delivery)
-                if isinstance(result, PagedResult)
-                and isinstance(result.context_delivery, dict)
-                else None
-            ),
-            replay_result_ref=(
-                str(result.result_handle.get("result_ref") or "")
-                if isinstance(result, PagedResult)
-                else ""
-            ),
-            context_messages=(
-                tuple(result.context_messages)
-                if isinstance(result, PagedResult)
-                else ()
-            ),
-        )
+        return ToolExecutionResult(name=alias, ok=False, text=rendered,
+            structured=result.model_dump(mode="json"), call_id=call_id,
+            llm_text=rendered, status=result.error_code, invocation_result=result,
+            snapshot_refs=result.snapshot_refs, replay_result_ref=call_id if result.snapshot_refs else "")
 
     @staticmethod
     def _render_invocation_for_llm(result: ToolInvocationResult) -> str:
@@ -1579,8 +1350,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     "retry": result.retry.value,
                 }
             )
-        if isinstance(result, PagedResult):
-            metadata["result_handle"] = dict(result.result_handle)
         if result.affordances:
             metadata["affordances"] = [item.model_dump(mode="json") for item in result.affordances]
         if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:

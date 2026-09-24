@@ -46,7 +46,7 @@ ArtifactCapabilitiesArtifactIntrospectionProviderReadInput = _strict_model(
         'representation': (Literal['auto', 'text', 'page_text', 'chunk_text', 'transcript', 'metadata'], Field('auto', description='Text-like representation only. Do not use this to inspect visual image pixels.')),
         'page': (int, Field(None, ge=1, description='1-based artifact page number from artifact_info; selects page_text. Mutually exclusive with chunk; not a tool-result page.')),
         'chunk': (int, Field(None, ge=1, description='1-based artifact chunk number from artifact_info; selects chunk_text. Mutually exclusive with page.')),
-        'max_chars': (int, Field(12000, ge=1, description='Text preview character budget, separate from tool-result pagination. Use page/chunk to focus on a representation.')),
+        'max_chars': (int, Field(12000, ge=1, description='Text preview character budget. Use page/chunk to focus on a representation.')),
     },
 )
 
@@ -441,36 +441,6 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput = _strict_model(
         'example': (dict[str, Any] | None, Field(None)),
         'input_schema': (dict[str, Any], Field(...)),
         'output_schema': (dict[str, Any], Field(...)),
-    },
-)
-
-ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput = _strict_model(
-    'ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput',
-    {
-        'result_ref': (str, Field(..., description='The result_ref shown in a prior tool result; this is the original tool_call_id.')),
-        'page': (int, Field(None, description="1-based page number. With anchor='head', page=1 is the first page. With anchor='tail', page=1 is the last page and page=2 is second-to-last.", ge=1)),
-        'anchor': (Literal['head', 'tail'], Field(None, description="Read from the start ('head') or end ('tail') of the paged result. Defaults to head.")),
-        'tail': (bool, Field(None, description="Shorthand for anchor='tail'. Useful for log-like output.")),
-        'page_size': (int, Field(None, description='Optional character page size.', ge=256)),
-    },
-)
-
-ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput = _strict_model(
-    'ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput',
-    {
-        'result_ref': (str, Field(None)),
-        'page': (int, Field(None)),
-        'page_count': (int, Field(None)),
-        'has_more': (bool, Field(None)),
-        'has_more_before': (bool, Field(None)),
-        'has_more_after': (bool, Field(None)),
-        'anchor': (str, Field(None)),
-        'anchor_page': (int, Field(None)),
-        'start_offset': (int, Field(None)),
-        'end_offset': (int, Field(None)),
-        'original_size': (int, Field(None)),
-        'page_size': (int, Field(None)),
-        'page_text': (str, Field(None)),
     },
 )
 

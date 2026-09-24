@@ -13,7 +13,6 @@ from pydantic import ValidationError
 from pal.execution.contracts import CapabilityResult
 from pal.execution.generated_tool_models import WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput
 from pal.web_fetch.tool_models import BrowserReadInput
-from pal.execution.tool_result_pager import ToolResultPagerStore
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.web_broker import BunshinBrokerWebClient
@@ -23,37 +22,6 @@ from pal.web_search.capabilities import WebSearchIntrospectionProvider
 
 
 class BunshinWebBrokerTests(unittest.TestCase):
-    def test_role_pager_keeps_payload_in_memory_and_uses_explicit_lifetime(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="pal_bunshin_pager_") as tmp:
-            root = Path(tmp)
-            pager = ToolResultPagerStore()
-            pager.begin_turn(
-                runtime_root=root,
-                turn_id="turn-1",
-                scope_key="role-assignment",
-            )
-            handle = pager.store(
-                runtime_root=root,
-                turn_id="turn-1",
-                result_ref="result-1",
-                tool_name="browser_read",
-                status="ok",
-                ok=True,
-                rendered="x" * 5000,
-                page_size=1000,
-            )
-
-            self.assertEqual(handle.execution_lifetime_id, "role-assignment")
-            self.assertFalse(hasattr(handle, "backing_path"))
-            self.assertFalse((root / "data" / "tool_results").exists())
-            self.assertEqual(
-                pager.read_page(
-                    "result-1",
-                    page=2,
-                    execution_lifetime_id="role-assignment",
-                ).content,
-                "x" * 1000,
-            )
 
     def test_sandbox_client_requires_assignment_token_and_uses_unix_only(self) -> None:
         broker = BunshinBrokerWebClient(Path("/tmp/pal-web-broker"), "run-web")

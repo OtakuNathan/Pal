@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
+from pal.shared.text_search import jieba_search_terms
 from pal.shared.prompt_rendering import render_xml_block
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.shared.tool_protocol import ToolContextMessageIR
@@ -194,20 +196,13 @@ class SkillSearchTool:
             if avoid_overlap:
                 hit["avoid_when_overlap"] = True
             ranked.append(hit)
-        ranked.sort(key=lambda item: (-float(item["score"]), str(item["skill_id"])))
+        ranked.sort(key=lambda item: (item["skill_id"].lower() != query, -float(item["score"]), str(item["skill_id"])))
         hits = ranked[:top_k]
         structured = {"hits": hits, "count": len(hits)}
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
             structured["next_action"] = "To use a matched active skill, call skill_inject with its name before answering from it."
         llm_text = _render_skill_tool_payload(self.service, "Skill search", structured)
-        if has_injectable_hit:
-            llm_text = (
-                "Skill search found an injectable active skill. "
-                "If the user asked to use this skill, the next tool call MUST be skill_inject with the matched name. "
-                "Search alone is not using the skill.\n"
-                f"{llm_text}"
-            )
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text=f"found {len(hits)} skill(s)",
@@ -349,31 +344,34 @@ def _project_skill_text(service: SkillService, value: object) -> str:
     return str(projector(value)) if callable(projector) else str(value or "")
 
 
+_SEARCH_STOP_WORDS = frozenset("a an the and or to of for in on at by with from as is are be using use".split())
+
+
+def _skill_search_terms(text: str) -> set[str]:
+    terms = set(jieba_search_terms(text.lower()))
+    # Preserve exact identifiers while also matching their meaningful components.
+    terms.update(part for term in tuple(terms) for part in re.split(r"[_.-]+", term))
+    return terms - _SEARCH_STOP_WORDS - {""}
+
+
 def _skill_search_score(skill, query: str) -> tuple[float, str, bool]:
-    terms = [term for term in str(query or "").lower().split() if term]
+    terms = _skill_search_terms(query)
     if not terms:
         return 0.0, "", False
-    strong_fields = " ".join((skill.skill_id, skill.title, " ".join(skill.activation_terms))).lower()
+    strong_fields = _skill_search_terms(" ".join((skill.skill_id, skill.title, " ".join(skill.activation_terms))))
     star = skill.applicability_star
-    normal_fields = " ".join(
-        (
-            skill.summary,
-            skill.use_when,
-            star.situation,
-            star.task,
-            star.action,
-            star.result,
-            " ".join(skill.capability_refs),
-        )
-    ).lower()
-    avoid_fields = str(skill.avoid_when or "").lower()
-    strong_hits = sum(1 for term in terms if term in strong_fields)
-    normal_hits = sum(1 for term in terms if term in normal_fields)
-    avoid_hits = sum(1 for term in terms if term in avoid_fields)
-    if strong_hits == 0 and normal_hits == 0:
-        return 0.0, "", bool(avoid_hits)
-    raw = strong_hits * 3.0 + normal_hits * 1.0 - avoid_hits * 0.75
-    score = max(0.01, raw / max(1, len(terms) * 3))
+    normal_fields = _skill_search_terms(" ".join((
+        skill.summary, skill.use_when, star.situation, star.task, star.action, star.result,
+        " ".join(skill.capability_refs),
+    )))
+    avoid_fields = _skill_search_terms(str(skill.avoid_when or ""))
+    strong_hits = len(terms & strong_fields)
+    normal_hits = len(terms & normal_fields)
+    avoid_hits = len(terms & avoid_fields)
+    raw = strong_hits * 3.0 + normal_hits - avoid_hits * 0.75
+    score = max(0.0, raw / (len(terms) * 3))
+    if query.strip().lower() == skill.skill_id.lower():
+        score = max(1.0, score)
     reasons = []
     if strong_hits:
         reasons.append(f"{strong_hits} strong field match(es)")

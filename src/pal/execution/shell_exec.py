@@ -15,6 +15,8 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+from pal.shared.result_snapshot import ResultSnapshotRef
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import ToolGuidance
@@ -36,6 +38,8 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "
         "For shell-based repository discovery, prefer rg for text search and rg --files for file enumeration; "
         "fall back to find, grep, or ls only when rg is unavailable or unsuitable. "
+        "Search saved output snapshots with rg. For unusually long lines, use awk/sed and wc to inspect bounded excerpts "
+        "that read_file's line ranges cannot select. Inspect the saved file rather than rerunning its producer. "
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
     ),
     do_not_use_when=(
@@ -46,7 +50,7 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "To change your own state, configuration, or endpoints, use a dedicated capability or the official "
         "`pal` CLI when it supports the change; never bypass it by hand-editing runtime storage, the database, "
         "or config files. For unsupported changes, follow pal.self.maintenance and the mutation policy. "
-        "Use read_file for UTF-8 file reads, edit_file for focused edits, write_file for complete writes, and "
+        "Use read_file for ordinary UTF-8 line/range reads, edit_file for focused edits, write_file for complete writes, and "
         "delete_path for deletion. Repository text search remains a run_shell task: use rg, as described above. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "
         "budgeting handles large output, while such pipelines hide the command that is stalled."
@@ -72,6 +76,9 @@ class _ShellExecution:
     cancelled: bool = False
     termination_signal: str = ""
     descendants_terminated: bool = False
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
+    snapshot_text: str = ""
+    output_error: str = ""
 
 
 @dataclass(eq=False)
@@ -81,6 +88,7 @@ class _ShellProcessSupervisor:
     timeout_ms: int
     output_root: Path
     termination_grace_seconds: float = SHELL_TERMINATION_GRACE_SECONDS
+    capture_output: Callable[[Path, Path], tuple[ResultSnapshotRef, str] | None] | None = None
     _proc: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _cancel_requested: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -127,8 +135,14 @@ class _ShellProcessSupervisor:
                     stderr_file.flush()
                     with self._state_lock:
                         self._proc = None
-            stdout = stdout_path.read_bytes().decode("utf-8", errors="replace")
-            stderr = stderr_path.read_bytes().decode("utf-8", errors="replace")
+            output_error = ""
+            try:
+                captured = self.capture_output(stdout_path, stderr_path) if self.capture_output else None
+            except OSError as exc:
+                captured = None
+                output_error = f"Command finished, but output could not be preserved: {exc}"
+            stdout = "" if captured or output_error else stdout_path.read_bytes().decode("utf-8", errors="replace")
+            stderr = "" if captured or output_error else stderr_path.read_bytes().decode("utf-8", errors="replace")
             return _ShellExecution(
                 returncode=proc.returncode,
                 stdout=stdout,
@@ -137,6 +151,9 @@ class _ShellProcessSupervisor:
                 cancelled=self._cancel_requested.is_set() and not timed_out,
                 termination_signal=self._termination_signal,
                 descendants_terminated=self._descendants_terminated,
+                snapshot_refs=(captured[0],) if captured else (),
+                snapshot_text=captured[1] if captured else "",
+                output_error=output_error,
             )
 
     async def cancel(self) -> None:
@@ -207,11 +224,12 @@ class ShellExecTool:
         if not self.shell_path:
             self.shell_path = self._default_shell_path()
 
-    def invoke(self, args: dict[str, object]) -> CapabilityResult:
+    def invoke(self, args: dict[str, object], **kwargs: object) -> CapabilityResult:
         prepared = self._prepare(args)
         if isinstance(prepared, CapabilityResult):
             return prepared
         cmd, cwd, timeout_ms, supervisor = prepared
+        self._configure_capture(supervisor, kwargs)
         try:
             execution = supervisor.run()
         except OSError as exc:
@@ -225,13 +243,19 @@ class ShellExecTool:
         if isinstance(prepared, CapabilityResult):
             return prepared
         cmd, cwd, timeout_ms, supervisor = prepared
+        snapshots = getattr(runtime, "result_snapshots", None)
+        self._configure_capture(supervisor, kwargs)
         register = getattr(runtime, "register_interrupt_handle", None)
         if callable(register):
             register(turn_id, supervisor)
+        worker = asyncio.create_task(asyncio.to_thread(supervisor.run))
         try:
-            execution = await asyncio.to_thread(supervisor.run)
+            execution = await asyncio.shield(worker)
         except asyncio.CancelledError:
             await supervisor.cancel()
+            execution = await worker
+            if snapshots is not None:
+                snapshots.finish_references(execution.snapshot_refs)
             raise
         except OSError as exc:
             return self._spawn_failure(cmd, cwd, timeout_ms, exc)
@@ -240,6 +264,30 @@ class ShellExecTool:
             if callable(release):
                 release(turn_id, supervisor)
         return self._execution_result(cmd, cwd, timeout_ms, execution)
+
+    @staticmethod
+    def _configure_capture(supervisor, kwargs):
+        runtime = kwargs.get("runtime")
+        turn_id = str(kwargs.get("turn_id") or "")
+        budget = kwargs.get("budget")
+        snapshots = getattr(runtime, "result_snapshots", None)
+        limit = runtime._resolve_char_limit(budget) if snapshots is not None and budget is not None else None
+        if limit is not None:
+            from pal.execution.result_snapshots import capture_stream_files, file_preview, render_snapshot_hint
+            call_id = str(kwargs.get("call_id") or "shell")
+            lifetime = runtime.logical_context_for_turn(turn_id or call_id).execution_lifetime_id
+            def capture_output(stdout, stderr):
+                streams = [(label, path, 0, path.stat().st_size)
+                           for label, path in (("stdout", stdout), ("stderr", stderr))]
+                if sum(item[3] for item in streams) <= limit:
+                    return None
+                ref = capture_stream_files(snapshots, streams, call_id=call_id, lifetime=lifetime)
+                try:
+                    return ref, file_preview(ref, budget.preview_chars or 1000) + "\n" + render_snapshot_hint(ref)
+                except BaseException:
+                    snapshots.finish_references((ref,))
+                    raise
+            supervisor.capture_output = capture_output
 
     def _prepare(
         self,
@@ -276,7 +324,10 @@ class ShellExecTool:
         timeout_ms: int,
         execution: _ShellExecution,
     ) -> CapabilityResult:
-        if execution.timed_out:
+        if execution.output_error:
+            display_text = execution.output_error
+            error_code = "output_snapshot_failed"
+        elif execution.timed_out:
             display_text = f"command timed out after {timeout_ms} ms"
             error_code = "command_timed_out"
         elif execution.cancelled:
@@ -289,6 +340,8 @@ class ShellExecTool:
                 display_text = f"command exited with code {execution.returncode}"
             error_code = "" if ok else "command_failed"
         output_text = _render_shell_output(display_text, execution.stdout, execution.stderr)
+        if execution.snapshot_text:
+            output_text += "\n" + execution.snapshot_text
         structured = {
             "cmd": cmd,
             "cwd": cwd or str(Path.cwd()),
@@ -296,8 +349,8 @@ class ShellExecTool:
             "returncode": execution.returncode,
             "stdout": execution.stdout,
             "stderr": execution.stderr,
-            "stdout_truncated": False,
-            "stderr_truncated": False,
+            "stdout_truncated": bool(execution.snapshot_refs),
+            "stderr_truncated": bool(execution.snapshot_refs),
             "timeout_ms": timeout_ms,
             "timed_out": execution.timed_out,
             "cancelled": execution.cancelled,
@@ -311,6 +364,7 @@ class ShellExecTool:
             text=output_text,
             structured=structured,
             llm_text=output_text,
+            snapshot_refs=execution.snapshot_refs,
         )
 
     @staticmethod
@@ -409,11 +463,15 @@ class ShellExecCapabilityMixin:
         async_handler_name="shell_async",
     )
     def shell(self, call: IntrospectionCall) -> IntrospectionResult:
-        return ShellExecTool().invoke(dict(call.args))
+        return ShellExecTool().invoke(dict(call.args), runtime=call.meta.get("execution_runtime"),
+            turn_id=call.meta.get("turn_id"), budget=call.meta.get("budget"),
+            call_id=getattr(call.meta.get("tool_call"), "call_id", ""))
 
     async def shell_async(self, call: IntrospectionCall) -> IntrospectionResult:
         return await ShellExecTool().ainvoke(
             dict(call.args),
             runtime=call.meta.get("execution_runtime"),
             turn_id=call.meta.get("turn_id"),
+            budget=call.meta.get("budget"),
+            call_id=getattr(call.meta.get("tool_call"), "call_id", ""),
         )

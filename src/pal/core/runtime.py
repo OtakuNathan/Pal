@@ -212,6 +212,9 @@ class TurnManager:
                         self.state.resident_interrupting_turn_id = None
 
     def cleanup_interrupted(self, turn_id: str, *, reason: str = "interrupted") -> None:
+        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
+        if snapshots is not None:
+            snapshots.finish_turn(turn_id)
         continuation = self.state.active_turns.pop(turn_id, None)
         if isinstance(continuation, TurnContinuation):
             continuation.interrupted = True
@@ -1076,6 +1079,9 @@ class PalCore(MemoryMaintenanceMixin):
                 self.context.turn_event_bus.emit(TURN_END, {**payload, "status": status})
 
     def _begin_tool_result_turn(self, continuation: TurnContinuation) -> None:
+        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
+        if callable(bind):
+            bind(self.context.port_registry.get("memory:memory"))
         begin = getattr(self.context.execution_runtime, "begin_tool_result_turn", None)
         if not callable(begin):
             return
@@ -1083,7 +1089,6 @@ class PalCore(MemoryMaintenanceMixin):
             turn_id=continuation.turn_id,
             scope_key=self.state.resident_execution_lifetime_id,
             input_id=continuation.turn_id,
-            retention_user_turns=getattr(self.config, "tool_result_pager_retention_user_turns", 5),
         )
 
     async def _background_channel_turn_runner_async(self, channel_envelope: ChannelEnvelope) -> None:

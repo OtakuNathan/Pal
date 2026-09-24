@@ -35,7 +35,7 @@ user message and does not advertise it as a dynamic context candidate.
 Native shell now adds at most one `shell_session` capability hint. It lists only
 the actions applicable to the delivered state and retains `read_tool` as the
 discovery entry point. Already-known operations remain callable directly.
-Result status, session ID, errors, effect semantics and pager handles remain
+Result status, session ID, errors, effect semantics and output snapshot references remain
 available. Pagination hints are independent of the session hint. Native input
 schemas, state transitions, cancellation, observation and cleanup are unchanged.
 

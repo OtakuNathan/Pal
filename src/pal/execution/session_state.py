@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
 
@@ -207,83 +206,6 @@ class FileDeliveryManifest:
 
 
 @dataclass(frozen=True)
-class PagerHandleManifest:
-    result_ref: str
-    execution_lifetime_id: str
-    tool_name: str
-    status: str
-    ok: bool
-    page_size: int
-    original_size: int
-    page_count: int
-    created_user_turn: int
-    expires_at_user_turn: int
-    output_json: str
-    rendered: str
-    origin: dict[str, Any] = field(default_factory=dict)
-    delivery_manifest: dict[str, Any] = field(default_factory=dict)
-
-    def public_dict(self) -> dict[str, Any]:
-        return {
-            "result_ref": self.result_ref,
-            "page_size": self.page_size,
-            "original_size": self.original_size,
-            "page_count": self.page_count,
-            "created_user_turn": self.created_user_turn,
-            "expires_at_user_turn": self.expires_at_user_turn,
-        }
-
-    def to_dict(self, *, include_payload: bool = True) -> dict[str, Any]:
-        payload = {
-            **self.public_dict(),
-            "execution_lifetime_id": self.execution_lifetime_id,
-            "tool_name": self.tool_name,
-            "status": self.status,
-            "ok": self.ok,
-            "origin": dict(self.origin),
-            "delivery_manifest": dict(self.delivery_manifest),
-        }
-        if include_payload:
-            payload["output_json"] = self.output_json
-            payload["rendered"] = self.rendered
-        return payload
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "PagerHandleManifest":
-        return cls(
-            result_ref=str(value.get("result_ref") or ""),
-            execution_lifetime_id=str(value.get("execution_lifetime_id") or ""),
-            tool_name=str(value.get("tool_name") or ""),
-            status=str(value.get("status") or ""),
-            ok=bool(value.get("ok", True)),
-            page_size=max(256, int(value.get("page_size") or 256)),
-            original_size=max(0, int(value.get("original_size") or 0)),
-            page_count=max(1, int(value.get("page_count") or 1)),
-            created_user_turn=max(0, int(value.get("created_user_turn") or 0)),
-            expires_at_user_turn=max(0, int(value.get("expires_at_user_turn") or 0)),
-            output_json=str(value.get("output_json") or ""),
-            rendered=str(value.get("rendered") or ""),
-            origin=dict(value.get("origin") or {}),
-            delivery_manifest=dict(value.get("delivery_manifest") or {}),
-        )
-
-
-@dataclass(frozen=True)
-class PagerRead:
-    state: str
-    manifest: PagerHandleManifest | None = None
-    content: str = ""
-    page: int = 1
-    page_count: int = 1
-    page_size: int = 0
-    anchor: str = "head"
-    anchor_page: int = 1
-    start_offset: int = 0
-    end_offset: int = 0
-    delivery_manifest: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class FileGrant:
     file_key: str
     digest: str
@@ -464,23 +386,6 @@ class LogicalExecutionStateBackend(Protocol):
         """Commit authority owned by one delivered tool result."""
         ...
 
-    def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:
-        ...
-
-    def read_pager(
-        self,
-        *,
-        execution_lifetime_id: str,
-        result_ref: str,
-        page: int,
-        page_size: int | None,
-        anchor: str,
-    ) -> PagerRead:
-        ...
-
-    def pager_lifetime(self, result_ref: str) -> str | None:
-        ...
-
     def file_grant(
         self,
         *,
@@ -531,8 +436,6 @@ class _SessionState:
     current_user_turn: int = 0
     input_ids: dict[str, int] = field(default_factory=dict)
     retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
-    handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
-    expired_handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
     file_results: dict[str, FileResultLease] = field(default_factory=dict)
     retired: bool = False
@@ -562,7 +465,7 @@ class InMemoryLogicalExecutionState:
             if semantic_input not in state.input_ids:
                 state.current_user_turn += 1
                 state.input_ids[semantic_input] = state.current_user_turn
-            self._expire_handles(state)
+            self._expire_file_snapshots(state)
             return self._context(session_id, semantic_input, state)
 
     def context(self, execution_lifetime_id: str) -> LogicalExecutionContext:
@@ -586,97 +489,6 @@ class InMemoryLogicalExecutionState:
                 raise RuntimeError("logical execution session is retired")
             self._apply_delivery(state, dict(delivery), replace_existing=False)
             return self._context(session_id, "", state)
-
-    def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:
-        with self._lock:
-            state = self._sessions.setdefault(manifest.execution_lifetime_id, _SessionState())
-            if state.retired:
-                raise RuntimeError("logical execution session is retired")
-            if manifest.result_ref in state.expired_handles:
-                raise ValueError("result_ref belongs to a retired pager handle")
-            existing = state.handles.get(manifest.result_ref)
-            if existing is not None:
-                old_hash = hashlib.sha256(
-                    (existing.output_json + "\0" + existing.rendered).encode("utf-8")
-                ).hexdigest()
-                new_hash = hashlib.sha256(
-                    (manifest.output_json + "\0" + manifest.rendered).encode("utf-8")
-                ).hexdigest()
-                if old_hash != new_hash:
-                    raise ValueError("result_ref was reused with different output")
-                return existing
-            state.handles[manifest.result_ref] = manifest
-            return manifest
-
-    def read_pager(
-        self,
-        *,
-        execution_lifetime_id: str,
-        result_ref: str,
-        page: int,
-        page_size: int | None,
-        anchor: str,
-    ) -> PagerRead:
-        with self._lock:
-            state = self._sessions.get(execution_lifetime_id)
-            if state is None:
-                return PagerRead(state="unknown_handle")
-            self._expire_handles(state)
-            manifest = state.handles.get(str(result_ref))
-            if manifest is None:
-                expired = state.expired_handles.get(str(result_ref))
-                if expired is not None:
-                    return PagerRead(state="expired_handle", manifest=expired)
-                return PagerRead(state="unknown_handle")
-            if state.retired:
-                return PagerRead(state="expired_handle")
-            size = max(256, int(page_size or manifest.page_size))
-            text = manifest.rendered
-            page_count = max(1, math.ceil(len(text) / size))
-            anchor_value = "tail" if str(anchor).lower() == "tail" else "head"
-            anchor_page = max(1, int(page or 1))
-            absolute_page = page_count - anchor_page + 1 if anchor_value == "tail" else anchor_page
-            if absolute_page < 1 or absolute_page > page_count:
-                return PagerRead(
-                    state="page_out_of_range",
-                    manifest=manifest,
-                    page=absolute_page,
-                    page_count=page_count,
-                    page_size=size,
-                    anchor=anchor_value,
-                    anchor_page=anchor_page,
-                )
-            start = (absolute_page - 1) * size
-            end = min(start + size, len(text))
-            delivery = FileDeliveryManifest.from_dict(manifest.delivery_manifest)
-            sliced = delivery.slice(start, end) if delivery is not None else None
-            return PagerRead(
-                state="ok",
-                manifest=manifest,
-                content=text[start:end],
-                page=absolute_page,
-                page_count=page_count,
-                page_size=size,
-                anchor=anchor_value,
-                anchor_page=anchor_page,
-                start_offset=start,
-                end_offset=end,
-                delivery_manifest=sliced.to_dict() if sliced is not None else {},
-            )
-
-    def pager_lifetime(self, result_ref: str) -> str | None:
-        """Resolve an exact globally unambiguous handle for direct callers."""
-
-        normalized = str(result_ref or "").strip()
-        if not normalized:
-            return None
-        with self._lock:
-            matches = [
-                execution_lifetime_id
-                for execution_lifetime_id, state in self._sessions.items()
-                if normalized in state.handles or normalized in state.expired_handles
-            ]
-        return matches[0] if len(matches) == 1 else None
 
     def file_grant(
         self,
@@ -805,7 +617,7 @@ class InMemoryLogicalExecutionState:
     def retire_session(self, execution_lifetime_id: str) -> None:
         with self._lock:
             # Preserve only a tombstone so late work cannot resurrect the
-            # logical coroutine. Pager payloads, file snapshots, and result leases
+            # logical coroutine. File snapshots and result leases
             # all die at the same ownership boundary.
             self._sessions[str(execution_lifetime_id)] = _SessionState(
                 retired=True
@@ -821,14 +633,6 @@ class InMemoryLogicalExecutionState:
                         "current_user_turn": state.current_user_turn,
                         "input_ids": dict(state.input_ids),
                         "retention_user_turns": state.retention_user_turns,
-                        "handles": {
-                            key: manifest.to_dict(include_payload=True)
-                            for key, manifest in state.handles.items()
-                        },
-                        "expired_handles": {
-                            key: manifest.to_dict(include_payload=False)
-                            for key, manifest in state.expired_handles.items()
-                        },
                         "snapshots": {
                             key: snapshot.to_dict()
                             for key, snapshot in state.snapshots.items()
@@ -858,8 +662,6 @@ class InMemoryLogicalExecutionState:
                 "input_ids",
                 "retention_user_turns",
                 "projection",  # accepted and ignored from older snapshots
-                "handles",
-                "expired_handles",
                 "snapshots",
                 "grants",
                 "file_results",
@@ -881,34 +683,6 @@ class InMemoryLogicalExecutionState:
                 raise ValueError(
                     "execution runtime snapshot contains an invalid semantic input"
                 )
-            raw_handles = dict(raw.get("handles") or {})
-            raw_expired_handles = dict(raw.get("expired_handles") or {})
-            handles = {
-                str(key): PagerHandleManifest.from_dict(dict(value))
-                for key, value in raw_handles.items()
-                if isinstance(value, dict)
-            }
-            expired_handles = {
-                str(key): PagerHandleManifest.from_dict(dict(value))
-                for key, value in raw_expired_handles.items()
-                if isinstance(value, dict)
-            }
-            if len(handles) != len(raw_handles) or len(expired_handles) != len(
-                raw_expired_handles
-            ):
-                raise ValueError("execution runtime snapshot contains an invalid pager")
-            if set(handles) & set(expired_handles):
-                raise ValueError("execution runtime snapshot pager state overlaps")
-            for result_ref, manifest in {**handles, **expired_handles}.items():
-                if (
-                    not result_ref
-                    or manifest.result_ref != result_ref
-                    or manifest.execution_lifetime_id != normalized_session_id
-                    or manifest.expires_at_user_turn < manifest.created_user_turn
-                ):
-                    raise ValueError(
-                        "execution runtime snapshot pager identity mismatch"
-                    )
             raw_snapshots = dict(raw.get("snapshots") or {})
             snapshots = {
                 str(key): FileSnapshot.from_dict(dict(value))
@@ -932,8 +706,6 @@ class InMemoryLogicalExecutionState:
                         or DEFAULT_RESULT_RETENTION_USER_TURNS
                     ),
                 ),
-                handles=handles,
-                expired_handles=expired_handles,
                 snapshots=snapshots,
                 file_results={
                     str(key): FileResultLease.from_dict(dict(value))
@@ -944,8 +716,7 @@ class InMemoryLogicalExecutionState:
             )
             # Legacy epoch grants are intentionally not restored.  They have
             # no result owner and therefore cannot satisfy the v2 RAII model;
-            # retained pager payloads can still be replayed to obtain a fresh
-            # result-owned lease.
+            # new source reads must establish result-owned leases.
             if any(
                 not result_id
                 or lease.result_id != result_id
@@ -956,8 +727,6 @@ class InMemoryLogicalExecutionState:
                 raise ValueError("execution runtime snapshot file result identity mismatch")
             if state.retired and (
                 state.input_ids
-                or state.handles
-                or state.expired_handles
                 or state.snapshots
                 or state.file_results
             ):
@@ -966,37 +735,12 @@ class InMemoryLogicalExecutionState:
                 )
             restored[normalized_session_id] = state
         for state in restored.values():
-            self._expire_handles(state)
+            self._expire_file_snapshots(state)
         return restored
 
     def install_prepared_state(self, prepared: dict[str, _SessionState]) -> None:
         with self._lock:
             self._sessions = prepared
-
-    def retire_pagers(
-        self,
-        *,
-        execution_lifetime_id: str,
-        result_refs: tuple[str, ...],
-    ) -> tuple[PagerHandleManifest, ...]:
-        with self._lock:
-            state = self._sessions.get(str(execution_lifetime_id))
-            if state is None:
-                return ()
-            retired = tuple(
-                manifest
-                for result_ref in result_refs
-                if (manifest := state.handles.pop(str(result_ref), None)) is not None
-            )
-            for manifest in retired:
-                state.expired_handles[manifest.result_ref] = replace(
-                    manifest,
-                    output_json="",
-                    rendered="",
-                    origin={},
-                    delivery_manifest={},
-                )
-            return retired
 
     def retire_results(
         self,
@@ -1004,7 +748,7 @@ class InMemoryLogicalExecutionState:
         execution_lifetime_id: str,
         result_ids: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """Retire authority owners without necessarily deleting pager data."""
+        """Retire file authority owned by removed results."""
 
         with self._lock:
             state = self._sessions.get(str(execution_lifetime_id))
@@ -1018,25 +762,6 @@ class InMemoryLogicalExecutionState:
             for result_id in retired:
                 state.file_results.pop(result_id, None)
             return retired
-
-    def expire_pagers(
-        self,
-        *,
-        execution_lifetime_id: str,
-    ) -> tuple[PagerHandleManifest, ...]:
-        with self._lock:
-            state = self._sessions.get(str(execution_lifetime_id))
-            if state is None:
-                return ()
-            expired_refs = tuple(
-                result_ref
-                for result_ref, manifest in state.handles.items()
-                if state.current_user_turn >= manifest.expires_at_user_turn
-            )
-        return self.retire_pagers(
-            execution_lifetime_id=execution_lifetime_id,
-            result_refs=expired_refs,
-        )
 
     def reset_state(self) -> None:
         with self._lock:
@@ -1052,31 +777,7 @@ class InMemoryLogicalExecutionState:
         )
 
     @staticmethod
-    def _expire_handles(state: _SessionState) -> None:
-        expired_refs = tuple(
-            result_ref
-            for result_ref, manifest in state.handles.items()
-            if state.current_user_turn >= manifest.expires_at_user_turn
-        )
-        if not expired_refs:
-            state.snapshots = {
-                key: snapshot
-                for key, snapshot in state.snapshots.items()
-                if state.current_user_turn < snapshot.expires_at_user_turn
-            }
-            return
-        expired = {
-            result_ref: state.handles.pop(result_ref)
-            for result_ref in expired_refs
-        }
-        for result_ref, manifest in expired.items():
-            state.expired_handles[result_ref] = replace(
-                manifest,
-                output_json="",
-                rendered="",
-                origin={},
-                delivery_manifest={},
-            )
+    def _expire_file_snapshots(state: _SessionState) -> None:
         state.snapshots = {
             key: snapshot
             for key, snapshot in state.snapshots.items()
@@ -1196,10 +897,6 @@ class InMemoryLogicalExecutionState:
                 else "delivery"
             ),
         )
-
-
-def page_count_for(rendered: str, page_size: int) -> int:
-    return max(1, math.ceil(len(str(rendered or "")) / max(256, int(page_size))))
 
 
 def content_digest(content: str) -> str:

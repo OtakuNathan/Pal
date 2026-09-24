@@ -120,3 +120,12 @@ def test_compact_leaves_checklist_and_its_current_projection_unchanged(tmp_path)
     assert result.success, result.failures
     assert checklist.show() == before
     assert provider.build_prompt_fragments(PromptAssemblyContext()) == fragments
+
+
+def test_legacy_all_completed_plan_is_not_reactivated():
+    service = ChecklistService()
+    port = ChecklistRuntimeStatePort(service)
+    prepared = port.prepare_restore_state({"plan": [{"step": "Done", "status": "completed"}]})
+    port.install_prepared_state(prepared)
+    assert service.show() is None
+    assert port.snapshot_state() == {"plan": None}
