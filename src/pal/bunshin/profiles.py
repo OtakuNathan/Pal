@@ -651,8 +651,6 @@ BUNSHIN_SKILL_REFERENCE_CAPABILITIES = CAPABILITY_GROUPS["skill_reference"]
 DEFAULT_BUNSHIN_DENIED_CAPABILITIES = frozenset(
     {
         "op_path_delete",
-        "op_behavior_advise",
-        "op_behavior_save",
         "op_channel_send_attachment",
         "op_memory_write",
         "op_memory_update",

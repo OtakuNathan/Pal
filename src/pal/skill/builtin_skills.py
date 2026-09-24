@@ -148,7 +148,7 @@ bypass review by issuing individual remember calls for the same proposals.
 Resident modules are core, execution, llm, channel (including the recovery socket),
 identity, memory, control, and failure. Resident means the whole module cannot be
 unloaded; some of its data has explicit refresh paths. Optional modules such as
-skill, behavior, checklist, proactive, artifact, Bunshin, MCP, LSP, sqlite_vec_l3,
+skill, checklist, proactive, artifact, Bunshin, MCP, LSP, sqlite_vec_l3,
 and web integrations belong to plugins. Check actual availability before use.
 
 | Surface | Change and activation | Verification / limits |
@@ -168,7 +168,7 @@ and web integrations belong to plugins. Check actual availability before use.
 | Bunshin profile/family customization | Use catalog read, set/reset_profile_override, set/reset_family_override, and catalog_refresh capabilities. | Overrides affect future Tasks, not existing snapshots. Catalog refresh reloads catalog data, not arbitrary sidecar Python code. |
 | Core mode and cache reminder | `core_configure` changes in-memory mode; `core_configure_cache_warm_deadline` persists reminder settings. | Inspect core_observe/core_cache_warm_deadline; mode is not a permanent config change. Reminder changes apply to scheduling, not a host restart. |
 | Search / browser settings | Use web_search provider config/auth/enable/active operations; browser_extension_manage controls local browser extensions. | Verify provider health/operation. Browser extension changes close current tabs; navigate again and verify the extension behavior. |
-| Memory provider, learned behavior and skills | Use their live management tools. Facts belong to memory, routing rules to behavior, reusable procedures to skills. | A learned behavior change does not edit system policy. Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
+| Memory provider and skills | Use their live management tools. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
 ## Reuse Core's system observation bus

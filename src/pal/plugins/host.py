@@ -809,21 +809,11 @@ class PluginHost:
         handle.mounted = False
 
     def _replay_optional_contributions(self, plugin_id: str) -> None:
-        behavior = self.context.port_registry.get("behavior:behavior")
         skill = self.context.port_registry.get("skill:skill")
-        if behavior is not None:
-            register = getattr(behavior, "register_declared_module", None)
-            if callable(register):
-                for generation in self.generations.values():
-                    register(generation.handle)
-        if skill is not None:
-            register = getattr(skill, "register_declared_module", None)
-            if callable(register):
-                for generation in self.generations.values():
-                    register(generation.handle)
-        if behavior is not None and skill is not None:
-            skill.behavior_repository = getattr(behavior, "repository", None)
-            behavior.skill_repository = getattr(skill, "repository", None)
+        register = getattr(skill, "register_declared_module", None)
+        if callable(register):
+            for generation in self.generations.values():
+                register(generation.handle)
 
     def _detach_generation(self, plugin_id: str) -> str:
         generation = self.generations.get(plugin_id)
@@ -849,14 +839,6 @@ class PluginHost:
         except Exception as exc:
             errors.append(f"unregister: {exc.__class__.__name__}: {exc}")
         try:
-            if plugin_id == "behavior":
-                skill = self.context.port_registry.get("skill:skill")
-                if skill is not None:
-                    skill.behavior_repository = None
-            elif plugin_id == "skill":
-                behavior = self.context.port_registry.get("behavior:behavior")
-                if behavior is not None:
-                    behavior.skill_repository = None
             generation.scope.absorb_handle_cleanups(handle)
         except Exception as exc:
             errors.append(f"provider: {exc.__class__.__name__}: {exc}")
@@ -1075,11 +1057,11 @@ class PluginHost:
         published = self.context.execution_runtime.mount_subtree(handle)
         try:
             handle.published_capabilities = published
-            self._register_behavior_declarations(handle)
+            self._register_skill_declarations(handle)
             return published
         except Exception:
             self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_behavior_declarations(module_id)
+            self._unregister_skill_declarations(module_id)
             handle.published_capabilities = []
             raise
 
@@ -1088,7 +1070,7 @@ class PluginHost:
         handle = self.context.module_registry.get(module_id)
         if handle is not None:
             self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_behavior_declarations(handle.module_id)
+            self._unregister_skill_declarations(handle.module_id)
             handle.published_capabilities = []
         return names
 
@@ -1114,21 +1096,13 @@ class PluginHost:
             for handler in handlers:
                 self.context.event_handler_registry.register(event_kind, handler, module_id=handle.module_id)
 
-    def _register_behavior_declarations(self, handle: ModuleHandle) -> None:
+    def _register_skill_declarations(self, handle: ModuleHandle) -> None:
         skill = self.context.port_registry.get("skill:skill")
         skill_register = getattr(skill, "register_declared_module", None)
         if callable(skill_register):
             skill_register(handle)
-        behavior = self.context.port_registry.get("behavior:behavior")
-        register = getattr(behavior, "register_declared_module", None)
-        if callable(register):
-            register(handle)
 
-    def _unregister_behavior_declarations(self, module_id: str) -> None:
-        behavior = self.context.port_registry.get("behavior:behavior")
-        unregister = getattr(behavior, "unregister_declared_module", None)
-        if callable(unregister):
-            unregister(module_id)
+    def _unregister_skill_declarations(self, module_id: str) -> None:
         skill = self.context.port_registry.get("skill:skill")
         skill_unregister = getattr(skill, "unregister_declared_module", None)
         if callable(skill_unregister):

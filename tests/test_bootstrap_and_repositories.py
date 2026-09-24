@@ -147,14 +147,14 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_builtin_provision_removes_stale_resident_module_manifests(self) -> None:
         builtin_root = self.registration.runtime.runtime_root / "plugins" / "_builtin"
-        for module_id in ("identity", "memory", "control", "failure"):
+        for module_id in ("identity", "memory", "control", "failure", "behavior"):
             stale_dir = builtin_root / module_id
             stale_dir.mkdir(parents=True, exist_ok=True)
             (stale_dir / "plugin.toml").write_text('plugin_id = "stale"\n', encoding="utf-8")
 
         self.wizard.provision_builtin_plugins(self.registration)
 
-        for module_id in ("identity", "memory", "control", "failure"):
+        for module_id in ("identity", "memory", "control", "failure", "behavior"):
             self.assertFalse((builtin_root / module_id / "plugin.toml").exists())
 
     def _write_demo_runtime_channel_provider(self) -> None:
@@ -579,6 +579,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             registration=self.registration,
             database=self.database,
         )
+
+        self.assertNotIn("behavior", handle.plugin_host.first_party_records)
+        self.assertNotIn("behavior:behavior", handle.core.context.port_registry)
+        self.assertIn("skill:skill", handle.core.context.port_registry)
 
         for module_id in (
             "core",
@@ -3872,6 +3876,63 @@ class _FakeTelegramUpdate:
 
 
 class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_typing_owners_share_loop_and_late_stop_cannot_stop_new_turn(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42", "thread_id": 7})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:a"})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:a"})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:b"})
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.endpoint._typing_tasks), 1)
+        typing = [payload for kind, payload in self.fake_bot.actions if kind == "typing"]
+        self.assertEqual(len(typing), 1)
+        self.assertEqual(typing[0]["message_thread_id"], 7)
+        changed_route = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        self.endpoint.send_status(changed_route, "working_stop", {"typing_owner": "turn:a"})
+        self.endpoint.send_status(changed_route, "working_stop", {"typing_owner": "turn:a"})
+        self.endpoint.send_status(handle, "working_stop", {})
+        self.assertEqual(len(self.endpoint._typing_tasks), 1)
+        self.endpoint.send_status(changed_route, "working_stop", {"typing_owner": "turn:b"})
+        await asyncio.sleep(0)
+        self.assertEqual(self.endpoint._typing_tasks, {})
+        self.assertEqual(self.endpoint._typing_owners, {})
+
+    async def test_transient_typing_failure_does_not_end_active_turn(self) -> None:
+        from unittest.mock import AsyncMock
+        self.fake_bot.send_chat_action = AsyncMock(side_effect=RuntimeError("temporary transport failure"))
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:a"})
+        await asyncio.sleep(0)
+        task = self.endpoint._typing_tasks["42:"]
+        self.assertFalse(task.done())
+        self.assertEqual(self.endpoint._typing_owners["42:"], {"turn:a"})
+        self.endpoint.send_status(handle, "working_stop", {"typing_owner": "turn:a"})
+        await asyncio.sleep(0)
+        self.assertTrue(task.cancelled())
+        self.assertEqual(self.endpoint._typing_owners, {})
+
+    async def test_cancelled_typing_callback_cannot_remove_replacement(self) -> None:
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:old"})
+        self.endpoint.send_status(handle, "working_stop", {"typing_owner": "turn:old"})
+        self.endpoint.send_status(handle, "typing_start", {"typing_owner": "turn:new"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.endpoint._typing_tasks), 1)
+        self.assertEqual(self.endpoint._typing_owners, {"42:": {"turn:new"}})
+
+    async def test_auxiliary_error_is_historical_and_recovers_only_on_same_operation(self) -> None:
+        self.endpoint._record_status_result("reaction", RuntimeError("Timed out"))
+        health = self.endpoint.inspect_health()
+        self.assertTrue(health["healthy"])
+        context = health["status_error_context"]
+        self.assertEqual(context["operation"], "reaction")
+        self.assertTrue(context["failed_at"])
+        self.assertIsNone(context["subsequent_success_at"])
+        self.endpoint._record_status_result("typing")
+        self.assertIsNone(self.endpoint.inspect_health()["status_error_context"]["subsequent_success_at"])
+        self.endpoint._record_status_result("reaction")
+        self.assertTrue(self.endpoint.inspect_health()["status_error_context"]["subsequent_success_at"])
+
     async def asyncSetUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_telegram_test_"))
         self.endpoint = TelegramChannelEndpoint(

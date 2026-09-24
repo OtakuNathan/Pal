@@ -273,7 +273,8 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     assert [item.label for item in plan_c.breakpoints] == ["stable", "anchor_fixed"]
     assert encoded_c.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded_c.extra_body["session_id"] == encoded_c.extra_body["prompt_cache_key"]
-    assert encoded_c.extra_body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    # OR hybrid keeps automatic caching by omitting explicit-only root options.
+    assert "prompt_cache_options" not in encoded_c.extra_body
     marked = _marked_blocks(payload_c)
     assert len(marked) == 2
     assert encoded_c.applied_cache_breakpoint_message_ids == (

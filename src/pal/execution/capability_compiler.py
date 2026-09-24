@@ -112,7 +112,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
             descriptor = CapabilityDescriptor(
                 name=public_alias,
                 canonical_path=canonical_path,
-                family=action_blueprint.family or action_blueprint.namespace,
+                family=action_blueprint.family,
                 source=node_blueprint.source,
                 display_name=public_alias,
                 aliases=(public_alias,),
@@ -238,8 +238,8 @@ def _underscore_canonical_path(
         return f"{namespace}_{node_blueprint.scope}_{canonical_module_id}_{action_blueprint.action_name}"
     if bool(action_blueprint.metadata.get("omit_family_in_canonical")):
         return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
-    family = _abbreviate_canonical_family(action_blueprint.family or "operation")
-    if family in {"operation", canonical_module_id}:
+    family = _abbreviate_canonical_family(action_blueprint.family)
+    if family in {"", "operation", canonical_module_id}:
         return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
     return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 

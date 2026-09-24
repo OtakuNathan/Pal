@@ -9,15 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.behavior import (
-    AffordanceDescriptor,
-    BehaviorAdviceRequest,
-    BehaviorAffordanceModel,
-    BehaviorRepository,
-    BehaviorService,
-    BehaviorSkillModel,
-    register_with_core as register_behavior_with_core,
-)
+from pal.skill.models import SkillModel
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import CompleteResult, EffectKind, Idempotency, RetryPolicy
@@ -57,12 +49,10 @@ class SkillSubsystemTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_skill_test_"))
         self.database = PalV2Database(self.root / "pal_skill.sqlite3")
-        self.database.initialize([BehaviorAffordanceModel, BehaviorSkillModel])
+        self.database.initialize([SkillModel])
         self.skill_repository = SkillRepository()
-        self.behavior_repository = BehaviorRepository(skill_repository=self.skill_repository)
         self.service = SkillService(
             repository=self.skill_repository,
-            behavior_repository=self.behavior_repository,
             runtime_root=self.root,
         )
 
@@ -142,7 +132,6 @@ class SkillSubsystemTests(unittest.TestCase):
     def test_assimilate_marks_oversized_manual_for_review_without_truncating(self) -> None:
         service = SkillService(
             repository=self.skill_repository,
-            behavior_repository=self.behavior_repository,
             runtime_root=self.root,
             admission_manual_char_budget=80,
         )
@@ -188,7 +177,6 @@ class SkillSubsystemTests(unittest.TestCase):
         }
         service = SkillService(
             repository=self.skill_repository,
-            behavior_repository=self.behavior_repository,
             runtime_root=self.root,
             llm_runtime=_FakeLLMRuntime(json.dumps(payload)),
         )
@@ -209,7 +197,7 @@ Run the workflow.
         self.assertIn("identity_or_system_override", result.structured["removed_risks"])
         self.assertNotIn("allowed-tools", service.llm_runtime.requests[0].messages[1].text)
 
-    def test_commit_writes_skill_file_and_thin_affordance(self) -> None:
+    def test_commit_writes_searchable_skill_without_advisor(self) -> None:
         candidate = asyncio.run(
             self.service.assimilate_async(
                 {
@@ -223,11 +211,8 @@ Run the workflow.
 
         self.assertEqual(result.status, "ok")
         self.assertIsNotNone(self.skill_repository.get_skill("safe.git.commit"))
+        self.assertNotIn("affordance", result.structured)
         self.assertTrue((self.root / "SKILL" / "safe.git.commit" / "skill.json").exists())
-        affordance = self.behavior_repository.get_affordance("skill.route.safe.git.commit")
-        self.assertIsNotNone(affordance)
-        self.assertEqual(affordance.skill_refs, ("safe.git.commit",))
-        self.assertEqual(affordance.prompt_hint, "Consider skill `safe.git.commit` when this scenario matches.")
 
     def test_duplicate_candidate_requires_replace_or_update(self) -> None:
         self.skill_repository.upsert_skill(
@@ -256,6 +241,7 @@ Run the workflow.
         self.assertEqual(result.structured["error"], "duplicate_skill_requires_update_or_replace")
 
     def test_inject_only_active_and_preserves_long_manual(self) -> None:
+        service = SkillService(repository=self.skill_repository, inject_manual_char_budget=10)
         self.skill_repository.upsert_skill(
             SkillDescriptor(
                 skill_id="active",
@@ -286,7 +272,6 @@ Run the workflow.
                 manual_text="x" * 100,
             )
         )
-        service = SkillService(repository=self.skill_repository, behavior_repository=self.behavior_repository, inject_manual_char_budget=10)
 
         active = SkillInjectTool(service=service).invoke({"skill_id": "active"})
         disabled = SkillInjectTool(service=service).invoke({"skill_id": "disabled"})
@@ -359,7 +344,7 @@ Run the workflow.
         self.assertEqual([hit["skill_id"] for hit in default.structured["hits"]], ["active.commit"])
         self.assertEqual([hit["skill_id"] for hit in disabled.structured["hits"]], ["disabled.commit"])
 
-    def test_skill_capabilities_keep_show_to_stats_and_operations_to_search_read_inject(self) -> None:
+    def test_skill_search_is_discoverable_as_introspection_with_other_aliases_preserved(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
@@ -375,6 +360,11 @@ Run the workflow.
 
         descriptors = core.context.capability_registry.descriptors
         self.assertEqual(descriptors["skill_inject"].module_id, "skill")
+        payload = core.context.execution_runtime._search_generation(
+            core.context.execution_runtime.registry_generation,
+            {"query": "skill_search", "namespace": "inspect", "module_name": "skill"},
+        )
+        self.assertIn("skill_search", [hit["alias"] for hit in payload["hits"]])
 
     def test_skill_inject_validates_through_facade_as_an_idempotent_read(self) -> None:
         self.skill_repository.upsert_skill(
@@ -462,8 +452,6 @@ Run the workflow.
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
-        behavior = BehaviorService(repository=self.behavior_repository)
-        register_behavior_with_core(core.context, behavior)
         core.publish_module_capabilities("skill")
 
         skill_id = "pal.self.maintenance"
@@ -476,8 +464,6 @@ Run the workflow.
                 search = SkillSearchTool(service=self.service).invoke({"query": query, "top_k": 3})
                 self.assertEqual(search.structured["hits"][0]["skill_id"], skill_id)
                 self.assertTrue(search.structured["hits"][0]["injectable"])
-                advice = asyncio.run(behavior.advise_async(BehaviorAdviceRequest(scenario=query, top_k=5)))
-                self.assertTrue(any(skill_id in candidate.skill_refs for candidate in advice.candidates))
 
         injected = SkillInjectTool(service=self.service).invoke({"skill_id": skill_id})
         self.assertEqual(injected.status, "ok")
@@ -625,130 +611,7 @@ Run the workflow.
         finally:
             handle.shutdown_sync()
 
-    def test_declared_development_skill_affordances_follow_owning_modules(self) -> None:
-        core = PalCore()
-        behavior_service = BehaviorService(repository=self.behavior_repository)
-        register_core_with_core(core)
-        register_execution_with_core(core.context)
-        register_skill_with_core(core.context, self.service)
-        register_behavior_with_core(core.context, behavior_service)
-        core.publish_module_capabilities("skill")
 
-        plugin_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="create pal plugin capability with build_plugin", top_k=5))
-        )
-        llm_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add llm model hook endpoint", top_k=5))
-        )
-        channel_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add channel provider with provider.toml and slash command", top_k=5))
-        )
-
-        plugin = next(candidate for candidate in plugin_advice.candidates if candidate.affordance_id == "declared.skill.pal_plugin_development")
-        llm = next(candidate for candidate in llm_advice.candidates if candidate.affordance_id == "declared.skill.pal_llm_model_hook_endpoint_development")
-        channel = next(candidate for candidate in channel_advice.candidates if candidate.affordance_id == "declared.skill.pal_channel_provider_development")
-
-        self.assertEqual(plugin.skill_refs, ("pal.plugin.development",))
-        self.assertEqual(llm.skill_refs, ("pal.llm.model_hook_endpoint.development",))
-        self.assertEqual(channel.skill_refs, ("pal.channel.provider.development",))
-        self.assertEqual(plugin.visibility_mode, "discoverable")
-        self.assertEqual(llm.visibility_mode, "discoverable")
-        self.assertEqual(channel.visibility_mode, "discoverable")
-        self.assertFalse(plugin.metadata["resident"])
-        self.assertFalse(llm.metadata["resident"])
-        self.assertFalse(channel.metadata["resident"])
-        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_plugin_development"))
-        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_model_hook_endpoint_development"))
-        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_channel_provider_development"))
-
-        pre_lsp_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add new language lsp template and language server config", top_k=5))
-        )
-        self.assertNotIn("declared.skill.pal_lsp_template_development", {candidate.affordance_id for candidate in pre_lsp_advice.candidates})
-
-        lsp_handle = build_lsp_plugin(runtime_root=self.root).register_with_core(core.context)
-        core.publish_module_capabilities("lsp")
-        try:
-            lsp_advice = asyncio.run(
-                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add new language lsp template and language server config", top_k=5))
-            )
-            lsp = next(candidate for candidate in lsp_advice.candidates if candidate.affordance_id == "declared.skill.pal_lsp_template_development")
-            self.assertEqual(lsp.skill_refs, ("pal.lsp.template.development",))
-            self.assertEqual(lsp.visibility_mode, "discoverable")
-            self.assertFalse(lsp.metadata["resident"])
-            self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_lsp_template_development"))
-
-            core.detach_module("lsp")
-            after_lsp = asyncio.run(
-                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add new language lsp template and language server config", top_k=5))
-            )
-            self.assertIn("declared.skill.pal_lsp_template_development", {candidate.affordance_id for candidate in after_lsp.candidates})
-        finally:
-            lsp_handle.shutdown_sync()
-
-        pre_bunshin_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add bunshin workflow scheduler repair bill with GateDefinition", top_k=5))
-        )
-        self.assertNotIn("declared.skill.pal_bunshin_development", {candidate.affordance_id for candidate in pre_bunshin_advice.candidates})
-
-        handle = register_bunshin_with_core(core.context, runtime_root=self.root)
-        core.publish_module_capabilities("bunshin")
-        try:
-            bunshin_advice = asyncio.run(
-                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add bunshin workflow scheduler repair bill with GateDefinition", top_k=5))
-            )
-            profile_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="create a new bunshin profile toml with workflow_next and capability_groups", top_k=5)
-                )
-            )
-            affordances = {candidate.affordance_id for candidate in [*bunshin_advice.candidates, *profile_advice.candidates]}
-            self.assertNotIn("declared.skill.pal_bunshin_development", affordances)
-            self.assertNotIn("declared.skill.pal_bunshin_profile_development", affordances)
-        finally:
-            handle.shutdown_sync()
-
-    def test_non_bunshin_development_skill_routes_remain_discoverable(self) -> None:
-        core = PalCore()
-        behavior_service = BehaviorService(repository=self.behavior_repository)
-        register_core_with_core(core)
-        register_execution_with_core(core.context)
-        register_skill_with_core(core.context, self.service)
-        register_behavior_with_core(core.context, behavior_service)
-        lsp_handle = build_lsp_plugin(runtime_root=self.root).register_with_core(core.context)
-        for module_id in ("execution", "skill", "behavior", "lsp"):
-            core.publish_module_capabilities(module_id)
-        try:
-            plugin_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="我要写一个 Pal plugin，新增 capability", top_k=5)
-                )
-            )
-            llm_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="加一个 LLM model hook endpoint", top_k=5)
-                )
-            )
-            channel_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="给 Pal 加一个 channel provider，带 provider.toml 和 inline keyboard", top_k=5)
-                )
-            )
-            lsp_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="给 Pal 加一个新语言 LSP template 和 language server config", top_k=5)
-                )
-            )
-            self.assertEqual(plugin_advice.candidates[0].affordance_id, "declared.skill.pal_plugin_development")
-            self.assertEqual(plugin_advice.candidates[0].skill_refs, ("pal.plugin.development",))
-            self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_model_hook_endpoint_development")
-            self.assertEqual(llm_advice.candidates[0].skill_refs, ("pal.llm.model_hook_endpoint.development",))
-            self.assertEqual(channel_advice.candidates[0].affordance_id, "declared.skill.pal_channel_provider_development")
-            self.assertEqual(channel_advice.candidates[0].skill_refs, ("pal.channel.provider.development",))
-            self.assertEqual(lsp_advice.candidates[0].affordance_id, "declared.skill.pal_lsp_template_development")
-            self.assertEqual(lsp_advice.candidates[0].skill_refs, ("pal.lsp.template.development",))
-        finally:
-            lsp_handle.shutdown_sync()
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
         core = PalCore()
@@ -777,7 +640,6 @@ Run the workflow.
     def test_invalid_sanitizer_json_returns_structured_failure(self) -> None:
         service = SkillService(
             repository=self.skill_repository,
-            behavior_repository=self.behavior_repository,
             runtime_root=self.root,
             llm_runtime=_FakeLLMRuntime("{not-json"),
         )

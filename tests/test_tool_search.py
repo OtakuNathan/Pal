@@ -122,6 +122,15 @@ class ToolSearchTests(unittest.TestCase):
         self.assertEqual(modules["memory"], 1)
         self.assertEqual(modules["web_search"], 1)
 
+    def test_wrong_family_returns_recovery_without_unfiltered_hits(self) -> None:
+        payload = self.search(query="web_lookup", family="channel", facets=True)
+        self.assertEqual(payload["hits"], [])
+        self.assertEqual(payload["total_count"], 0)
+        self.assertEqual(payload["facets"]["families"], [])
+        families = {item["family"] for item in payload["filter_suggestions"]["families"]}
+        self.assertIn("web", families)
+        self.assertIn("filters exclude", payload["usage_hint"])
+
     def test_jieba_terms_find_chinese_search_text(self) -> None:
         payload = self.search(query="记忆召回")
         self.assertEqual(payload["hits"][0]["alias"], "memory_lookup")

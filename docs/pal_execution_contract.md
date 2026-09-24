@@ -144,6 +144,12 @@ flowchart LR
 
 `Capability` 的主分桶方式不是 effect class，而是 family。
 
+family 必须来自 owner 的显式声明。未声明时保留空字符串，不能用 namespace、
+module、scope 或 `general` / `capability` / `unknown` 补造分类。
+搜索命中和工具清单保留这个空值；family facets 只统计非空的真实声明。
+namespace 和 family 独立，行为路由也不得相互推导。未声明 family 的能力仍可
+按 alias、query、module 或 namespace 正常发现和调用。
+
 推荐 family 至少包括：
 
 - `observe`
@@ -616,23 +622,10 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 ## Behavior Layer Integration
 
-Execution does not decide when a capability should come to mind. That is owned by the `behavior` subsystem.
-
-The split is:
-
-- `Execution` owns capability inventory and invocation.
-- `Behavior` owns scenario-to-action advice.
-- `Skill` remains manual-only.
-- `Affordance` points to capability refs, skill refs, and memory query hints.
-
-The LLM-facing difference is:
-
-- use `tool_search` to discover available capability inventory.
-- use `behavior_advise` to ask which route fits a scenario.
-- use `skill_inject` to fetch a manual only when the user or selected workflow
-  explicitly requests it; a returned `skill_ref` does not trigger injection by itself.
-
-See [pal_behavior_contract.md](pal_behavior_contract.md).
+System explains that directly exposed tools are not the complete capability inventory.
+Use capability search when an unfamiliar ability is needed; tool contracts and result
+next-action hints describe how to use it. Skills provide searchable manuals, and memory
+provides durable facts and experience. There is no separate behavior advisor routing layer.
 
 ## Non-Goals
 

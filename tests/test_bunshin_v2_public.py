@@ -5118,13 +5118,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(reconstructed_prompt, first_prompt)
 
     def test_manager_reuses_skill_inject_user_context_projection(self) -> None:
-        from pal.behavior.models import BehaviorSkillModel
+        from pal.skill.models import SkillModel
         from pal.foundation import PalV2Database
         from pal.skill.contracts import SkillDescriptor
         from pal.skill.repository import SkillRepository
 
         database = PalV2Database(self.runtime_root / "pal.sqlite3")
-        database.initialize((BehaviorSkillModel,))
+        database.initialize((SkillModel,))
         try:
             SkillRepository().upsert_skill(
                 SkillDescriptor(

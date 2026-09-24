@@ -653,8 +653,13 @@ class _PlaywrightCliWorker:
             argv = [command]
             if operation == "new" and str(args.get("url") or "").strip():
                 argv = _cli_args(command, _validate_url(args["url"]))
-            if operation in {"select", "close"} and args.get("index") is not None:
-                argv = _cli_args(command, str(max(0, int(args["index"]))))
+            if operation in {"select", "close"}:
+                index = args.get("index")
+                if index is None and operation == "close":
+                    return {"tabs": self._run_write(record, argv, timeout_ms=timeout_ms)}
+                if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                    raise BrowserServiceError("select/close requires a nonnegative index from browser_tabs list", code="invalid_arguments")
+                argv = _cli_args(command, str(index))
             return {"tabs": self._run_write(record, argv, timeout_ms=timeout_ms)}
         if action == "dialog":
             operation = str(args.get("operation") or "").lower()

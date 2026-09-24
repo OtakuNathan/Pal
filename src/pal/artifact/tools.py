@@ -169,6 +169,8 @@ class ArtifactReadTool:
             )
             status = RuntimeStatus.OK if result.ok else RuntimeStatus.UNSUPPORTED
             return _result(status, "Artifact read", result.to_dict(), text=result.text)
+        except ValueError as exc:
+            return _result(RuntimeStatus.INVALID, "Artifact read failed", {"reason": str(exc)})
         except KeyError as exc:
             return _result(RuntimeStatus.NOT_FOUND, "Artifact read failed", {"reason": _key_error_reason(exc)})
 
@@ -188,7 +190,6 @@ class ArtifactSearchTool:
                 scope_key,
                 query=str(args.get("query") or ""),
                 kind=str(args.get("kind") or "") or None,
-                time_hint=str(args.get("time_hint") or "recent"),
                 limit=_optional_int(args.get("limit")) or 5,
             )
             structured = {"results": [item.to_dict() for item in results], "ttl_refreshed": False}

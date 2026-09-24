@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.skill.models import SkillModel
 
 from pal.shared.tool_protocol import new_tool_call
 
@@ -17,7 +18,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from pal.behavior import BehaviorRepository, BehaviorAffordanceModel, BehaviorSkillModel
 from pal.bootstrap import compose_runtime
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
@@ -577,11 +577,10 @@ class RealLLMIntegrationTests(unittest.TestCase):
         runtime = _real_runtime(max_output_tokens=4096)
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_skill_"))
         database = PalV2Database(runtime_root / "pal_skill.sqlite3")
-        database.initialize([BehaviorAffordanceModel, BehaviorSkillModel])
+        database.initialize([SkillModel])
         repository = SkillRepository()
         service = SkillService(
             repository=repository,
-            behavior_repository=BehaviorRepository(skill_repository=repository),
             llm_runtime=runtime,
             runtime_root=runtime_root,
         )
@@ -616,11 +615,10 @@ class RealLLMIntegrationTests(unittest.TestCase):
         runtime = _real_runtime(max_output_tokens=4096)
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_skill_"))
         database = PalV2Database(runtime_root / "pal_skill.sqlite3")
-        database.initialize([BehaviorAffordanceModel, BehaviorSkillModel])
+        database.initialize([SkillModel])
         repository = SkillRepository()
         service = SkillService(
             repository=repository,
-            behavior_repository=BehaviorRepository(skill_repository=repository),
             llm_runtime=runtime,
             runtime_root=runtime_root,
         )

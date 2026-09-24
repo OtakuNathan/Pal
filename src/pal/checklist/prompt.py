@@ -37,8 +37,11 @@ class ChecklistPromptFragmentProvider:
                 title="Task Flow",
                 content=(
                     "Keep the active checklist small and concrete; its first unfinished item is the work cursor. "
-                    "Call checklist_check for phases actually completed, then checklist_clear when the task completes, "
-                    "is cancelled, or is replaced. Independent progress updates may share a response with other tools. "
+                    "Use checklist_check for one completed phase or checklist_upsert to update several phases together. "
+                    "Before marking the final phase complete, review the user's requirements against actual results and note omissions or unverified items; do not repeat completed checks. "
+                    "The last checklist_check automatically closes the checklist. Use checklist_clear to cancel or replace work, or close a plan completed through batch upsert. "
+                    "Batch checks for already-confirmed phases with the next useful tool calls in the same response instead of spending a separate round on bookkeeping. "
+                    "For example, check a completed inspection alongside the next edit; wait for test results before checking verification complete. "
                     "Do not perform remaining work just to clear the checklist or repeat verification solely to close it. "
                     "Summarize from actual execution evidence, including omitted checks and unfinished work; the checklist "
                     "is not truth, evidence, or permission. Complex read-only investigations may use it when long-running "

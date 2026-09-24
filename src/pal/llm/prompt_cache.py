@@ -633,7 +633,8 @@ class PromptCacheCoordinator:
             with self._lock:
                 state = self._tails.get(plan.scope_key)
                 expected = tuple(b.path for b in plan.breakpoints)
-                audited, wire_hash = wire.audit(encoded, expected, mode=plan.mode)
+                audited, wire_hash = wire.audit(encoded, expected, mode=plan.mode,
+                    gateway=plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT)
                 actual_clean = wire.clean_request(encoded, finalize=False)
                 audited &= all(wire.boundary_at(actual_clean, b.message_id, b.path)
                                == wire.boundary_at(plan.prepared_encoded, b.message_id, b.path)

@@ -367,7 +367,8 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                 if profile == PROFILES[1]:
                     assert "prompt_cache_options" not in request.extra_body
                 if profile == PROFILES[2]:
-                    assert request.extra_body["prompt_cache_options"]["mode"] == "implicit"
+                    assert "prompt_cache_options" not in request.extra_body
+                    assert "prompt_cache_breakpoint" in str(payload)
             assert llm.usage_ledger.snapshot()["provider_request_count"] == rounds + len(transport.summary_requests)
             assert llm.usage_ledger.snapshot()["cost"] == pytest.approx((rounds + len(transport.summary_requests)) * 0.01)
             serialized = json.dumps(records)

@@ -24,11 +24,11 @@ class ModuleLifecycle:
         published = self.context.execution_runtime.mount_subtree(handle)
         try:
             handle.published_capabilities = published
-            self._register_behavior_declarations(handle)
+            self._register_skill_declarations(handle)
             return published
         except Exception:
             self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_behavior_declarations(module_id)
+            self._unregister_skill_declarations(module_id)
             handle.published_capabilities = []
             raise
 
@@ -37,7 +37,7 @@ class ModuleLifecycle:
         handle = self.context.module_registry.get(module_id)
         if handle is not None:
             self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_behavior_declarations(handle.module_id)
+            self._unregister_skill_declarations(handle.module_id)
         handle = self.context.module_registry.get(module_id)
         if handle is not None:
             handle.published_capabilities = []
@@ -118,21 +118,13 @@ class ModuleLifecycle:
         for provider in handle.prompt_fragment_providers:
             self.context.prompt_fragment_registry.register(provider)
 
-    def _register_behavior_declarations(self, handle) -> None:
+    def _register_skill_declarations(self, handle) -> None:
         skill = self.context.port_registry.get("skill:skill")
         skill_register = getattr(skill, "register_declared_module", None)
         if callable(skill_register):
             skill_register(handle)
-        behavior = self.context.port_registry.get("behavior:behavior")
-        register = getattr(behavior, "register_declared_module", None)
-        if callable(register):
-            register(handle)
 
-    def _unregister_behavior_declarations(self, module_id: str) -> None:
-        behavior = self.context.port_registry.get("behavior:behavior")
-        unregister = getattr(behavior, "unregister_declared_module", None)
-        if callable(unregister):
-            unregister(module_id)
+    def _unregister_skill_declarations(self, module_id: str) -> None:
         skill = self.context.port_registry.get("skill:skill")
         skill_unregister = getattr(skill, "unregister_declared_module", None)
         if callable(skill_unregister):

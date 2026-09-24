@@ -63,9 +63,6 @@ class StubRuntimeHandle:
         manager = self.proactive_manager
         return getattr(manager, "repository", None)
 
-    @property
-    def behavior_service(self):
-        return self._optional_port("behavior:behavior")
 
     @property
     def skill_service(self):

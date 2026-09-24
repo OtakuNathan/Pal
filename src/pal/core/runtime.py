@@ -1056,9 +1056,24 @@ class PalCore(MemoryMaintenanceMixin):
         self._on_turn_task_done(continuation.turn_id, task)
 
     async def run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
-        self.state.active_turns[continuation.turn_id] = continuation
-        self._begin_tool_result_turn(continuation)
-        return await self._run_turn_continuation_async(continuation)
+        # Tracked callers already own paired events through their task callback.
+        owns_events = self.state.turn_tasks.get(continuation.turn_id) is not asyncio.current_task()
+        payload = self._tracked_turn_event_payload(continuation)
+        if owns_events:
+            self.context.turn_event_bus.emit(TURN_START, payload)
+        status = "failed"
+        try:
+            self.state.active_turns[continuation.turn_id] = continuation
+            self._begin_tool_result_turn(continuation)
+            outcome = await self._run_turn_continuation_async(continuation)
+            status = "success"
+            return outcome
+        except asyncio.CancelledError:
+            status = "interrupted"
+            raise
+        finally:
+            if owns_events:
+                self.context.turn_event_bus.emit(TURN_END, {**payload, "status": status})
 
     def _begin_tool_result_turn(self, continuation: TurnContinuation) -> None:
         begin = getattr(self.context.execution_runtime, "begin_tool_result_turn", None)
@@ -1117,7 +1132,7 @@ class PalCore(MemoryMaintenanceMixin):
                     delivery_binding=delivery_binding,
                     schedule_timer=not self.state.pending_channel_turns,
                 )
-            self._queue_channel_status(channel_envelope, "working_stop")
+            self._queue_channel_status(channel_envelope, "working_stop", {"typing_owner": f"turn:{turn_id}"})
             await self._start_next_queued_turn_async()
 
     def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
@@ -1152,8 +1167,9 @@ class PalCore(MemoryMaintenanceMixin):
     ) -> bool | None:
         await self.expire_pending_control_requests_async()
         status_route = action.route or (action.delivery.route if action.delivery is not None else None)
+        typing_payload = {"typing_owner": f"control:{uuid4().hex}"}
         with contextlib.suppress(Exception):
-            await self._status_to_route_async(status_route, "typing_start", {})
+            await self._status_to_route_async(status_route, "typing_start", typing_payload)
         try:
             if action.delivery is not None:
                 return await self._deliver_control_delivery_async(
@@ -1245,7 +1261,7 @@ class PalCore(MemoryMaintenanceMixin):
             )
         finally:
             with contextlib.suppress(Exception):
-                await self._status_to_route_async(status_route, "working_stop", {})
+                await self._status_to_route_async(status_route, "working_stop", typing_payload)
 
     async def publish_control_catalog_async(self, *, endpoint_id: str | None = None) -> None:
         control_plane = self.context.port_registry.get("control:control")
@@ -1922,16 +1938,15 @@ class PalCore(MemoryMaintenanceMixin):
             await self._complete_compact_reply_async(action, message)
             return
         result = run_result.memory_result
-        entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
-        summary_count = getattr(result, "metadata", {}).get("compact_summary_count", 0) if result else 0
-        retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
-        storage_text = "L1 compact summary updated." if summary_count else "No compact summary was stored."
+        reply_text = "Context compacted."
+        if str(getattr(result, "summary", "") or "").strip():
+            reply_text += " Continuity summary updated."
         normalization_diagnostics = compact_normalization_diagnostics(result)
         if normalization_diagnostics:
-            storage_text += f" {len(normalization_diagnostics)} optional format issues normalized or skipped."
+            reply_text += f" {len(normalization_diagnostics)} optional format issues normalized or skipped."
         await self._complete_compact_reply_async(
             action,
-            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
+            reply_text,
         )
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:

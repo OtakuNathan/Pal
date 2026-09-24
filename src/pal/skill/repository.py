@@ -5,7 +5,7 @@ from typing import Iterable
 
 from peewee import DoesNotExist
 
-from pal.behavior.models import BehaviorSkillModel
+from pal.skill.models import SkillModel
 from pal.foundation.persistence import utc_now
 from pal.skill.contracts import (
     SKILL_SOURCE_DECLARED,
@@ -31,7 +31,7 @@ def _tuple(value: object) -> tuple[str, ...]:
 class SkillRepository:
     def upsert_skill(self, descriptor: SkillDescriptor) -> SkillDescriptor:
         now = utc_now()
-        existing = BehaviorSkillModel.get_or_none(BehaviorSkillModel.skill_id == descriptor.skill_id)
+        existing = SkillModel.get_or_none(SkillModel.skill_id == descriptor.skill_id)
         created_at = descriptor.created_at or (existing.created_at if existing is not None else now)
         updated_at = descriptor.updated_at or now
         metadata = dict(descriptor.metadata or {})
@@ -48,7 +48,7 @@ class SkillRepository:
             }
         )
         enabled = bool(descriptor.enabled) and descriptor.status not in {SKILL_STATUS_DISABLED, SKILL_STATUS_DEPRECATED}
-        BehaviorSkillModel.insert(
+        SkillModel.insert(
             skill_id=descriptor.skill_id,
             module_id=descriptor.module_id,
             title=descriptor.title,
@@ -66,15 +66,15 @@ class SkillRepository:
 
     def get_skill(self, skill_id: str) -> SkillDescriptor | None:
         try:
-            return _skill_from_model(BehaviorSkillModel.get_by_id(skill_id))
+            return _skill_from_model(SkillModel.get_by_id(skill_id))
         except DoesNotExist:
             return None
 
     def list_skills(self, *, enabled_only: bool = False, active_only: bool = False) -> tuple[SkillDescriptor, ...]:
-        query = BehaviorSkillModel.select()
+        query = SkillModel.select()
         if enabled_only or active_only:
-            query = query.where(BehaviorSkillModel.enabled == True)  # noqa: E712
-        query = query.order_by(BehaviorSkillModel.skill_id)
+            query = query.where(SkillModel.enabled == True)  # noqa: E712
+        query = query.order_by(SkillModel.skill_id)
         skills = tuple(_skill_from_model(row) for row in query)
         if active_only:
             skills = tuple(skill for skill in skills if skill.active)
@@ -82,8 +82,8 @@ class SkillRepository:
 
     def delete_declared_skills_for_module(self, module_id: str) -> int:
         return (
-            BehaviorSkillModel.delete()
-            .where((BehaviorSkillModel.module_id == module_id) & (BehaviorSkillModel.source_kind == SKILL_SOURCE_DECLARED))
+            SkillModel.delete()
+            .where((SkillModel.module_id == module_id) & (SkillModel.source_kind == SKILL_SOURCE_DECLARED))
             .execute()
         )
 
@@ -120,7 +120,7 @@ class SkillRepository:
         )
 
 
-def _skill_from_model(row: BehaviorSkillModel) -> SkillDescriptor:
+def _skill_from_model(row: SkillModel) -> SkillDescriptor:
     metadata = dict(row.metadata_blob or {})
     status = str(metadata.get("status") or (SKILL_STATUS_ACTIVE if row.enabled else SKILL_STATUS_DISABLED))
     return SkillDescriptor(

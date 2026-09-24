@@ -490,13 +490,13 @@ class BunshinManager:
             from pal.skill.repository import SkillRepository
             from pal.skill.service import SkillService
             from pal.skill.tools import SkillInjectTool
-            from pal.behavior.models import BehaviorSkillModel
+            from pal.skill.models import SkillModel
 
             self._skill_database = PalV2Database(
                 db_path=self.runtime_db_path or Path(self.runtime_root) / "pal.sqlite3",
                 read_only=True,
             )
-            self._skill_database.initialize((BehaviorSkillModel,))
+            self._skill_database.initialize((SkillModel,))
             self._skill_inject_tool = SkillInjectTool(
                 service=SkillService(
                     repository=SkillRepository(),

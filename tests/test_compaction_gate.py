@@ -514,7 +514,7 @@ def test_manual_real_engine_vertical_smoke(tmp_path):
 
         core._complete_compact_reply_async = record_reply
         await core._handle_compact_memory_async(_action())
-        assert replies and replies[0].startswith("Context compacted.")
+        assert replies == ["Context compacted. Continuity summary updated."]
         assert not core.state.compaction_tickets
         kinds = [
             message.kind

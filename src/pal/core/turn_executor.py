@@ -2059,7 +2059,6 @@ class TurnExecutor:
                 memory_service.l2_store.tick_heat()
             except Exception:
                 pass
-        self._tick_behavior_lifecycle()
         self._reap_expired_artifacts()
         return result
 
@@ -2079,15 +2078,6 @@ class TurnExecutor:
                 }
             )
 
-    def _tick_behavior_lifecycle(self) -> None:
-        behavior_service = self.context.port_registry.get("behavior:behavior")
-        tick = getattr(behavior_service, "tick_advisor_hints", None)
-        if not callable(tick):
-            return
-        try:
-            tick()
-        except Exception:
-            pass
 
     # ── shared compaction engine ─────────────────────────────────────────
 

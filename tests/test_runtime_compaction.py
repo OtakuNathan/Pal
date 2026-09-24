@@ -912,7 +912,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             in str(request.metadata.get("purpose") or "")
         ]
         self.assertEqual(len(compaction_requests), 1)
-        self.assertEqual(replies[-1].split(".")[0], "Context compacted")
+        self.assertEqual(replies[-1], "Context compacted. Continuity summary updated.")
         self.assertEqual(statuses[-1][0], "interactive_open")
         spec = statuses[-1][1]["spec"]
         self.assertIn("Nothing is saved until final submission", spec.text)

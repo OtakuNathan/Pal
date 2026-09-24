@@ -245,7 +245,7 @@ class MemoryIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show memory runtime state.",
             use_when="Diagnosing memory system health — provider count, active provider, record counts.",
-            do_not_use_when="Recalling specific memories (use recall_memory). Checking behavior routing (use behavior_show).",
+            do_not_use_when="Recalling specific memories (use recall_memory).",
             failure_next_steps="Read-only diagnostic. If no active provider, check memory_list_providers.",
         ), aliases=("memory_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -342,7 +342,6 @@ class MemoryIntrospectionProvider:
             do_not_use_when=(
                 "Not for current runtime state (inspect live capabilities). "
                 "Not for current external facts (verify externally). "
-                "Not for behavior routing rules (use advise_behavior)."
             ),
             failure_next_steps=(
                 "Use targeted queries with limit 3-5. "
@@ -406,7 +405,6 @@ class MemoryIntrospectionProvider:
                 "Use update_memory only for an explicit correction to a known record, never for speculative consolidation."
             ),
             do_not_use_when=(
-                "Not for behavior rules (use learn_behavior). "
                 "Not for current runtime state or external facts. "
                 "Do not invent mem_ref values. Canonical conflicts require explicit update."
             ),
@@ -556,7 +554,6 @@ class MemoryIntrospectionProvider:
                 "Copy mem_ref exactly from recall_memory results, including prefixes like fact: or case:."
             ),
             do_not_use_when=(
-                "Not for behavior guidance (use forget_behavior). "
                 "Do not invent or shorten mem_ref values."
             ),
             failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If deletion may have succeeded, reconcile by recalling that mem_ref before following any retry affordance; do not issue a blind duplicate delete.",

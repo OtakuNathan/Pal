@@ -15,6 +15,13 @@ the current real user input, or the compact continuity block for the first turn
 using that compact generation. Runtime context presented as user content is not
 an independent user anchor. Identical positions are deduplicated.
 
+Hybrid wire encoding differs by provider: direct OpenAI requests send
+`prompt_cache_options: {"mode": "implicit", "ttl": "30m"}`. OpenRouter requests
+omit that object and send only the S/T block markers and routing keys; automatic
+caching remains enabled. OpenRouter's [published schema](https://openrouter.ai/openapi.json)
+only accepts `explicit` as the request-level mode (checked 2026-09-23).
+Explicit mode still sends `{"mode": "explicit", "ttl": "30m"}` on both providers.
+
 The OpenAI implementation keeps the last two distinct submitted tail positions.
 The next request carries the most recent still-valid position before its current
 C. Rebuilding a request or retrying the same C does not consume the previous

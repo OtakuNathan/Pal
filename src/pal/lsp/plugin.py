@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation.service_logging import current_service_log_sink_description
@@ -156,87 +155,6 @@ def _position_schema() -> dict[str, Any]:
     source="builtin:lsp",
     target_kind="lsp_provider",
     path_module_id="lsp",
-)
-@affordance(
-    affordance_id="declared.lsp.code_intelligence",
-    title="LSP code intelligence",
-    scenario_text=(
-        "Pal is reading, navigating, editing, reviewing, or verifying source code and may benefit from "
-        "symbol-aware language-server information."
-    ),
-    prompt_hint=(
-        "After selecting a project or worktree, call lsp_prepare_workspace once before using LSP code "
-        "intelligence; call it again only when compile commands, include paths, SDK stubs, or language settings "
-        "change. Then use LSP capabilities for symbol-aware navigation and verification: "
-        "use read_tool to inspect the exact indirect alias, then invoke it with call_tool. Useful aliases are "
-        "lsp_document_symbols and lsp_workspace_symbols for structure; lsp_definition, lsp_references, lsp_hover, "
-        "lsp_prepare_call_hierarchy, lsp_incoming_calls, and lsp_outgoing_calls for relationships; and "
-        "lsp_diagnostics after edits when a matching server is available. "
-        "Pair LSP with source reads, search, and tests; do not treat LSP as a substitute for inspecting source."
-    ),
-    activation_terms=(
-        "code",
-        "source",
-        "symbol",
-        "definition",
-        "references",
-        "diagnostics",
-        "lsp",
-        "language server",
-        "python",
-        "cpp",
-        "typescript",
-        "读代码",
-        "代码导航",
-        "诊断",
-    ),
-    capability_refs=(
-        "lsp_status",
-        "lsp_prepare_workspace",
-        "lsp_doctor",
-        "lsp_diagnostics",
-        "lsp_hover",
-        "lsp_definition",
-        "lsp_implementation",
-        "lsp_references",
-        "lsp_prepare_call_hierarchy",
-        "lsp_incoming_calls",
-        "lsp_outgoing_calls",
-        "lsp_document_symbols",
-        "lsp_workspace_symbols",
-    ),
-    priority=75,
-    activation_threshold=0.15,
-)
-@affordance(
-    affordance_id="declared.skill.pal_lsp_template_development",
-    title="Pal LSP template development skill",
-    scenario_text=(
-        "The user wants to add, repair, test, or hot-load an LSP server template, language server config, "
-        "or new programming language LSP support."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.lsp.template.development` before creating "
-        "plugins/lsp/servers templates or LSP language server config."
-    ),
-    activation_terms=(
-        "lsp template",
-        "language server template",
-        "new language lsp",
-        "add lsp support",
-        "add language support",
-        "language server",
-        "plugins/lsp/servers",
-        "language_ids",
-        "op_lsp_mgmt_rescan",
-        "lsp 插件",
-        "语言服务器",
-        "新语言",
-    ),
-    skill_refs=(PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "plugins/lsp/servers"},
 )
 @dataclass
 class LspManagerPluginProvider:

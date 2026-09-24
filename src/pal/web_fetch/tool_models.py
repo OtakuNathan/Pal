@@ -7,6 +7,13 @@ from pydantic import Field, create_model
 from pal.execution.tool_facade import StrictToolModel, StructuredToolOutput
 
 
+TARGET_DESCRIPTION = (
+    "Current snapshot ref such as e15, or a unique CSS selector (#main > button.submit) "
+    "or Playwright locator (getByRole('button', { name: 'Submit' })). "
+    "Obtain refs from browser_snapshot/browser_find on the current page; refresh after navigation or stale-ref errors."
+)
+
+
 def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
     return create_model(name, __base__=StrictToolModel, **fields)
 
@@ -27,7 +34,7 @@ BrowserReadInput = _strict_model(
 BrowserSnapshotInput = _strict_model(
     "BrowserSnapshotInput",
     {
-        "target": (str | None, Field(None)),
+        "target": (str | None, Field(None, description=TARGET_DESCRIPTION)),
         "depth": (int | None, Field(8)),
         "boxes": (bool, Field(False)),
         "max_chars": (int, Field(12000)),
@@ -45,9 +52,9 @@ BrowserFindInput = _strict_model(
 BrowserClickInput = _strict_model(
     "BrowserClickInput",
     {
-        "target": (str, Field(...)),
+        "target": (str, Field(..., description=TARGET_DESCRIPTION)),
         "button": (Literal["left", "right", "middle"], Field("left")),
-        "modifiers": (list[str], Field(default_factory=list)),
+        "modifiers": (list[Literal["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]], Field(default_factory=list, description="Modifier keys held during the click.")),
         "double": (bool, Field(False)),
         "timeout_ms": (int, Field(15000)),
     },
@@ -55,7 +62,7 @@ BrowserClickInput = _strict_model(
 BrowserFillInput = _strict_model(
     "BrowserFillInput",
     {
-        "target": (str, Field(...)),
+        "target": (str, Field(..., description=TARGET_DESCRIPTION)),
         "text": (str, Field(...)),
         "submit": (bool, Field(False)),
         "timeout_ms": (int, Field(15000)),
@@ -67,24 +74,24 @@ BrowserTypeInput = _strict_model(
 )
 BrowserPressInput = _strict_model(
     "BrowserPressInput",
-    {"key": (str, Field(...)), "timeout_ms": (int, Field(15000))},
+    {"key": (str, Field(..., description="Playwright key or chord, e.g. Enter, ArrowLeft, a, Control+a. Acts on the currently focused element.")), "timeout_ms": (int, Field(15000))},
 )
 BrowserTargetInput = _strict_model(
     "BrowserTargetInput",
-    {"target": (str, Field(...)), "timeout_ms": (int, Field(15000))},
+    {"target": (str, Field(..., description=TARGET_DESCRIPTION)), "timeout_ms": (int, Field(15000))},
 )
 BrowserSelectInput = _strict_model(
     "BrowserSelectInput",
     {
-        "target": (str, Field(...)),
-        "value": (str, Field(...)),
+        "target": (str, Field(..., description=TARGET_DESCRIPTION)),
+        "value": (str, Field(..., description="HTML option value from the inspected dropdown, not its index or assumed display label.")),
         "timeout_ms": (int, Field(15000)),
     },
 )
 BrowserCheckInput = _strict_model(
     "BrowserCheckInput",
     {
-        "target": (str, Field(...)),
+        "target": (str, Field(..., description=TARGET_DESCRIPTION)),
         "checked": (bool, Field(True)),
         "timeout_ms": (int, Field(15000)),
     },
@@ -112,7 +119,7 @@ BrowserTabsInput = _strict_model(
     "BrowserTabsInput",
     {
         "operation": (Literal["list", "new", "select", "close"], Field("list")),
-        "index": (int | None, Field(None)),
+        "index": (int | None, Field(None, ge=0, description="Zero-based index from browser_tabs(operation='list'). Required for select. For close, omit to close the current tab.")),
         "url": (str | None, Field(None)),
         "timeout_ms": (int, Field(60000)),
     },
@@ -129,7 +136,7 @@ BrowserEvaluateInput = _strict_model(
     "BrowserEvaluateInput",
     {
         "func": (str, Field(...)),
-        "target": (str | None, Field(None)),
+        "target": (str | None, Field(None, description=TARGET_DESCRIPTION)),
         "max_chars": (int, Field(20000, description="Result character budget. Oversized objects/arrays return a JSON text preview with truncated=true and their original result_type.")),
         "timeout_ms": (int, Field(15000)),
     },
@@ -156,7 +163,7 @@ BrowserInspectLayoutInput = _strict_model(
 BrowserScreenshotInput = _strict_model(
     "BrowserScreenshotInput",
     {
-        "target": (str | None, Field(None)),
+        "target": (str | None, Field(None, description=TARGET_DESCRIPTION)),
         "full_page": (bool, Field(False)),
         "hires": (bool, Field(False)),
         "timeout_ms": (int, Field(30000)),

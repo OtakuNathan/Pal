@@ -397,7 +397,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return {
             "name": record.alias,
             "display_name": record.alias,
-            "family": record.family or "general",
+            "family": record.family,
             "description": record.compiled_description,
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
@@ -1072,19 +1072,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
             limit = 10
         terms = tuple(item.lower() for item in jieba_search_terms(query))
         scored: list[tuple[int, str, dict[str, Any]]] = []
+        query_matches: list[dict[str, Any]] = []
         for alias, item in generation.search_records.items():
             item_namespace = str(item.get("namespace") or "").lower()
             item_family = str(item.get("family") or "").lower()
             item_module = str(item.get("module_id") or "").lower()
             item_tags = {str(tag).lower() for tag in item.get("tags", ())}
-            if namespace and item_namespace != namespace:
-                continue
-            if family and item_family != family:
-                continue
-            if module_id and item_module != module_id:
-                continue
-            if tags and not tags.issubset(item_tags):
-                continue
             alias_text = alias.lower()
             search_text = str(item["search_text"]).lower()
             haystack = f"{alias_text} {search_text} {item_family} {item_module} {' '.join(item_tags)}"
@@ -1106,6 +1099,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 if term in {item_family, item_module, *item_tags}:
                     score += 3
             if terms and score == 0:
+                continue
+            query_matches.append(item)
+            if ((namespace and item_namespace != namespace)
+                    or (family and item_family != family)
+                    or (module_id and item_module != module_id)
+                    or (tags and not tags.issubset(item_tags))):
                 continue
             hit = dict(item)
             hit["score"] = score
@@ -1134,6 +1133,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
             result["facets"] = _search_facets(item for _, _, item in scored)
             if result["truncated"]:
                 result["usage_hint"] = "Narrow with namespace, module_name, family, or tags."
+        if not scored and query_matches:
+            result["filter_suggestions"] = _search_facets(query_matches)
+            result["usage_hint"] = (
+                "The query matches tools, but the supplied filters exclude them. "
+                "Remove or correct filters using filter_suggestions; family is not module_name."
+            )
+        elif not scored:
+            result["usage_hint"] = "No matching tools. Try another alias or broader task keywords."
         return result
 
     @staticmethod
@@ -1968,7 +1975,9 @@ def _search_facets(records: Any) -> dict[str, Any]:
             ("modules", "module_id", "module_id"),
             ("families", "family", "family"),
         ):
-            value = str(record.get(field_name) or "unknown")
+            value = str(record.get(field_name) or "")
+            if not value:
+                continue
             counts[bucket][value] = counts[bucket].get(value, 0) + 1
     return {
         "namespaces": [

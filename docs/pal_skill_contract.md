@@ -49,7 +49,7 @@ Action: what kind of workflow it guides
 Result: what successful use should produce
 ```
 
-Advisor and affordance search may use `summary`, STAR, `use_when`, and `avoid_when`.
+Skill search uses `summary`, STAR, `use_when`, and `avoid_when`.
 
 They must not rely on full `manual_text` for routing.
 
@@ -64,7 +64,7 @@ V1 source formats:
 
 V1 does not accept artifact id or file path directly. If the source is in a file or artifact, Pal must first read it with the appropriate existing tool and then pass text into `skill_assimilate`.
 
-Assimilation includes parsing, prompt-injection risk scan, no-tool LLM sanitization, semantic compression, STAR generation, `use_when` / `avoid_when` generation, duplicate/conflict detection, and thin affordance candidate generation.
+Assimilation includes parsing, prompt-injection risk scan, no-tool LLM sanitization, semantic compression, STAR generation, `use_when` / `avoid_when` generation, duplicate/conflict detection.
 
 Assimilation is candidate-first. It does not write durable state.
 
@@ -90,8 +90,8 @@ Raw external source is not injected. `skill_inject` only reads normalized skill 
 ## Tools
 
 - `skill_assimilate`: creates a sanitized skill candidate and does not commit.
-- `skill_commit`: commits a candidate, writes normalized skill storage, and upserts a thin affordance.
-- `skill_update`: updates a normalized skill and refreshes its thin affordance.
+- `skill_commit`: commits a candidate, writes normalized skill storage, without creating a separate routing record.
+- `skill_update`: updates a normalized skill or manual text.
 - `skill_disable`: disables a skill without deleting history.
 - `skill_search`: searches active skills for the current scenario or explicit skill name, without returning manuals.
 - `skill_read`: reads normalized skill metadata and optionally manual text.
@@ -99,18 +99,11 @@ Raw external source is not injected. `skill_inject` only reads normalized skill 
 
 `skill_inject` returns structured failure for missing, disabled, deprecated, or over-budget skills.
 
-## Affordance Relationship
+## Discovery
 
-Skill commit automatically creates or updates a thin affordance:
-
-```text
-scenario_text = skill.use_when
-prompt_hint = "Consider skill `<skill_id>` when this scenario matches."
-skill_refs = [`skill_id`]
-capability_refs = skill.capability_refs
-```
-
-Affordance must stay thin. It routes to skill; it must not contain a multi-step procedure.
+Skills are searchable manuals. Skill search uses each manual's own metadata;
+commit and update do not create a second behavior routing record. The advisor
+plugin is retired.
 
 ## Duplicate And Conflict Detection
 

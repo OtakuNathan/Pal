@@ -104,7 +104,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
-            purpose="Create or replace Pal's active execution-cursor checklist.",
+            purpose="Create or replace Pal's active execution-cursor checklist, including multiple status updates in one call.",
             use_when=(
                 "Unless the user specifies otherwise, use before the first mutation in work with multiple delivery phases, long execution, or resumption needs"
                 "; update when phases materially change. Routine edit-and-test work needs no checklist."
@@ -147,7 +147,7 @@ class ChecklistIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="checklist upserted",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Checklist upserted", payload),
+            llm_text=render_titled_structured_for_llm("Checklist upserted", {key: payload[key] for key in ("changed", "active", "done", "total")}),
         )
 
     @capability_action(
@@ -156,10 +156,10 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="check",
         guidance=ToolGuidance(
-            purpose="Mark one exact step in Pal's active checklist as completed.",
-            use_when="That concrete step has actually completed.",
-            do_not_use_when="The step is still pending or no checklist is active.",
-            failure_next_steps="If no checklist is active, call checklist_upsert. If the step does not match exactly, use checklist_show to recover its text.",
+            purpose="Mark one exact step as completed; checking the last unfinished step automatically closes the checklist.",
+            use_when="The step is already confirmed complete. Prefer calling alongside the next useful tools in the same response, rather than in a separate bookkeeping round.",
+            do_not_use_when="Completion depends on results from tools in the same batch; wait for those results first. No checklist is active.",
+            failure_next_steps="If no checklist is active, it may already have closed; open a new one only if work remains. If the step does not match exactly, use checklist_show to recover its text.",
             next_tool_hints=(
                 NextToolHint(
                     name="checklist_show",
@@ -167,7 +167,7 @@ class ChecklistIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="checklist_clear",
-                    use_when="Every phase is complete; close the checklist using existing execution evidence, without another verification round.",
+                    use_when="Cancel or retire remaining work, or close a plan completed through batch upsert. The last check closes automatically.",
                 ),
             ),
         ),
@@ -184,7 +184,7 @@ class ChecklistIntrospectionProvider:
                 status=RuntimeStatus.ERROR,
                 text="no active checklist",
                 structured={"changed": False, "step": step, "error": "no_active_checklist"},
-                llm_text="No active checklist. Call checklist_upsert first to open one.",
+                llm_text="No active checklist; it may already have completed and closed. Use checklist_upsert only if work remains.",
             )
         if not outcome.found:
             return CapabilityResult(
@@ -198,18 +198,19 @@ class ChecklistIntrospectionProvider:
             )
         payload = {
             "changed": outcome.changed,
+            "cleared": outcome.cleared,
             "step": step,
             **_snapshot_payload(outcome.snapshot),
         }
-        if outcome.changed:
+        if outcome.changed or outcome.cleared:
             payload["echo"] = _checklist_echo("check", outcome.snapshot)
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text="checklist step checked" if outcome.changed else "checklist step already completed",
+            text="checklist completed and closed" if outcome.cleared else "checklist step checked" if outcome.changed else "checklist step already completed",
             structured=payload,
             llm_text=render_titled_structured_for_llm(
-                "Checklist step checked" if outcome.changed else "Checklist step unchanged",
-                payload,
+                "Checklist completed and closed" if outcome.cleared else "Checklist step checked" if outcome.changed else "Checklist step unchanged",
+                {key: payload[key] for key in ("changed", "step", "done", "total", "cleared")},
             ),
         )
 
@@ -293,7 +294,7 @@ class ChecklistIntrospectionProvider:
             structured=payload,
             llm_text=render_titled_structured_for_llm(
                 "Checklist cleared" if cleared else "No active checklist",
-                payload,
+                {"cleared": cleared},
             ),
         )
 

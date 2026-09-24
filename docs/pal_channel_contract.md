@@ -587,3 +587,21 @@ Channel 订阅 Core bus，而不是拥有 sleeping 等系统状态。通过
 `on_runtime_state` 向 endpoint 投影最新快照，通过可选的 `on_core_event`
 投影瞬时通知；两者只入队、不执行阻塞 I/O，不进入普通投递失败恢复或历史。
 完整事件与插件订阅约定见 [Core system observations](pal_core_events.md)。
+
+## Typing lifetime
+
+Typing is a per-destination aggregate, not one loop per turn. Telegram maintains
+one loop for each `(chat_id, thread_id)` and a set of active operation IDs. START
+adds an ID; END removes it. Duplicate events are idempotent, overlapping turns or
+control operations share the loop, and the last END stops it. A late END cannot
+remove another operation. Telegram receives the corresponding message thread ID.
+
+The turn subscriber remembers the START route so an END missing its endpoint or
+thread can still release the original owner. Tracked continuation tasks own their
+paired events; direct continuations emit their own pair, including on failure or
+cancellation. Control operations have independent IDs. Reconnection buffers may
+coalesce duplicate statuses only for the same owner. Missing-endpoint statuses are
+logged; endpoint shutdown cancels all remaining typing loops.
+
+A transient chat-action delivery failure is logged and retried at the normal
+interval while owners remain. It does not count as an END or affect model work.

@@ -86,6 +86,39 @@ def echo_handler(value: EchoInput) -> CapabilityResult:
 
 
 class CapabilityAliasRoutingTests(unittest.TestCase):
+    def test_missing_family_stays_missing_through_discovery(self) -> None:
+
+        for namespace in ("introspection", "operation"):
+            with self.subTest(namespace=namespace):
+                @capability_node(namespace=namespace, scope="module", kind="module", source="test", target_kind="module")
+                class Provider:
+                    @capability_action(
+                        namespace=namespace, scope="module", action_name="echo", aliases=("echo",),
+                        InputModel=EchoInput, OutputModel=EchoOutput, execution=INDIRECT_NONE,
+                        guidance=echo_capability()["guidance"],
+                    )
+                    def echo(self, call):
+                        return echo_handler(EchoInput(**call.args))
+
+                subtree = compile_provider_subtree(Provider(), module_id="test", lifecycle_scope="runtime", detachable=False)
+                handle = SimpleNamespace(mounted_subtree=subtree)
+                self.assertEqual(subtree.descriptors[0].family, "")
+                runtime = ExecutionRuntime()
+                runtime.mount_subtree(handle)
+                try:
+                    self.assertEqual(runtime.get_tool_spec("echo")["family"], "")
+                    payload = runtime._search_generation(runtime.registry_generation, {"query": "echo", "facets": True})
+                    self.assertEqual(payload["hits"][0]["family"], "")
+                    self.assertEqual(payload["hits"][0]["namespace"], namespace)
+                    self.assertEqual(payload["facets"]["families"], [])
+                    for invented in (namespace, "general", "unknown", "capability"):
+                        filtered = runtime._search_generation(runtime.registry_generation, {"query": "echo", "family": invented})
+                        self.assertEqual(filtered["hits"], [])
+                    if namespace == "operation":
+                        self.assertIn("op_test_echo", runtime.compiled_capability_index.by_canonical)
+                finally:
+                    runtime.shutdown()
+
     def test_provider_capability_requires_exactly_one_declared_alias(self) -> None:
         @capability_node(
             namespace=OPERATION_NAMESPACE,

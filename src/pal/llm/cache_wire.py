@@ -94,18 +94,26 @@ def inject_exact(encoded: EncodedRequest, points: tuple, cache_key: str,
         }:
             target["prompt_cache_breakpoint"] = {"mode": "explicit"}
             applied.append(point.message_id)
-    extra = {"prompt_cache_key": cache_key,
-             "prompt_cache_options": {"mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}}
+    extra = {"prompt_cache_key": cache_key}
+    # OpenRouter accepts only mode=explicit in its request-level options.
+    # Block markers alone preserve automatic caching (hybrid) on that gateway.
+    if not gateway or mode == "explicit":
+        extra["prompt_cache_options"] = {
+            "mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}
     if gateway:
         extra["session_id"] = cache_key
     return EncodedRequest(payload, clean.message_spans, extra, tuple(applied))
 
 
-def audit(encoded: EncodedRequest, expected: tuple[tuple, ...], *, mode: str = "explicit") -> tuple[bool, str]:
+def audit(encoded: EncodedRequest, expected: tuple[tuple, ...], *, mode: str = "explicit",
+          gateway: bool = False) -> tuple[bool, str]:
     payload = thaw_json(encoded.payload)
     payload.update(thaw_json(encoded.extra_body))
     found = []
-    valid = payload.get("prompt_cache_options") == {"mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}
+    if gateway and mode == "hybrid":
+        valid = "prompt_cache_options" not in payload
+    else:
+        valid = payload.get("prompt_cache_options") == {"mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}
     for path, node in protocol_nodes(payload):
         if "cache_control" in node:
             valid = False

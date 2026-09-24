@@ -97,7 +97,7 @@ class TestChecklistService:
         assert service.show() is None
         assert service.clear() is False
 
-    def test_check_marks_completed_and_is_idempotent(self):
+    def test_nonfinal_check_marks_completed_and_is_idempotent(self):
         service = ChecklistService()
         service.upsert([{"step": "step one"}, {"step": "step two"}])
 
@@ -124,6 +124,22 @@ class TestChecklistService:
         assert outcome.changed is False
         assert outcome.snapshot is not None and outcome.snapshot.done == 0
 
+    def test_last_check_clears_active_slot_and_keeps_completed_snapshot(self):
+        service = ChecklistService()
+        service.upsert([{"step": "one"}, {"step": "two"}])
+        first = service.check("one")
+        assert not first.cleared
+        assert service.show() is not None
+        last = service.check("two")
+        assert last.cleared
+        assert last.snapshot.done == last.snapshot.total == 2
+        assert not last.snapshot.active
+        assert service.show() is None
+        assert not service.clear()
+        service.upsert([{"step": "new task"}])
+        assert not service.check("two").cleared
+        assert service.show().plan[0]["step"] == "new task"
+
     def test_upsert_replaces_previous_plan(self):
         service = ChecklistService()
         service.upsert([{"step": "old"}])
@@ -149,7 +165,7 @@ class TestChecklistCapabilities:
     def test_tool_guidance_is_a_concise_local_contract(self):
         blueprint = ChecklistIntrospectionProvider.upsert.__capability_action_blueprints__[0]
         assert blueprint.guidance is not None
-        assert blueprint.guidance.purpose == "Create or replace Pal's active execution-cursor checklist."
+        assert "multiple status updates in one call" in blueprint.guidance.purpose
         assert "before the first mutation" in blueprint.guidance.use_when
         assert "multiple delivery phases" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when
@@ -167,6 +183,9 @@ class TestChecklistCapabilities:
         assert result.structured["echo"]["tag"] == "checklist"
         assert result.structured["echo"]["payload"]["action"] == "upsert"
         assert result.llm_text.strip()
+        assert "echo" not in result.llm_text
+        assert "markdown" not in result.llm_text
+        assert "plan" not in result.llm_text
 
     def test_identical_upsert_is_a_noop_without_broadcast(self):
         call = CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]})
@@ -192,6 +211,20 @@ class TestChecklistCapabilities:
         result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
         assert result.status == RuntimeStatus.ERROR
         assert result.structured is not None and result.structured["error"] == "no_active_checklist"
+
+    def test_last_check_emits_one_completed_echo_without_clear_echo(self):
+        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
+        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        assert result.status == RuntimeStatus.OK
+        assert result.structured["cleared"] is True
+        assert result.structured["active"] is False
+        assert self.provider.service.show() is None
+        echo = result.structured["echo"]
+        assert echo["payload"]["active"] is False
+        assert echo["payload"]["done"] == echo["payload"]["total"] == 1
+        assert "✅ a" in echo["markdown"]
+        assert "Checklist cleared." not in echo["markdown"]
+        assert "completed and closed" in result.llm_text
 
     def test_check_unknown_step_returns_error_without_echo(self):
         self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
@@ -248,7 +281,9 @@ class TestChecklistPrompt:
         assert task_flow.section == "task_flow"
         assert "checklist_check" in task_flow.content
         assert "checklist_clear" in task_flow.content
-        assert "is cancelled, or is replaced" in task_flow.content
+        assert "automatically closes" in task_flow.content
+        assert "cancel or replace" in task_flow.content
+        assert "review the user's requirements" in task_flow.content
         assert "Do not perform remaining work just to clear" in task_flow.content
         assert "Summarize from actual execution evidence" in task_flow.content
         assert "Simple answers" in task_flow.content
@@ -316,6 +351,14 @@ class TestChecklistPrompt:
         for alias in ("checklist_upsert", "checklist_check", "checklist_clear"):
             assert alias in generation.direct_aliases
         assert "checklist_show" in generation.indirect_aliases
+        from pal.shared.tool_protocol import new_tool_call
+        result = core.context.execution_runtime.execute_tool(new_tool_call(
+            name="checklist_upsert", args={"plan": [{"step": "one"}, {"step": "two"}]}
+        ))
+        assert result.ok
+        assert result.structured["echo"]["payload"]["total"] == 2
+        assert "echo" not in result.llm_text
+        assert "markdown" not in result.llm_text
 
 
 class TestToolEchoFanOut:

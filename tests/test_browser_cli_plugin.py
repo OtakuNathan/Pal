@@ -87,6 +87,30 @@ def test_user_positionals_are_separated_from_cli_options() -> None:
     ]
 
 
+@pytest.mark.parametrize("operation,index", [("close", -1), ("select", -1), ("select", None)])
+def test_invalid_tab_target_never_dispatches(tmp_path, operation, index):
+    from pal.web_fetch.tool_models import BrowserTabsInput
+    from pydantic import ValidationError
+    if index is not None:
+        with pytest.raises(ValidationError):
+            BrowserTabsInput(operation=operation, index=index)
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    calls = []
+    worker._run_write = lambda *args, **kwargs: calls.append(args)
+    with pytest.raises(BrowserServiceError, match="nonnegative index"):
+        worker._dispatch_action(None, action="tabs", args={"operation": operation, "index": index}, timeout_ms=1000)
+    assert calls == []
+
+
+def test_close_current_tab_and_select_exact_index(tmp_path):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    calls = []
+    worker._run_write = lambda record, argv, **kwargs: calls.append(argv) or "ok"
+    worker._dispatch_action(None, action="tabs", args={"operation": "close"}, timeout_ms=1000)
+    worker._dispatch_action(None, action="tabs", args={"operation": "select", "index": 2}, timeout_ms=1000)
+    assert calls == [["tab-close"], ["tab-select", "--", "2"]]
+
+
 def test_missing_cli_reports_installing_without_http_fallback(tmp_path: Path) -> None:
     worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
     scheduled = []

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.skill.models import SkillModel
 
 import asyncio
 import os
@@ -10,7 +11,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from pal.behavior import BehaviorAffordanceModel, BehaviorRepository, BehaviorService, BehaviorSkillModel, register_with_core as register_behavior_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import EffectKind, Idempotency, RetryPolicy
@@ -384,7 +384,7 @@ class McpPluginSidecarTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_mcp_plugin_test_"))
         self.database = PalV2Database(self.root / "pal_mcp.sqlite3")
-        self.database.initialize([BehaviorAffordanceModel, BehaviorSkillModel, PluginBundleModel])
+        self.database.initialize([SkillModel, PluginBundleModel])
 
     def tearDown(self) -> None:
         self.database.close()
@@ -398,11 +398,8 @@ class McpPluginSidecarTests(unittest.TestCase):
         skill_repository = SkillRepository()
         skill_service = SkillService(repository=skill_repository, runtime_root=self.root)
         register_skill_with_core(core.context, skill_service)
-        behavior_service = BehaviorService(repository=BehaviorRepository(skill_repository=skill_repository))
-        register_behavior_with_core(core.context, behavior_service)
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("skill")
-        core.publish_module_capabilities("behavior")
         return core, skill_service
 
     def _write_config_and_server(self) -> None:

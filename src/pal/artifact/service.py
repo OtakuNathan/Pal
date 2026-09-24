@@ -483,6 +483,10 @@ class ArtifactManager:
         chunk: int | None = None,
         max_chars: int | None = None,
     ) -> ArtifactReadResult:
+        if page is not None and chunk is not None:
+            raise ValueError("page and chunk are mutually exclusive")
+        if any(value is not None and value < 1 for value in (page, chunk)):
+            raise ValueError("page and chunk use 1-based numbering")
         record = self._require_visible_record(artifact_id, scope_key)
         self._refresh_hot(record.artifact_id, scope_key)
         max_chars = _clamp_max_chars(max_chars, self.policy)
@@ -537,10 +541,8 @@ class ArtifactManager:
         *,
         query: str = "",
         kind: str | None = None,
-        time_hint: str = "recent",
         limit: int = 5,
     ) -> tuple[ArtifactSearchResult, ...]:
-        _ = time_hint
         query_terms = _terms(query)
         now = _utc_now_dt()
         scored: list[ArtifactSearchResult] = []
@@ -1194,7 +1196,7 @@ def _snippet(text: str, terms: list[str], *, max_chars: int) -> str:
 
 def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
-        return ("Use artifact_grep for specific terms.", "Use artifact_read with page or chunk for focused reading.")
+        return ("Use artifact_grep for specific terms.", "Use read_artifact with page or chunk for focused reading.")
     if record.kind == ARTIFACT_KIND_AUDIO:
         return ("Use artifact_transcribe if a transcript is needed.",)
     if record.kind == ARTIFACT_KIND_IMAGE:

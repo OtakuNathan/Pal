@@ -27,7 +27,6 @@ from pal.execution.generated_tool_models import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall
 from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
@@ -78,115 +77,6 @@ if TYPE_CHECKING:
     source="builtin:skill",
     target_kind="module",
 )
-@affordance(
-    affordance_id="declared.skill.pal_plugin_development",
-    title="Pal plugin development skill",
-    scenario_text=(
-        "The user wants to create, repair, review, or hot-refresh a Pal plugin, "
-        "plugin capability, build_plugin entrypoint, ModuleHandle surface, or plugin lifecycle."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.plugin.development` before designing, "
-        "writing, repairing, or attaching Pal plugin code."
-    ),
-    activation_terms=(
-        "pal plugin",
-        "plugin development",
-        "create plugin",
-        "repair plugin",
-        "hot refresh plugin",
-        "build_plugin",
-        "ModuleHandle",
-        "capability extension",
-        "插件开发",
-        "写插件",
-        "修插件",
-    ),
-    skill_refs=(PAL_PLUGIN_DEVELOPMENT_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False},
-)
-@affordance(
-    affordance_id="declared.skill.pal_llm_model_hook_endpoint_development",
-    title="Pal LLM model-hook endpoint development skill",
-    scenario_text=(
-        "The user wants to add, repair, test, or validate an exact-model request hook "
-        "or matching llm_endpoints row."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.llm.model_hook_endpoint.development` before "
-        "creating model-hook code or endpoint metadata. Do not refresh/load the running runtime unless the user explicitly asks."
-    ),
-    activation_terms=(
-        "llm model hook",
-        "llm endpoint",
-        "model-specific instruction",
-        "endpoint hook",
-        "runtime model hook",
-        "new model provider",
-        "add llm provider",
-        "llm/models",
-        "llm_endpoints",
-        "适配器",
-        "模型 endpoint",
-        "模型端点",
-    ),
-    skill_refs=(PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False, "requires_user_refresh": True},
-)
-@affordance(
-    affordance_id="declared.skill.pal_channel_provider_development",
-    title="Pal channel provider development skill",
-    scenario_text=(
-        "The user wants to add, repair, test, or hot-load a Pal channel provider, channel endpoint, "
-        "runtime-root channel provider manifest, slash-command path, inline interaction rendering, or channel lifecycle."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.channel.provider.development` before "
-        "creating provider.toml, channel provider code, endpoint metadata, or channel interaction handling."
-    ),
-    activation_terms=(
-        "channel provider",
-        "channel endpoint",
-        "channel integration",
-        "new channel",
-        "add channel",
-        "runtime channel provider",
-        "channel/providers",
-        "provider.toml",
-        "ChannelEndpointProviderManager",
-        "FactoryChannelProvider",
-        "ChannelEndpointQueueBase",
-        "slash command",
-        "inline keyboard",
-        "频道",
-        "通道",
-        "channel 接入",
-    ),
-    skill_refs=(PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "channel/providers"},
-)
-@affordance(
-    affordance_id="declared.skill.pal_self_maintenance",
-    title="Pal self maintenance skill",
-    scenario_text="The user asks how to configure Pal, use its CLI, or perform Pal self-modification, source/config repair, or prompt boundary refactoring.",
-    prompt_hint="If this route matches, inject skill `pal.self.maintenance` to explain configuration or carry out authorized maintenance.",
-    activation_terms=(
-        "pal self maintenance", "self maintenance", "repair pal", "pal source repair",
-        "prompt boundary", "system prompt refactoring", "自我维护", "维护 Pal",
-        "修复 Pal", "维护流程", "提示词边界", "内置维护 skill",
-        "自我修改", "如何配置 Pal", "怎么配置 Pal", "Pal怎么配置", "pal cli", "configure pal", "pal configuration",
-    ),
-    skill_refs=(PAL_SELF_MAINTENANCE_SKILL_ID,),
-    priority=35,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False},
-)
 @dataclass
 class SkillIntrospectionProvider:
     service: SkillService
@@ -202,7 +92,7 @@ class SkillIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show skill management state and pending assimilation candidates.",
             use_when="Diagnosing skill system health, or recovering a candidate_id after an uncertain skill_assimilate result.",
-            do_not_use_when="Searching for a specific skill (use skill_search). Checking behavior routing rules (use behavior_show). Checking memory state (use memory_show).",
+            do_not_use_when="Searching for a specific skill (use skill_search). Checking memory state (use memory_show).",
             failure_next_steps="Read-only diagnostic. If no skills are active, use skill_search to find relevant ones.",
         ),
         aliases=("skill_show",),
@@ -246,7 +136,7 @@ class SkillIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
-            do_not_use_when="Recording a durable fact or preference (use remember_memory). Learning a routing rule (use learn_behavior). The content is a one-off procedure not worth normalizing.",
+            do_not_use_when="Recording a durable fact or preference (use remember_memory). The content is a one-off procedure not worth normalizing.",
             failure_next_steps="Review the candidate output and use skill_commit to persist it. If assimilation may have succeeded but its result was lost, inspect skill_show and recover the matching pending candidate_id before considering another assimilation.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
@@ -268,7 +158,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="commit",
         guidance=ToolGuidance(
-            purpose="Commit a sanitized skill candidate and register its thin behavior affordance.",
+            purpose="Commit a sanitized skill candidate to the searchable manual library.",
             use_when="After skill_assimilate produced a candidate you've reviewed and want to persist as a normalized skill.",
             do_not_use_when="Committing unreviewed candidates. Writing a durable fact (use remember_memory).",
             failure_next_steps="If validation fails before commit, fix the candidate fields. If commit may have succeeded, reconcile with skill_search using the skill name before retrying. If the skill already exists, use skill_update instead.",
@@ -287,9 +177,9 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="update",
         guidance=ToolGuidance(
-            purpose="Update a normalized skill's metadata or manual text and refresh its affordance.",
+            purpose="Update a normalized skill's metadata or manual text.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
-            do_not_use_when="Updating a durable fact (use update_memory). Updating a behavior rule (use update_behavior). Creating a new skill (use skill_assimilate + skill_commit).",
+            do_not_use_when="Updating a durable fact (use update_memory). Creating a new skill (use skill_assimilate + skill_commit).",
             failure_next_steps="If the skill name is not found, verify it with skill_search. If the update outcome is uncertain, read the skill by name and compare the intended patch before retrying; every applied update advances its version.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
@@ -308,7 +198,7 @@ class SkillIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
             use_when="A skill is no longer relevant or is producing false-positive activations.",
-            do_not_use_when="Forgetting a durable fact (use forget_memory). Removing a behavior rule (use forget_behavior). Permanently deleting skill data (this only disables).",
+            do_not_use_when="Forgetting a durable fact (use forget_memory). Permanently deleting skill data (this only disables).",
             failure_next_steps="If the skill name is not found, verify it with skill_search. Re-enable by using skill_update to set status back to active.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
@@ -320,20 +210,22 @@ class SkillIntrospectionProvider:
         return SkillDisableTool(service=self.service).invoke(_skill_name_args(call.args))
 
     @capability_action(
-        namespace=OPERATION_NAMESPACE,
+        namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         family="skill",
         action_name="search",
         guidance=ToolGuidance(
             purpose="Search normalized skills by scenario or name. Returns metadata only — does not inject manuals into context.",
             use_when="Looking for a reusable procedure or domain manual that may help the current task. Checking if a skill exists before creating one.",
-            do_not_use_when="Recalling durable facts (use recall_memory). Getting routing advice (use advise_behavior). You already know the skill name and want its manual (use skill_read or skill_inject).",
+            do_not_use_when="Recalling durable facts (use recall_memory). You already know the skill name and want its manual (use skill_read or skill_inject).",
             failure_next_steps="If no results, try broader scenario terms. If a skill exists but isn't matching, check its activation terms with skill_read.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
         execution=INDIRECT_LOCAL_READ,
         aliases=("skill_search",),
+        # Keep the capability identity used by existing Bunshin profiles.
+        metadata={"canonical_path": "op_skill_search"},
     )
     def search(self, call: CapabilityCall):
         return SkillSearchTool(service=self.service).invoke(call.args)

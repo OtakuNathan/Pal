@@ -3,7 +3,8 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import StrictToolModel, ToolGuidance
+from pydantic import Field
 
 from pal.execution.generated_tool_models import (
     LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
@@ -11,7 +12,7 @@ from pal.execution.generated_tool_models import (
 )
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.llm.models import LLMEndpointModel
@@ -29,6 +30,11 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+
+
+class LLMUsageInput(StrictToolModel):
+    view: Literal["summary", "detail"] = Field("summary", description="Summary of process-lifetime usage by default; detail includes accounting diagnostics and latest-request fields. Not a current-turn report.")
+    endpoint_id: str | None = Field(None, description="Exact endpoint ID returned by llm_list to restrict usage to that endpoint; omit for process totals.")
 
 
 @dataclass(frozen=True)
@@ -248,13 +254,34 @@ class LLMIntrospectionProvider:
             purpose="Show resident-process LLM usage statistics — requests, tokens, cache hit rate, cost.",
             use_when="Monitoring token consumption, cache performance, or cost across the current process lifetime.",
             do_not_use_when="Checking model metadata (use llm_active or llm_show).",
-            failure_next_steps="Read-only. Stats reset on process restart. If all zeros, no LLM requests have been made yet.",
+            failure_next_steps="Stats reset on process restart. Missing usage or incomplete cost is unknown, not zero. Use view=detail for accounting diagnostics or endpoint_id to focus on one endpoint.",
         ),
+        InputModel=LLMUsageInput,
         aliases=("llm_usage",),
     )
     def usage(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
         payload = llm_status_payload(self)
+        endpoint_id = call.args.get("endpoint_id")
+        usage = payload["usage"]
+        if endpoint_id is not None:
+            usage = next((row for row in usage.get("by_endpoint", ())
+                          if row.get("endpoint_id") == endpoint_id), None)
+            if usage is None:
+                return IntrospectionResult(status=RuntimeStatus.NOT_FOUND,
+                    text="No usage recorded for this endpoint in the current process.",
+                    llm_text="No usage recorded for this endpoint in the current process. Check its ID with llm_list; this is not a zero-cost measurement.",
+                    structured={"endpoint_id": endpoint_id, "scope": "resident_process", "reason": "no_recorded_usage"})
+            usage = {"scope": "resident_process", **usage}
+        if call.args.get("view", "summary") == "summary":
+            keys = ("scope", "endpoint_id", "model_id", "request_count", "failed_request_count",
+                    "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens",
+                    "cost", "cost_complete", "cost_unknown_attempt_count", "usage_reporting_rate",
+                    "reported", "token_cache_ratio", "cache_partition_unknown_attempt_count", "usage_anomaly")
+            usage = {key: usage[key] for key in keys if key in usage}
+            usage.setdefault("cost_complete", False)
+            payload = {"active_endpoint_id": payload["active_model"].get("active_endpoint_id"), "usage": usage}
+        else:
+            payload = {**payload, "usage": usage}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="llm usage status",

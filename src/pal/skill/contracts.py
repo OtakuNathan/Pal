@@ -112,7 +112,6 @@ class SkillAssimilationCandidate:
     candidate_id: str
     decision: str
     skill: SkillDescriptor
-    affordance: dict[str, Any]
     duplicate_candidates: tuple[dict[str, Any], ...] = ()
     conflict_candidates: tuple[dict[str, Any], ...] = ()
     removed_risks: tuple[str, ...] = ()
@@ -123,7 +122,6 @@ class SkillAssimilationCandidate:
             "candidate_id": self.candidate_id,
             "decision": self.decision,
             "skill": self.skill.to_dict(),
-            "affordance": dict(self.affordance),
             "duplicate_candidates": [dict(item) for item in self.duplicate_candidates],
             "conflict_candidates": [dict(item) for item in self.conflict_candidates],
             "removed_risks": list(self.removed_risks),

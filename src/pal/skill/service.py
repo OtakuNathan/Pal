@@ -8,17 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from pal.behavior.contracts import (
-    AFFORDANCE_ACTIVATION_DELIBERATIVE,
-    AFFORDANCE_MODE_SUGGEST,
-    AFFORDANCE_SOURCE_DECLARED,
-    AFFORDANCE_SOURCE_INSTRUCTED,
-    AFFORDANCE_VISIBILITY_DISCOVERABLE,
-    AffordanceDescriptor,
-)
-from pal.behavior.decorators import SkillBlueprint
-from pal.behavior.repository import BehaviorRepository
-from pal.foundation.persistence import database_proxy, utc_now
+from pal.foundation.persistence import utc_now
 from pal.llm.conversions import request_ir_from_prompt
 from pal.shared import LLMFinishReason
 from pal.shared.text_search import jieba_search_terms
@@ -35,12 +25,12 @@ from pal.skill.contracts import (
     SkillDescriptor,
 )
 from pal.skill.repository import SkillRepository
+from pal.skill.decorators import SkillBlueprint
 
 
 @dataclass
 class SkillService:
     repository: SkillRepository = field(default_factory=SkillRepository)
-    behavior_repository: BehaviorRepository | None = None
     llm_runtime: Any | None = None
     execution_runtime: Any | None = None
     runtime_root: Path | None = None
@@ -94,21 +84,9 @@ class SkillService:
             self.repository.mark_deprecated(skill.skill_id)
             skill = _copy_skill(skill, version=max(1, int(skill.version)) + 1, updated_at=utc_now())
         self._write_skill_file(skill)
-        behavior_repository = self._behavior_repository()
-        affordance = self._affordance_from_candidate(candidate, skill=skill)
-        with database_proxy.atomic():
-            stored_skill = self.repository.upsert_skill(skill)
-            stored_affordance = behavior_repository.upsert_affordance(affordance)
+        stored_skill = self.repository.upsert_skill(skill)
         self.pending_candidates.pop(candidate.candidate_id, None)
-        return {
-            "skill": stored_skill.to_dict(),
-            "affordance": {
-                "affordance_id": stored_affordance.affordance_id,
-                "scenario_text": stored_affordance.scenario_text,
-                "prompt_hint": stored_affordance.prompt_hint,
-                "skill_refs": list(stored_affordance.skill_refs),
-            },
-        }
+        return {"skill": stored_skill.to_dict()}
 
     def update_skill(self, payload: dict[str, Any]) -> SkillDescriptor:
         skill_id = str(payload.get("skill_id") or "").strip()
@@ -151,7 +129,6 @@ class SkillService:
             raise ValueError("unsupported skill status")
         self._write_skill_file(updated)
         stored = self.repository.upsert_skill(updated)
-        self._upsert_thin_affordance_for_skill(stored)
         return stored
 
     def disable_skill(self, skill_id: str) -> SkillDescriptor | None:
@@ -297,12 +274,10 @@ class SkillService:
         )
         duplicate_candidates, conflict_candidates = self._detect_duplicates(skill)
         candidate_id = _candidate_id(skill)
-        affordance = _thin_affordance_payload(skill)
         return SkillAssimilationCandidate(
             candidate_id=candidate_id,
             decision=decision,
             skill=skill,
-            affordance=affordance,
             duplicate_candidates=tuple(duplicate_candidates),
             conflict_candidates=tuple(conflict_candidates),
             removed_risks=removed_risks,
@@ -341,44 +316,6 @@ class SkillService:
         tmp = root / "skill.json.tmp"
         tmp.write_text(json.dumps(skill.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(target)
-
-    def _behavior_repository(self) -> BehaviorRepository:
-        if self.behavior_repository is None:
-            self.behavior_repository = BehaviorRepository()
-        return self.behavior_repository
-
-    def _affordance_from_candidate(self, candidate: SkillAssimilationCandidate, *, skill: SkillDescriptor) -> AffordanceDescriptor:
-        payload = dict(candidate.affordance)
-        now = utc_now()
-        return AffordanceDescriptor(
-            affordance_id=str(payload.get("affordance_id") or f"skill.route.{skill.skill_id}"),
-            module_id="skill",
-            title=str(payload.get("title") or skill.title),
-            scenario_text=str(payload.get("scenario_text") or skill.use_when or skill.summary),
-            prompt_hint=f"Consider skill `{skill.skill_id}` when this scenario matches.",
-            visibility_mode=AFFORDANCE_VISIBILITY_DISCOVERABLE,
-            activation_kind=AFFORDANCE_ACTIVATION_DELIBERATIVE,
-            activation_mode=AFFORDANCE_MODE_SUGGEST,
-            source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
-            activation_terms=skill.activation_terms,
-            skill_refs=(skill.skill_id,),
-            capability_refs=skill.capability_refs,
-            priority=80,
-            activation_threshold=0.25,
-            enabled=skill.active,
-            metadata={"generated_by": "op_skill_commit"},
-            created_at=now,
-            updated_at=now,
-        )
-
-    def _upsert_thin_affordance_for_skill(self, skill: SkillDescriptor) -> None:
-        candidate = SkillAssimilationCandidate(
-            candidate_id=_candidate_id(skill),
-            decision="accept",
-            skill=skill,
-            affordance=_thin_affordance_payload(skill),
-        )
-        self._behavior_repository().upsert_affordance(self._affordance_from_candidate(candidate, skill=skill))
 
 
 _SANITIZER_SYSTEM_PROMPT = """You are Pal's skill assimilation sanitizer.
@@ -499,7 +436,6 @@ def _candidate_from_dict(payload: dict[str, Any]) -> SkillAssimilationCandidate:
         candidate_id=str(payload.get("candidate_id") or _candidate_id(skill)),
         decision=str(payload.get("decision") or "accept"),
         skill=skill,
-        affordance=dict(payload.get("affordance") or _thin_affordance_payload(skill)),
         duplicate_candidates=tuple(dict(item) for item in list(payload.get("duplicate_candidates") or [])),
         conflict_candidates=tuple(dict(item) for item in list(payload.get("conflict_candidates") or [])),
         removed_risks=_string_tuple(payload.get("removed_risks")),
@@ -539,22 +475,10 @@ def _collect_skill_blueprints(provider: Any) -> tuple[SkillBlueprint, ...]:
     import inspect
 
     collected: list[SkillBlueprint] = []
-    collected.extend(getattr(provider.__class__, "__behavior_skill_blueprints__", ()))
+    collected.extend(getattr(provider.__class__, "__skill_blueprints__", ()))
     for _, value in inspect.getmembers(provider.__class__):
-        collected.extend(getattr(value, "__behavior_skill_blueprints__", ()))
+        collected.extend(getattr(value, "__skill_blueprints__", ()))
     return tuple(collected)
-
-
-def _thin_affordance_payload(skill: SkillDescriptor) -> dict[str, Any]:
-    return {
-        "affordance_id": f"skill.route.{skill.skill_id}",
-        "title": skill.title,
-        "scenario_text": skill.use_when or skill.summary,
-        "prompt_hint": f"Consider skill `{skill.skill_id}` when this scenario matches.",
-        "skill_refs": [skill.skill_id],
-        "capability_refs": list(skill.capability_refs),
-        "activation_terms": list(skill.activation_terms),
-    }
 
 
 def _validated_source_format(value: object) -> str:

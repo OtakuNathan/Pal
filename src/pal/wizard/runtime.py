@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pal.artifact import ArtifactHotStateModel, ArtifactRecordModel, ArtifactRepresentationModel
-from pal.behavior import BehaviorAffordanceModel
 from pal.channel import ChannelEndpointRepository
 from pal.channel.endpoints import DEFAULT_SOCKET_FILENAME
 from pal.foundation import PalV2Database
@@ -34,7 +33,6 @@ ALL_MODELS = (
     ProactiveDefinitionModel,
     ProactiveRunModel,
     WebSearchProviderModel,
-    BehaviorAffordanceModel,
     SkillModel,
     ArtifactRecordModel,
     ArtifactRepresentationModel,
@@ -203,8 +201,9 @@ class WizardService(WizardServicePort):
         # One-release correction: these domains are resident foundation
         # modules, not plugins. Remove only their managed manifests so a
         # runtime started briefly on the misclassified release cannot keep
-        # discovering duplicate plugin identities after upgrading.
-        for resident_id in ("identity", "memory", "control", "failure"):
+        # discovering duplicate plugin identities after upgrading. The retired
+        # behavior advisor manifest is removed too; its stored records stay intact.
+        for resident_id in ("identity", "memory", "control", "failure", "behavior"):
             stale_dir = builtin_root / resident_id
             (stale_dir / "plugin.toml").unlink(missing_ok=True)
             try:

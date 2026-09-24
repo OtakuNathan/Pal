@@ -29,7 +29,7 @@ ArtifactCapabilitiesArtifactIntrospectionProviderListOutput = _strict_model(
 ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or artifact_search.')),
+        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
     },
 )
 
@@ -42,11 +42,11 @@ ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput = _strict_model(
 ArtifactCapabilitiesArtifactIntrospectionProviderReadInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderReadInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or artifact_search.')),
+        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
         'representation': (Literal['auto', 'text', 'page_text', 'chunk_text', 'transcript', 'metadata'], Field('auto', description='Text-like representation only. Do not use this to inspect visual image pixels.')),
-        'page': (int, Field(None)),
-        'chunk': (int, Field(None)),
-        'max_chars': (int, Field(12000)),
+        'page': (int, Field(None, ge=1, description='1-based artifact page number from artifact_info; selects page_text. Mutually exclusive with chunk; not a tool-result page.')),
+        'chunk': (int, Field(None, ge=1, description='1-based artifact chunk number from artifact_info; selects chunk_text. Mutually exclusive with page.')),
+        'max_chars': (int, Field(12000, ge=1, description='Text preview character budget, separate from tool-result pagination. Use page/chunk to focus on a representation.')),
     },
 )
 
@@ -61,7 +61,6 @@ ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput = _strict_model(
     {
         'query': (str, Field(None)),
         'kind': (str, Field(None)),
-        'time_hint': (str, Field('recent')),
         'limit': (int, Field(5)),
     },
 )
@@ -75,7 +74,7 @@ ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput = _strict_model(
 ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or artifact_search.')),
+        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
     },
 )
 
@@ -88,7 +87,7 @@ ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput = _strict_model(
 ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or artifact_search.')),
+        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
         'query': (str, Field(...)),
         'top_k': (int, Field(5)),
         'max_chars_per_result': (int, Field(2000)),
@@ -104,7 +103,7 @@ ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput = _strict_model(
 ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or artifact_search.')),
+        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
     },
 )
 
@@ -114,103 +113,6 @@ ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput = _strict_mode
     },
 )
 
-BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput',
-    {
-        'scenario': (str, Field(..., description='Current situation Pal is facing; include the routing uncertainty or risky decision point.')),
-        'intent': (str, Field(None, description='Optional intended outcome.')),
-        'turn_kind': (str, Field(None, description='Turn type, such as chat, service, or bunshin.')),
-        'constraints': (list[str], Field(None)),
-        'already_considered': (list[str], Field(None)),
-        'top_k': (int, Field(5, ge=0)),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput',
-    {
-        'candidates': (list[dict[str, Any]], Field(None)),
-        'fallback_used': (bool, Field(None)),
-        'router_error': (str, Field(None)),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput',
-    {
-        'scenario_text': (str, Field(..., description='Scenario that should activate this affordance.')),
-        'prompt_hint': (str, Field(..., description='Short behavioral hint body Pal should remember. Do not repeat the title as a prefix.')),
-        'title': (str, Field(None, description='Optional short label for this behavior guidance.')),
-        'activation_terms': (list[str], Field(None, description='Optional concrete terms that help match this scenario later.')),
-        'capability_refs': (list[str], Field(None, description='Optional exact tool/capability names this behavior may route toward.')),
-        'skill_refs': (list[str], Field(None, description='Optional semantic skill names returned by skill_search that may provide reference manuals for this scenario.')),
-        'memory_query_hints': (list[str], Field(None, description='Optional recall_memory query hints for facts/cases relevant to this behavior.')),
-        'conflict_resolution': (Literal['ask', 'merge', 'overwrite', 'skip'], Field('ask', description='What to do when the same scenario already has behavior guidance. Use ask by default so Pal asks the user whether to merge, overwrite, or leave it unchanged.')),
-        'resident': (bool, Field(False, description="Set true only for behavior guidance that should be always visible in Pal's prompt. Leave false for normal guidance that the behavior router recalls when the scenario matches.")),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput',
-    {
-        'affordance_id': (str, Field(...)),
-        'module_id': (str, Field(...)),
-        'title': (str, Field(...)),
-        'learn_result': (Literal['learned', 'merged', 'overwritten', 'skipped'], Field(...)),
-        'source_kind': (str, Field(...)),
-        'scenario_text': (str, Field(...)),
-        'prompt_hint': (str, Field(...)),
-        'capability_refs': (list[str], Field(...)),
-        'skill_refs': (list[str], Field(...)),
-        'memory_query_hints': (list[str], Field(...)),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput',
-    {
-        'affordance': (str, Field(..., description='Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.')),
-        'scenario_text': (str, Field(None, description='Updated activation scenario text. Do not use this when replacing the visible behavior guidance shown in <behavior_guidance>; use prompt_hint for that.')),
-        'prompt_hint': (str, Field(None, description='Updated visible behavior guidance body rendered in <behavior_guidance>. Use this when the user asks to replace, edit, or update the guidance/original text. Do not repeat the title as a prefix.')),
-        'title': (str, Field(None)),
-        'activation_terms': (list[str], Field(None)),
-        'capability_refs': (list[str], Field(None)),
-        'skill_refs': (list[str], Field(None)),
-        'memory_query_hints': (list[str], Field(None)),
-        'resident': (bool, Field(None, description="Set true to make this guidance always visible in Pal's prompt, or false to keep it behavior-router recalled.")),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput',
-    {
-        'affordance_id': (str, Field(...)),
-        'affordance_hash': (str, Field(...)),
-        'module_id': (str, Field(...)),
-        'title': (str, Field(...)),
-        'scenario_text': (str, Field(...)),
-        'prompt_hint': (str, Field(...)),
-        'updated_fields': (list[str], Field(...)),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput',
-    {
-        'affordance': (str, Field(..., description='Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.')),
-    },
-)
-
-BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput = _strict_model(
-    'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput',
-    {
-        'affordance_id': (str, Field(...)),
-        'affordance_hash': (str, Field(...)),
-        'module_id': (str, Field(...)),
-        'title': (str, Field(...)),
-        'deleted': (bool, Field(...)),
-    },
-)
 
 ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput',
@@ -483,12 +385,12 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput',
     {
         'query': (str, Field(None, description="Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.")),
-        'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Capability namespace. Use inspect to inspect state; use action to perform work.')),
-        'family': (str, Field(None, description='Optional family filter such as management, lifecycle, endpoint, or search.')),
+        'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Optional registry namespace from hits/facets. inspect aliases introspection; action aliases operation. Omit when unknown; read-only tools can also be registered under operation.')),
+        'family': (str, Field(None, description='Exact explicitly declared family copied from hits/facets. Empty family in a hit means undeclared, not its namespace or module. Omit on initial search; use module_name for channel/skill/etc.')),
         'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
         'top_k': (int, Field(None, description='Maximum number of compact hits to return.', ge=1)),
-        'limit': (int, Field(None, description='Alias for top_k.', ge=1)),
+        'limit': (int, Field(None, description='Alias for top_k; top_k takes precedence when both are supplied.', ge=1)),
         'facets': (bool, Field(None, description='Default false. Set true to include namespace/module/family counts for broad-search narrowing.')),
     },
 )
@@ -518,7 +420,8 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput = _strict_model
         'truncated': (bool, Field(None)),
         'applied_filters': (dict[str, Any], Field(None)),
         'facets': (dict[str, Any], Field(None, description='Only present when requested with facets=true; counts deduplicated candidates.')),
-        'usage_hint': (str, Field(None, description='Only present for broad facet responses that need narrowing guidance.')),
+        'usage_hint': (str, Field(None, description='Search narrowing or empty-result recovery guidance.')),
+        'filter_suggestions': (dict[str, Any], Field(None, description='Available classifications among query matches before filters; these are suggestions, not returned hits.')),
     },
 )
 
@@ -746,7 +649,7 @@ McpPluginMcpManagerPluginProviderDetachInput = _strict_model(
 McpPluginMcpManagerPluginProviderImagePrepareInput = _strict_model(
     'McpPluginMcpManagerPluginProviderImagePrepareInput',
     {
-        'artifact_id': (str, Field(None, description='Opaque artifact handle returned by list_artifacts or artifact_search.')),
+        'artifact_id': (str, Field(None, description='Opaque artifact handle returned by list_artifacts or search_artifacts.')),
         'path': (str, Field(None)),
         'url': (str, Field(None)),
         'mode': (Literal['auto', 'url', 'path', 'base64', 'data_url'], Field(None)),
@@ -1190,7 +1093,7 @@ ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
         'skill_refs': (list[str], Field(None, description='Semantic skill names returned by skill_search.')),
         'out_channel_name': (str, Field(None, description='Endpoint name returned by channel_list.')),
         'enabled': (bool, Field(None)),
-        'out_reply_target': (dict[str, Any], Field(None, description='Query channel endpoint auth_state for routing info (session_id, request_id)')),
+        'out_reply_target': (dict[str, Any], Field(None, description='Provider-specific destination copied from a known inbound reply_target or an existing proactive task. Auth state is not a destination. Telegram uses chat_id and optional thread_id; do not invent session_id/request_id.')),
         'schedule': (dict[str, Any], Field(None, description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
     },
 )
@@ -1228,7 +1131,7 @@ ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput = _stric
     'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput',
     {
         'name': (str, Field(..., description='Task name returned by proactive_list.')),
-        'out_reply_target': (dict[str, Any], Field(None, description='Reply routing info: session_id, request_id')),
+        'out_reply_target': (dict[str, Any], Field(None, description='Provider-specific destination from a known inbound reply_target or existing proactive task. Telegram uses chat_id and optional thread_id; fields differ across providers.')),
     },
 )
 

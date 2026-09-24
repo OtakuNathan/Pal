@@ -867,20 +867,31 @@ def subscribe_core_state(context: MainContext, runtime: ChannelRuntime):
 class TypingSubscriber:
     def __init__(self, runtime: ChannelRuntime) -> None:
         self._runtime = runtime
+        self._routes: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def __call__(self, topic: str, event: TurnEvent) -> None:
+        turn_id = str(event.get("turn_id") or "")
+        if not turn_id:
+            return
         endpoint_id = str(event.get("endpoint_id") or "")
         reply_target = dict(event.get("reply_target") or {})
-        if not endpoint_id:
-            return
+        payload = {"typing_owner": f"turn:{turn_id}", "turn_id": turn_id}
         if topic == TURN_START:
-            self._runtime.queue_endpoint_status(
-                endpoint_id, "typing_start", reply_target=reply_target,
-            )
+            if not endpoint_id:
+                return
+            previous = self._routes.get(turn_id)
+            if previous == (endpoint_id, reply_target):
+                return
+            if previous is not None:
+                self._runtime.queue_endpoint_status(previous[0], "working_stop", reply_target=previous[1], payload=payload)
+            self._routes[turn_id] = (endpoint_id, reply_target)
+            self._runtime.queue_endpoint_status(endpoint_id, "typing_start", reply_target=reply_target, payload=payload)
         elif topic == TURN_END:
-            self._runtime.queue_endpoint_status(
-                endpoint_id, "working_stop", reply_target=reply_target,
-            )
+            # The start route owns teardown; a final event may omit or change it.
+            route = self._routes.pop(turn_id, None)
+            if route is None:
+                return
+            self._runtime.queue_endpoint_status(route[0], "working_stop", reply_target=route[1], payload=payload)
 
 
 def register_with_core(

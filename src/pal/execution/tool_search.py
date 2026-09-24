@@ -91,10 +91,10 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="search",
         guidance=ToolGuidance(
-            purpose="Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show, namespace='action' for mutate/execute/external.",
+            purpose="Search capabilities by task or alias. Start with query and optionally module_name; add namespace/family filters only using values observed in hits or facets.",
             use_when="When you need to find a capability by what it does but don't know its exact alias.",
             do_not_use_when="When you already know the alias (use read_tool or call_tool). When you want to invoke a known capability.",
-            failure_next_steps="Try a different namespace, broader query, or set facets=true for narrowing stats.",
+            failure_next_steps="For empty results, use filter_suggestions or remove guessed filters. Use facets=true to discover classifications before narrowing; family is not a business-domain taxonomy.",
             next_tool_hints=(
                 NextToolHint(
                     name="read_tool",

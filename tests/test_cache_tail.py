@@ -1,5 +1,8 @@
 from dataclasses import replace
+import json
 
+import httpx
+from openai import OpenAI
 import pytest
 
 from pal.llm.cache_policy import CacheProfileError, available_modes, resolve_mode
@@ -22,6 +25,15 @@ def send(coordinator, request, ctx, identity):
     return coordinator.prepare_attempt(request, ctx, raw, identity)
 
 
+@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "openai/gpt-6-sol"])
+def test_unverified_openrouter_models_do_not_enable_explicit_controls(model):
+    ctx = replace(context("hybrid", provider="openrouter"), model_id=model)
+    assert available_modes(ctx) == ("implicit",)
+    with pytest.raises(CacheProfileError):
+        resolve_mode(ctx)
+    assert resolve_mode(replace(ctx, capabilities={"prompt_cache": {"mode": "implicit"}})) == "implicit"
+
+
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("provider", ["openai", "openrouter"])
 @pytest.mark.parametrize("mode,count", [("implicit", 0), ("hybrid", 2), ("explicit", 3)])
@@ -35,10 +47,49 @@ def test_modes_final_payload(shape, provider, mode, count):
     if mode == "implicit":
         assert "prompt_cache_options" not in encoded.extra_body
     else:
-        assert audit(encoded, tuple(p.path for p in plan.breakpoints), mode=mode)[0]
+        assert audit(encoded, tuple(p.path for p in plan.breakpoints), mode=mode,
+                     gateway=provider == "openrouter")[0]
+        if provider == "openrouter" and mode == "hybrid":
+            assert "prompt_cache_options" not in encoded.extra_body
+        else:
+            assert thaw_json(encoded.extra_body["prompt_cache_options"]) == {
+                "mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}
     if mode == "explicit":
         assert plan.breakpoints[-1].label == "tail_current"
         assert plan.breakpoints[-1].message_id == request.messages[-2].message_id
+
+
+@pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
+def test_openrouter_hybrid_sdk_body_and_reject_incompatible_options(shape):
+    # OR's PromptCacheOptions schema accepts only "explicit". Omitting the
+    # object keeps automatic caching enabled alongside the block markers:
+    # https://openrouter.ai/docs/guides/best-practices/prompt-caching
+    co, ctx = PromptCacheCoordinator(), context("hybrid", shape, "openrouter")
+    request = _active_tool_request(_request())
+    plan, encoded, _ = send(co, request, ctx, "hybrid-wire")
+    captured = []
+
+    def capture(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "offline", "object": "response"})
+
+    with OpenAI(api_key="offline-test", base_url="https://example.test/v1",
+                http_client=httpx.Client(transport=httpx.MockTransport(capture))) as client:
+        resource = client.responses if shape == WireShape.OPENAI_RESPONSE else client.chat.completions
+        with resource.with_streaming_response.create(
+            **thaw_json(encoded.payload), extra_body=thaw_json(encoded.extra_body), stream=False
+        ):
+            pass
+    body, = captured
+    assert "extra_body" not in body
+    assert "prompt_cache_options" not in body
+    assert body["session_id"] == body["prompt_cache_key"] == plan.cache_key
+    paths = tuple(path for path, node in protocol_nodes(body) if "prompt_cache_breakpoint" in node)
+    assert paths == tuple(point.path for point in plan.breakpoints)
+    assert len(paths) == 2
+    for options in ({"mode": "implicit", "ttl": "30m"}, {"mode": "explicit", "ttl": "30m"}, None):
+        bad = replace(encoded, extra_body={**thaw_json(encoded.extra_body), "prompt_cache_options": options})
+        assert not audit(bad, paths, mode="hybrid", gateway=True)[0]
 
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])

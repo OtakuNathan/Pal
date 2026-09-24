@@ -199,8 +199,8 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="search",
         guidance=ToolGuidance(
-            purpose="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
-            use_when="You know roughly what file the user means (by name, type, or when sent) but lack the exact artifact_id.",
+            purpose="Search currently available conversation artifacts by filename, kind, caption, or summary. Results use relevance and recency ranking, not a date filter.",
+            use_when="You know roughly what file the user means by name, type, or content but lack the exact artifact_id.",
             do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
             failure_next_steps="If no results, try list_artifacts for a broader view, widen the query, or check if the artifact expired.",
         ),

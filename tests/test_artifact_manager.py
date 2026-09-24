@@ -251,6 +251,17 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_text_artifact_read_search_and_ttl_rules(self) -> None:
         ref = self._register_text()
+        from pal.execution.generated_tool_models import (
+            ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput as SearchInput,
+            ArtifactCapabilitiesArtifactIntrospectionProviderReadInput as ReadInput,
+        )
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            SearchInput(time_hint="last_week")
+        with self.assertRaises(ValidationError):
+            ReadInput(artifact_id=ref.artifact_id, page=0)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            self.manager.read(ref.artifact_id, self.scope_key, page=1, chunk=1)
 
         hot_before_search = self.repository.list_hot_states(scope_key=self.scope_key)[0]
         hits = self.manager.artifact_search(self.scope_key, query="refund", limit=5)
@@ -1082,6 +1093,12 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         register_artifact_with_core(core.context, self.manager)
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("artifact")
+        from types import SimpleNamespace
+        from pal.artifact.service import _next_actions_for
+        aliases = core.context.capability_registry.descriptors
+        for kind in ("pdf", "audio"):
+            for suggestion in _next_actions_for(SimpleNamespace(kind=kind)):
+                self.assertIn(suggestion.split()[1], aliases)
         core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
         ref = self._register_text("refund-policy.txt", "refund terms are on page one")
 

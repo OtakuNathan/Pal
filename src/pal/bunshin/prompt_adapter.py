@@ -92,7 +92,7 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
             metadata={"prompt_target": "developer"},
         )
         add(
-            "behavior_guidance",
+            "role_contract",
             "Role Contract",
             str(scaffold.get("behavior") or ""),
             20,

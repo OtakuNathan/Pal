@@ -207,6 +207,11 @@ class ChannelEndpointHub:
                 and isinstance(current, QueuedStatus)
                 and prior.response_handle == current.response_handle
                 and prior.kind == current.kind
+                and (
+                    current.kind not in {"typing_start", "working_stop"}
+                    or (prior.payload.get("typing_owner") or prior.payload.get("turn_id"))
+                    == (current.payload.get("typing_owner") or current.payload.get("turn_id"))
+                )
                 and current.kind in {"typing_start", "working_stop", "control_catalog", "llm_waiting"}
             ):
                 self.buffered_text_bytes = max(
@@ -1244,8 +1249,10 @@ class ChannelRuntime(ChannelRuntimePort):
             self.control_catalog_payload = dict(payload or {})
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:
+            if kind in {"typing_start", "typing_stop", "working_stop"}:
+                logging.getLogger(__name__).warning("Dropped %s for missing endpoint %s (owner=%s)", kind, endpoint_id, (payload or {}).get("typing_owner", ""))
             return None
-        target = dict(reply_target or endpoint.derive_default_reply_target())
+        target = dict(endpoint.derive_default_reply_target() if reply_target is None else reply_target)
         handle = endpoint.build_response_handle(reply_target=target)
         hub = self._require_hub(endpoint_id)
         if hub.state == EndpointHubState.ATTACHED:

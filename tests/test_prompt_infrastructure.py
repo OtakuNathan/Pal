@@ -114,7 +114,7 @@ def test_dynamic_section_cannot_explicitly_target_system() -> None:
             module_id="test",
             fragments=(
                 PromptFragment(
-                    section="resident_affordances",
+                    section="skill_guide",
                     title="Misrouted dynamic state",
                     content="This must remain outside the system prompt.",
                     metadata={"prompt_target": "system"},
@@ -154,3 +154,21 @@ def test_registering_same_prompt_provider_object_is_idempotent() -> None:
 
     assert registry.list_for_prompt() == (provider,)
     assert registry.by_module == {"module_a": ["same.id"]}
+
+
+def test_bunshin_role_contract_survives_without_advisor_policy() -> None:
+    from pal.bunshin.prompt_adapter import BunshinPromptFragmentProvider
+
+    provider = BunshinPromptFragmentProvider(
+        scaffold_factory=lambda: {"behavior": "Review the bound implementation and report defects."},
+        role_context_factory=lambda: "",
+    )
+    compiler = _compiler(provider)
+    prompt = compiler.build_prompt_ir(PromptAssemblyContext(metadata={"memory_pack": None}))
+    role = next(block for block in prompt.developer_blocks if block.block_id == "role_contract")
+    assert "Review the bound implementation" in role.content
+    assert "<pal_defaults" not in role.content
+    assert all("behavior_guidance" not in block.block_id for block in prompt.developer_blocks)
+    rendered = compiler._render_system_blocks(prompt.developer_blocks)
+    assert "Review the bound implementation" in rendered
+    assert "behavior-owned routing" not in rendered

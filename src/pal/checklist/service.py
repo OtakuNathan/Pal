@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 ChecklistStatus = Literal["pending", "in_progress", "completed"]
@@ -28,6 +28,7 @@ class CheckOutcome:
     changed: bool
     snapshot: ChecklistSnapshot | None
     found: bool
+    cleared: bool = False
 
 
 class ChecklistService:
@@ -50,7 +51,7 @@ class ChecklistService:
     MAX_MARKDOWN_CHARS = 4000
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._active: list[ChecklistItem] | None = None
 
     def upsert(self, plan: list[dict[str, Any]]) -> ChecklistSnapshot:
@@ -87,7 +88,11 @@ class ChecklistService:
                         item.status = "completed"
                         changed = True
                     break
-            return CheckOutcome(changed=changed, snapshot=self._snapshot_locked(), found=found)
+            snapshot = self._snapshot_locked()
+            cleared = found and snapshot.done == snapshot.total and self.clear()
+            if cleared:
+                snapshot = replace(snapshot, active=False)
+            return CheckOutcome(changed=changed, snapshot=snapshot, found=found, cleared=cleared)
 
     def show(self) -> ChecklistSnapshot | None:
         with self._lock:

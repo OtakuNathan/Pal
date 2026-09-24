@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
-from pal.behavior.decorators import skill
+from pal.skill.decorators import skill
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.web_fetch.tool_models import (
     BrowserActionOutput,

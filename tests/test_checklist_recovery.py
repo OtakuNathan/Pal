@@ -38,6 +38,17 @@ def test_checkpoint_round_trip_and_reset_keep_checklist_independent(tmp_path):
     assert service.show() is None
 
 
+def test_last_check_does_not_restore_completed_checklist_after_restart(tmp_path):
+    app, checklist = app_with_checklist(tmp_path)
+    checklist.upsert([{"step": "Finish work"}])
+    assert checklist.check("Finish work").cleared
+    asyncio.run(app._publish_checkpoint_async())
+    restored, service = app_with_checklist(tmp_path)
+    asyncio.run(restored._restore_checkpoint_async())
+    assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
+    assert service.show() is None
+
+
 def test_legacy_snapshot_adds_only_empty_checklist_without_rewriting_history(tmp_path):
     old = _build_app(tmp_path)
     memory = old.handle.memory_service

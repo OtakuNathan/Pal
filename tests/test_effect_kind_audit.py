@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pal.artifact.capabilities import ArtifactIntrospectionProvider
-from pal.behavior.capabilities import BehaviorIntrospectionProvider
 from pal.execution.tool_facade import EffectKind
 from pal.mcp.plugin import McpManagerPluginProvider
 from pal.memory.capabilities import MemoryIntrospectionProvider
@@ -36,7 +35,6 @@ def test_artifact_effects_track_hot_state_and_content_mutations() -> None:
 
 
 def test_stateful_query_tools_are_not_declared_as_reads() -> None:
-    assert _declared_effect(BehaviorIntrospectionProvider, "advise") is EffectKind.LOCAL_WRITE
     assert _declared_effect(MemoryIntrospectionProvider, "recall") is EffectKind.LOCAL_WRITE
     assert _declared_effect(SQLiteVecL3Plugin, "recall_query") is EffectKind.LOCAL_WRITE
     assert _declared_effect(_L3ProviderCapabilityMixin, "recall_query") is EffectKind.LOCAL_WRITE

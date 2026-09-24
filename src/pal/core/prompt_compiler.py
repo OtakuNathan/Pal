@@ -14,15 +14,6 @@ from pal.shared.payloads import extract_text_from_payload
 from pal.shared.prompt_rendering import render_runtime_context_update, render_runtime_reminder, render_system_reminder, render_xml_block
 
 
-_BEHAVIOR_GUIDANCE_HEADER = (
-    "Behavior guidance is behavior-owned routing metadata. It may include resident learned rules and temporary route hints produced by advise_behavior.\n"
-    "Temporary behavior guidance retires automatically; learned or resident behavior guidance may persist.\n"
-    "Consider matching guidance before choosing a route.\n"
-    "Follow relevant hints unless higher-priority policy, current user instruction, live truth, or capability policy makes them inappropriate."
-)
-_BEHAVIOR_GUIDANCE_HEADER_LINES = frozenset(_BEHAVIOR_GUIDANCE_HEADER.splitlines())
-
-
 def normalize_prompt_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw_message in list(messages or []):
@@ -88,8 +79,6 @@ class PromptCompiler:
             if not rendered_body and not self._preserve_empty_protocol_fragment(fragment):
                 continue
             prompt_target = self._prompt_target(fragment)
-            if normalized_section == "resident_affordances" and prompt_target == "runtime_reminder":
-                prompt_target = "developer"  # Legacy providers retain advisory semantics.
             self._validate_prompt_target(
                 fragment,
                 normalized_section=normalized_section,
@@ -340,17 +329,15 @@ class PromptCompiler:
         }
         developer_sections = {
             "persona",
-            "resident_affordances",
             "operating_guidance",
             "tool_routing",
             "tool_efficiency",
             "memory_guide",
-            "behavior_guidance",
-            "behavior_guidance_guide",
             "skill_guide",
             "knowledge_storage_boundary",
             "requirements_brief",
             "requirements_policy",
+            "role_contract",
             "task_acceptance",
             "task_acceptance_policy",
             "output_contract",
@@ -409,8 +396,6 @@ class PromptCompiler:
             "tool_efficiency": "Tool Efficiency",
             "mutation_policy": "Mutation Policy",
             "memory_guide": "Memory Guide",
-            "behavior_guidance": "Behavior Guidance",
-            "behavior_guidance_guide": "Behavior Guidance Guide",
             "skill_guide": "Skill Guide",
             "knowledge_storage_boundary": "Knowledge Storage Boundary",
             "requirements_brief": "Requirements Brief",
@@ -457,11 +442,7 @@ class PromptCompiler:
         aliases = {
             "system_surfaces": "system_map",
             "rules": "operating_rules",
-            "advisor_gate": "task_flow",
-            "advisor_recovery_memory": "task_flow",
-            "behavior_routing": "task_flow",
             "memory_routing": "memory_guide",
-            "behavior_memory_write_boundary": "knowledge_storage_boundary",
             "skill_learning": "skill_guide",
         }
         lowered = aliases.get(lowered, lowered)
@@ -484,13 +465,11 @@ class PromptCompiler:
             "tool_efficiency",
             "mutation_policy",
             "memory_guide",
-            "behavior_guidance",
-            "behavior_guidance_guide",
             "skill_guide",
             "knowledge_storage_boundary",
-            "resident_affordances",
             "requirements_brief",
             "requirements_policy",
+            "role_contract",
             "task_acceptance",
             "task_acceptance_policy",
             "output_contract",
@@ -557,8 +536,6 @@ class PromptCompiler:
             "memory_guidance": 30,
             "skill_guide": 40,
             "skill_guidance": 40,
-            "resident_affordances": 50,
-            "behavior_guidance": 60,
             "tool_efficiency": 70,
         }
         return sorted(
@@ -601,8 +578,6 @@ class PromptCompiler:
             "tool_routing": 50,
             "tool_efficiency": 60,
             "memory_guide": 70,
-            "behavior_guidance": 80,
-            "behavior_guidance_guide": 90,
             "skill_guide": 100,
             "knowledge_storage_boundary": 110,
             "requirements_brief": 120,
@@ -656,7 +631,7 @@ class PromptCompiler:
         candidates = []
         for index, block in enumerate(prompt_ir.developer_blocks):
             # Bound output/acceptance contracts are not optional defaults.
-            if block.block_id not in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "behavior_guidance", "behavior_guidance_guide", "resident_affordances", "skill_guide", "knowledge_storage_boundary"}:
+            if block.block_id not in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "skill_guide", "knowledge_storage_boundary"}:
                 continue
             candidates.append({"key": f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
                                "role": "developer", "content": self._project_llm_text(block.content), "instruction": True})
@@ -684,32 +659,10 @@ class PromptCompiler:
         if not blocks:
             return ""
         rendered_sections: list[str] = []
-        behavior_parts: list[str] = []
-
-        def flush_behavior_parts() -> None:
-            if not behavior_parts:
-                return
-            rendered_sections.append(
-                render_xml_block(
-                    "behavior_guidance",
-                    self._render_behavior_guidance_content(list(behavior_parts)),
-                )
-            )
-            behavior_parts.clear()
-
         for block in blocks:
             content = self._project_llm_text(block.content.strip())
-            if not content:
-                continue
-            if block.block_id in {"resident_affordances", "behavior_guidance"}:
-                behavior_parts.append(content)
-                continue
-            flush_behavior_parts()
-            tag = self._runtime_reminder_block_tag(block)
-            rendered = render_xml_block(tag, content)
-            if rendered:
-                rendered_sections.append(rendered)
-        flush_behavior_parts()
+            if content:
+                rendered_sections.append(render_xml_block(self._runtime_reminder_block_tag(block), content))
         return "\n\n".join(rendered_sections)
 
     @staticmethod
@@ -770,12 +723,6 @@ class PromptCompiler:
             "memory": (
                 "Tool side effect: activated recalled memories for this turn.\n"
                 "Use them as relevant reference; they are not noise.\n"
-                "This is not a new user message. Do not answer this block directly.\n"
-                "Continue the current task using this context."
-            ),
-            "behavior": (
-                "Runtime context update: activated behavior guidance for this turn.\n"
-                "Evaluate relevant hints before continuing; they are not noise.\n"
                 "This is not a new user message. Do not answer this block directly.\n"
                 "Continue the current task using this context."
             ),
@@ -851,7 +798,7 @@ class PromptCompiler:
                 current_tag = tag
                 current_parts = []
             body = block.content.strip()
-            if block.block_id in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "behavior_guidance", "behavior_guidance_guide", "resident_affordances", "skill_guide", "knowledge_storage_boundary"}:
+            if block.block_id in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "skill_guide", "knowledge_storage_boundary"}:
                 key = f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}"
                 body = f'<pal_defaults key="{escape(key, quote=True)}">Unless the current user request specifies otherwise:\n' + body + "\n</pal_defaults>"
             current_parts.append(body)
@@ -860,40 +807,11 @@ class PromptCompiler:
         return "\n\n".join(rendered_sections)
 
     def _render_system_section(self, tag: str, parts: list[str]) -> str:
-        if tag == "behavior_guidance":
-            return render_xml_block(
-                tag,
-                self._render_behavior_guidance_content(
-                    [self._project_llm_text(part) for part in parts]
-                ),
-            )
         return render_xml_block(tag, self._project_llm_text("\n\n".join(parts)))
 
-    @staticmethod
-    def _render_behavior_guidance_content(parts: list[str]) -> str:
-        lines: list[str] = []
-        seen_lines: set[str] = set()
-        for part in parts:
-            for raw_line in part.splitlines():
-                line = raw_line.strip()
-                if not line or line in _BEHAVIOR_GUIDANCE_HEADER_LINES:
-                    continue
-                if line.startswith("<pal_defaults") or line == "</pal_defaults>":
-                    lines.append(line)
-                    continue
-                dedupe_key = line.casefold()
-                if dedupe_key in seen_lines:
-                    continue
-                seen_lines.add(dedupe_key)
-                lines.append(line)
-        if not lines:
-            return _BEHAVIOR_GUIDANCE_HEADER
-        return _BEHAVIOR_GUIDANCE_HEADER + "\n\n" + "\n".join(lines)
 
     @staticmethod
     def _system_block_tag(block: PromptIRBlock) -> str:
-        if block.block_id == "resident_affordances":
-            return "behavior_guidance"
         tag = str(block.block_id or "").strip()
         if tag == "memory_context":
             return "memory_context"

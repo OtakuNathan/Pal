@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from pal.control.presentation import interaction_projection, interaction_text, interaction_button_rows
@@ -325,6 +326,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _stop_event: asyncio.Event | None = None
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _typing_owners: dict[str, set[str]] = field(default_factory=dict)
     _send_chains: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _pending_reply_deliveries: dict[str, tuple[QueuedReply, asyncio.Task[None]]] = field(
         default_factory=dict,
@@ -347,6 +349,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _authorized: bool = False
     _last_poll_error: str = ""
     _last_status_error: str = ""
+    _last_status_operation: str = ""
+    _last_status_error_at: str = ""
+    _last_status_recovered_at: str = ""
     _last_poll_error_at: float = 0.0
     _poll_error_stale_threshold_seconds: float = 10.0
     _poll_monitor_interval_seconds: float = 0.5
@@ -441,6 +446,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         for task in list(self._typing_tasks.values()):
             task.cancel()
         self._typing_tasks.clear()
+        self._typing_owners.clear()
         for task in list(self._send_chains.values()):
             task.cancel()
         self._send_chains.clear()
@@ -751,12 +757,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return
         if kind == "typing_start":
             key = self._typing_key(response_handle)
+            owner = str(payload.get("typing_owner") or payload.get("turn_id") or "legacy")
+            self._typing_owners.setdefault(key, set()).add(owner)
             if key in self._typing_tasks and not self._typing_tasks[key].done():
                 return
-            self._typing_tasks[key] = loop.create_task(self._typing_loop(response_handle))
+            task = loop.create_task(self._typing_loop(response_handle))
+            self._typing_tasks[key] = task
+            task.add_done_callback(lambda finished: self._typing_done(key, finished))
             return
         if kind == "typing_stop" or kind == "working_stop":
-            self._stop_typing(response_handle)
+            self._stop_typing(response_handle, owner=str(payload.get("typing_owner") or payload.get("turn_id") or "legacy"))
             return
         if kind == "receipt_marker":
             loop.create_task(self._send_receipt_marker_async(response_handle, payload))
@@ -896,7 +906,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         elif not self._polling_running:
             reason = "polling_not_running"
         return {
-            "healthy": bool(self._polling_running and not self._last_poll_error),
+            "healthy": not bool(reason),
+            "health_scope": "Current inbound polling; not a measurement of past message latency or outbound delivery.",
             "polling_running": self._polling_running,
             "reconnecting": self._reconnecting,
             "reconnect_attempts": self._reconnect_attempts,
@@ -906,9 +917,26 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "last_get_updates_activity_age_seconds": round(activity_age, 3) if activity_age is not None else None,
             "get_updates_in_flight_seconds": round(in_flight_age, 3),
             "last_status_error": self._last_status_error,
+            "status_error_context": {
+                "scope": "Historical auxiliary operation; does not determine polling health.",
+                "operation": self._last_status_operation,
+                "failed_at": self._last_status_error_at or None,
+                "subsequent_success_at": self._last_status_recovered_at or None,
+            } if self._last_status_error else None,
             "last_delivery_error": self.last_delivery_error,
             "reason": reason,
         }
+
+    def _record_status_result(self, operation: str, error: Exception | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        if error is not None:
+            self._last_status_error = str(error)
+            self._last_status_operation = operation
+            self._last_status_error_at = now
+            self._last_status_recovered_at = ""
+            logger.warning("telegram auxiliary operation %s failed: %s", operation, error)
+        elif operation == self._last_status_operation and self._last_status_error:
+            self._last_status_recovered_at = now
 
     def inspect_auth_state(self) -> dict[str, Any]:
         return {
@@ -1377,8 +1405,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 message_id=message_id,
                 reaction=reaction,
             )
+            self._record_status_result("reaction")
         except Exception as exc:
-            self._last_status_error = str(exc)
+            self._record_status_result("reaction", exc)
 
     async def _typing_loop(self, response_handle: ResponseHandle) -> None:
         if self.application is None:
@@ -1386,18 +1415,24 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         if chat_id is None:
             return
-        try:
-            while True:
-                await self.application.bot.send_chat_action(chat_id=chat_id, action="typing")
-                await asyncio.sleep(4.0)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._last_status_error = str(exc)
+        while True:
+            try:
+                kwargs = {"chat_id": chat_id, "action": "typing"}
+                thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
+                if thread_id is not None:
+                    kwargs["message_thread_id"] = thread_id
+                await self.application.bot.send_chat_action(**kwargs)
+                self._record_status_result("typing")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A transport failure is not a turn-end event.
+                self._record_status_result("typing", exc)
+            await asyncio.sleep(4.0)
 
     def _typing_key(self, response_handle: ResponseHandle) -> str:
-        chat_id = str(response_handle.reply_target.get("chat_id") or "")
-        thread_id = str(response_handle.reply_target.get("thread_id") or "")
+        chat_id = str(_safe_int(response_handle.reply_target.get("chat_id")) or "")
+        thread_id = str(_safe_int(response_handle.reply_target.get("thread_id")) or "")
         return f"{chat_id}:{thread_id}"
 
     def _schedule_ordered_send(
@@ -1446,11 +1481,26 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         except Exception as exc:
             self.last_delivery_error = str(exc)
 
-    def _stop_typing(self, response_handle: ResponseHandle) -> None:
-        key = self._typing_key(response_handle)
-        task = self._typing_tasks.pop(key, None)
-        if task is not None:
-            task.cancel()
+    def _typing_done(self, key: str, task: asyncio.Task[None]) -> None:
+        # A cancelled old loop must not remove its replacement.
+        if self._typing_tasks.get(key) is task:
+            self._typing_tasks.pop(key, None)
+            self._typing_owners.pop(key, None)
+
+    def _stop_typing(self, response_handle: ResponseHandle, *, owner: str = "legacy") -> None:
+        # Owner identifies the operation even if its final route lost thread_id.
+        keys = list(self._typing_owners) if owner != "legacy" else [self._typing_key(response_handle)]
+        for key in keys:
+            owners = self._typing_owners.get(key)
+            if not owners or owner not in owners:
+                continue
+            owners.discard(owner)
+            if owners:
+                continue
+            self._typing_owners.pop(key, None)
+            task = self._typing_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
 
     async def _send_reply_async(self, response_handle: ResponseHandle, text: str) -> None:
         if self.application is None:
@@ -1995,8 +2045,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     for item in commands
                 ]
             )
+            self._record_status_result("set_my_commands")
         except Exception as exc:
-            self._last_status_error = str(exc)
+            self._record_status_result("set_my_commands", exc)
             logger.exception("telegram control command menu update failed")
             return
 
@@ -2006,8 +2057,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             except Exception:
                 MenuButtonCommands = _FallbackMenuButtonCommands
             await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            self._record_status_result("set_chat_menu_button")
         except Exception as exc:
-            self._last_status_error = str(exc)
+            self._record_status_result("set_chat_menu_button", exc)
             logger.exception("telegram command menu button update failed")
 
     def _build_interaction_markup(self, spec: InteractionMessageSpec):
