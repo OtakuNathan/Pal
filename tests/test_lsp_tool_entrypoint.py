@@ -28,7 +28,7 @@ def test_attach_failure_is_reported_as_failure_not_applied_success() -> None:
     assert provider.last_health["healthy"] is False
 
 
-def test_prepare_workspace_result_points_to_indirect_lsp_tools() -> None:
+def test_prepare_workspace_ready_reports_facts_without_navigation_menu() -> None:
     provider = LspManagerPluginProvider(runtime_root=Path(tempfile.mkdtemp()))
     provider._request_or_error = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
         "status": "ok",
@@ -42,22 +42,27 @@ def test_prepare_workspace_result_points_to_indirect_lsp_tools() -> None:
 
     assert result.status == "ok"
     assert result.structured is not None
-    assert result.structured["next_tools"]["map_code"] == [
-        "lsp_document_symbols",
-        "lsp_workspace_symbols",
-    ]
-    assert "call_tool" in result.llm_text
-    assert "lsp_diagnostics" in result.llm_text
+    assert result.structured["workspace_root"] == "/workspace"
+    # A ready preparation is complete guidance-free: no navigation menu, no
+    # discovery reminder, no trailing direction text.
+    assert "next_tools" not in result.structured
+    assert not result.affordances
+    assert result.recovery_hint == ""
+    for token in ("call_tool", "read_tool", "lsp_diagnostics", "lsp_document_symbols"):
+        assert token not in result.llm_text
 
 
-def test_partial_prepare_points_to_readiness_tools_before_navigation() -> None:
+def test_partial_prepare_offers_bound_doctor_not_a_menu() -> None:
     provider = LspManagerPluginProvider(runtime_root=Path(tempfile.mkdtemp()))
     provider._request_or_error = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
         "status": "partial",
         "workspace_root": "/workspace",
         "primary_server": "clangd",
         "primary_probe_ready": False,
-        "servers": [{"server_id": "yaml", "status": "ok"}],
+        "servers": [
+            {"server_id": "yaml", "status": "ok"},
+            {"server_id": "clangd", "status": "init_failed"},
+        ],
     }
 
     result = provider.prepare_workspace(
@@ -67,11 +72,12 @@ def test_partial_prepare_points_to_readiness_tools_before_navigation() -> None:
     assert result.status == "ok"
     assert result.structured is not None
     assert result.structured["status"] == "partial"
-    assert result.structured["next_tools"] == {
-        "inspect_readiness": ["lsp_status", "lsp_doctor"],
-        "refresh_configuration": ["lsp_rescan"],
-    }
-    assert "primary language server is not ready" in result.llm_text
+    assert "next_tools" not in result.structured
+    tools = {item.tool: item for item in result.affordances}
+    assert set(tools) == {"lsp_doctor"}
+    doctor = tools["lsp_doctor"]
+    assert doctor.arguments["workspace_root"] == "/workspace"
+    assert doctor.arguments["name"] == "clangd"
     assert "lsp_document_symbols" not in result.llm_text
 
 

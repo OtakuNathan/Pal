@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -57,6 +58,11 @@ from pal.execution.tool_registry import (
     ToolRegistryGeneration,
     compile_registry_generation,
 )
+from pal.execution.result_guidance import (
+    action_key,
+    normalize_affordances,
+    resolve_failure_guidance,
+)
 from pal.shared import ToolExecutionResult
 from pal.plugins.l3.registry import L3PluginRegistry
 from pal.plugins.l3.stubs import NullL3Plugin
@@ -81,13 +87,29 @@ if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
 
 
-_FAILURE_MEMORY_NEXT_STEP = (
-    "If this is not itself a memory-recall failure and the failure looks familiar, "
-    "repeated, or opaque, call recall_memory with kind='case' and 1-3 focused queries "
-    "using the tool name, error text, symptoms, and affected resource. Treat recalled "
-    "fixes as leads, verify them against the current state, and do not repeat the same "
-    "call unchanged."
-)
+# Free-text recovery guidance is bounded. Validated optional actions are
+# capped by count and delivered outside the body truncation budget.
+_MAX_RECOVERY_HINT_CHARS = 500
+_LOGGER = logging.getLogger(__name__)
+
+# A leading structured fact block larger than this is not treated as a
+# minimum envelope (it would dwarf the budget it claims to be necessary for).
+_MAX_FACT_BLOCK_CHARS = 1_200
+
+
+def _leading_fact_block(text: str) -> str | None:
+    """Return the leading JSON object of a facts-first result body, if any."""
+
+    import json
+
+    stripped = str(text or "").lstrip()
+    try:
+        value, end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or end > _MAX_FACT_BLOCK_CHARS:
+        return None
+    return stripped[:end]
 
 
 def _is_plugin_lifecycle_tool(name: object) -> bool:
@@ -575,6 +597,26 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         turn_id: str | None,
     ) -> ToolInvocationResult:
+        result = self._invoke_tool_record_unfinalized_sync(
+            generation,
+            call,
+            invocation_mode=invocation_mode,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+        return self._finalize_invocation_result(generation, call, result, budget=budget, turn_id=turn_id)
+
+    def _invoke_tool_record_unfinalized_sync(
+        self,
+        generation: ToolRegistryGeneration,
+        call: ToolCallIR,
+        *,
+        invocation_mode: InvocationMode,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
         resolved = self._resolve_invocation_record(generation, call, invocation_mode=invocation_mode)
         if isinstance(resolved, RejectedResult):
             return resolved
@@ -592,9 +634,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
             turn_id=turn_id,
         )
         if special is not None:
-            if record.alias == "call_tool":
-                return special
-            return self._budget_invocation_result(special, call, budget=budget, turn_id=turn_id)
+            # Builtin results flow to the invoke-level finalizer together
+            # with every other exit; call_tool recursion finalizes once
+            # inside its own wrapper and is returned idempotently here.
+            return special
         if not allow_tools:
             return rejection(
                 "finalization_only",
@@ -632,6 +675,26 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         turn_id: str | None,
     ) -> ToolInvocationResult:
+        result = await self._invoke_tool_record_unfinalized_async(
+            generation,
+            call,
+            invocation_mode=invocation_mode,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+        return self._finalize_invocation_result(generation, call, result, budget=budget, turn_id=turn_id)
+
+    async def _invoke_tool_record_unfinalized_async(
+        self,
+        generation: ToolRegistryGeneration,
+        call: ToolCallIR,
+        *,
+        invocation_mode: InvocationMode,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
         resolved = self._resolve_invocation_record(generation, call, invocation_mode=invocation_mode)
         if isinstance(resolved, RejectedResult):
             return resolved
@@ -649,9 +712,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
             turn_id=turn_id,
         )
         if special is not None:
-            if record.alias == "call_tool":
-                return special
-            return self._budget_invocation_result(special, call, budget=budget, turn_id=turn_id)
+            # Builtin results flow to the invoke-level finalizer together
+            # with every other exit; call_tool recursion finalizes once
+            # inside its own wrapper and is returned idempotently here.
+            return special
         if not allow_tools:
             return rejection(
                 "finalization_only",
@@ -1072,28 +1136,140 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return await result if inspect.isawaitable(result) else result
 
     def _normalize_invocation_result(self, record, call, raw, *, budget, turn_id):
+        # Normalization only: guidance resolution and the final model-text
+        # budget happen once at the invoke-level finalizer, after every
+        # override (including native appends) has contributed its fields.
         result = self._normalize_invocation_result_inner(record, call, raw, budget=budget, turn_id=turn_id)
         if not result.snapshot_refs and getattr(raw, "snapshot_refs", ()):
             result = result.model_copy(update={"snapshot_refs": tuple(raw.snapshot_refs)})
+        return result
+
+    def deliver_invocation_result(
+        self,
+        record: CompiledToolRecord,
+        call: ToolCallIR,
+        raw: Any,
+        *,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
+        """Normalize and finalize one result for direct delivery paths.
+
+        Background event and observation deliveries that bypass the invoke
+        entry points still receive the same guidance resolution and final
+        model-text budget as ordinary tool results (§9.2).
+        """
+        result = self._normalize_invocation_result(record, call, raw, budget=budget, turn_id=turn_id)
+        return self._finalize_invocation_result(
+            self._registry_generation, call, result, budget=budget, turn_id=turn_id
+        )
+
+    def _finalize_invocation_result(
+        self,
+        generation: ToolRegistryGeneration,
+        call: ToolCallIR,
+        result: ToolInvocationResult,
+        *,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
+        """Single authoritative exit for one logical tool result (§9.2-§9.3).
+
+        Candidate guidance is resolved against the captured generation, then
+        the body plus status and recovery metadata is bounded. Optional
+        action metadata is delivered outside that truncation budget.
+        Idempotent: an already-final result whose budgeted portion fits
+        passes through unchanged, so nested
+        wrappers (call_tool recursion, native overrides) never double-capture
+        snapshots or stack fallbacks.
+        """
+        try:
+            result = self._resolve_result_guidance(generation, result)
+        except Exception:
+            # Guidance handling must never turn a delivered operation into a
+            # new failure (B12); degrade to the bare typed result.
+            _LOGGER.warning("Unable to resolve tool result guidance", exc_info=True)
+            result = result.model_copy(update={"affordances": [], "recovery_hint": ""})
         return self._budget_invocation_result(result, call, budget=budget, turn_id=turn_id)
 
+    def _resolve_result_guidance(
+        self,
+        generation: ToolRegistryGeneration,
+        result: ToolInvocationResult,
+    ) -> ToolInvocationResult:
+        """Validate and dedup suggested actions against the captured view (§8)."""
+        resolved: list[ToolAffordance] = []
+        for candidate in normalize_affordances(result.affordances or (), limit=None):
+            try:
+                key = action_key(candidate)
+                record = generation.record_for_alias(key.alias)
+                if record is None or key.alias == "call_tool":
+                    continue
+                arguments = json.loads(key.arguments_json)
+                validated = self._validate_invocation_input(record, arguments)
+                if isinstance(validated, RejectedResult):
+                    continue
+                if isinstance(self._resolve_record_binding(generation, record, validated), RejectedResult):
+                    continue
+                if key.alias == "read_tool" and generation.record_for_alias(arguments["name"]) is None:
+                    continue
+                if key.alias in generation.direct_aliases:
+                    action = ToolAffordance(tool=key.alias, arguments=arguments, reason=candidate.reason)
+                else:
+                    wrapper = generation.direct_aliases.get("call_tool")
+                    if wrapper is None:
+                        continue
+                    arguments = {"name": key.alias, "args": arguments}
+                    if isinstance(self._validate_invocation_input(wrapper, arguments), RejectedResult):
+                        continue
+                    action = ToolAffordance(tool="call_tool", arguments=arguments, reason=candidate.reason)
+                resolved.append(action)
+            except Exception:
+                _LOGGER.warning("Dropping invalid tool result affordance", exc_info=True)
+        resolved = normalize_affordances(resolved)
+        if resolved == list(result.affordances or ()):
+            return result
+        return result.model_copy(update={"affordances": resolved})
+
     def _budget_invocation_result(self, result, call, *, budget, turn_id):
-        """Bound model text without replacing the operation's validated host result."""
+        """Bound the body and recovery metadata independently of optional actions.
+
+        Affordances are validated and capped separately. They are appended
+        outside this budget so suggestions cannot crowd out operation facts.
+        """
         limit = self._resolve_char_limit(budget) if budget else None
+        if limit is None:
+            return result
         text = result.llm_text
-        if limit is None or len(text) <= limit:
+        tail = self._rendered_guidance_tail(result, include_affordances=False)
+        if len(text) + len(tail) <= limit:
             return result
         refs = tuple(result.snapshot_refs or ())
         delivery = getattr(result, "context_delivery", None)
         manifest = FileDeliveryManifest.from_dict(delivery) if delivery else None
-        long_line = manifest and any(span.line_length > limit for span in manifest.spans)
-        extra = (
-            "\nA source line exceeds this delivery budget. Use run_shell with awk/sed/wc "
-            "to inspect bounded portions of the original file. edit_file requires complete "
-            "source lines; for this case use a focused shell edit (for example sed), checking "
-            "the current source before modifying it. Reading the output copy grants no source edit authority."
-            if long_line else ""
+        managed_snapshot = bool(
+            call.args.get("file_path")
+            and self.result_snapshots is not None
+            and self.result_snapshots.lookup_path(str(call.args["file_path"])) is not None
         )
+        long_line = bool(manifest) and manifest.operation == "read" and any(
+            span.line_length > limit for span in manifest.spans
+        )
+        if long_line and not managed_snapshot:
+            extra = (
+                "\nA source line exceeds this delivery budget. Use run_shell with awk/sed/wc "
+                "to inspect bounded portions of the original file. edit_file requires complete "
+                "source lines; for this case use a focused shell edit (for example sed), checking "
+                "the current source before modifying it. Reading the output copy grants no source edit authority."
+            )
+        elif long_line and managed_snapshot:
+            extra = (
+                "\nA line of this result snapshot exceeds the delivery budget. View bounded "
+                "fragments (for example head/tail portions) instead of whole lines; snapshots "
+                "are immutable evidence, not editable sources."
+            )
+        else:
+            extra = ""
         output_error = ""
         try:
             lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
@@ -1110,7 +1286,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "where applicable use shell with tail/sed for bounded output. "
                 "Do not repeat side effects merely to retrieve output." + extra
             )
-        preview, intervals = head_tail(text, max(0, min(int(budget.preview_chars or 1000), limit - len(hint) - 2)))
+        preview_allowance = max(0, min(int(budget.preview_chars or 1000), limit - len(hint) - len(tail) - 4))
+        marker = "\n... [output omitted; see complete snapshot] ...\n"
+        if preview_allowance < len(marker):
+            # The preview cannot fit even its omission marker: the documented
+            # minimum-envelope exception applies. Owners compose results
+            # facts-first, so a leading bounded structured block (for example
+            # a paged session status header) is preserved whole instead of
+            # being head-cut into unparsable fragments.
+            fact_block = _leading_fact_block(text)
+            if fact_block is not None:
+                preview, intervals = fact_block, ()
+            else:
+                preview, intervals = text[:preview_allowance], ()
+        else:
+            preview, intervals = head_tail(text, preview_allowance)
+        # The metadata tail renders from typed fields at the single renderer;
+        # the budgeted body carries only the preview plus delivery hint.
         updates = {"llm_text": preview + "\n\n" + hint, "snapshot_refs": refs}
         if isinstance(result, CompleteResult):
             updates["output_error"] = result.output_error or output_error
@@ -1140,6 +1332,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return raw
         receipt: EffectReceipt | None = None
         affordances: list[ToolAffordance] = []
+        recovery_hint = ""
         llm_text = ""
         context_delivery: dict[str, Any] | None = None
         context_messages: tuple[ToolContextMessageIR, ...] = ()
@@ -1148,7 +1341,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt
-            affordances = list(raw.affordances)
+            affordances = normalize_affordances(raw.affordances, limit=None)
+            recovery_hint = str(raw.recovery_hint or "")
             llm_text = raw.llm_text
         elif isinstance(raw, CapabilityResult) or all(
             hasattr(raw, attribute) for attribute in ("status", "text", "structured", "llm_text")
@@ -1162,6 +1356,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if isinstance(raw_delivery, dict):
                 context_delivery = dict(raw_delivery)
             context_messages = tuple(getattr(raw, "context_messages", ()) or ())
+            affordances = normalize_affordances(getattr(raw, "affordances", ()) or (), limit=None)
+            recovery_hint = str(getattr(raw, "recovery_hint", "") or "")
             if isinstance(raw_receipt, EffectReceipt):
                 receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
@@ -1172,19 +1368,24 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     if receipt is not None
                     else EffectOutcome.UNKNOWN
                 )
-                details = dict(raw_structured or {})
-                details.setdefault(
-                    "failure_next_steps",
-                    record.guidance.failure_next_steps.strip(),
+                # Pick the best failure guidance instead of stacking every
+                # source (§6.1): handler-provided recovery wins; the declared
+                # fallback fills the recovery hint only when nothing more
+                # specific exists.
+                recovery_hint, owner_affordances = self._safe_failure_guidance(
+                    handler_recovery_hint=str(getattr(raw, "recovery_hint", "") or ""),
+                    handler_affordances=affordances,
+                    declared_failure_next_steps=record.guidance.failure_next_steps.strip(),
                 )
                 return FailedResult(
                     error_code=str((raw_structured or {}).get("error_code") or raw_status or "handler_failed"),
                     error=raw_text or llm_text,
                     effect=outcome,
                     retry=derive_retry_directive(record.execution, outcome),
-                    llm_text=self._append_failure_guidance(record, llm_text or raw_text),
-                    affordances=self._default_failure_affordances(record),
-                    details=details,
+                    llm_text=llm_text or raw_text,
+                    affordances=owner_affordances,
+                    recovery_hint=recovery_hint,
+                    details=dict(raw_structured or {}),
                 )
             candidate = raw_structured if raw_structured is not None else {"text": raw_text}
             if record.is_mcp and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict):
@@ -1238,7 +1439,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
         return CompleteResult(
             output=output, effect=outcome, llm_text=rendered,
-            affordances=affordances, context_delivery=context_delivery,
+            affordances=affordances, recovery_hint=recovery_hint, context_delivery=context_delivery,
             snapshot_refs=refs, replay_result_ref=call.call_id if refs else "", context_messages=context_messages,
         )
 
@@ -1261,30 +1462,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
             exc.error_code,
             str(exc),
             retry=exc.retry,
-            affordances=list(exc.affordances),
+            affordances=normalize_affordances(exc.affordances, limit=None),
             details=dict(exc.details),
+            recovery_hint=str(getattr(exc, "recovery_hint", "") or ""),
         )
 
     @staticmethod
-    def _append_failure_guidance(record: CompiledToolRecord, text: str) -> str:
-        base = str(text or "").strip()
-        guidance = record.guidance.failure_next_steps.strip()
-        if not guidance or guidance.lower() in base.lower():
-            return base
-        return f"{base}\nFailure next steps: {guidance}" if base else f"Failure next steps: {guidance}"
-
-    @staticmethod
-    def _default_failure_affordances(record: CompiledToolRecord) -> list[ToolAffordance]:
-        return [
-            ToolAffordance(
-                tool="read_tool",
-                arguments={"name": record.alias},
-                reason=(
-                    "Review this tool's failure contract and retry semantics before choosing "
-                    "a recovery action."
-                ),
+    def _safe_failure_guidance(
+        *,
+        handler_recovery_hint: str,
+        handler_affordances: list[ToolAffordance],
+        declared_failure_next_steps: str,
+    ) -> tuple[str, list[ToolAffordance]]:
+        try:
+            return resolve_failure_guidance(
+                handler_recovery_hint=handler_recovery_hint,
+                handler_affordances=handler_affordances,
+                declared_failure_next_steps=declared_failure_next_steps,
             )
-        ]
+        except Exception:
+            _LOGGER.warning("Unable to resolve failure guidance; retaining operation failure", exc_info=True)
+            return "", []
 
     @staticmethod
     def _handler_exception_result(record: CompiledToolRecord, exc: Exception) -> FailedResult:
@@ -1295,22 +1493,20 @@ class ExecutionRuntime(ExecutionRuntimePort):
             outcome = receipt.outcome
         else:
             outcome = EffectOutcome.UNKNOWN
-        affordances = list(getattr(exc, "affordances", ()) or ())
-        if not affordances:
-            affordances = ExecutionRuntime._default_failure_affordances(record)
-        details = dict(getattr(exc, "details", {}) or {})
-        details.setdefault("failure_next_steps", record.guidance.failure_next_steps.strip())
+        recovery_hint, affordances = ExecutionRuntime._safe_failure_guidance(
+            handler_recovery_hint=str(getattr(exc, "recovery_hint", "") or ""),
+            handler_affordances=list(getattr(exc, "affordances", ()) or ()),
+            declared_failure_next_steps=record.guidance.failure_next_steps.strip(),
+        )
         return FailedResult(
             error_code=str(getattr(exc, "error_code", "handler_exception") or "handler_exception"),
             error=f"{exc.__class__.__name__}: {exc}",
             effect=outcome,
             retry=derive_retry_directive(record.execution, outcome),
-            llm_text=ExecutionRuntime._append_failure_guidance(
-                record,
-                f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
-            ),
+            llm_text=f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
             affordances=affordances,
-            details=details,
+            recovery_hint=recovery_hint,
+            details=dict(getattr(exc, "details", {}) or {}),
         )
 
     @staticmethod
@@ -1346,8 +1542,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
             snapshot_refs=result.snapshot_refs, replay_result_ref=call_id if result.snapshot_refs else "")
 
     @staticmethod
-    def _render_invocation_for_llm(result: ToolInvocationResult) -> str:
-        base = str(result.llm_text or "")
+    def _invocation_metadata_values(
+        result: ToolInvocationResult,
+        *,
+        recovery_hint: str | None = None,
+        affordances: list[ToolAffordance] | None = None,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "kind": result.kind,
             "effect": result.effect.value,
@@ -1359,15 +1559,32 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     "retry": result.retry.value,
                 }
             )
-        if result.affordances:
-            metadata["affordances"] = [item.model_dump(mode="json") for item in result.affordances]
+        hint = (
+            str(result.recovery_hint or "") if recovery_hint is None else recovery_hint
+        ).strip()
+        if hint:
+            metadata["recovery"] = hint[:_MAX_RECOVERY_HINT_CHARS]
+        actions = result.affordances if affordances is None else affordances
+        if actions:
+            metadata["affordances"] = [item.model_dump(mode="json") for item in actions]
+        return metadata
+
+    @classmethod
+    def _rendered_guidance_tail(
+        cls, result: ToolInvocationResult, *, include_affordances: bool = True
+    ) -> str:
+        """The deterministic metadata suffix the renderer appends to the body."""
+        metadata = cls._invocation_metadata_values(
+            result, affordances=None if include_affordances else []
+        )
         if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:
-            return base
-        rendered_metadata = render_structured_for_llm(metadata)
-        rendered = f"{base}\n\nTool result metadata: {rendered_metadata}"
-        if isinstance(result, (RejectedResult, FailedResult)):
-            rendered = f"{rendered}\nFailure next step: {_FAILURE_MEMORY_NEXT_STEP}"
-        return rendered
+            return ""
+        return f"\n\nTool result metadata: {render_structured_for_llm(metadata)}"
+
+    @classmethod
+    def _render_invocation_for_llm(cls, result: ToolInvocationResult) -> str:
+        base = str(result.llm_text or "")
+        return base + cls._rendered_guidance_tail(result)
 
     def execute_tool(
         self,

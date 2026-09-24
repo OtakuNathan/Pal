@@ -50,6 +50,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.tool_protocol import ToolAffordance
 
 
 _MANAGER_RETIRE_TIMEOUT_SECONDS = 5.0
@@ -319,7 +320,10 @@ class LspManagerPluginProvider:
             ),
         ), InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput, aliases=("lsp_prepare_call_hierarchy",), execution=INDIRECT_LOCAL_READ)
     def prepare_call_hierarchy(self, call: CapabilityCall) -> CapabilityResult:
-        return _capability_from_rpc("LSP prepare call hierarchy", self._request_or_error("prepare_call_hierarchy", dict(call.args or {})))
+        return _call_hierarchy_result(
+            self._request_or_error("prepare_call_hierarchy", dict(call.args or {})),
+            dict(call.args or {}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls",
         guidance=ToolGuidance(
@@ -555,6 +559,114 @@ class LspManagerPluginProvider:
         return bool((self.last_health or {}).get("ok"))
 
 
+def _failing_servers(payload: dict[str, Any]) -> list[str]:
+    failing: list[str] = []
+    for item in list(payload.get("servers") or []):
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("server_id") or "")
+            status = str(item.get("status") or "")
+            if name and status not in {"ok", "ready"}:
+                failing.append(name)
+    return failing
+
+
+def _prepare_workspace_result(payload: dict[str, Any]) -> CapabilityResult:
+    """Guidance follows this result's facts, not a standing menu (v2 §7.3-§7.4).
+
+    A ready preparation reports readiness facts only. Partial or failed
+    preparations offer recovery bound to the workspace and — when exactly one
+    failing server is identifiable — that server. No navigation menu is
+    attached to any branch.
+    """
+    projected = dict(payload)
+    raw_status = str(projected.get("status") or RuntimeStatus.OK)
+    affordances: list[ToolAffordance] = []
+    recovery_hint = ""
+    if raw_status != RuntimeStatus.OK:
+        workspace_root = str(projected.get("workspace_root") or "").strip()
+        failing = _failing_servers(projected)
+        primary = str(projected.get("primary_server") or "").strip()
+        target: str | None = None
+        if len(failing) == 1:
+            target = failing[0]
+        elif primary and primary in failing:
+            target = primary
+        if target:
+            arguments: dict[str, Any] = {"name": target}
+            if workspace_root:
+                arguments["workspace_root"] = workspace_root
+            affordances.append(
+                ToolAffordance(
+                    tool="lsp_doctor",
+                    arguments=arguments,
+                    reason=(
+                        f"Language server {target!r} is not ready for this workspace; "
+                        "diagnose that server before navigation."
+                    ),
+                )
+            )
+        elif workspace_root:
+            affordances.append(
+                ToolAffordance(
+                    tool="lsp_status",
+                    arguments={"workspace_root": workspace_root},
+                    reason="Workspace preparation did not reach readiness; inspect its server readiness.",
+                )
+            )
+        else:
+            recovery_hint = "Preparation did not reach readiness; inspect workspace readiness with lsp_status."
+    result = _capability_from_rpc("LSP workspace preparation", projected)
+    return CapabilityResult(
+        status=result.status,
+        text=result.text,
+        structured=result.structured,
+        llm_text=result.llm_text,
+        affordances=tuple(affordances),
+        recovery_hint=recovery_hint,
+    )
+
+
+def _call_hierarchy_result(payload: dict[str, Any], args: dict[str, Any]) -> CapabilityResult:
+    """Bind call-hierarchy continuation to the position that produced the item.
+
+    Exactly one prepared item supports an unambiguous callers/callees
+    continuation at the same position; empty or ambiguous results stay facts.
+    """
+    result = _capability_from_rpc("LSP prepare call hierarchy", payload)
+    affordances: list[ToolAffordance] = []
+    items = payload.get("items")
+    raw_status = str(payload.get("status") or RuntimeStatus.OK)
+    if raw_status == RuntimeStatus.OK and isinstance(items, list) and len(items) == 1:
+        continuation: dict[str, Any] = {
+            key: args[key] for key in ("file", "line", "character") if key in args
+        }
+        if args.get("workspace_root"):
+            continuation["workspace_root"] = args["workspace_root"]
+        if args.get("name"):
+            continuation["name"] = args["name"]
+        affordances.extend(
+            (
+                ToolAffordance(
+                    tool="lsp_incoming_calls",
+                    arguments=dict(continuation),
+                    reason="The prepared item can resolve its callers at this position.",
+                ),
+                ToolAffordance(
+                    tool="lsp_outgoing_calls",
+                    arguments=dict(continuation),
+                    reason="The prepared item can resolve its callees at this position.",
+                ),
+            )
+        )
+    return CapabilityResult(
+        status=result.status,
+        text=result.text,
+        structured=result.structured,
+        llm_text=result.llm_text,
+        affordances=tuple(affordances),
+    )
+
+
 @dataclass
 class LspManagerPluginBundle:
     runtime_root: Path
@@ -588,44 +700,3 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
         status = RuntimeStatus.OK
     return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))
 
-
-def _prepare_workspace_result(payload: dict[str, Any]) -> CapabilityResult:
-    projected = dict(payload)
-    raw_status = str(projected.get("status") or RuntimeStatus.OK)
-    if raw_status == RuntimeStatus.OK:
-        projected["next_tools"] = {
-            "map_code": ["lsp_document_symbols", "lsp_workspace_symbols"],
-            "inspect_symbol": ["lsp_hover", "lsp_definition", "lsp_implementation", "lsp_references"],
-            "trace_calls": ["lsp_prepare_call_hierarchy", "lsp_incoming_calls", "lsp_outgoing_calls"],
-            "verify_edits": ["lsp_diagnostics"],
-        }
-        direction = (
-            "Workspace preparation completed. The LSP tools above are indirect capabilities: "
-            "invoke the relevant one with call_tool using its exact alias; use read_tool first when its arguments are unclear."
-        )
-    elif raw_status == "partial":
-        projected["next_tools"] = {
-            "inspect_readiness": ["lsp_status", "lsp_doctor"],
-            "refresh_configuration": ["lsp_rescan"],
-        }
-        direction = (
-            "Workspace preparation is partial: the primary language server is not ready even though another "
-            "detected server may be available. Use call_tool with lsp_status or lsp_doctor before navigation; "
-            "after changing server configuration, use lsp_rescan and retry lsp_prepare_workspace."
-        )
-    else:
-        projected["next_tools"] = {
-            "inspect_readiness": ["lsp_status", "lsp_doctor"],
-            "refresh_configuration": ["lsp_rescan"],
-        }
-        direction = (
-            "Workspace preparation did not become ready. Use call_tool with lsp_status or lsp_doctor; "
-            "after changing server configuration, use lsp_rescan and retry lsp_prepare_workspace."
-        )
-    result = _capability_from_rpc("LSP workspace preparation", projected)
-    return CapabilityResult(
-        status=result.status,
-        text=result.text,
-        structured=result.structured,
-        llm_text=f"{result.llm_text}\n\n{direction}",
-    )

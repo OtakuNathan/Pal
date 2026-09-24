@@ -173,7 +173,9 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wrong_direct.error_code, "wrong_invocation_mode")
         self.assertIsInstance(wrong_indirect, RejectedResult)
         self.assertEqual(wrong_indirect.error_code, "wrong_invocation_mode")
-        self.assertTrue(wrong_direct.affordances)
+        # This bare runtime has no call_tool provider surface; do not suggest
+        # an unavailable wrapper even though invoke_indirect_tool exists.
+        self.assertEqual(wrong_direct.affordances, [])
         self.assertTrue(wrong_indirect.affordances)
 
     async def test_canonical_path_is_never_an_llm_invocation_name(self) -> None:
@@ -385,28 +387,46 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsInstance(result, FailedResult)
-        self.assertIn("Failure next steps: correct the input before retrying", result.llm_text)
-        self.assertEqual(result.details["failure_next_steps"], "correct the input before retrying")
-        self.assertEqual(result.affordances[0].tool, "read_tool")
-        self.assertEqual(result.affordances[0].arguments, {"name": "echo"})
+        # The declared fallback rides the typed recovery field exactly once;
+        # no read_tool affordance is fabricated and no memory ritual is
+        # appended to the failure.
+        self.assertEqual(result.recovery_hint, "correct the input before retrying")
+        self.assertEqual(result.affordances, [])
+        self.assertNotIn("recall_memory", result.llm_text)
 
-        rendered = self.runtime.execute_tool(
-            new_tool_call(
-                name="call_tool",
-                args={"name": "echo", "args": {"value": "x"}},
-            )
-        )
-        self.assertFalse(rendered.ok)
-        self.assertIn("call recall_memory with kind='case'", rendered.llm_text)
+        from pal.core import PalCore
+        from pal.execution import register_with_core
 
-        rejected = self.runtime.execute_tool(
-            new_tool_call(
-                name="call_tool",
-                args={"name": "echo", "args": {"value": 7}},
+        core = PalCore()
+        register_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        try:
+            wrapped_runtime = core.context.execution_runtime
+            mount_test_capability(wrapped_runtime, **_echo_kwargs(handler=blocked))
+
+            rendered = wrapped_runtime.execute_tool(
+                new_tool_call(
+                    name="call_tool",
+                    args={"name": "echo", "args": {"value": "x"}},
+                )
             )
-        )
-        self.assertFalse(rejected.ok)
-        self.assertIn("call recall_memory with kind='case'", rejected.llm_text)
+            self.assertFalse(rendered.ok)
+            self.assertIn('"recovery":"correct the input before retrying"', rendered.llm_text)
+            self.assertNotIn("recall_memory", rendered.llm_text)
+
+            rejected = wrapped_runtime.execute_tool(
+                new_tool_call(
+                    name="call_tool",
+                    args={"name": "echo", "args": {"value": 7}},
+                )
+            )
+            self.assertFalse(rejected.ok)
+            # A schema rejection carries its precise correction without the
+            # business fallback or a memory-recall trailer.
+            self.assertNotIn("recall_memory", rejected.llm_text)
+            self.assertNotIn("correct the input before retrying", rejected.llm_text)
+        finally:
+            core.close()
 
     async def test_paging_happens_after_complete_output_validation(self) -> None:
         mount_test_capability(

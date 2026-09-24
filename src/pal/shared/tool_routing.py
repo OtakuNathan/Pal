@@ -4,9 +4,9 @@ from __future__ import annotations
 
 
 TOOL_EXECUTION_SYSTEM_POLICY = (
-    "- On failure or uncertain outcome, prefer result-specific recovery affordances, then the "
-    "tool description's `Failure next steps`, before improvising. Respect effect, idempotency, "
-    "retry, and reconcile semantics; never blindly retry a mutation.\n"
+    "- On failure or uncertain outcome, prefer result-specific recovery affordances before "
+    "improvising. Respect effect, idempotency, retry, and reconcile semantics; never blindly "
+    "retry a mutation.\n"
     "- Treat each tool call as one RPC. If it times out, crashes, or does not complete, its "
     "result is unavailable and its side effects may be uncertain. Inspect current state, then "
     "retry when appropriate; never infer success from the missing result.\n"

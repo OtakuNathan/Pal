@@ -13,7 +13,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     model_validation_schema,
 )
-from pal.shared.tool_protocol import ToolContextMessageIR
+from pal.shared.tool_protocol import ToolAffordance, ToolContextMessageIR
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,10 @@ class CapabilityResult:
     text: str = ""
     structured: dict[str, Any] | None = None
     effect_receipt: EffectReceipt | None = None
+    # Result-specific guidance (task package v2 §5.1): business owners emit
+    # affordances only when this result's facts justify an action.
+    affordances: tuple[ToolAffordance, ...] = ()
+    recovery_hint: str = ""
     context_delivery: dict[str, Any] | None = None
     snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     context_messages: tuple[ToolContextMessageIR, ...] = ()
@@ -106,6 +110,8 @@ class CapabilityResult:
     def __post_init__(self) -> None:
         if not str(self.llm_text or ""):
             raise ValueError("CapabilityResult.llm_text must be non-empty")
+        object.__setattr__(self, "affordances", tuple(self.affordances or ()))
+        object.__setattr__(self, "recovery_hint", str(self.recovery_hint or ""))
         object.__setattr__(self, "context_messages", tuple(self.context_messages or ()))
 
 

@@ -32,15 +32,16 @@ BUNSHIN_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "once the exact path and content are known. Git is available here only for classified read-only inspection such as "
                     "status, diff, log, show, blame, grep, ls-files, rev-parse, show-ref, and non-mutating branch queries. "
                     "Git mutations and unknown Git subcommands are trapped; leave repository checkpoint mutations to the "
-                    "Manager. Do not use shell networking or package-download commands; use search_web/browser_read for web "
+                    "Manager. If a command is trapped, do not retry it through another shell spelling or wrapper. "
+                    "Do not use shell networking or package-download commands; use search_web/browser_read for web "
                     "research and report missing dependencies as an environment blocker. Do not pipe long-running tests "
                     "or builds through head, tail, or grep merely to shorten output; result budgeting handles large output, "
                     "while those pipelines hide the command that is stalled."
                 ),
                 "failure_next_steps": (
-                    "If a command is trapped, do not retry it through another shell spelling or wrapper. For a trapped "
-                    "Git command, use a permitted read-only subcommand or stop. For an ordinary command failure, inspect "
-                    "stdout, stderr, and exit status, correct the command or environment, and then rerun only when safe."
+                    "For a trapped Git command, use a permitted read-only subcommand or stop. For an ordinary command "
+                    "failure, inspect stdout, stderr, and exit status, correct the command or environment, and then "
+                    "rerun only when safe."
                 ),
             }
         ),

@@ -115,12 +115,15 @@ class ToolGuidance(StrictToolModel):
     purpose: str
     use_when: str
     do_not_use_when: str
-    failure_next_steps: str
+    # Host-side failure fallback declaration. It intentionally does not enter
+    # the default model description; execution offers it only when a real
+    # failure result carries no more specific handler guidance.
+    failure_next_steps: str = ""
     next_tool_hints: tuple[NextToolHint, ...] = ()
 
     @model_validator(mode="after")
     def validate_guidance(self) -> "ToolGuidance":
-        for field_name in ("purpose", "use_when", "do_not_use_when", "failure_next_steps"):
+        for field_name in ("purpose", "use_when", "do_not_use_when"):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"tool guidance {field_name} must be non-empty")
         names = [hint.name for hint in self.next_tool_hints]
@@ -161,6 +164,7 @@ class ToolHandlerResult(StrictToolModel):
     llm_text: str = ""
     effect_receipt: EffectReceipt | None = None
     affordances: list[ToolAffordance] = Field(default_factory=list)
+    recovery_hint: str = ""
 
 
 class ToolExecutionError(RuntimeError):
@@ -174,12 +178,14 @@ class ToolExecutionError(RuntimeError):
         effect_receipt: EffectReceipt | None = None,
         affordances: list[ToolAffordance] | None = None,
         details: dict[str, Any] | None = None,
+        recovery_hint: str = "",
     ) -> None:
         super().__init__(message)
         self.error_code = str(error_code or "handler_failed")
         self.effect_receipt = effect_receipt
         self.affordances = list(affordances or ())
         self.details = dict(details or {})
+        self.recovery_hint = str(recovery_hint or "")
 
 
 class ToolRejectedError(ValueError):
@@ -193,12 +199,14 @@ class ToolRejectedError(ValueError):
         retry: RetryDirective = RetryDirective.CORRECT_INPUT,
         affordances: list[ToolAffordance] | None = None,
         details: dict[str, Any] | None = None,
+        recovery_hint: str = "",
     ) -> None:
         super().__init__(message)
         self.error_code = str(error_code or "rejected")
         self.retry = retry
         self.affordances = list(affordances or ())
         self.details = dict(details or {})
+        self.recovery_hint = str(recovery_hint or "")
 
 
 def validate_output(model: type[BaseModel], value: Any) -> BaseModel:
@@ -253,7 +261,6 @@ def compile_tool_description(
         f"Purpose: {guidance.purpose.strip()}",
         f"Use when: {guidance.use_when}",
         f"Do not use when: {guidance.do_not_use_when}",
-        f"Failure next steps: {guidance.failure_next_steps}",
         (
             "Execution semantics: "
             f"invocation_mode={execution.invocation_mode.value}; "
@@ -285,6 +292,7 @@ def rejection(
     retry: RetryDirective = RetryDirective.CORRECT_INPUT,
     affordances: list[ToolAffordance] | None = None,
     details: dict[str, Any] | None = None,
+    recovery_hint: str = "",
 ) -> RejectedResult:
     return RejectedResult(
         error_code=error_code,
@@ -293,6 +301,7 @@ def rejection(
         llm_text=error,
         affordances=list(affordances or ()),
         details=dict(details or {}),
+        recovery_hint=str(recovery_hint or ""),
     )
 
 

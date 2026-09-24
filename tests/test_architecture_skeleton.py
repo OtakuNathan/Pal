@@ -876,15 +876,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("Tool boom failed", result.text)
-        self.assertIn("Failure next steps:", result.text)
-        self.assertIn("inspect the returned tagged failure", result.text)
+        # The declared fallback now rides the typed recovery field, rendered
+        # once through the metadata channel — never concatenated into the
+        # body and never accompanied by a fabricated read_tool affordance.
+        self.assertNotIn("Failure next steps:", result.text)
+        self.assertIn('"recovery":"inspect the returned tagged failure"', result.text)
         self.assertEqual(result.structured["kind"], "failed")
         self.assertEqual(result.structured["error_code"], "handler_exception")
         self.assertEqual(
-            result.structured["details"]["failure_next_steps"],
+            result.structured["recovery_hint"],
             "inspect the returned tagged failure",
         )
-        self.assertEqual(result.structured["affordances"][0]["tool"], "read_tool")
+        self.assertEqual(result.structured["affordances"], [])
 
     def test_execution_tools_introspection_includes_description_and_schema(self) -> None:
         core = PalCore()
@@ -1178,9 +1181,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         for keyword in guidance_node.keywords
                     }
                     label = f"{source_path.name}:{node.lineno}:{node.name}"
-                    for field in ("purpose", "use_when", "do_not_use_when", "failure_next_steps"):
+                    for field in ("purpose", "use_when", "do_not_use_when"):
                         if not str(fields.get(field) or "").strip():
                             failures.append(f"{label}: empty {field}")
+                    # failure_next_steps is an optional host-side fallback:
+                    # empty is legal, but filler is not when a value exists.
                     purpose = str(fields.get("purpose") or "")
                     if len(purpose) > 240:
                         failures.append(f"{label}: purpose is {len(purpose)} characters")
@@ -1455,10 +1460,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("scope", memory_recall_properties)
             memory_write = generation.indirect_aliases["remember_memory"]
             memory_write_description = memory_write.compiled_description
-            self.assertIn("recall_memory", memory_write_description)
+            # Failure-time reconciliation lives in the declared fallback and
+            # result-side recovery, not in the standing description.
+            self.assertNotIn("recall_memory", memory_write_description)
+            self.assertIn("reconcile with recall_memory", memory_write.guidance.failure_next_steps)
             self.assertIn("Use update_memory only for an explicit correction", memory_write_description)
             self.assertIn("semantic duplicates are handled by dreaming", memory_write_description)
-            self.assertIn("fact:/case:", memory_write_description)
+            self.assertIn("fact:/case:", memory_write.guidance.failure_next_steps)
             memory_write_properties = memory_write.input_schema["properties"]
             self.assertIn("star", memory_write_properties)
             self.assertIn("task_id", memory_write_properties)

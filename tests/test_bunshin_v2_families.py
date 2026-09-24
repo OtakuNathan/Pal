@@ -1575,7 +1575,9 @@ workspace_policy: {}
         self.assertIn("Purpose: generic web description", spec["description"])
         self.assertIn(f"Use when: {override['use_when']}", spec["description"])
         self.assertIn(f"Do not use when: {override['do_not_use_when']}", spec["description"])
-        self.assertIn(f"Failure next steps: {override['failure_next_steps']}", spec["description"])
+        # The declared fallback stays on the guidance contract (result-side
+        # recovery on real failures); it is not standing description text.
+        self.assertNotIn("Failure next steps:", spec["description"])
 
     def test_role_workspace_provisioning_never_injects_capabilities(self) -> None:
         source = self.root / "source"

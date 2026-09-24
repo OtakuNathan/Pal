@@ -75,7 +75,11 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             assert 'output_schema' not in visible and 'example' not in visible
             assert visible['input_schema'] == result.structured['input_schema']
             assert 'Output shape:' not in visible['description']
-            for retained in ('Failure next steps:', 'Execution semantics:', 'Valid example:'):
+            # The failure handbook lives host-side on the guidance contract and
+            # surfaces as result-side recovery on real failures; it is not
+            # part of the standing description.
+            assert 'Failure next steps:' not in visible['description']
+            for retained in ('Execution semantics:', 'Valid example:'):
                 assert retained in visible['description']
         result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name':'exec_tools','args':{}}))
         assert all('output_schema' in item for item in result.structured['tools'])

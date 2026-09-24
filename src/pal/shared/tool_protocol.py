@@ -175,6 +175,9 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     effect: EffectOutcome
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
+    # Short, result-specific recovery guidance that is not expressible as a
+    # full tool call; executable next actions belong in affordances.
+    recovery_hint: str = ""
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
     output_error: str = Field(default="", exclude=True)
     snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
@@ -191,6 +194,7 @@ class RejectedResult(_StrictProtocolModel):
     retry: RetryDirective
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
+    recovery_hint: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -203,6 +207,7 @@ class FailedResult(_StrictProtocolModel):
     retry: RetryDirective
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
+    recovery_hint: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
 
 

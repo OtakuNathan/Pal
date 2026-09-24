@@ -704,12 +704,18 @@ class TurnExecutor:
                 )
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
+            # Direct-synthesized model-visible errors obey the same bounded
+            # presentation as execution results: exception detail is capped,
+            # never streamed unbounded into the model view.
+            detail = str(exc)
+            if len(detail) > 400:
+                detail = detail[:200] + " ... " + detail[-150:]
             failure = (
                 f"Tool {execution_call.name} timed out before returning a result."
                 if isinstance(exc, TimeoutError)
                 else (
                     f"Tool {execution_call.name} did not complete: "
-                    f"{exc.__class__.__name__}: {exc}"
+                    f"{exc.__class__.__name__}: {detail}"
                 )
             )
             guidance = (
