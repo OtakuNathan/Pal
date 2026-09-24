@@ -303,3 +303,119 @@ def test_source_read_grants_only_exact_head_tail_preview_offsets(tmp_path):
                 (f'{span.start_line:6d}\t' + lines[span.start_line - 1])[span.visible_start_in_line:span.visible_end_in_line])
     finally:
         runtime.shutdown()
+
+
+def test_complete_result_and_builtin_definition_obey_output_budget(tmp_path):
+    from pal.core import PalCore
+    from pal.execution import register_with_core
+    from pal.execution.tool_facade import CompleteResult, EffectOutcome
+    from pydantic import create_model, Field
+    from tests.test_immutable_tool_facade import EchoInput
+    core = PalCore()
+    register_with_core(core.context)
+    core.publish_module_capabilities('execution')
+    runtime = core.context.execution_runtime
+    budget = ToolCallBudget(max_output_chars=1000, preview_chars=200)
+    try:
+        text = 'DIRECT' * 4000
+        kwargs = _echo_kwargs(handler=lambda _: CompleteResult(output={'echo': text}, effect=EffectOutcome.NONE, llm_text=text))
+        kwargs['InputModel'] = create_model('LargeSchema', __base__=EchoInput, value=(str, Field(description=text)))
+        mount_test_capability(runtime, **kwargs)
+        result = runtime.invoke_indirect_tool(new_tool_call(name='echo', args={'value': 'x'}, call_id='direct'), budget=budget, turn_id='t')
+        assert len(result.llm_text) <= 1000
+        assert Path(result.snapshot_refs[0].path).read_text() == text
+        result = runtime.invoke_direct_tool(new_tool_call(name='read_tool', args={'name': 'echo'}, call_id='definition'), budget=budget, turn_id='t')
+        assert result.kind == 'complete', result
+        assert len(result.llm_text) <= 1000
+        assert text in Path(result.snapshot_refs[0].path).read_text()
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("direct_result", [False, True])
+def test_save_failure_keeps_host_control_and_context_messages(tmp_path, monkeypatch, direct_result):
+    from pal.execution.tool_facade import CompleteResult, EffectOutcome
+    from pal.shared.tool_protocol import ToolContextMessageIR
+    runtime = ExecutionRuntime(runtime_root=tmp_path)
+    output = {'channel_event': {'action': 'clear'}, 'echo': 'X' * 5000}
+    context = (ToolContextMessageIR(content='independent fact', semantic_kind='reference'),)
+    try:
+        from pal.execution.contracts import CapabilityResult
+        from pal.execution.tool_facade import StructuredToolOutput
+        from pal.shared import RuntimeStatus
+        raw = (CompleteResult(output=output, effect=EffectOutcome.APPLIED, llm_text='X' * 5000, context_messages=context)
+            if direct_result else CapabilityResult(status=RuntimeStatus.OK, structured=output,
+                llm_text='X' * 5000, context_messages=context))
+        kwargs = _echo_kwargs(handler=lambda _: raw)
+        kwargs['OutputModel'] = StructuredToolOutput
+        mount_test_capability(runtime, **kwargs)
+        def fail(*args, **kwargs):
+            raise OSError('disk full')
+        monkeypatch.setattr(runtime.result_snapshots, 'capture_chunks', fail)
+        result = runtime.invoke_indirect_tool(new_tool_call(name='echo', args={'value': 'x'}),
+            budget=ToolCallBudget(max_output_chars=1000, preview_chars=200), turn_id='t')
+        assert result.kind == 'complete'
+        assert result.output == output
+        assert result.context_messages == context
+        assert result.output_error == 'disk full'
+        canonical = runtime._canonical_result_from_invocation('echo', 'c', result)
+        assert canonical.structured['channel_event'] == output['channel_event']
+        assert canonical.context_messages == context
+        assert 'disk full' in result.llm_text
+        assert len(result.llm_text) <= 1000
+    finally:
+        runtime.shutdown()
+
+
+def test_long_source_line_has_conditional_shell_edit_guidance(tmp_path):
+    from pal.core import PalCore
+    from pal.execution import register_with_core
+    core = PalCore()
+    register_with_core(core.context)
+    core.publish_module_capabilities('execution')
+    runtime = core.context.execution_runtime
+    path = tmp_path / 'long.json'
+    path.write_text('x' * 10000)
+    try:
+        result = runtime.execute_tool(new_tool_call(name='read_file', args={'file_path': str(path)}, call_id='long'),
+            budget=ToolCallBudget(max_output_chars=1500, preview_chars=300), turn_id='long')
+        assert 'focused shell edit' in result.llm_text
+        assert not result.context_delivery['complete_file']
+        path.write_text('short\n')
+        result = runtime.execute_tool(new_tool_call(name='read_file', args={'file_path': str(path)}, call_id='short'),
+            budget=ToolCallBudget(max_output_chars=1500, preview_chars=300), turn_id='short')
+        assert 'focused shell edit' not in result.llm_text
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize('disk_full', [False, True])
+def test_only_delivered_source_lines_grant_edits(tmp_path, monkeypatch, disk_full):
+    from pal.core import PalCore
+    from pal.execution import register_with_core
+    core = PalCore()
+    register_with_core(core.context)
+    core.publish_module_capabilities('execution')
+    runtime = core.context.execution_runtime
+    path = tmp_path / 'source.txt'
+    path.write_text(''.join(f'line-{n:04d}\n' for n in range(1, 1001)))
+    if disk_full:
+        def fail(*args, **kwargs):
+            raise OSError('disk full')
+        monkeypatch.setattr(runtime.result_snapshots, 'capture_chunks', fail)
+    try:
+        result = runtime.execute_tool(new_tool_call(name='read_file', args={'file_path': str(path), 'limit': 1000}, call_id='read'),
+            budget=ToolCallBudget(max_output_chars=1400, preview_chars=300), turn_id='t')
+        runtime.commit_tool_delivery(turn_id='t', result_id='read', context_delivery=dict(result.context_delivery))
+        context = runtime.logical_context_for_turn('t')
+        grant = runtime.logical_state.file_grant(execution_lifetime_id=context.execution_lifetime_id,
+            file_key=str(path.resolve()), digest=result.context_delivery['digest'])
+        assert grant is not None and not grant.complete
+        assert not any(start <= 500 <= end for start, end in grant.covered_ranges)
+        assert all(f'line-{n:04d}' in result.llm_text for start, end in grant.covered_ranges for n in range(start, end + 1))
+        hidden_edit = runtime.invoke_direct_tool(new_tool_call(name='edit_file', args={'file_path': str(path),
+            'edits': [{'old_string': 'line-0500', 'new_string': 'hidden-change'}]}), turn_id='t')
+        assert 'PARTIAL_READ' in hidden_edit.llm_text
+        assert 'line-0500' in path.read_text()
+    finally:
+        core.close()

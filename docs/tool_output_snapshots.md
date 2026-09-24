@@ -4,7 +4,9 @@ Large tool output is delivered as a bounded head/tail preview and the path of an
 immutable UTF-8 output file. The file contains the complete rendered result of
 that invocation. Search it with `rg` or read selected lines with `read_file`.
 `read_file` keeps its existing line/range schema; unusually long lines can be
-examined using ordinary shell text tools. Business query pagination is unchanged.
+examined using ordinary shell text tools. A truncated oversized source line receives
+a conditional shell inspection/edit hint; `edit_file` still requires complete
+affected lines. Query limits and artifact page/block selection are unchanged.
 
 The file is a historical copy, not a claim about the current resource. A fresh
 read/query may be appropriate when current state is needed. Never automatically
@@ -20,12 +22,14 @@ Only explicit IR references acquire ownership. An arbitrary path mentioned in
 output or source text does not. L1 acquires successor references before releasing
 old references during replacement; prepublication validation rejects malformed
 paths. Pending delivery, snapshot reads and an in-flight model request also pin
-files. Once the last owner is gone, Execution deletes the managed file.
+files. A running native shell independently leases the snapshots visible to its
+launching request until observed execution termination or explicit session cleanup;
+compact and later requests cannot revoke that lease. Once the last owner is gone, Execution deletes the managed file.
 
 Reading a snapshot does not create another snapshot and grants no edit authority
 over the original resource. File tools reject modification of a managed copy.
 This is a file-tool contract, not a sandbox against arbitrary shell commands.
-Source-file editing still requires a valid delivered `read_file` of that source.
+`edit_file` still requires a valid delivered `read_file` of that source.
 When a source read itself overflows, only the source ranges actually shown in its
 preview acquire authority; the full copy does not grant authority for omitted text.
 
@@ -47,7 +51,13 @@ before their original output resources retire. Native observations copy captured
 byte intervals; remote transport keeps its existing incremental download and
 capacity rules. Snapshot creation and L1 delivery precede output acknowledgment.
 Failed delivery retries output preparation, never command execution. ACK retry
-does not create another L1 event.
+does not create another L1 event. A save failure delivers an honest error without
+acknowledging or releasing native output. `shell_session` can retry a failed
+session's captured export; a one-shot result without a session supplies an
+`output_ref` for read/release instead. Release is explicit abandonment, never a
+consequence of a disk error. Generic save failures preserve validated structured
+results and host context/control messages while marking the model preview incomplete.
+All successful handler and discovery-tool results use the same budget boundary.
 
 `read_tool_result` and the `paged` invocation variant are retired, including
 legacy handle storage, restoration/migration, and pager TTL configuration. The

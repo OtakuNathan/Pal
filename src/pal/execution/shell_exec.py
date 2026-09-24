@@ -38,8 +38,8 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "
         "For shell-based repository discovery, prefer rg for text search and rg --files for file enumeration; "
         "fall back to find, grep, or ls only when rg is unavailable or unsuitable. "
-        "Search saved output snapshots with rg. For unusually long lines, use awk/sed and wc to inspect bounded excerpts "
-        "that read_file's line ranges cannot select. Inspect the saved file rather than rerunning its producer. "
+        "Search saved output snapshots with rg. "
+        "Inspect the saved file rather than rerunning its producer. "
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
     ),
     do_not_use_when=(

@@ -592,7 +592,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             turn_id=turn_id,
         )
         if special is not None:
-            return special
+            if record.alias == "call_tool":
+                return special
+            return self._budget_invocation_result(special, call, budget=budget, turn_id=turn_id)
         if not allow_tools:
             return rejection(
                 "finalization_only",
@@ -647,7 +649,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             turn_id=turn_id,
         )
         if special is not None:
-            return special
+            if record.alias == "call_tool":
+                return special
+            return self._budget_invocation_result(special, call, budget=budget, turn_id=turn_id)
         if not allow_tools:
             return rejection(
                 "finalization_only",
@@ -1069,22 +1073,59 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def _normalize_invocation_result(self, record, call, raw, *, budget, turn_id):
         result = self._normalize_invocation_result_inner(record, call, raw, budget=budget, turn_id=turn_id)
-        if not isinstance(result, (FailedResult, RejectedResult)):
-            return result
-        refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
+        if not result.snapshot_refs and getattr(raw, "snapshot_refs", ()):
+            result = result.model_copy(update={"snapshot_refs": tuple(raw.snapshot_refs)})
+        return self._budget_invocation_result(result, call, budget=budget, turn_id=turn_id)
+
+    def _budget_invocation_result(self, result, call, *, budget, turn_id):
+        """Bound model text without replacing the operation's validated host result."""
         limit = self._resolve_char_limit(budget) if budget else None
         text = result.llm_text
-        if limit is not None and len(text) > limit:
-            try:
-                lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
-                ref = refs[0] if refs else self.result_snapshots.capture(text, call_id=call.call_id, lifetime=lifetime)
-                refs = (ref,)
-                hint = render_snapshot_hint(ref)
-                text, _ = head_tail(text, max(0, min(int(budget.preview_chars or 1000), limit-len(hint)-2)))
-                text += "\n\n" + hint
-            except OSError as exc:
-                text = text[:max(0, limit)] + "\nComplete output could not be saved: " + str(exc)
-        return result.model_copy(update={"llm_text": text, "snapshot_refs": refs})
+        if limit is None or len(text) <= limit:
+            return result
+        refs = tuple(result.snapshot_refs or ())
+        delivery = getattr(result, "context_delivery", None)
+        manifest = FileDeliveryManifest.from_dict(delivery) if delivery else None
+        long_line = manifest and any(span.line_length > limit for span in manifest.spans)
+        extra = (
+            "\nA source line exceeds this delivery budget. Use run_shell with awk/sed/wc "
+            "to inspect bounded portions of the original file. edit_file requires complete "
+            "source lines; for this case use a focused shell edit (for example sed), checking "
+            "the current source before modifying it. Reading the output copy grants no source edit authority."
+            if long_line else ""
+        )
+        output_error = ""
+        try:
+            lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
+            existing = self.result_snapshots.lookup_path(call.args["file_path"]) if call.args.get("file_path") else None
+            ref = existing or (refs[0] if refs else self.result_snapshots.capture(text, call_id=call.call_id, lifetime=lifetime))
+            refs = tuple(dict.fromkeys((*refs, ref)))
+            hint = render_snapshot_hint(ref) + extra
+        except OSError as exc:
+            output_error = str(exc)
+            hint = (
+                "Complete output could not be saved: " + str(exc)[:200] +
+                ". The operation result is retained; this preview is incomplete. "
+                "Resolve storage availability. Repeat only a known safe/idempotent operation; "
+                "where applicable use shell with tail/sed for bounded output. "
+                "Do not repeat side effects merely to retrieve output." + extra
+            )
+        preview, intervals = head_tail(text, max(0, min(int(budget.preview_chars or 1000), limit - len(hint) - 2)))
+        updates = {"llm_text": preview + "\n\n" + hint, "snapshot_refs": refs}
+        if isinstance(result, CompleteResult):
+            updates["output_error"] = result.output_error or output_error
+            updates["replay_result_ref"] = result.replay_result_ref or (call.call_id if refs else "")
+            if manifest:
+                spans = []
+                for index, (a, b) in enumerate(intervals):
+                    part = manifest.slice(a, b)
+                    display_offset = 0 if index == 0 else len(preview) - (b - a)
+                    if part:
+                        spans.extend(replace(span, start_offset=span.start_offset + display_offset,
+                            end_offset=span.end_offset + display_offset) for span in part.spans)
+                updates["context_delivery"] = replace(manifest, spans=tuple(spans), complete_file=False,
+                    inherited_ranges=(), parent_result_ids=(), empty_file=False).to_dict()
+        return result.model_copy(update=updates)
 
     def _normalize_invocation_result_inner(
         self,
@@ -1195,38 +1236,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         # Pal-owned structured serialization may change presentation.
         rendered = llm_text or render_structured_for_llm(output)
         refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
-        char_limit = self._resolve_char_limit(budget) if budget is not None else None
-        if char_limit is not None and len(rendered) > char_limit:
-            try:
-                context = self.logical_context_for_turn(turn_id or call.call_id)
-                # Reads of a managed snapshot refer back to that same immutable
-                # file; never spill the read into another snapshot.
-                existing = self.result_snapshots.lookup_path(call.args.get("file_path", "")) if call.args.get("file_path") else None
-                ref = existing or (refs[0] if refs else self.result_snapshots.capture(
-                    rendered, call_id=call.call_id, lifetime=context.execution_lifetime_id))
-                refs = tuple(dict.fromkeys((*refs, ref)))
-                hint = render_snapshot_hint(ref)
-                preview_budget = max(0, min(int(budget.preview_chars or 1000), char_limit - len(hint) - 2))
-                preview, intervals = head_tail(rendered, preview_budget)
-                rendered = preview + "\n\n" + hint
-                if context_delivery:
-                    manifest = FileDeliveryManifest.from_dict(context_delivery)
-                    # Preserve only actually displayed source ranges. The file
-                    # containing the rest grants no authority over its source.
-                    spans = []
-                    if manifest:
-                        for index, (a, b) in enumerate(intervals):
-                            part = manifest.slice(a, b)
-                            display_offset = 0 if index == 0 else len(preview) - (b - a)
-                            if part:
-                                spans.extend(replace(span, start_offset=span.start_offset + display_offset,
-                                    end_offset=span.end_offset + display_offset) for span in part.spans)
-                    context_delivery = replace(manifest, spans=tuple(spans), complete_file=False,
-                                               inherited_ranges=(), parent_result_ids=(), empty_file=False).to_dict() if manifest else None
-            except OSError as exc:
-                return FailedResult(error_code="output_snapshot_failed", error=str(exc), effect=outcome,
-                    retry=derive_retry_directive(record.execution, outcome),
-                    llm_text="Operation finished, but its complete output could not be saved: " + str(exc))
         return CompleteResult(
             output=output, effect=outcome, llm_text=rendered,
             affordances=affordances, context_delivery=context_delivery,

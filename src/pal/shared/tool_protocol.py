@@ -176,6 +176,7 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
+    output_error: str = Field(default="", exclude=True)
     snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
     replay_result_ref: str = Field(default="", exclude=True)
     context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)

@@ -57,7 +57,6 @@ FILE_READ_GUIDANCE = ToolGuidance(
     do_not_use_when=(
         "Binary files, images, PDFs, or channel-delivered artifacts. Reading several different "
         "files at once (read_file reads one file per call; batch ranges apply within one file). "
-        "For character slices within an unusually long line, use run_shell with awk/sed and wc to inspect a bounded excerpt; "
         "offset and limit here count lines, not characters. "
         "Do not re-read an unchanged covered block after read_file returns an unchanged marker; "
         "use the earlier result unless the file changed or another range is needed."

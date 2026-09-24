@@ -73,6 +73,14 @@ class ResultSnapshotStore:
             self.own(("request", turn_id), (self._refs[i] for i in ids))
             self.reap()
 
+    def lease_request(self, turn_id: str) -> object:
+        """Transfer the request's readable snapshots to an independent consumer."""
+        owner = object()
+        with self._lock:
+            ids = self._owners.get(("request", turn_id), ())
+            self.own(owner, (self._refs[i] for i in ids))
+        return owner
+
     def finish_turn(self, turn_id: str) -> None:
         self.release(("request", turn_id))
 
