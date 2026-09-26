@@ -202,8 +202,8 @@ class LspManagerPluginProvider:
         action_name="status",
         guidance=ToolGuidance(
             purpose="Report workspace LSP readiness and server health.",
-            use_when="Checking if LSP is ready for navigation before invoking lsp_definition, lsp_hover, or lsp_references through read_tool/call_tool.",
-            do_not_use_when="Module-level status (use lsp_show). One server health (use lsp_doctor).",
+            use_when="Workspace readiness is unknown, relevant configuration changed, or an LSP operation reported a readiness problem.",
+            do_not_use_when="A successful preparation or recent LSP result already establishes readiness for the unchanged workspace. Module-level status (use lsp_show). One server health (use lsp_doctor).",
             failure_next_steps="If not ready, run lsp_prepare_workspace first.",
             next_tool_hints=(
                 NextToolHint(name="lsp_document_symbols", use_when="A known file's symbol structure must be mapped."),
@@ -311,8 +311,8 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy",
         guidance=ToolGuidance(
             purpose="Prepare call hierarchy items at a file position.",
-            use_when="Starting a call hierarchy query — get the symbol before finding callers or callees.",
-            do_not_use_when="Directly finding callers (use lsp_incoming_calls) or callees (use lsp_outgoing_calls) if you already have the item.",
+            use_when="Inspecting the candidate call hierarchy symbols at a file position when those items themselves are needed.",
+            do_not_use_when="Finding callers or callees at a known file position: call lsp_incoming_calls or lsp_outgoing_calls directly; each prepares its items internally.",
             failure_next_steps="If empty, the position may not be a callable symbol.",
             next_tool_hints=(
                 NextToolHint(name="lsp_incoming_calls", use_when="The prepared item needs its callers."),
@@ -328,7 +328,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls",
         guidance=ToolGuidance(
             purpose="Find callers (incoming calls) for a symbol.",
-            use_when="Tracing who calls a specific function or method.",
+            use_when="Tracing who calls a specific function or method at a known file position. Preparation is internal; no prior lsp_prepare_call_hierarchy call is needed.",
             do_not_use_when="Finding callees (use lsp_outgoing_calls). Finding references (use lsp_references).",
             failure_next_steps="If empty, no callers found or LSP not ready.",
         ), InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput, aliases=("lsp_incoming_calls",), execution=INDIRECT_LOCAL_READ)
@@ -338,7 +338,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls",
         guidance=ToolGuidance(
             purpose="Find callees (outgoing calls) for a symbol.",
-            use_when="Tracing what a specific function or method calls.",
+            use_when="Tracing what a specific function or method calls at a known file position. Preparation is internal; no prior lsp_prepare_call_hierarchy call is needed.",
             do_not_use_when="Finding callers (use lsp_incoming_calls). Finding references (use lsp_references).",
             failure_next_steps="If empty, no callees found or LSP not ready.",
         ), InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput, aliases=("lsp_outgoing_calls",), execution=INDIRECT_LOCAL_READ)
@@ -699,4 +699,3 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     elif status == "partial":
         status = RuntimeStatus.OK
     return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))
-

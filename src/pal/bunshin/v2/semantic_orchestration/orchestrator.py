@@ -6625,7 +6625,7 @@ class SemanticOrchestrator:
         ):
             invocation_acceptance = [
                 "This is architecture review, not product verification. Judge whether a future Coder can implement the task from the declarations and semantic DAG; never inspect or execute private bodies merely to show that requested behavior is not implemented yet.",
-                "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
+                "Investigate a bound reference path only when its type or relevance is unknown. If supplied metadata or evidence already in context establishes the relevant file, read it directly without repeating discovery. Use bounded discovery for unclassified paths.",
                 "Read the skeleton diff first. Ignore private product bodies inside their owning module's declared implementation_scopes: they are non-authoritative Coder drafts and cannot prove or invalidate the architecture. Reject tests, build machinery, cross-module or undeclared writes, and any contract whose feasibility depends on private draft behavior.",
                 "This logical Reviewer persists across Candidates, but no verdict does. For every new Candidate, first regress all prior findings and touched accepted invariants; then inspect the current skeleton diff and affected semantic neighborhood for new defects. Reuse unchanged investigation instead of rereading it.",
                 "Review the bound task.yaml ledger in order, code contracts, semantic dependencies, and scenarios; reconcile every exact Manager-recorded question and answer.",

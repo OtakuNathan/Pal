@@ -1028,8 +1028,8 @@ class BunshinSandboxTests(unittest.TestCase):
                 prompt,
             )
             self.assertIn("## Reference Access Efficiency", prompt)
-            self.assertIn("investigate what the supplied path currently contains", prompt)
-            self.assertIn("Do not assume the path is a file", prompt)
+            self.assertIn("Investigate a reference path only when its type or relevance is unknown", prompt)
+            self.assertIn("read it directly without another listing or search", prompt)
             self.assertIn("use that exact file path directly", prompt)
             self.assertNotIn("reference pack root is a directory", prompt)
             self.assertIn("Immutable inputs are lookup sources, not a mandatory reading checklist", prompt)

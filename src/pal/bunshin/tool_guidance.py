@@ -27,8 +27,10 @@ BUNSHIN_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                 ),
                 "do_not_use_when": (
                     "Stay focused on your assigned task; do not inspect or manipulate runtime, orchestration, capability, "
-                    "or workflow state. Once an exact file is known, call read_file instead of shelling out to cat, head, "
-                    "tail, or sed. Prefer edit_file for precise text replacement and write_file for complete text files "
+                    "or workflow state. Once an exact file is known, prefer read_file for ordinary source reading. "
+                    "When a long line exceeds read_file's delivery budget, use bounded shell excerpts of that file "
+                    "as the result guidance recommends; inspect only the needed portions. Reading an output snapshot "
+                    "does not grant source edit authority. Prefer edit_file for precise text replacement and write_file for complete text files "
                     "once the exact path and content are known. Git is available here only for classified read-only inspection such as "
                     "status, diff, log, show, blame, grep, ls-files, rev-parse, show-ref, and non-mutating branch queries. "
                     "Git mutations and unknown Git subcommands are trapped; leave repository checkpoint mutations to the "
@@ -48,8 +50,9 @@ BUNSHIN_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
         "op_lsp_status": MappingProxyType(
             {
                 "use_when": (
-                    "Check whether the Manager-prepared bound worktree has a healthy, "
-                    "recognition-probed language server before relying on LSP navigation."
+                    "Check the Manager-prepared bound worktree when LSP readiness is unknown, relevant "
+                    "configuration changed, or an LSP operation reported a readiness problem. Reuse a successful "
+                    "preparation or recent LSP result that establishes readiness for the unchanged worktree."
                 ),
                 "failure_next_steps": (
                     "If unavailable or unhealthy, continue with source inspection, focused "

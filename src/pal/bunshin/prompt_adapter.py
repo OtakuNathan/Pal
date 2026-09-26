@@ -315,7 +315,7 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
             [
                 "",
                 "## Reference Access Efficiency",
-                "- Before reading a reference, briefly investigate what the supplied path currently contains and choose the appropriate visible tool. Do not assume the path is a file or call read_file on it before establishing that it is the relevant file.",
+                "- Investigate a reference path only when its type or relevance is unknown. If supplied metadata or evidence already in context establishes the relevant file, read it directly without another listing or search. For an unclassified path, use bounded discovery to choose the appropriate visible tool.",
                 "- When exact read_file_args are already supplied, use that exact file path directly when the reference is needed; do not investigate it again.",
                 "- Keep reference investigation bounded, read only what the current question requires, and reuse what you already learned instead of repeating discovery.",
             ]

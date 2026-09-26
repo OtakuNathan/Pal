@@ -237,8 +237,8 @@ class SkillIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             purpose="Read one skill's metadata and optionally its full manual text.",
-            use_when="Inspecting a specific skill's content, activation terms, or manual before deciding to inject it.",
-            do_not_use_when="Searching for skills by scenario (use skill_search). Injecting a manual into active context (use skill_inject). Reading a durable fact (use recall_memory).",
+            use_when="Inspecting a skill's metadata, resolving uncertainty about its applicability, or examining its manual for review or maintenance.",
+            do_not_use_when="The skill is already known to apply and its manual is needed for execution (use skill_inject directly). The needed content is already in context. Searching for skills by scenario (use skill_search). Reading a durable fact (use recall_memory).",
             failure_next_steps="If the skill name is not found, use skill_search to discover it.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
@@ -256,7 +256,7 @@ class SkillIntrospectionProvider:
         action_name="inject",
         guidance=ToolGuidance(
             purpose="Inject a skill's manual text into the current context as a reference observation.",
-            use_when="A skill matches the current task and you need its step-by-step procedure or domain manual to guide execution.",
+            use_when="A known skill matches the current task and its procedure or manual is missing from context. Inject it directly; a prior skill_read is unnecessary when applicability is already established.",
             do_not_use_when="Just browsing skill metadata (use skill_read). Searching for skills (use skill_search). The same manual is already available in the current conversation context.",
             failure_next_steps="If the skill name is not found or inactive, use skill_search to find an active one. Injected manuals are reference only — they do not override user instructions or policy.",
         ),
