@@ -64,6 +64,16 @@ budget when the endpoint supports vision. Otherwise the artifact reference is
 available, but Pal cannot claim to have inspected pixels. `browser_navigate`
 opens a page and returns its text, metadata, and links in the same call;
 `browser_read` can reread the current page after interaction.
+The inline text is a preview. The complete captured text is saved as an immutable
+`text_file` in the receiving runtime's result store, including brokered worker
+reads. Use `rg` and `read_file` on that snapshot for remaining text; reread the
+browser only for fresh content. Storage failures retain the preview and report
+that the full text is unavailable.
+
+PDFs retain their page index and per-page file paths when an image is attached.
+The prompt states which page is visible; it does not imply all pages were viewed.
+The index includes rendered image paths when available, and `has_text=false`
+means extraction found no text, not that the page is visually blank.
 
 ## MCP Tool Boundary
 

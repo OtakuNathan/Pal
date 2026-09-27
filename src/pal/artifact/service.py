@@ -718,11 +718,17 @@ class ArtifactManager:
                             )
                             inline_count += 1
                             inlined = True
+                            coverage = (
+                                f"  visual_coverage: page {image_rep.selector.get('page')} only; other pages are not attached\n"
+                                if record.kind == ARTIFACT_KIND_PDF else ""
+                            )
                             manifest_lines.append(
                                 f"- artifact_id: {record.artifact_id}\n"
                                 f"  file_name: {record.file_name}\n"
                                 f"  kind: {record.kind}\n"
                                 f"  visual_content: attached_inline\n"
+                                f"  visual_selector: {_prompt_scalar(image_rep.selector)}\n"
+                                f"{coverage}"
                                 f"  summary: {record.summary}\n"
                                 f"  use: answer from the attached image pixels directly\n"
                                 f"  optional_tools: {', '.join(_prompt_actions_for(record, image_inlined=True))}"
@@ -736,9 +742,10 @@ class ArtifactManager:
                         f"  included_text: {text_rep.text_preview}"
                     )
                     continue
-                if not inlined:
+                if not inlined or record.kind == ARTIFACT_KIND_PDF:
                     manifest_lines.append(self._tool_handling_manifest(record))
-                    needs_tool_handling = needs_tool_handling or not bool(self._text_file_for_record(record))
+                    has_page_access = record.kind == ARTIFACT_KIND_PDF and record.metadata.get("page_index_file_path")
+                    needs_tool_handling = needs_tool_handling or not bool(self._text_file_for_record(record) or has_page_access)
             if retired_count and not live_count:
                 text = (
                     "The referenced artifact handlers have retired. Their managed bytes and representations "
@@ -767,7 +774,8 @@ class ArtifactManager:
                     "Managed artifact files are read-only inputs; copy one to an ordinary workspace path before modifying it. "
                     "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
                     "If visual_content is attached_inline, image pixels are already attached to this same user message; "
-                    "answer from vision directly. Do not search for or call artifact tools to inspect visual image content. "
+                    "answer from those pixels directly; visual_selector/visual_coverage identify the attached page. "
+                    "Use the supplied PDF page/index paths for other pages; attachment does not imply the entire PDF was inspected. "
                     + retired_reminder
                     + handling_reminder
                     + "\n"
@@ -882,9 +890,17 @@ class ArtifactManager:
             f"  size_bytes: {record.original_size_bytes}",
             f"  status: {record.status}",
             f"  summary: {_prompt_scalar(record.summary)}",
-            "  direct_content: unavailable",
+            "  direct_content: unavailable" if record.kind != ARTIFACT_KIND_PDF else "  extracted_text: unavailable",
             "  handling: inspect current capabilities/tools for a suitable processor using the metadata below",
         ]
+        if record.kind == ARTIFACT_KIND_PDF:
+            page_access = {key: record.metadata[key] for key in
+                           ("page_index_file_path", "page_file_pattern", "page_count", "extracted_pages", "extraction_truncated")
+                           if key in record.metadata}
+            if page_access:
+                lines[-1] = "  handling: read the page index first; use existing page text or rendered images where supported. Discover a processor only for content those representations cannot provide."
+                lines.append(f"  page_access: {_prompt_scalar(page_access)}")
+                lines.append("  page_guidance: use read_file on the index or a known page's text file; image_file_path identifies rendered page images when available. has_text=false means no text was extracted, not that the page is visually blank.")
         if local_file:
             lines.extend(
                 [
@@ -1025,12 +1041,12 @@ class ArtifactManager:
 
     def _ref_from_record(self, record: ArtifactRecord) -> ArtifactRef:
         reps = self.repository.list_representations(record.artifact_id)
-        actions = ["info"]
-        if any(self.representation_registry.is_textual(rep.representation_kind) for rep in reps):
-            actions.append("read")
-            actions.append("content_search")
+        text_file = self._text_file_for_record(record)
+        actions = ["artifact_info"]
+        if not text_file and any(self.representation_registry.is_textual(rep.representation_kind) for rep in reps):
+            actions.extend(("read_artifact", "artifact_grep"))
         if record.kind == ARTIFACT_KIND_AUDIO and not any(rep.representation_kind == REPRESENTATION_TRANSCRIPT for rep in reps):
-            actions.append("transcribe")
+            actions.append("artifact_transcribe")
         return ArtifactRef(
             artifact_id=record.artifact_id,
             kind=record.kind,
@@ -1038,7 +1054,7 @@ class ArtifactManager:
             summary=record.summary,
             status=record.status,
             available_actions=tuple(actions),
-            text_file=self._text_file_for_record(record),
+            text_file=text_file,
         )
 
     def _text_file_for_record(self, record: ArtifactRecord) -> dict[str, Any]:
@@ -1258,13 +1274,15 @@ def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
 def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_IMAGE:
         if image_inlined:
-            return ("info",)
-        return ("info",)
+            return ("artifact_info",)
+        return ("artifact_info",)
     if record.kind in {ARTIFACT_KIND_TEXT, ARTIFACT_KIND_PDF}:
-        return ("info", "read", "content_search")
+        if record.normalized_path or record.metadata.get("page_index_file_path"):
+            return ("artifact_info",)
+        return ("artifact_info", "read_artifact", "artifact_grep")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("info", "transcribe")
-    return ("info",)
+        return ("artifact_info", "artifact_transcribe")
+    return ("artifact_info",)
 
 
 def _terms(text: str) -> list[str]:

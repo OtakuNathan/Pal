@@ -75,6 +75,34 @@ def test_short_text_is_a_file_handle_without_inline_body(manager):
     assert 'included_text:' not in exposure.text
     assert Path(ref.text_file['file_path']).read_bytes().decode() == content
     assert manager.read(ref.artifact_id, 'scope').next_actions == ()
+    assert ref.available_actions == ('artifact_info',)
+
+
+@pytest.mark.parametrize('text', ['', 'Short page'])
+def test_inline_pdf_keeps_page_access_and_discloses_visual_coverage(manager, text):
+    fitz = pytest.importorskip('fitz')
+    path = manager.runtime_root / 'visual.pdf'
+    doc = fitz.open()
+    page = doc.new_page()
+    if text:
+        page.insert_text((72, 72), text)
+    doc.new_page()
+    doc.save(path)
+    doc.close()
+    ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
+    exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {'supports_vision': True})
+    assert len(exposure.inline_parts) == 1
+    assert 'visual_coverage: page 1 only' in exposure.text
+    assert 'page_index_file_path' in exposure.text
+    assert 'page_file_pattern' in exposure.text
+    assert 'optional_tools: artifact_info' in exposure.text
+    record = manager.repository.get_record(ref.artifact_id)
+    index_path = Path(record.metadata['page_index_file_path'])
+    assert str(index_path) in exposure.text
+    pages = json.loads(index_path.read_text())['pages']
+    assert [entry['page'] for entry in pages] == [1, 2]
+    assert all(Path(entry['image_file_path']).is_file() for entry in pages)
+    assert pages[1]['has_text'] is False
 
 
 def test_pdf_full_text_preserves_original_page_locations(manager):

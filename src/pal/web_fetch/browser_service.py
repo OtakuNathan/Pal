@@ -543,7 +543,10 @@ class _PlaywrightCliWorker:
             timeout_ms=timeout_ms, raw=True,
         )
         document = _parse_json_object(raw, "browser read")
-        text = str(document.get("text") or "").strip()
+        text = str(document.get("text") or "")
+        # Harness-only transport; the capability stores this in the receiving
+        # runtime's output store before rendering any LLM-facing result.
+        document["_full_text"] = text
         document["text_truncated"] = bool(document.get("text_truncated")) or len(text) > max_chars
         document["text"] = text[:max_chars].rstrip()
         links = list(document.get("links") or [])
@@ -1044,7 +1047,7 @@ def _read_page_script(*, max_chars: int, max_links: int) -> str:
       return {{
         requested_url: location.href, final_url: location.href,
         title: String(document.title || '').slice(0, 2000),
-        text: text.slice(0, args.maxChars + 1),
+        text,
         content_type: String(document.contentType || '').slice(0, 200),
         links, metadata
       }};

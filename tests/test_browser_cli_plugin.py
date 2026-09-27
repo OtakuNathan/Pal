@@ -55,7 +55,8 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
                  "browser_extensions", "browser_extension_manage"):
         assert name in navigate["description"]
     assert "`browser_read` (indirect)" in navigate["description"]
-    assert "a separate read is unnecessary" in navigate["description"]
+    assert "A separate browser read is unnecessary" in navigate["description"]
+    assert "text_file" in navigate["description"]
     assert "browser_click" not in direct
     assert "browser_screenshot" not in direct
 
@@ -99,6 +100,7 @@ def test_navigation_reads_content_once_and_honors_link_budget(tmp_path, action):
     assert result["navigation_completed"] is True
     assert len(result["document"]["text"]) == 1000
     assert result["document"]["text_truncated"] is True
+    assert result["document"]["_full_text"] == "x" * 1100
     assert result["document"]["links"] == []
     assert '"maxLinks": 0' in calls[-1][1]
 

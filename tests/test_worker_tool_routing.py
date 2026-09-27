@@ -9,6 +9,23 @@ from pal.shared import PromptAssemblyContext
 from tests.capability_fixture import mount_test_capability
 
 
+@pytest.mark.parametrize('name,authored', [
+    ('op_bunshin_memory_candidate_write', False),
+    ('op_bunshin_artifact_write', False),
+    ('op_bunshin_artifact_edit', True),
+])
+def test_workflow_descriptions_only_publish_authored_examples(name, authored):
+    from pal.bunshin.scoped_execution import _WORKSPACE_TOOL_SPECS, _workflow_capability
+    from pal.execution.tool_registry import _compile_record
+
+    descriptor, binding = _workflow_capability(
+        name=name, spec=_WORKSPACE_TOOL_SPECS[name], handler=lambda *_: {})
+    record = _compile_record(descriptor, binding)
+    assert ('Valid example:' in record.compiled_description) is authored
+    if authored:
+        assert 'report.md' in record.compiled_description
+
+
 @pytest.mark.parametrize('indirect', [False, True])
 def test_worker_routes_only_through_its_actual_surface(indirect):
     core = PalCore()

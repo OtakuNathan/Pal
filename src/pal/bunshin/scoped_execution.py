@@ -332,6 +332,7 @@ def _workflow_capability(
         metadata={
             "namespace": "operation",
             "scope": "workflow",
+            "examples_generated": not bool(spec.get("examples")),
             "allow_missing_next_tool_hints": True,
             "scoped_projection": "bunshin",
             "delegates_execution": name in SHELL_EVIDENCE_CAPABILITIES,

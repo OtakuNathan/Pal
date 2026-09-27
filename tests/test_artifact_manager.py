@@ -1076,8 +1076,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         merged_text = request.messages[0].text
         self.assertIn("Available Artifacts", merged_text)
         self.assertIn("visual_content: attached_inline", merged_text)
-        self.assertIn("answer from vision directly", merged_text)
-        self.assertIn("optional_tools: info", merged_text)
+        self.assertIn("answer from those pixels directly", merged_text)
+        self.assertIn("optional_tools: artifact_info", merged_text)
         self.assertNotIn("inspect_inline_image", merged_text)
         self.assertNotIn("actions: info, read, search", merged_text)
         self.assertIn("what do you see?", merged_text)

@@ -271,8 +271,6 @@ class PdfArtifactProcessor:
                            "page_file_pattern": str(pages_dir / "page_{page:04d}.txt"),
                            "page_count": len(doc), "extracted_pages": max_pages,
                            "extraction_truncated": max_pages < len(doc)}
-            index_path.write_text(json.dumps({**page_access, "pages": page_locations},
-                                             ensure_ascii=False, indent=2), encoding="utf-8")
             if combined:
                 full_path = context.representations_dir() / "normalized.txt"
                 full_path.write_text(combined, encoding="utf-8")
@@ -286,6 +284,14 @@ class PdfArtifactProcessor:
                 _write_text_chunks(context, record.artifact_id, combined)
             if len(combined.strip()) < context.policy.pdf.textless_min_chars:
                 _render_pdf_page_images(context, record, doc)
+            page_images = {rep.selector.get("page"): rep.path for rep in
+                           context.repository.list_representations(record.artifact_id,
+                               representation_kind=REPRESENTATION_PAGE_IMAGE)}
+            for location in page_locations:
+                if location["page"] in page_images:
+                    location["image_file_path"] = page_images[location["page"]]
+            index_path.write_text(json.dumps({**page_access, "pages": page_locations},
+                                             ensure_ascii=False, indent=2), encoding="utf-8")
             page_count = len(doc)
         finally:
             doc.close()

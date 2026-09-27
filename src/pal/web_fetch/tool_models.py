@@ -23,7 +23,7 @@ BrowserNavigateInput = _strict_model(
     {
         "url": (str, Field(...)),
         "timeout_ms": (int, Field(60000)),
-        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Maximum rendered page text characters.")),
+        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Inline page-text preview budget; the complete captured text is saved to text_file for rg/read_file.")),
         "max_links": (int, Field(80, ge=0, le=500, description="Maximum page links; zero omits links.")),
     },
 )
@@ -32,7 +32,7 @@ BrowserReadInput = _strict_model(
     {
         "url": (str | None, Field(None)),
         "timeout_ms": (int, Field(60000)),
-        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Maximum rendered page text characters.")),
+        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Inline page-text preview budget; the complete captured text is saved to text_file for rg/read_file.")),
         "max_links": (int, Field(80, ge=0, le=500, description="Maximum page links; zero omits links.")),
     },
 )
