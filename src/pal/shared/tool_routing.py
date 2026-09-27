@@ -17,13 +17,16 @@ TOOL_EXECUTION_SYSTEM_POLICY = (
 )
 
 
-TOOL_ROUTING_DEVELOPER_GUIDANCE = (
+TOOL_DISCOVERY_DEVELOPER_GUIDANCE = (
     "- Invoke direct tools by their exposed name; invoke indirect tools through call_tool(name=alias, args=...). "
     "Search using short English alias keywords: [domain] [action] [object], e.g. "
     "remember memory, lsp prepare workspace, or browser screenshot. Include a known domain; "
     "spaces and underscores both work, word order is flexible, and a complete alias need not be guessed. Search hits include guidance and input contracts: "
     "call immediately when these suffice. Use read_tool only for missing or changed contract information, "
     "or when a validation error does not provide enough information to correct the call.\n"
+)
+
+TOOL_RESULT_DEVELOPER_GUIDANCE = (
     "- Treat each tool's guidance and returned affordances as its continuation contract. "
     "After a tool call, follow a suggested next tool only when its stated `use_when` condition "
     "matches the observed result and current task.\n"
@@ -34,6 +37,23 @@ TOOL_ROUTING_DEVELOPER_GUIDANCE = (
     "establish rendered appearance. Choose verification appropriate to the change and the user's scope. "
     "Use screenshots only when the model or a reviewer can inspect pixels."
 )
+
+TOOL_ROUTING_DEVELOPER_GUIDANCE = TOOL_DISCOVERY_DEVELOPER_GUIDANCE + TOOL_RESULT_DEVELOPER_GUIDANCE
+
+
+def routing_guidance_for_tools(aliases) -> str:
+    """Describe only the entrypoints exposed in this model's tool window."""
+    names = set(aliases)
+    if {"search_tools", "read_tool", "call_tool"} <= names:
+        return TOOL_ROUTING_DEVELOPER_GUIDANCE
+    routing = "Invoke exposed tools directly by name. "
+    if "call_tool" in names:
+        routing += "Invoke known indirect aliases through call_tool(name=alias, args=...). "
+    if "read_tool" in names:
+        routing += "Use read_tool only when a known tool's contract is missing or insufficient. "
+    if "search_tools" in names:
+        routing += "Discover tools with short English alias words: [domain] [action] [object]. "
+    return routing + "\n" + TOOL_RESULT_DEVELOPER_GUIDANCE
 
 
 TOOL_EFFICIENCY_DEVELOPER_GUIDANCE = (
@@ -61,6 +81,7 @@ TOOL_ROUTING_SYSTEM_GUIDANCE = (
 TOOL_EFFICIENCY_SYSTEM_GUIDANCE = TOOL_EFFICIENCY_DEVELOPER_GUIDANCE
 
 __all__ = [
+    "routing_guidance_for_tools",
     "TOOL_EFFICIENCY_DEVELOPER_GUIDANCE",
     "TOOL_EFFICIENCY_SYSTEM_GUIDANCE",
     "TOOL_EXECUTION_SYSTEM_POLICY",

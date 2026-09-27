@@ -149,6 +149,18 @@ def test_specific_task_words_rank_above_partial_matches(runtime):
     assert aliases.index("read_tool") > aliases.index("read_file")
 
 
+def test_exact_search_does_not_report_weaker_matches_as_truncation(runtime):
+    precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "facets": True}))
+    assert precise.ok
+    assert [hit['alias'] for hit in precise.structured['hits']] == ['read_file']
+    assert precise.structured['omitted_weaker_count'] > 0
+    assert precise.structured['truncated'] is False
+    assert 'usage_hint' not in precise.structured
+    broad = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "top_k": 1}))
+    assert broad.structured['truncated'] is True
+    assert broad.structured['omitted_weaker_count'] == 0
+
+
 def test_find_symbols_keeps_symbol_tools_despite_other_full_matches(tmp_path):
     from pal.lsp import build_lsp_plugin
 

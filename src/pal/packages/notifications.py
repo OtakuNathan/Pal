@@ -6,6 +6,7 @@ from copy import deepcopy
 import threading
 
 from pal.foundation import EventEnvelope
+from pal.core.core_events import TURN_END, TURN_TOOL_RESULT_COMMITTED
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.shared.result_rendering import render_structured_for_llm
 
@@ -45,6 +46,9 @@ class PackageCompletionSource:
         self.pending = {}
         self.claimed = set()
         self.seen = set()
+        self.consumed = set()
+        self.deliveries = {}
+        self.started = set()
         self.tasks = set()
         self.lock = threading.Lock()
         self.closed = False
@@ -64,6 +68,8 @@ class PackageCompletionSource:
         if not self.registered:
             self.context.event_source_registry.attach(MODULE, self)
             self.context.event_handler_registry.register(EVENT, self, module_id=MODULE)
+            self.context.core_event_bus.subscribe(TURN_TOOL_RESULT_COMMITTED, self._on_delivery)
+            self.context.core_event_bus.subscribe(TURN_END, self._on_delivery)
             self.registered = True
 
         def notify(state):
@@ -74,11 +80,55 @@ class PackageCompletionSource:
                 if job_id in self.seen:
                     return
                 self.seen.add(job_id)
+                token = (job_id, state.get("finished_at"), binding.control_scope_key)
+                if token in self.consumed:
+                    return
                 observation = {key: value for key, value in state.items()
                                if key not in {"notification", "notification_error", "next_step"}}
                 self.pending[job_id] = (deepcopy(observation), binding, turn_id)
             core.notify_ready()
         return notify
+
+    def stage_status_delivery(self, call, result):
+        """Reading status only proposes consumption; durable delivery commits it."""
+        if not self.registered or not call.args.get("job_id") or result.status != "ok":
+            return
+        turn_id = call.meta.get("turn_id")
+        call_id = getattr(call.meta.get("tool_call"), "call_id", None)
+        if not call_id:
+            return
+        opening = self.core.state.active_turns.get(turn_id)
+        binding = getattr(opening, "delivery_binding", None)
+        if binding is None:
+            return
+        states = (result.structured or {}).get("jobs", ())
+        tokens = {(state["job_id"], state.get("finished_at"), binding.control_scope_key)
+                  for state in states if state.get("status") in {"ready", "failed"}
+                  and state.get("job_id") == call.args["job_id"] and state.get("finished_at") is not None}
+        with self.lock:
+            if not self.closed and tokens:
+                self.deliveries[(turn_id, call_id)] = tokens
+
+    def _on_delivery(self, topic, event):
+        with self.lock:
+            if self.closed:
+                return
+            turn_id = event.get("turn_id")
+            if topic == TURN_END:
+                self.deliveries = {key: value for key, value in self.deliveries.items() if key[0] != turn_id}
+                return
+            tokens = self.deliveries.pop((turn_id, event.get("call_id")), ())
+            if not event.get("complete"):
+                return
+            for token in tokens:
+                job_id, finished_at, scope = token
+                if job_id in self.started:
+                    continue
+                self.consumed.add(token)
+                pending = self.pending.get(job_id)
+                if pending and pending[0].get("finished_at") == finished_at and pending[1].control_scope_key == scope:
+                    self.pending.pop(job_id)
+                    self.claimed.discard(job_id)
 
     def _idle(self):
         state = self.core.state
@@ -114,6 +164,7 @@ class PackageCompletionSource:
                     self.claimed.discard(job_id)
                     return []
                 state, binding, opening_turn = self.pending[job_id]
+                self.started.add(job_id)
             identity = f"package:{job_id}:completed"
             text = (
                 "<runtime_context_update>Background package operation completed. This is an observation, "
@@ -156,6 +207,7 @@ class PackageCompletionSource:
             with self.lock:
                 self.pending.pop(job_id, None)
                 self.claimed.discard(job_id)
+                self.started.discard(job_id)
             core.state.active_turns.pop(continuation.turn_id, None)
             core.turn_manager._mark_turn_exited(continuation.turn_id)
             if not self.closed:
@@ -167,8 +219,11 @@ class PackageCompletionSource:
             self.closed = True
             self.pending.clear()
             self.claimed.clear()
+            self.deliveries.clear()
         if self.registered:
             self.context.event_source_registry.detach_module(MODULE)
             self.context.event_handler_registry.detach_module(MODULE)
+            self.context.core_event_bus.unsubscribe(TURN_TOOL_RESULT_COMMITTED, self._on_delivery)
+            self.context.core_event_bus.unsubscribe(TURN_END, self._on_delivery)
         for task in tuple(self.tasks):
             task.get_loop().call_soon_threadsafe(task.cancel)

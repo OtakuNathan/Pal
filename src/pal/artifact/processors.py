@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import shutil
 from dataclasses import dataclass, replace
@@ -241,13 +242,15 @@ class PdfArtifactProcessor:
             for index in range(max_pages):
                 page = doc.load_page(index)
                 text = str(page.get_text("text") or "").strip()
+                page_path = pages_dir / f"page_{index + 1:04d}.txt"
+                page_path.write_text(text, encoding="utf-8")
+                page_locations.append({"page": index + 1, "file_path": str(page_path),
+                                       "has_text": bool(text),
+                                       "start_line": next_line if text else None,
+                                       "end_line": next_line + text.count("\n") if text else None})
                 if text:
-                    page_locations.append({"page": index + 1, "start_line": next_line,
-                                           "end_line": next_line + text.count("\n")})
                     next_line += text.count("\n") + 2
                     page_texts.append(text)
-                    page_path = pages_dir / f"page_{index + 1:04d}.txt"
-                    page_path.write_text(text, encoding="utf-8")
                     context.put_representation(
                         ArtifactRepresentation(
                             representation_id=_representation_id(record.artifact_id, REPRESENTATION_PAGE_TEXT, str(index + 1)),
@@ -263,6 +266,13 @@ class PdfArtifactProcessor:
                         )
                     )
             combined = "\n\n".join(page_texts)
+            index_path = context.representations_dir() / "page_index.json"
+            page_access = {"page_index_file_path": str(index_path),
+                           "page_file_pattern": str(pages_dir / "page_{page:04d}.txt"),
+                           "page_count": len(doc), "extracted_pages": max_pages,
+                           "extraction_truncated": max_pages < len(doc)}
+            index_path.write_text(json.dumps({**page_access, "pages": page_locations},
+                                             ensure_ascii=False, indent=2), encoding="utf-8")
             if combined:
                 full_path = context.representations_dir() / "normalized.txt"
                 full_path.write_text(combined, encoding="utf-8")
@@ -271,8 +281,7 @@ class PdfArtifactProcessor:
                     artifact_id=record.artifact_id, representation_kind=REPRESENTATION_TEXT,
                     path=str(full_path), mime_type="text/plain", size_bytes=full_path.stat().st_size,
                     text_preview=_preview(combined), summary=_preview(combined),
-                    metadata={"pages": page_locations, "page_count": len(doc),
-                              "extracted_pages": max_pages, "extraction_truncated": max_pages < len(doc)},
+                    metadata=page_access,
                 ))
                 _write_text_chunks(context, record.artifact_id, combined)
             if len(combined.strip()) < context.policy.pdf.textless_min_chars:
@@ -285,7 +294,7 @@ class PdfArtifactProcessor:
             summary=f"PDF artifact {record.file_name}, {page_count} page(s)",
             status=ARTIFACT_STATUS_READY if combined else ARTIFACT_STATUS_PARTIAL,
             metadata={**dict(record.metadata), "page_count": page_count, "extracted_text_chars": len(combined),
-                      "extracted_pages": max_pages, "text_pages": page_locations},
+                      **page_access},
         )
 
 

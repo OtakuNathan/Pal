@@ -421,6 +421,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput = _strict_model
         'hits': (list[ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem], Field(None)),
         'total_count': (int, Field(None)),
         'returned_count': (int, Field(None)),
+        'omitted_weaker_count': (int, Field(None, description='Weaker matches intentionally omitted by ranking, not result truncation.')),
         'top_k': (int, Field(None)),
         'truncated': (bool, Field(None)),
         'applied_filters': (dict[str, Any], Field(None)),

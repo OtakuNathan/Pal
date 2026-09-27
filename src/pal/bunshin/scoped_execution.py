@@ -430,6 +430,13 @@ class _ExecutionOverlay:
             subtree.bound_actions.append(binding)
             subtree.bound_action_keys.append((record.binding.canonical_path, record.binding.target_id))
             subtree.search_record_ids.append(record.binding.descriptor.name)
+        discovery = {"op_tool_search", "op_tool_read", "op_tool_call"}
+        if not any(descriptor.execution.invocation_mode == InvocationMode.INDIRECT
+                   for descriptor in subtree.descriptors if descriptor.canonical_path not in discovery):
+            subtree.descriptors = [d for d in subtree.descriptors if d.canonical_path not in discovery]
+            subtree.bound_actions = [a for a in subtree.bound_actions if a.canonical_path not in discovery]
+            subtree.bound_action_keys = [key for key in subtree.bound_action_keys if key[0] not in discovery]
+            subtree.search_record_ids = [d.name for d in subtree.descriptors]
         if subtree.descriptors:
             self.runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
 

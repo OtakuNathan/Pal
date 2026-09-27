@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,11 +67,14 @@ def test_duplicate_representation_hits_keep_one_body_and_all_locations(manager):
     assert any(item['selector'].get('chunk') == 1 for item in hits[0].locations)
 
 
-def test_short_inline_text_preserves_whitespace_and_content_beyond_summary(manager):
+def test_short_text_is_a_file_handle_without_inline_body(manager):
     content = 'first\r\n\tsecond\r\n' + 'z' * 300
-    register(manager, 'short.txt', content)
+    ref = register(manager, 'short.txt', content)
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {})
-    assert 'included_text: ' + content in exposure.text
+    assert ref.text_file['file_path'] in exposure.text
+    assert 'included_text:' not in exposure.text
+    assert Path(ref.text_file['file_path']).read_bytes().decode() == content
+    assert manager.read(ref.artifact_id, 'scope').next_actions == ()
 
 
 def test_pdf_full_text_preserves_original_page_locations(manager):
@@ -83,11 +88,34 @@ def test_pdf_full_text_preserves_original_page_locations(manager):
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
     lines = Path(ref.text_file['file_path']).read_text().splitlines()
-    pages = ref.text_file['pages']
-    assert [entry['page'] for entry in pages] == [1, 3]
+    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    assert [entry['page'] for entry in pages] == [1, 2, 3]
     assert lines[pages[0]['start_line'] - 1] == 'First page line'
     assert lines[pages[0]['end_line'] - 1] == 'Second line'
-    assert lines[pages[1]['start_line'] - 1] == 'Third page text'
+    assert lines[pages[2]['start_line'] - 1] == 'Third page text'
+    assert pages[1]['has_text'] is False and pages[1]['start_line'] is None
+    assert Path(ref.text_file['page_file_pattern'].format(page=2)).read_text() == ''
+    assert Path(ref.text_file['page_file_pattern'].format(page=3)).read_text() == 'Third page text'
+    exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {})
+    assert ref.text_file['page_index_file_path'] in exposure.text
+    assert 'start_line' not in exposure.text
     selected = manager.read(ref.artifact_id, 'scope', page=3)
     assert selected.text_file['selector'] == {'page': 3}
     assert Path(selected.text_file['file_path']).read_text() == 'Third page text'
+
+
+def test_pdf_index_discloses_unprocessed_pages(manager):
+    fitz = pytest.importorskip('fitz')
+    manager.policy = replace(manager.policy, pdf=replace(manager.policy.pdf, max_pages=1))
+    path = manager.runtime_root / 'limited.pdf'
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), 'First page')
+    doc.new_page().insert_text((72, 72), 'Not extracted')
+    doc.save(path)
+    doc.close()
+    ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
+    assert ref.text_file['extraction_truncated'] is True
+    assert ref.text_file['page_count'] == 2 and ref.text_file['extracted_pages'] == 1
+    index = json.loads(Path(ref.text_file['page_index_file_path']).read_text())
+    assert [entry['page'] for entry in index['pages']] == [1]
+    assert not Path(ref.text_file['page_file_pattern'].format(page=2)).exists()

@@ -22,7 +22,7 @@ from pal.shared.payloads import extract_text_from_payload
 from pal.shared.tool_routing import (
     TOOL_EFFICIENCY_DEVELOPER_GUIDANCE,
     TOOL_EXECUTION_SYSTEM_POLICY,
-    TOOL_ROUTING_DEVELOPER_GUIDANCE,
+    routing_guidance_for_tools,
 )
 
 
@@ -147,7 +147,7 @@ class BunshinPromptFragmentProvider(PromptFragmentProvider):
         add(
             "tool_routing",
             "Tool Routing",
-            TOOL_ROUTING_DEVELOPER_GUIDANCE,
+            routing_guidance_for_tools(scaffold.get("visible_capabilities") or ()),
             65,
             metadata={"prompt_target": "developer"},
         )

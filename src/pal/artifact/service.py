@@ -555,9 +555,9 @@ class ArtifactManager:
             selection=dict(selected.selector),
             metadata={**self._record_dict(record), "representation": self._representation_dict(selected)},
             text_file=_text_file_metadata(selected),
-            next_actions=("Read the complete text_file.file_path with read_file or search it with run_shell and rg. "
+            next_actions=("If the task needs text beyond this preview, read text_file.file_path with read_file or search it with run_shell and rg. "
                           "For oversized lines use bounded shell reads. This is a managed read-only input; copy it before editing.",)
-                         if _text_file_metadata(selected) else (),
+                         if truncated and _text_file_metadata(selected) else (),
         )
 
     def artifact_search(
@@ -855,13 +855,18 @@ class ArtifactManager:
     def _tool_handling_manifest(self, record: ArtifactRecord) -> str:
         text_file = self._text_file_for_record(record)
         if text_file:
+            page_guidance = (
+                "For PDFs, read a known page directly using page_file_pattern (1-based page); "
+                "page_index_file_path maps original pages to flat-file lines. "
+                if "page_index_file_path" in text_file else ""
+            )
             return (
                 f"- artifact_id: {record.artifact_id}\n"
                 f"  file_name: {_prompt_scalar(record.file_name)}\n"
                 f"  kind: {record.kind}\n"
                 f"  text_file: {_prompt_scalar(text_file)}\n"
                 "  handling: use run_shell with rg to locate text and read_file to read lines; "
-                "use shell for oversized lines. The text is already extracted; no processor discovery "
+                f"{page_guidance}Use shell for oversized lines. The text is already extracted; no processor discovery "
                 "or read_artifact call is required. Copy this managed input before editing."
             )
         local_file = _local_file_metadata(record)
@@ -917,7 +922,7 @@ class ArtifactManager:
         return None
 
     def _first_short_text_representation(self, record: ArtifactRecord) -> ArtifactRepresentation | None:
-        if record.kind not in {ARTIFACT_KIND_TEXT, ARTIFACT_KIND_AUDIO}:
+        if record.kind != ARTIFACT_KIND_AUDIO:
             return None
         for kind in (REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT):
             for rep in self.repository.list_representations(record.artifact_id, representation_kind=kind):
@@ -1192,7 +1197,7 @@ def _text_file_metadata(representation: ArtifactRepresentation) -> dict[str, Any
     return {"file_path": path, "representation": representation.representation_kind,
             "selector": dict(representation.selector), "read_only": True,
             **{key: representation.metadata[key]
-               for key in ("pages", "page_count", "extracted_pages", "extraction_truncated")
+               for key in ("page_index_file_path", "page_file_pattern", "page_count", "extracted_pages", "extraction_truncated")
                if key in representation.metadata}}
 
 

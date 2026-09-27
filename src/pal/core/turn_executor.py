@@ -36,7 +36,7 @@ from pal.core.turns import (
     ToolCallEffect,
     ToolObservation,
 )
-from pal.core.core_events import TURN_TOOL_CALL_FAILED
+from pal.core.core_events import TURN_TOOL_CALL_FAILED, TURN_TOOL_RESULT_COMMITTED
 from pal.failure import FailureSignal
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.conversions import tool_definition_ir_from_dict
@@ -1973,6 +1973,11 @@ class TurnExecutor:
         observe = getattr(self.context.execution_runtime, "observe_tool_delivery", None)
         if callable(observe):
             observe(call, result)
+        self.context.core_event_bus.emit(TURN_TOOL_RESULT_COMMITTED, {
+            "turn_id": turn_id, "call_id": call.call_id,
+            "complete": bool(result.ok and not result.snapshot_refs
+                             and not getattr(result.invocation_result, "output_error", None)),
+        })
         acknowledge = getattr(self.context.execution_runtime, "acknowledge_tool_result_async", None)
         if callable(acknowledge):
             await acknowledge(call.call_id, turn_id)

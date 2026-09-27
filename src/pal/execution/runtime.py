@@ -1032,7 +1032,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "total_count": len(scored),
             "returned_count": len(hits),
             "top_k": limit,
-            "truncated": len(scored) > len(hits),
+            "truncated": len(candidates) > len(hits),
+            "omitted_weaker_count": len(scored) - len(candidates),
             "applied_filters": {
                 key: value
                 for key, value in {

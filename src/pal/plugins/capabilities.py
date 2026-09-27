@@ -125,7 +125,10 @@ class PluginsIntrospectionProvider:
             failure_next_steps="Unknown jobs may belong to another runtime root; verify the selected runtime."),
         InputModel=PackageStatusInput, aliases=("package_status",), execution=INDIRECT_LOCAL_READ)
     def package_status(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._package_result(self.jobs().status, job_id=call.args.get("job_id"), wait_ms=call.args.get("wait_ms", 0))
+        result = self._package_result(self.jobs().status, job_id=call.args.get("job_id"), wait_ms=call.args.get("wait_ms", 0))
+        if self.completion_events is not None:
+            self.completion_events.stage_status_delivery(call, result)
+        return result
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(

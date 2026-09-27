@@ -91,11 +91,12 @@ authored examples appear in tool descriptions, so placeholder paths, commands,
 and no-op edits cannot be mistaken for recommended invocations.
 
 Text artifacts expose a managed `text_file.file_path` in their reference and
-prompt manifest. Search it with `run_shell` and `rg`, then use `read_file` for
-line ranges; handle oversized lines with shell tools. Artifact previews remain
-bounded, but the supplied path contains the complete extracted text. Short
-inline text is the actual complete content, not a shortened preview. PDF text
-includes original page numbers and line ranges, including gaps for blank pages.
+prompt manifest, without automatically inlining even short text. Search it with
+`run_shell` and `rg`, then use `read_file` for line ranges; handle oversized lines
+with shell tools. PDFs supply a flat extracted-text file for searching, a
+`page_file_pattern` for directly reading a known original page, and a
+`page_index_file_path` mapping pages to flat-file line ranges. The index records
+pages with no extracted text and the extraction limit; it is not injected in full.
 Managed paths are temporary read-only inputs. Audio uses the same path when a
 transcript exists; no transcription backend is added by this change.
 
@@ -117,6 +118,20 @@ both work; not every alias has all three components.
 Default results contain at most three strongest matches, with exact aliases or
 matching word sets converging to one tool when unambiguous. An explicit `top_k`
 or `limit` enables broader discovery. Hits retain the callable input contract.
+`omitted_weaker_count` counts weaker matches deliberately excluded by ranking;
+`truncated` only means selected candidates exceeded the requested result limit.
+
+Worker routing follows the actual scoped tool window. Fully direct worker
+surfaces omit search/read/call entrypoints. Backends retaining indirect tools,
+such as native shell sessions, keep the required entrypoints and corresponding
+guidance; prompts do not advertise unavailable search tools.
+
+Package completion consumption is atomic with respect to event admission. An
+explicit terminal status result delivered durably in the owning conversation
+consumes the matching job revision, including when the callback arrives later.
+Failed or incomplete delivery and reads from another conversation leave the
+notification pending. Core's `turn.tool_result_committed` event carries only
+turn/call identifiers and a delivery-completeness flag, not the result body.
 
 `scripts/benchmark_alias_search.py` evaluates model-generated first searches and
 first selections against isolated real registries (112 tools in this fixture).

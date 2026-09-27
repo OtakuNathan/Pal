@@ -334,7 +334,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(content_hits), 1)
         self.assertTrue(any("refund terms" in hit.text for hit in content_hits))
 
-    def test_prompt_exposure_is_user_context_and_hides_local_paths(self) -> None:
+    def test_prompt_exposure_is_user_context_with_managed_text_handle(self) -> None:
         ref = self._register_text(name="invoice.txt", text="invoice total is 42")
         provider = ArtifactPromptFragmentProvider(service=self.manager)
         event = EventEnvelope(
@@ -358,7 +358,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fragments[0].section, "artifact")
         self.assertIn(ref.artifact_id, fragments[0].content)
         self.assertIn("invoice.txt", fragments[0].content)
-        self.assertNotIn(str(self.root), fragments[0].content)
+        self.assertIn(ref.text_file["file_path"], fragments[0].content)
+        self.assertNotIn("invoice total is 42", fragments[0].content)
 
         compiler = PromptCompiler(_PromptContext(_Registry(provider), self.manager))
         request = compiler.build_canonical_prompt(
@@ -415,7 +416,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             "look at the attachment",
             {"supports_vision": False},
         )
-        self.assertNotIn(str(self.root), exposure.text)
+        self.assertIn(local_file["normalized_path"], exposure.text)
+        self.assertNotIn(local_file["original_path"], exposure.text)
 
     def test_current_artifact_refs_prevent_empty_caption_from_falling_back_to_hot_history(self) -> None:
         old_ref = self._register_image(name="old_caption.jpg", turn_id="old-turn")
