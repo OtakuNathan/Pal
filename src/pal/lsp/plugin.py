@@ -703,4 +703,6 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     evidence = payload.get("evidence")
     if isinstance(evidence, dict) and "result" in payload and evidence.get("result") == payload["result"]:
         projection["evidence"] = {key: value for key, value in evidence.items() if key != "result"}
-    return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, projection))
+    return CapabilityResult(status=status, text=title, structured=payload,
+                            llm_text=render_titled_structured_for_llm(title, projection),
+                            recovery_hint=str(payload.get("next_step") or "") if status != RuntimeStatus.OK else "")

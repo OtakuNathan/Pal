@@ -236,3 +236,11 @@ python -m pytest -q \
 - Proactive 运行历史明确区分 unavailable、empty、available；没有历史仓库不再暗示从未运行。
 
 本地相关回归：126 passed，17 subtests passed，两个既有依赖弃用警告。完整测试交给 GitHub CI；未激活运行中实例。
+
+## 输出契约错误与 LSP 诊断证据
+
+- 输出 schema 校验失败保留具体错误、原始正文及未校验输出；错误明确归属工具/provider 契约，不引导修改任务参数。大结果沿用预算层落盘，无法 JSON 编码的错误输出也可交付。
+- LSP 诊断未到达时外层标记 unavailable / pending，并提供等待后重查与持续故障诊断路线，不宣称 fresh。
+- 诊断通知核对文档版本，过滤版本不匹配的通知且不唤醒等待者；无版本通知保留为 version_unknown，外层不宣称与当前文件匹配。文档版本在发送通知前登记，避免即时响应被误判。
+
+相关回归 86 passed，两个既有依赖弃用警告。全量验证由 GitHub CI 执行，未激活运行中实例。

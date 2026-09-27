@@ -170,6 +170,7 @@ class AsyncLspConnector:
             version = self._document_versions.get(uri, 1) + 1
             self._diagnostics.pop(uri, None)
             self._diagnostic_events[uri] = asyncio.Event()
+            self._document_versions[uri] = version
             await self.notify(
                 "textDocument/didChange",
                 {
@@ -177,10 +178,10 @@ class AsyncLspConnector:
                     "contentChanges": [{"text": text}],
                 },
             )
-            self._document_versions[uri] = version
         else:
             self._diagnostics.pop(uri, None)
             self._diagnostic_events[uri] = asyncio.Event()
+            self._document_versions[uri] = 1
             await self.notify(
                 "textDocument/didOpen",
                 {
@@ -192,7 +193,6 @@ class AsyncLspConnector:
                     }
                 },
             )
-            self._document_versions[uri] = 1
         self._open_hashes[uri] = digest
         return {"uri": uri, "file_sha256": digest, "text": text}
 
@@ -326,11 +326,18 @@ class AsyncLspConnector:
             return
         params = dict(message.get("params") or {})
         uri = str(params.get("uri") or "")
+        version = params.get("version")
+        current_version = self._document_versions.get(uri)
+        if version is not None and (not isinstance(version, int) or isinstance(version, bool)
+                                    or current_version != version):
+            return
         self._diagnostics[uri] = {
             "status": "ok",
             "uri": uri,
             "diagnostics": list(params.get("diagnostics") or []),
-            "diagnostics_state": "fresh",
+            "diagnostics_state": "fresh" if version is not None else "version_unknown",
+            "document_version": current_version,
+            "diagnostic_version": version,
             "timestamp": utc_now(),
         }
         self._diagnostic_events.setdefault(uri, asyncio.Event()).set()

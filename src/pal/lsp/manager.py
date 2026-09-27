@@ -1212,7 +1212,17 @@ class LspManager:
             ),
             "result": result,
         }
-        return {"status": "ok", "operation": operation, "evidence": evidence, "result": result, "server": self._server_summary(state)}
+        payload = {"status": "ok", "operation": operation, "evidence": evidence, "result": result, "server": self._server_summary(state)}
+        if operation == "diagnostics" and isinstance(result, dict):
+            diagnostic_state = result.get("diagnostics_state")
+            if result.get("status") == "pending" or diagnostic_state in {"pending", "timed_out"}:
+                payload.update(status="unavailable", reason="diagnostics_not_ready",
+                               next_step="Diagnostics have not arrived; an empty list is not a clean check. Retry lsp_diagnostics after the server has had time to respond. If this persists, use lsp_doctor for this server.")
+                evidence["freshness"] = "pending"
+            elif diagnostic_state != "fresh":
+                evidence["freshness"] = "unknown"
+                payload["next_step"] = "The server did not establish the diagnostic document version; these diagnostics are observations, not proof that the current file is clean."
+        return payload
 
 
 def _workspace_environment_path(runtime_root: Path, workspace_root: Path) -> Path:

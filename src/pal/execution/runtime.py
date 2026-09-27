@@ -1465,8 +1465,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 error=str(exc),
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
-                llm_text=f"Tool output failed validation for {record.alias}; effect={outcome.value}.",
-                details={"output_schema": record.output_schema},
+                llm_text=(f"Tool output contract error for {record.alias}; effect={outcome.value}.\n"
+                          f"Validation error: {exc}\n"
+                          "This is a tool/provider output error, not a task argument error. "
+                          "Inspect the captured result and repair the tool/provider contract; "
+                          "do not repeat side effects to retrieve this output.\n"
+                          "Unvalidated tool result:\n" + render_structured_for_llm({
+                              "output": candidate, "llm_text": llm_text,
+                          })),
+                details={"output_schema": record.output_schema,
+                         "raw_output_text": render_structured_for_llm(candidate),
+                         "raw_llm_text": llm_text},
             )
         # Handler text is data, including leading/trailing whitespace. Only
         # Pal-owned structured serialization may change presentation.
