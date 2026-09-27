@@ -42,7 +42,7 @@ BrowserSnapshotInput = _strict_model(
         "target": (str | None, Field(None, description=TARGET_DESCRIPTION)),
         "depth": (int | None, Field(8)),
         "boxes": (bool, Field(False)),
-        "max_chars": (int, Field(12000)),
+        "max_chars": (int, Field(12000, description="Inline preview budget; truncated output is saved to text_file for rg/read_file.")),
         "timeout_ms": (int, Field(15000)),
     },
 )
@@ -142,7 +142,7 @@ BrowserEvaluateInput = _strict_model(
     {
         "func": (str, Field(...)),
         "target": (str | None, Field(None, description=TARGET_DESCRIPTION)),
-        "max_chars": (int, Field(20000, description="Result character budget. Oversized objects/arrays return a JSON text preview with truncated=true and their original result_type.")),
+        "max_chars": (int, Field(20000, description="Inline preview budget. Oversized objects/arrays return a JSON preview and original result_type; text_file preserves the complete result. Read that file instead of rerunning the script.")),
         "timeout_ms": (int, Field(15000)),
     },
 )

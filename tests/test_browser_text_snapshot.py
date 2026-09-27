@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from pal.shared import IntrospectionCall
 from pal.shared.tool_protocol import new_tool_call
 from pal.web_fetch.capabilities import WebFetchIntrospectionProvider
 from pal.web_fetch import WebFetchService, register_with_core as register_web
+from pal.web_fetch.browser_service import _PlaywrightCliWorker
 
 
 @pytest.fixture
@@ -96,3 +98,45 @@ def test_navigate_retains_snapshot_through_runtime_normalization():
         assert '_full_text' not in result.structured['document']
     finally:
         runtime.shutdown()
+
+
+@pytest.mark.parametrize('action', ['snapshot', 'find', 'evaluate'])
+@pytest.mark.parametrize('fail_storage', [False, True])
+def test_truncated_browser_operations_keep_full_output_without_reexecution(runtime, tmp_path, monkeypatch, action, fail_storage):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    text = 'captured line\n' * 2000
+    value = {'content': text} if action == 'evaluate' else text
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        return json.dumps(value) if action == 'evaluate' else text
+
+    monkeypatch.setattr(worker, '_run', run)
+    def execute(**kwargs):
+        return worker._dispatch_action(SimpleNamespace(key='a' * 64), action=kwargs['action'],
+                                      args=kwargs['args'], timeout_ms=1000)
+
+    if fail_storage:
+        def fail(*args, **kwargs):
+            raise OSError('disk full')
+        monkeypatch.setattr(runtime.result_snapshots, 'capture', fail)
+    provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=execute))
+    args = {'max_chars': 1000} if action == 'snapshot' else {'text': 'captured'} if action == 'find' else {'func': '() => document.title', 'max_chars': 200}
+    result = getattr(provider, action)(IntrospectionCall(name='browser_' + action, args=args,
+        meta={'execution_runtime': runtime, 'turn_id': 'captured-output'}))
+    payload = result.structured
+    assert len(calls) == 1
+    assert payload['truncated'] is True
+    assert '_full_text' not in payload and '_full_text' not in result.llm_text
+    assert text not in result.llm_text
+    assert 'do not repeat' in payload['next_step']
+    if fail_storage:
+        assert payload['text_file_error'] == 'disk full'
+        assert 'text_file' not in payload
+        assert result.snapshot_refs == ()
+    else:
+        path = Path(payload['text_file']['file_path'])
+        saved = path.read_text()
+        assert (json.loads(saved) if action == 'evaluate' else saved) == value
+        assert result.snapshot_refs[0].path == str(path)

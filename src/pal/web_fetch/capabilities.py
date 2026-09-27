@@ -230,7 +230,7 @@ class WebFetchIntrospectionProvider:
         metadata={"canonical_path": "op_browser_snapshot", "omit_family_in_canonical": True},
         execution=INDIRECT_EXTERNAL_READ,
     )
-    def snapshot(self, call: IntrospectionCall) -> IntrospectionResult:
+    def snapshot(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "snapshot", "Browser snapshot")
 
     @capability_action(
@@ -249,7 +249,7 @@ class WebFetchIntrospectionProvider:
         metadata={"canonical_path": "op_browser_find", "omit_family_in_canonical": True},
         execution=INDIRECT_EXTERNAL_READ,
     )
-    def find(self, call: IntrospectionCall) -> IntrospectionResult:
+    def find(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "find", "Browser matches")
 
     def _write_action(self, call: IntrospectionCall, action: str) -> IntrospectionResult:
@@ -308,7 +308,7 @@ class WebFetchIntrospectionProvider:
         return self._action(call, "inspect_layout", "Browser layout inspection")
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="evaluate", guidance=ToolGuidance(purpose="Evaluate a JavaScript function in the current page and return its result.", use_when="Reading page-internal state such as localStorage, sessionStorage, or JS globals that snapshots cannot expose.", do_not_use_when="The value is available via browser_read, browser_snapshot, or browser_inspect_layout.", failure_next_steps="Check that func is a function expression such as () => document.title; navigation resets page state."), InputModel=BrowserEvaluateInput, OutputModel=BrowserActionOutput, aliases=("browser_evaluate",), metadata={"canonical_path": "op_browser_evaluate", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
-    def evaluate(self, call: IntrospectionCall) -> IntrospectionResult:
+    def evaluate(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "evaluate", "Browser evaluation")
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="network", guidance=ToolGuidance(purpose="Observe fetch/XHR API traffic of the current page through an injected JavaScript hook.", use_when="Capturing API requests, headers, or tokens the page sends; start after navigating, interact, then read entries.", do_not_use_when="Raw HTTP via curl is sufficient, or no page interaction is expected.", failure_next_steps="Navigation removes the hook; run operation=start again and confirm installed=true."), InputModel=BrowserNetworkInput, OutputModel=BrowserActionOutput, aliases=("browser_network",), metadata={"canonical_path": "op_browser_network", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
@@ -407,11 +407,14 @@ class WebFetchIntrospectionProvider:
                 # are not usable inside its sandbox; transport raw text once.
                 return replace(result, llm_text="Browser document captured for worker delivery")
             return self._document_result(call, result)
+        if action in {"snapshot", "find", "evaluate"}:
+            result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
+            return self._document_result(call, result, nested_document=False)
         return _result(RuntimeStatus.OK, title, payload)
 
-    def _document_result(self, call: IntrospectionCall, result: IntrospectionResult) -> IntrospectionResult | CapabilityResult:
+    def _document_result(self, call: IntrospectionCall, result: IntrospectionResult, *, nested_document: bool = True) -> IntrospectionResult | CapabilityResult:
         payload = dict(result.structured or {})
-        document = dict(payload.get("document") or {})
+        document = dict(payload.get("document") or {}) if nested_document else payload
         if "_full_text" not in document:
             return replace(result, llm_text=render_titled_structured_for_llm(result.text, payload))
         text = document.pop("_full_text")
@@ -426,13 +429,14 @@ class WebFetchIntrospectionProvider:
             refs = (ref,)
             document["text_file"] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
                                      "sha256": ref.digest, "read_only": True}
-            if document.get("text_truncated"):
-                document["next_step"] = "For remaining text, use rg/read_file on text_file.file_path. This is a snapshot of the captured page; reread the browser only when fresh page content is needed."
+            if document.get("text_truncated") or document.get("truncated"):
+                document["next_step"] = "For remaining output, use rg/read_file on text_file.file_path. This preserves the captured result; do not repeat an action or evaluate script just to recover omitted output. Element refs describe the captured page and may be stale after page changes."
         except (OSError, RuntimeError) as exc:
             document["text_file_error"] = str(exc)
-            if document.get("text_truncated"):
-                document["next_step"] = "Only the preview is available because saving the full text failed. Resolve output storage before requesting another capture."
-        payload["document"] = document
+            if document.get("text_truncated") or document.get("truncated"):
+                document["next_step"] = "Only the preview is available because saving the full text failed. Resolve output storage; do not repeat potentially mutating actions or scripts solely to recover output."
+        if nested_document:
+            payload["document"] = document
         return CapabilityResult(status=result.status, text=result.text, structured=payload,
                        llm_text=render_titled_structured_for_llm(result.text, payload), snapshot_refs=refs)
 

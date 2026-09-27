@@ -401,7 +401,7 @@ Example `capabilities.py`:
 from dataclasses import dataclass
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.execution.tool_facade import StrictToolModel
+from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, capability_node
 
@@ -433,6 +433,7 @@ class DemoProvider:
             failure_next_steps="No failure modes. If echo doesn't work, the skill module may be detached.",
         ),
         InputModel=EchoInput,
+        aliases=("demo_echo",),
         execution=INDIRECT_NONE,
     )
     def echo(self, call: CapabilityCall) -> CapabilityResult:

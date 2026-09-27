@@ -69,6 +69,10 @@ The inline text is a preview. The complete captured text is saved as an immutabl
 reads. Use `rg` and `read_file` on that snapshot for remaining text; reread the
 browser only for fresh content. Storage failures retain the preview and report
 that the full text is unavailable.
+Truncated `browser_snapshot`, `browser_find`, and `browser_evaluate` results use
+the same snapshot storage. Evaluate saves complete JSON for objects and arrays;
+reading omitted output never requires executing the script again. Element refs
+in a saved snapshot can become stale after page changes.
 
 PDFs retain their page index and per-page file paths when an image is attached.
 The prompt states which page is visible; it does not imply all pages were viewed.

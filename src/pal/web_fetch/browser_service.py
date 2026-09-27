@@ -592,7 +592,8 @@ class _PlaywrightCliWorker:
             command = _cli_args("snapshot", *positionals, options=options)
             raw = self._run(record, command, timeout_ms=timeout_ms, raw=True)
             max_chars = max(1000, min(100000, int(args.get("max_chars") or 12000)))
-            return {"snapshot": raw[:max_chars], "truncated": len(raw) > max_chars}
+            return {"snapshot": raw[:max_chars], "truncated": len(raw) > max_chars,
+                    **({"_full_text": raw} if len(raw) > max_chars else {})}
         if action == "find":
             text = str(args.get("text") or "")
             regex = str(args.get("regex") or "")
@@ -604,7 +605,8 @@ class _PlaywrightCliWorker:
             else:
                 command = _cli_args("find", _bounded_text(text, limit=500, field_name="text"))
             raw = self._run(record, command, timeout_ms=timeout_ms, raw=True)
-            return {"matches": raw[:12000], "truncated": len(raw) > 12000}
+            return {"matches": raw[:12000], "truncated": len(raw) > 12000,
+                    **({"_full_text": raw} if len(raw) > 12000 else {})}
         if action == "click":
             command_name = "dblclick" if bool(args.get("double")) else "click"
             button = str(args.get("button") or "left").lower()
@@ -723,6 +725,8 @@ class _PlaywrightCliWorker:
             }
             if truncated and not isinstance(value, str):
                 result["result_format"] = "json_preview"
+            if truncated:
+                result["_full_text"] = preview
             return result
         if action == "network":
             operation = str(args.get("operation") or "read").lower()
