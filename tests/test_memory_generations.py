@@ -34,6 +34,24 @@ class MemoryGenerationTests(unittest.TestCase):
     def fact(self, **values):
         return L3CommitRequest(kind="fact", title="API preference", summary="Explicit APIs", search_text="explicit interfaces", **values)
 
+    def test_exact_recall_reads_durable_state_without_index_refresh(self):
+        first = self.provider.commit(self.fact())
+        with patch.object(self.provider, "refresh_indexes", side_effect=AssertionError("index refresh")):
+            found = self.provider.recall(MemoryQuery(mem_ref=first.document_id))
+            self.assertEqual(found.metadata["lookup_status"], "found")
+            self.assertEqual(found.hits[0]["summary"], "Explicit APIs")
+            self.assertNotIn(first.document_id, found.hits[0]["summary"])
+            updated = self.provider.correct(L3CorrectRequest(document_id=first.document_id, summary="Changed preference"))
+            old = self.provider.recall(MemoryQuery(mem_ref=first.document_id))
+            self.assertEqual(old.metadata["lookup_status"], "superseded")
+            self.assertEqual(old.metadata["successors"], [updated.document_id])
+            self.assertEqual(old.hits, [])
+            self.assertEqual(self.provider.recall(MemoryQuery(mem_ref=updated.document_id)).hits[0]["summary"], "Changed preference")
+            self.provider.delete(L3DeleteRequest(document_id=updated.document_id))
+            deleted = self.provider.recall(MemoryQuery(mem_ref=updated.document_id))
+            self.assertEqual(deleted.metadata["lookup_status"], "deleted")
+            self.assertEqual(self.provider.recall(MemoryQuery(mem_ref="fact:absent")).metadata["lookup_status"], "not_found")
+
     def test_independent_repositories_do_not_rebind_source_models(self):
         first = self.provider.commit(self.fact())
         other = self.storage.open("other")

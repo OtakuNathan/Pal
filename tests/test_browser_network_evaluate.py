@@ -124,3 +124,47 @@ def test_evaluate_preserves_small_result_types(value):
     assert result['result'] == value
     assert result['truncated'] is False
     assert result['result_type'] == type(value).__name__
+
+
+def test_network_body_capture_discloses_sampling_and_unavailable_streams():
+    run_network_scenario('''
+await window.fetch('/long', {body: 'x'.repeat(3000)});
+await window.fetch({url: '/stream', body: {} });
+await window.fetch('/binary', {body: new Uint8Array([1, 2])});
+const entries = run('read').entries;
+assert.equal(entries[0].request.body.length, 2048);
+assert.equal(entries[0].request.body_original_chars, 3000);
+assert.equal(entries[0].request.body_truncated, true);
+assert.equal(entries[1].request.body_capture_status, 'unavailable');
+assert.equal(entries[2].request.body_capture_status, 'unsupported');
+''')
+
+
+def test_page_and_layout_scripts_capture_all_matching_text():
+    from pal.web_fetch.browser_service import _read_page_script, _layout_script
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is required')
+    scripts = {'page': _read_page_script(max_chars=1000, max_links=1),
+               'none': _read_page_script(max_chars=1000, max_links=0),
+               'layout': _layout_script(selector='.item', limit=1)}
+    script = 'const scripts = ' + json.dumps(scripts) + ''';
+const assert = require('node:assert/strict');
+global.location = {href: 'https://example.test'};
+const nodes = Array.from({length: 501}, (_, i) => ({
+  href: 'https://example.test/' + i, innerText: 'x'.repeat(1500), rel: '',
+  id: 'item' + i, tagName: 'A', getAttribute: () => '',
+  getBoundingClientRect: () => ({x: i, y: 0, width: 10, height: 10})
+}));
+global.document = {body: {innerText: 'body'}, title: 'Title', documentElement: {lang: 'en'},
+  contentType: 'text/html', querySelector: () => null, querySelectorAll: () => nodes};
+global.getComputedStyle = () => ({getPropertyValue: () => ''});
+const run = name => JSON.parse(eval('(' + scripts[name] + ')')());
+assert.equal(run('page').links.length, 501);
+assert.equal(run('page').links[500].text.length, 1500);
+assert.equal(run('none').links.length, 0);
+assert.equal(run('layout').elements.length, 501);
+assert.equal(run('layout').elements[500].text.length, 1500);
+'''
+    result = subprocess.run([node, '-e', script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr

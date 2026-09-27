@@ -53,6 +53,8 @@ class TextArtifactPolicy:
 @dataclass(frozen=True)
 class PdfArtifactPolicy:
     max_pages: int = 200
+    # Legacy configuration fields retained for loading older policies. All
+    # processed pages now receive images; max_pages bounds both text and images.
     eager_fallback_page_images: int = 8
     textless_min_chars: int = 40
 

@@ -702,7 +702,7 @@ class ArtifactManager:
                     continue
                 live_count += 1
                 inlined = False
-                if supports_vision and inline_count < self.policy.image.max_inline_images:
+                if record.kind != ARTIFACT_KIND_PDF and supports_vision and inline_count < self.policy.image.max_inline_images:
                     image_rep = self._first_image_representation(record)
                     if image_rep is not None and _representation_base64_fits(image_rep, self.policy):
                         source = self.to_data_url(image_rep.representation_id)
@@ -865,13 +865,16 @@ class ArtifactManager:
         if text_file:
             page_guidance = (
                 "For PDFs, read a known page directly using page_file_pattern (1-based page); "
-                "page_index_file_path maps original pages to flat-file lines. "
+                "page_index_file_path lists page processing status, text lines, and image_file_path. "
+                "PDF pixels are not attached. When needed, use artifact_import with the page image_file_path; "
+                "image injection requires a vision-capable model and available image budget. "
                 if "page_index_file_path" in text_file else ""
             )
             return (
                 f"- artifact_id: {record.artifact_id}\n"
                 f"  file_name: {_prompt_scalar(record.file_name)}\n"
                 f"  kind: {record.kind}\n"
+                f"  status: {record.status}\n"
                 f"  text_file: {_prompt_scalar(text_file)}\n"
                 "  handling: use run_shell with rg to locate text and read_file to read lines; "
                 f"{page_guidance}Use shell for oversized lines. The text is already extracted; no processor discovery "

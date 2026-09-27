@@ -45,6 +45,9 @@ class LLMModelListItem:
     provider: str
     wire_shape: str
     priority: int
+    supports_vision: bool | None = None
+    supports_tools: bool | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)
@@ -121,7 +124,7 @@ class LLMIntrospectionProvider:
         action_name="list",
         guidance=ToolGuidance(
             purpose="List enabled LLM endpoints ordered by priority.",
-            use_when="Discovering available model endpoints, their provider, wire shape, and priority.",
+            use_when="Discovering available model endpoints, their provider, wire shape, priority, vision/tools support, and context window.",
             do_not_use_when="Checking the current active model (use llm_active). Inspecting one endpoint in depth (use llm_show).",
             failure_next_steps="Read-only. If empty, no endpoints are configured or enabled.",
         ),
@@ -138,6 +141,9 @@ class LLMIntrospectionProvider:
                 provider=endpoint.provider,
                 wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
                 priority=int(getattr(endpoint, "priority", 0) or 0),
+                supports_vision=getattr(endpoint, "supports_vision", None),
+                supports_tools=getattr(endpoint, "supports_tools", None),
+                context_window=getattr(endpoint, "context_window", None),
                 ).__dict__,
                 "name": endpoint.endpoint_id,
             }

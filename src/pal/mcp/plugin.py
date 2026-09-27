@@ -275,7 +275,7 @@ class McpManagerPluginProvider:
                 status=RuntimeStatus.ERROR,
                 text=f"image prepare failed: {exc.__class__.__name__}",
                 structured={"error": str(exc)},
-                llm_text=f"image prepare failed: {exc.__class__.__name__}",
+                llm_text=f"Image preparation failed: {exc}. " + _mcp_recovery_hint(exc, image=True),
             )
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -596,10 +596,30 @@ def _add_names(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
 
 
 def _error_result(text: str, exc: Exception) -> IntrospectionResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+    payload = {"error": str(exc), "error_type": exc.__class__.__name__,
+               "next_step": _mcp_recovery_hint(exc)}
     return IntrospectionResult(
         status=RuntimeStatus.ERROR,
         text=text,
         structured=payload,
         llm_text=render_titled_structured_for_llm(text, payload),
     )
+
+
+def _mcp_recovery_hint(exc: Exception, *, image: bool = False) -> str:
+    message = str(exc).lower()
+    if image:
+        if message.startswith("image file not found:") or isinstance(exc, OSError):
+            return "Use run_shell for a bounded existence/readability check of the image path, then correct the path; read_file is for text."
+        if "artifact_scope_unavailable" in message:
+            return "The artifact has no bound conversation scope. Use an accessible local image path, or invoke from the artifact's conversation."
+        if "artifact service unavailable" in message:
+            return "Use an accessible local image path, or inspect artifact service availability with search_tools(query='artifact show')."
+        if "artifact_not_found" in message or "artifact_handler_retired" in message:
+            return "Use list_artifacts to check current artifact availability; copy a returned artifact_id or use an accessible local image path."
+        if message == "artifact_id, path, or url is required":
+            return "Supply an image source; use read_tool(name='mcp_image_prepare') for the exact source and mode schema."
+        return "Inspect the reported cause and mcp_show for service health; for argument errors use read_tool(name='mcp_image_prepare')."
+    return ("Inspect mcp_show for manager health and mcp_server_list for server state; "
+            "use mcp_server_read with the affected server name for details. "
+            "Correct the reported cause. Reconcile any external write before retrying it.")

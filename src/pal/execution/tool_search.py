@@ -35,7 +35,7 @@ class ExecutionToolSearchMixin:
         scope="module",
         action_name="tools",
         guidance=ToolGuidance(
-            purpose="List registered execution tools with descriptions and input schemas.",
+            purpose="List a compact directory of registered tool aliases, purposes, modules, and invocation modes.",
             use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
             do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
             failure_next_steps="Read-only. If expected tools are missing, check exec_show for capability/tool counts.",

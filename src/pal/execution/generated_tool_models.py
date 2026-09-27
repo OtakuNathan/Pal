@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import Field, create_model
 
 from pal.execution.tool_facade import StrictToolModel, StructuredToolOutput
+from pal.skill.tool_models import SkillPatch
 
 
 def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
@@ -635,12 +636,13 @@ McpPluginMcpManagerPluginProviderImagePrepareInput = _strict_model(
 MemoryCapabilitiesMemoryIntrospectionProviderRecallInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderRecallInput',
     {
+        'mem_ref': (str | None, Field(None, pattern=r'^(fact|case):.+$', description='Exact durable reference. When supplied, reads the record directly without semantic search or index refresh; queries/topic_scope/limit are not used. kind/task_id still constrain visibility.')),
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for the remembered fact, preference, project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here.')),
         'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
-        'limit': (int, Field(None, description='Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.', ge=1, le=10)),
+        'limit': (int, Field(5, description='Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.', ge=1, le=10)),
         'kind': (Literal['fact', 'case'], Field(None, description='Optional memory type filter. Use fact for stable facts, preferences, project context, or prior decisions. Use case for prior failures, debugging attempts, repair lessons, task experience, or when current work hits an error and prior pitfall/fix experience may exist.')),
-        'view': (Literal['summary', 'origin'], Field(None, description='Use summary by default for normal work. Use origin only when provenance, source text, or extra detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from.')),
+        'view': (Literal['summary', 'origin'], Field('summary', description='Use summary by default for normal work. Use origin only when provenance, source text, or extra detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from.')),
     },
 )
 
@@ -911,6 +913,7 @@ PluginsCapabilitiesPluginsIntrospectionProviderDisableInput = _strict_model(
 PluginsL3SqliteVecSQLiteVecL3PluginRecallInput = _strict_model(
     'PluginsL3SqliteVecSQLiteVecL3PluginRecallInput',
     {
+        'mem_ref': (str | None, Field(None, pattern=r'^(fact|case):.+$', description='Exact durable reference. When supplied, reads the record directly without semantic search or index refresh; queries/topic_scope/limit are not used. kind/task_id still constrain visibility.')),
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for durable facts, preferences, project context, prior decisions, repair cases, or task experience. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known; do not paste large raw context.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference area, or failure domain. This is semantic narrowing, not the storage scope.')),
         'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
@@ -984,6 +987,7 @@ PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput = _strict_model(
 PluginsL3StubsL3ProviderCapabilityMixinRecallInput = _strict_model(
     'PluginsL3StubsL3ProviderCapabilityMixinRecallInput',
     {
+        'mem_ref': (str | None, Field(None, pattern=r'^(fact|case):.+$', description='Exact durable reference. When supplied, reads the record directly without semantic search or index refresh; queries/topic_scope/limit are not used. kind/task_id still constrain visibility.')),
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for durable facts, preferences, project context, prior decisions, repair cases, or task experience. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known; do not paste large raw context.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference area, or failure domain. This is semantic narrowing, not the storage scope.')),
         'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task identifier from current context. When provided, recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids.')),
@@ -1157,7 +1161,7 @@ SkillCapabilitiesSkillIntrospectionProviderUpdateInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderUpdateInput',
     {
         'name': (str, Field(..., description='Skill name returned by skill_search.')),
-        'patch': (dict[str, Any], Field(...)),
+        'patch': (SkillPatch, Field(..., description='Only supplied fields change. Empty strings/lists clear optional content; title and manual_text must remain nonblank.')),
     },
 )
 

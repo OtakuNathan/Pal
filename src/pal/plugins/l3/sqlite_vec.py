@@ -236,6 +236,7 @@ class SQLiteVecL3Plugin:
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
+            mem_ref=str(call.args.get("mem_ref") or "").strip() or None,
             level=str(call.args.get("level") or "warm"),
             queries=[str(value) for value in list(call.args.get("queries") or [])],
             topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
@@ -342,7 +343,7 @@ class SQLiteVecL3Plugin:
             purpose="Update a memory record in the sqlite backend.",
             use_when="Correcting or superseding a stored memory record at the provider level.",
             do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
-            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_memory. If the update outcome is uncertain, recall that mem_ref and reconcile its current content before retrying.",
+            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_memory. If the update outcome is uncertain, use recall_memory with that exact mem_ref and reconcile its current content before retrying.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
@@ -447,7 +448,7 @@ class SQLiteVecL3Plugin:
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         if self.repository.frozen:
-            return IntrospectionResult(status="unavailable", text="memory maintenance owns the connection")
+            return IntrospectionResult(status="unavailable", text="memory maintenance owns the connection", llm_text="memory maintenance owns the connection")
         self.mounted = False
         self.repository.close()
         return IntrospectionResult(
@@ -541,7 +542,46 @@ class SQLiteVecL3Plugin:
         return L3MutationResult(status="ok", document_id=document_id,
             hit={"document_id": document_id, "deleted": True}, metadata={"deleted": True})
 
+    def _recall_exact(self, query: MemoryQuery) -> L3RecallResult:
+        ref = query.mem_ref
+        metadata = {"retrieval_mode": "exact", "mem_ref": ref, "lookup_status": "not_found"}
+        if not self.mounted:
+            return L3RecallResult(metadata={**metadata, "lookup_status": "unavailable"})
+        repo = self.repository
+        if ref in repo.excluded_refs:
+            return L3RecallResult(metadata=metadata)
+        if repo.catalog is not None and repo.catalog.is_deleted(ref):
+            return L3RecallResult(metadata={**metadata, "lookup_status": "deleted"})
+        hit = repo.get_document(ref)
+        if hit is not None:
+            if ((query.kind and hit.get("document_kind") != query.kind)
+                    or (query.scope and hit.get("scope") != query.scope)
+                    or (query.task_id and hit.get("task_id") not in (None, query.task_id))):
+                return L3RecallResult(metadata={**metadata, "lookup_status": "not_in_scope"})
+            entry = self._project_entry(hit, source_kind="l3_recall", candidate_state="candidate")
+            self.service.project_l3_entries([entry], touch=True, top_of_mind=False)
+            return L3RecallResult(hits=[hit], projected_entries=[entry],
+                metadata={**metadata, "lookup_status": "found"})
+        # Revisions are durable evidence of replacement, not current facts.
+        import json
+        row = repo.database.execute_sql(
+            "SELECT successors_json FROM memory_revisions WHERE document_id = ?", (ref,)
+        ).fetchone()
+        successors = json.loads(row[0]) if row else []
+        retired = row is not None
+        if not retired and repo.catalog is not None:
+            for item in repo.catalog.history(ref, repo=repo):
+                if item.get("document", {}).get("document_id") == ref:
+                    successors = item.get("successors", [])
+                    retired = True
+                    break
+        if retired:
+            metadata.update(lookup_status="superseded" if successors else "retired", successors=successors)
+        return L3RecallResult(metadata=metadata)
+
     def recall(self, query: MemoryQuery) -> L3RecallResult:
+        if query.mem_ref:
+            return self._recall_exact(query)
         if not self.mounted:
             return L3RecallResult()
         refreshed = (

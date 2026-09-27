@@ -552,6 +552,9 @@ class _PlaywrightCliWorker:
         links = list(document.get("links") or [])
         document["links_truncated"] = bool(document.get("links_truncated")) or len(links) > max_links
         document["links"] = links[:max_links]
+        document["links_count"] = len(links)
+        if max_links:
+            document["_full_files"] = {"links_file": json.dumps(links, ensure_ascii=False, indent=2)}
         return {"document": document, "content_status": "available"}
 
     def _dispatch_action(
@@ -593,7 +596,7 @@ class _PlaywrightCliWorker:
             raw = self._run(record, command, timeout_ms=timeout_ms, raw=True)
             max_chars = max(1000, min(100000, int(args.get("max_chars") or 12000)))
             return {"snapshot": raw[:max_chars], "truncated": len(raw) > max_chars,
-                    **({"_full_text": raw} if len(raw) > max_chars else {})}
+                    "_full_text": raw}
         if action == "find":
             text = str(args.get("text") or "")
             regex = str(args.get("regex") or "")
@@ -606,7 +609,7 @@ class _PlaywrightCliWorker:
                 command = _cli_args("find", _bounded_text(text, limit=500, field_name="text"))
             raw = self._run(record, command, timeout_ms=timeout_ms, raw=True)
             return {"matches": raw[:12000], "truncated": len(raw) > 12000,
-                    **({"_full_text": raw} if len(raw) > 12000 else {})}
+                    "_full_text": raw}
         if action == "click":
             command_name = "dblclick" if bool(args.get("double")) else "click"
             button = str(args.get("button") or "left").lower()
@@ -622,7 +625,7 @@ class _PlaywrightCliWorker:
             _, marker, section = output.partition("### Open tabs\n")
             tabs = section.split("\n### ", 1)[0].strip() if marker else ""
             if tabs:
-                return {"open_tabs": tabs[:12000], "tabs_truncated": len(tabs) > 12000,
+                return {"open_tabs": tabs[:12000], "tabs_truncated": len(tabs) > 12000, "_full_text": tabs,
                         "next_step": "Inspect open_tabs. To read a popup or another tab, use browser_tabs with operation=select and its index, then browser_read or browser_snapshot. Use operation=list to refresh indices first if tabs changed."}
             return {}
         if action == "fill":
@@ -703,7 +706,12 @@ class _PlaywrightCliWorker:
                 raise BrowserServiceError("selector is required", code="invalid_arguments")
             limit = max(1, min(20, int(args.get("max_elements") or 20)))
             raw = self._run(record, ["eval", _layout_script(selector=selector, limit=limit)], timeout_ms=timeout_ms, raw=True)
-            return {"inspection": _parse_json_object(raw, "layout inspection")}
+            inspection = _parse_json_object(raw, "layout inspection")
+            full = json.dumps(inspection, ensure_ascii=False, indent=2)
+            elements = list(inspection.get("elements") or [])
+            inspection["elements"] = elements[:limit]
+            inspection["truncated"] = len(elements) > limit
+            return {"inspection": inspection, "_full_text": full}
         if action == "evaluate":
             func = _bounded_text(args.get("func"), limit=20000, field_name="func").strip()
             if not func:
@@ -725,8 +733,7 @@ class _PlaywrightCliWorker:
             }
             if truncated and not isinstance(value, str):
                 result["result_format"] = "json_preview"
-            if truncated:
-                result["_full_text"] = preview
+            result["_full_text"] = preview
             return result
         if action == "network":
             operation = str(args.get("operation") or "read").lower()
@@ -1040,17 +1047,17 @@ def _read_page_script(*, max_chars: int, max_links: int) -> str:
         ['open_graph_title', 'meta[property="og:title"]']
       ]) {{
         const node = document.querySelector(selector);
-        if (node && node.content) metadata[key] = String(node.content).slice(0, 2000);
+        if (node && node.content) metadata[key] = String(node.content);
       }}
       const text = document.body ? (document.body.innerText || '') : '';
-      const links = Array.from(document.querySelectorAll('a[href]')).slice(0, args.maxLinks + 1).map(a => ({{
-        href: String(a.href || '').slice(0, 8192),
-        text: String(a.innerText || a.textContent || '').trim().slice(0, 1000),
-        rel: String(a.rel || '').slice(0, 500)
+      const links = (args.maxLinks ? Array.from(document.querySelectorAll('a[href]')) : []).map(a => ({{
+        href: String(a.href || ''),
+        text: String(a.innerText || a.textContent || '').trim(),
+        rel: String(a.rel || '')
       }}));
       return {{
         requested_url: location.href, final_url: location.href,
-        title: String(document.title || '').slice(0, 2000),
+        title: String(document.title || ''),
         text,
         content_type: String(document.contentType || '').slice(0, 200),
         links, metadata
@@ -1068,16 +1075,16 @@ def _layout_script(*, selector: str, limit: int) -> str:
       const round = value => Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
       const rectPayload = rect => ({{x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height), top: round(rect.top), right: round(rect.right), bottom: round(rect.bottom), left: round(rect.left)}});
       const all = Array.from(document.querySelectorAll(args.selector));
-      const elements = all.slice(0, args.limit).map(node => {{
+      const elements = all.map(node => {{
         const rect = node.getBoundingClientRect();
         const parentRect = node.parentElement ? node.parentElement.getBoundingClientRect() : null;
         const previousRect = node.previousElementSibling ? node.previousElementSibling.getBoundingClientRect() : null;
         const nextRect = node.nextElementSibling ? node.nextElementSibling.getBoundingClientRect() : null;
         const computed = getComputedStyle(node);
         const styles = Object.fromEntries(args.properties.map(name => [name, computed.getPropertyValue(name)]));
-        return {{tag: String(node.tagName || '').toLowerCase(), id: String(node.id || '').slice(0,160), classes: String(node.getAttribute('class') || '').split(/\\s+/).filter(Boolean).slice(0,20), role: String(node.getAttribute('role') || '').slice(0,80), text: String(node.innerText || node.textContent || '').replace(/\\s+/g,' ').trim().slice(0,240), geometry: rectPayload(rect), parent_geometry: parentRect ? rectPayload(parentRect) : null, previous_sibling_vertical_gap_px: previousRect ? round(rect.top - previousRect.bottom) : null, next_sibling_vertical_gap_px: nextRect ? round(nextRect.top - rect.bottom) : null, computed_styles: styles}};
+        return {{tag: String(node.tagName || '').toLowerCase(), id: String(node.id || ''), classes: String(node.getAttribute('class') || '').split(/\\s+/).filter(Boolean), role: String(node.getAttribute('role') || ''), text: String(node.innerText || node.textContent || '').replace(/\\s+/g,' ').trim(), geometry: rectPayload(rect), parent_geometry: parentRect ? rectPayload(parentRect) : null, previous_sibling_vertical_gap_px: previousRect ? round(rect.top - previousRect.bottom) : null, next_sibling_vertical_gap_px: nextRect ? round(nextRect.top - rect.bottom) : null, computed_styles: styles}};
       }});
-      return {{selector: args.selector, matched_count: all.length, truncated: all.length > args.limit, elements}};
+      return {{selector: args.selector, matched_count: all.length, truncated: false, elements}};
     }})())"""
 
 
@@ -1134,20 +1141,23 @@ def _network_start_script() -> str:
     } catch (err) {}
     return out;
   };
-  const bodyOf = body => {
+  const bodyOf = (body, unavailable = false) => {
     try {
-      if (body === null || body === undefined) return null;
-      if (typeof body === 'string') return body.slice(0, 2048);
-      if (typeof body === 'object') return JSON.stringify(body).slice(0, 2048);
-      return String(body).slice(0, 2048);
-    } catch (err) { return null; }
+    if (unavailable) return {body: null, body_capture_status: 'unavailable', body_truncated: false};
+    if (body === null || body === undefined) return {body: null, body_capture_status: 'absent', body_truncated: false, body_original_chars: 0};
+    // Do not consume Request streams or pretend Blob/FormData bytes were captured.
+    if (typeof body !== 'string' && !(body instanceof URLSearchParams))
+      return {body: null, body_capture_status: 'unsupported', body_truncated: false};
+    const text = String(body);
+    return {body: text.slice(0, 2048), body_capture_status: text.length > 2048 ? 'sampled' : 'captured', body_truncated: text.length > 2048, body_original_chars: text.length};
+    } catch (err) { return {body: null, body_capture_status: 'unavailable', body_truncated: false}; }
   };
   const originalFetch = window.fetch;
   if (typeof originalFetch === 'function') {
     window.fetch = function(input, init) {
       const url = typeof input === 'string' ? input : String((input && input.url) || input);
       const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-      const request = {method: method, headers: headersOf((init && init.headers) || (input && input.headers)), body: bodyOf(init && init.body)};
+      const request = {method: method, headers: headersOf((init && init.headers) || (input && input.headers)), ...bodyOf(init && init.body, !!(input && input.body && !(init && Object.prototype.hasOwnProperty.call(init, 'body'))))};
       const startedAt = Date.now();
       const at = new Date(startedAt).toISOString();
       return originalFetch.apply(this, arguments).then(
@@ -1162,7 +1172,7 @@ def _network_start_script() -> str:
   xhrProto.setRequestHeader = function(name, value) { if (this.__palNetMeta) this.__palNetMeta.headers[String(name)] = String(value); return originalSetHeader.apply(this, arguments); };
   xhrProto.send = function(body) {
     const meta = this.__palNetMeta || {method: 'GET', url: '', headers: {}};
-    if (this.__palNetMeta && body !== undefined && body !== null) meta.body = bodyOf(body);
+    Object.assign(meta, bodyOf(body));
     const startedAt = Date.now();
     const at = new Date(startedAt).toISOString();
     this.addEventListener('loadend', () => {

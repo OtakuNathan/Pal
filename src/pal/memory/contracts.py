@@ -68,6 +68,7 @@ class MemoryQuery:
     kind: str | None = None
     scope: str | None = None
     view: L3RecallView = L3RecallView.SUMMARY
+    mem_ref: str | None = None
 
 
 @dataclass(frozen=True)

@@ -95,36 +95,40 @@ class SkillService:
         current = self.repository.get_skill(skill_id)
         if current is None:
             raise ValueError("skill_not_found")
-        patch = dict(payload.get("patch") or {})
+        from pal.skill.tool_models import SkillPatch
+        patch = SkillPatch.model_validate(payload.get("patch", {})).model_dump(exclude_unset=True)
         star_patch = patch.get("applicability_star") if isinstance(patch.get("applicability_star"), dict) else {}
         star = SkillApplicabilitySTAR(
-            situation=str(star_patch.get("situation") or current.applicability_star.situation),
-            task=str(star_patch.get("task") or current.applicability_star.task),
-            action=str(star_patch.get("action") or current.applicability_star.action),
-            result=str(star_patch.get("result") or current.applicability_star.result),
+            situation=star_patch.get("situation", current.applicability_star.situation),
+            task=star_patch.get("task", current.applicability_star.task),
+            action=star_patch.get("action", current.applicability_star.action),
+            result=star_patch.get("result", current.applicability_star.result),
         )
         updated = SkillDescriptor(
             skill_id=current.skill_id,
             module_id=current.module_id,
-            title=str(patch.get("title") or current.title),
-            summary=str(patch.get("summary") or current.summary),
-            manual_text=str(patch.get("manual_text") or current.manual_text),
+            title=patch.get("title", current.title),
+            summary=patch.get("summary", current.summary),
+            manual_text=patch.get("manual_text", current.manual_text),
             source_kind=current.source_kind,
-            activation_terms=_string_tuple(patch.get("activation_terms")) or current.activation_terms,
-            capability_refs=_string_tuple(patch.get("capability_refs")) or current.capability_refs,
+            activation_terms=_string_tuple(patch["activation_terms"]) if "activation_terms" in patch else current.activation_terms,
+            capability_refs=_string_tuple(patch["capability_refs"]) if "capability_refs" in patch else current.capability_refs,
             enabled=bool(patch.get("enabled", current.enabled)),
-            status=str(patch.get("status") or current.status),
+            status=patch.get("status", current.status),
             applicability_star=star,
-            use_when=str(patch.get("use_when") or current.use_when),
-            avoid_when=str(patch.get("avoid_when") or current.avoid_when),
-            sanitization_notes=_string_tuple(patch.get("sanitization_notes")) or current.sanitization_notes,
+            use_when=patch.get("use_when", current.use_when),
+            avoid_when=patch.get("avoid_when", current.avoid_when),
+            sanitization_notes=_string_tuple(patch["sanitization_notes"]) if "sanitization_notes" in patch else current.sanitization_notes,
             source_format=current.source_format,
             source_refs=current.source_refs,
-            version=int(current.version) + 1,
+            version=current.version,
             metadata=dict(current.metadata),
             created_at=current.created_at,
-            updated_at=utc_now(),
+            updated_at=current.updated_at,
         )
+        if updated == current:
+            return current
+        updated = _copy_skill(updated, version=current.version + 1, updated_at=utc_now())
         if updated.status not in SKILL_STATUSES:
             raise ValueError("unsupported skill status")
         self._write_skill_file(updated)

@@ -6,7 +6,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, model_validator
 
 from pal.shared.tool_protocol import (
     CompleteResult,
@@ -23,6 +23,21 @@ class StrictToolModel(BaseModel):
     """Base contract for Pal-owned tool inputs and outputs."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        schema = handler(core_schema)
+        # Legacy omit-only fields use None internally, but reject explicit null.
+        # Do not advertise that sentinel as a callable default. Nullable fields
+        # retain their null default and explicit-null semantics.
+        for name, field in cls.model_fields.items():
+            prop = schema.get("properties", {}).get(field.alias or name, {})
+            if "default" in prop and prop["default"] is None:
+                try:
+                    TypeAdapter(field.annotation).validate_python(None, strict=True)
+                except ValidationError:
+                    prop.pop("default")
+        return schema
 
 
 class EmptyToolInput(StrictToolModel):

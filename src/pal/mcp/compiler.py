@@ -351,7 +351,7 @@ def _unique_path(base: str, used_paths: set[str]) -> str:
 def _mcp_guidance(purpose: str) -> ToolGuidance:
     return ToolGuidance(
         purpose=purpose,
-        use_when=purpose,
+        use_when="The task requires this external MCP service and its declared capability.",
         do_not_use_when="Do not use when a Pal-owned tool matches the task or when the external MCP server is not trusted for the data.",
         failure_next_steps="Inspect the MCP error and recovery affordances; reconcile external writes before retrying.",
     )

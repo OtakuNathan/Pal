@@ -119,6 +119,7 @@ class SkillUpdateTool:
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         try:
+            previous = self.service.repository.get_skill(str(args.get("skill_id") or ""))
             skill = self.service.update_skill(args)
         except ValueError as exc:
             structured = {"reason": "invalid_request", "error": str(exc)}
@@ -128,12 +129,13 @@ class SkillUpdateTool:
                 structured=structured,
                 llm_text=_render_skill_tool_payload(self.service, "Skill update failed", structured),
             )
-        structured = {"skill": skill.to_dict()}
+        changed = previous is None or skill.version != previous.version
+        structured = {"skill": skill.to_dict(), "changed": changed}
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text="skill updated",
+            text="skill updated" if changed else "skill unchanged",
             structured=structured,
-            llm_text=_render_skill_tool_payload(self.service, "Skill updated", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill updated" if changed else "Skill unchanged", structured),
         )
 
 

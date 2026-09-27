@@ -70,8 +70,8 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="configure",
         guidance=ToolGuidance(
-            purpose="Configure core runtime mode.",
-            use_when="Switching core operating mode (e.g. normal, maintenance).",
+            purpose="Set the core state mode label.",
+            use_when="Changing the mode label exposed by core_observe; this does not pause, drain, restart, or enter maintenance.",
             do_not_use_when="Reading core state (use core_observe). Configuring a specific module (use that module's capabilities).",
             failure_next_steps="If mode change fails, check core_observe for current state and module health.",
         ),
@@ -85,9 +85,9 @@ class CoreIntrospectionProvider:
             self.core.state.mode = str(mode)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="core configuration updated",
+            text="core mode label",
             structured={"mode": self.core.state.mode},
-            llm_text=render_titled_structured_for_llm("Core configuration updated", {"mode": self.core.state.mode}),
+            llm_text=render_titled_structured_for_llm("Core mode label", {"mode": self.core.state.mode}),
         )
 
     @capability_action(

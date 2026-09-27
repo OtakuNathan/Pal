@@ -49,7 +49,8 @@ def render_tool_definition(payload: dict[str, Any]) -> str:
 def render_tool_inventory(payload: dict[str, Any]) -> str:
     return render_structured_for_llm({
         **payload,
-        "tools": [{key: value for key, value in tool.items() if key != "output_schema"}
+        "tools": [{key: value for key, value in tool.items()
+                   if key in {"name", "purpose", "module", "invocation_mode"}}
                   for tool in payload["tools"]],
     })
 

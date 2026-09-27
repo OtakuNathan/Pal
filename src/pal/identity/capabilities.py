@@ -49,7 +49,7 @@ class IdentityIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Read Pal's configured identity and preferences from durable storage and refresh the resident in-memory projection.",
             use_when="Inspecting Pal's configured persona/preferences or explicitly refreshing identity after external configuration changes.",
-            do_not_use_when="Recalling user facts (use recall_memory). Checking behavior routing (use behavior_show).",
+            do_not_use_when="Recalling user facts (use recall_memory).",
             failure_next_steps="Read-only. If no persona, identity prompt fragments will use defaults.",
         ),
         aliases=("identity_show",),

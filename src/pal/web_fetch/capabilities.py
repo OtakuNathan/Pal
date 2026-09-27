@@ -244,6 +244,7 @@ class WebFetchIntrospectionProvider:
             failure_next_steps="Refresh browser_snapshot if the page changed, then search again.",
         ),
         InputModel=BrowserFindInput,
+        examples=({"text": "Sign in"},),
         OutputModel=BrowserActionOutput,
         aliases=("browser_find",),
         metadata={"canonical_path": "op_browser_find", "omit_family_in_canonical": True},
@@ -407,7 +408,7 @@ class WebFetchIntrospectionProvider:
                 # are not usable inside its sandbox; transport raw text once.
                 return replace(result, llm_text="Browser document captured for worker delivery")
             return self._document_result(call, result)
-        if action in {"snapshot", "find", "evaluate"}:
+        if "_full_text" in payload or "_full_files" in payload:
             result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
             return self._document_result(call, result, nested_document=False)
         return _result(RuntimeStatus.OK, title, payload)
@@ -415,30 +416,37 @@ class WebFetchIntrospectionProvider:
     def _document_result(self, call: IntrospectionCall, result: IntrospectionResult, *, nested_document: bool = True) -> IntrospectionResult | CapabilityResult:
         payload = dict(result.structured or {})
         document = dict(payload.get("document") or {}) if nested_document else payload
-        if "_full_text" not in document:
+        files = dict(document.pop("_full_files", {}) or {})
+        if "_full_text" in document:
+            files["text_file"] = document.pop("_full_text")
+        if not files:
             return replace(result, llm_text=render_titled_structured_for_llm(result.text, payload))
-        text = document.pop("_full_text")
-        refs = ()
+        refs = []
         runtime = call.meta.get("execution_runtime")
-        try:
-            if runtime is None:
-                raise RuntimeError("Output storage is unavailable for this caller")
-            call_id = getattr(call.meta.get("tool_call"), "call_id", None) or uuid4().hex
-            lifetime = runtime.logical_context_for_turn(call.meta.get("turn_id") or call_id).execution_lifetime_id
-            ref = runtime.result_snapshots.capture(text, call_id=call_id, lifetime=lifetime)
-            refs = (ref,)
-            document["text_file"] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
-                                     "sha256": ref.digest, "read_only": True}
-            if document.get("text_truncated") or document.get("truncated"):
-                document["next_step"] = "For remaining output, use rg/read_file on text_file.file_path. This preserves the captured result; do not repeat an action or evaluate script just to recover omitted output. Element refs describe the captured page and may be stale after page changes."
-        except (OSError, RuntimeError) as exc:
-            document["text_file_error"] = str(exc)
-            if document.get("text_truncated") or document.get("truncated"):
-                document["next_step"] = "Only the preview is available because saving the full text failed. Resolve output storage; do not repeat potentially mutating actions or scripts solely to recover output."
+        for label, text in files.items():
+            try:
+                if runtime is None:
+                    raise RuntimeError("Output storage is unavailable for this caller")
+                call_id = getattr(call.meta.get("tool_call"), "call_id", None) or uuid4().hex
+                lifetime = runtime.logical_context_for_turn(call.meta.get("turn_id") or call_id).execution_lifetime_id
+                ref = runtime.result_snapshots.capture(text, call_id=call_id, lifetime=lifetime,
+                    coverage=f"captured {label.removesuffix('_file')} content")
+                refs.append(ref)
+                document[label] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
+                                  "sha256": ref.digest, "read_only": True}
+            except (OSError, RuntimeError) as exc:
+                document[label + "_error"] = str(exc)
+        document["next_step"] = (
+            "Use rg/read_file on the returned content files for captured output beyond the preview. "
+            "These are snapshots; element refs may be stale after page changes; "
+            "do not repeat actions or scripts just to recover output."
+        )
+        if len(refs) != len(files):
+            document["next_step"] += " Saving the full text failed for one or more files; only their previews are available. Resolve output storage first."
         if nested_document:
             payload["document"] = document
         return CapabilityResult(status=result.status, text=result.text, structured=payload,
-                       llm_text=render_titled_structured_for_llm(result.text, payload), snapshot_refs=refs)
+                       llm_text=render_titled_structured_for_llm(result.text, payload), snapshot_refs=tuple(refs))
 
     @staticmethod
     def _scope(call: IntrospectionCall) -> tuple[str, bool]:

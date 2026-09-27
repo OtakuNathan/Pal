@@ -166,9 +166,9 @@ and web integrations belong to plugins. Check actual availability before use.
 | MCP server configuration | Edit TOML/JSON under `plugins/mcp/`, then `mcp_rescan`; use mcp_attach/mcp_detach for configured server connections. | Rescan reconnects changed enabled server configurations and updates tool discovery; inspect mcp_server_list/read. Editing manager implementation requires plugin reload. |
 | LSP server configuration | Runtime overrides under `plugins/lsp/servers/`, then `lsp_rescan`; prepare/doctor the target workspace. | Rescan updates config and invalidates changed sessions; workspace preparation/use starts the needed server. Templates have their own development skill. |
 | Bunshin profile/family customization | Use catalog read, set/reset_profile_override, set/reset_family_override, and catalog_refresh capabilities. | Overrides affect future Tasks, not existing snapshots. Catalog refresh reloads catalog data, not arbitrary sidecar Python code. |
-| Core mode and cache reminder | `core_configure` changes in-memory mode; `core_configure_cache_warm_deadline` persists reminder settings. | Inspect core_observe/core_cache_warm_deadline; mode is not a permanent config change. Reminder changes apply to scheduling, not a host restart. |
+| Core mode and cache reminder | `core_configure` changes an in-memory mode label; `core_configure_cache_warm_deadline` persists reminder settings. | Inspect core_observe/core_cache_warm_deadline; the mode label does not enter maintenance, drain work, or persist configuration. Reminder changes apply to scheduling, not a host restart. |
 | Search / browser settings | Use web_search provider config/auth/enable/active operations; browser_extension_manage controls local browser extensions. | Verify provider health/operation. Browser extension changes close current tabs; navigate again and verify the extension behavior. |
-| Memory provider and skills | Use their live management tools. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
+| Memory provider and skills | Use their live management tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
 ## Reuse Core's system observation bus
@@ -226,6 +226,14 @@ prepare an exact scoped patch, and apply only within the user's authorization.
 Do not rerun the whole setup wizard merely to work around a missing narrow setter.
 
 ## Verify and hand off
+
+For tool output, distinguish a captured snapshot from current state and a content
+component from a complete result. Use returned files with rg/read_file for omitted
+text; do not repeat side effects to recover output. Short statuses remain inline.
+PDF parsing provides a flat text file plus an index of original page numbers,
+page text and full-page images. Check page processing status; import the indexed
+image_file_path with artifact_import when that page's pixels are needed. A PDF
+artifact_id alone does not mean any page image is attached.
 
 For screenshot-based self-inspection, use the appropriate browser/desktop capability.
 `browser_screenshot` registers a current-conversation artifact and returns its

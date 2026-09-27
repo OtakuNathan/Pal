@@ -176,6 +176,7 @@ class _L3ProviderCapabilityMixin:
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
+            mem_ref=str(call.args.get("mem_ref") or "").strip() or None,
             level=str(call.args.get("level") or "warm"),
             queries=[str(value) for value in list(call.args.get("queries") or [])],
             topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
@@ -422,7 +423,8 @@ class NullL3Plugin(_L3ProviderCapabilityMixin):
         return {"provider_id": self.provider_id, "mounted": self.mounted, "vector_backend": "none", "record_count": 0}
 
     def recall(self, query: MemoryQuery) -> L3RecallResult:
-        _ = query
+        if query.mem_ref:
+            return L3RecallResult(metadata={"retrieval_mode": "exact", "mem_ref": query.mem_ref, "lookup_status": "unavailable"})
         if not self.mounted:
             return L3RecallResult()
         return L3RecallResult()
@@ -460,6 +462,12 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
         _ = query
         if not self.mounted:
             return L3RecallResult()
+        records = self.records
+        if query.mem_ref:
+            records = [r for r in records if r.get("document_id") == query.mem_ref
+                       and (not query.kind or r.get("document_kind") == query.kind)
+                       and (not query.scope or r.get("scope") == query.scope)
+                       and (not query.task_id or r.get("task_id") in (None, query.task_id))]
         entries = [
             L2Entry(
                 entry_id=str(record.get("document_id")),
@@ -474,12 +482,13 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
                 dedupe_fingerprint=str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
                 payload=dict(record),
             )
-            for record in self.records
+            for record in records
         ]
         service = getattr(self, "service", None)
         if service is not None and hasattr(service, "project_l3_entries"):
             service.project_l3_entries(entries, touch=True)
-        return L3RecallResult(hits=list(self.records), projected_entries=entries)
+        return L3RecallResult(hits=list(records), projected_entries=entries,
+            metadata={"retrieval_mode": "exact", "mem_ref": query.mem_ref, "lookup_status": "found" if records else "not_found"} if query.mem_ref else {})
 
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
         existing = None

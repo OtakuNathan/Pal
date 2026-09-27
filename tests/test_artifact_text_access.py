@@ -79,7 +79,7 @@ def test_short_text_is_a_file_handle_without_inline_body(manager):
 
 
 @pytest.mark.parametrize('text', ['', 'Short page'])
-def test_inline_pdf_keeps_page_access_and_discloses_visual_coverage(manager, text):
+def test_pdf_keeps_page_access_and_imports_pixels_on_demand(manager, text):
     fitz = pytest.importorskip('fitz')
     path = manager.runtime_root / 'visual.pdf'
     doc = fitz.open()
@@ -91,11 +91,11 @@ def test_inline_pdf_keeps_page_access_and_discloses_visual_coverage(manager, tex
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {'supports_vision': True})
-    assert len(exposure.inline_parts) == 1
-    assert 'visual_coverage: page 1 only' in exposure.text
+    assert exposure.inline_parts == ()
+    assert 'PDF pixels are not attached' in exposure.text
+    assert 'artifact_import' in exposure.text
     assert 'page_index_file_path' in exposure.text
     assert 'page_file_pattern' in exposure.text
-    assert 'optional_tools: artifact_info' in exposure.text
     record = manager.repository.get_record(ref.artifact_id)
     index_path = Path(record.metadata['page_index_file_path'])
     assert str(index_path) in exposure.text
@@ -145,5 +145,58 @@ def test_pdf_index_discloses_unprocessed_pages(manager):
     assert ref.text_file['extraction_truncated'] is True
     assert ref.text_file['page_count'] == 2 and ref.text_file['extracted_pages'] == 1
     index = json.loads(Path(ref.text_file['page_index_file_path']).read_text())
-    assert [entry['page'] for entry in index['pages']] == [1]
+    assert [entry['page'] for entry in index['pages']] == [1, 2]
+    assert index['pages'][1]['status'] == 'not_processed'
+    assert 'image_file_path' not in index['pages'][1]
+    assert manager.repository.get_record(ref.artifact_id).status == 'partial'
     assert not Path(ref.text_file['page_file_pattern'].format(page=2)).exists()
+
+
+def test_pdf_page_image_import_uses_existing_injection_path(manager):
+    from pal.artifact.tools import ArtifactImportTool
+    fitz = pytest.importorskip('fitz')
+    path = manager.runtime_root / 'mixed.pdf'
+    doc = fitz.open()
+    for index in range(2):
+        page = doc.new_page()
+        page.insert_text((72, 72), f'Page {index + 1} with text and graphics')
+        page.draw_rect(fitz.Rect(10, 10, 50, 50), color=(1, 0, 0))
+    doc.save(path)
+    doc.close()
+    ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
+    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    runtime = SimpleNamespace(provider_registry={'core:turn_io': SimpleNamespace(artifact_scope_for_turn=lambda _: 'scope')})
+    result = asyncio.run(ArtifactImportTool(manager).ainvoke({'path': pages[1]['image_file_path']}, runtime=runtime, turn_id='page-view'))
+    assert result.status == 'ok', result.llm_text
+    image_id = result.structured['artifact_id']
+    assert result.context_messages[0].artifact_ids == (image_id,)
+    for vision, expected in [(True, 1), (False, 0)]:
+        exposure = manager.select_prompt_exposure('scope', 'page-view', 'page 2',
+            {'supports_vision': vision}, artifact_ids=(image_id,))
+        assert len(exposure.inline_parts) == expected
+    manager.policy = replace(manager.policy, image=replace(manager.policy.image, max_inline_images=0))
+    assert manager.select_prompt_exposure('scope', 'page-view', 'page 2',
+        {'supports_vision': True}, artifact_ids=(image_id,)).inline_parts == ()
+
+
+def test_pdf_image_failure_is_per_page_and_keeps_text(manager, monkeypatch):
+    import pal.artifact.processors as processors
+    fitz = pytest.importorskip('fitz')
+    original = processors._render_pdf_page_images
+    def render(context, record, doc, *, page_indices=None):
+        if page_indices == (1,):
+            raise OSError('page render failed')
+        return original(context, record, doc, page_indices=page_indices)
+    monkeypatch.setattr(processors, '_render_pdf_page_images', render)
+    path = manager.runtime_root / 'partial.pdf'
+    doc = fitz.open()
+    for i in range(3):
+        doc.new_page().insert_text((72, 72), f'Page {i + 1}')
+    doc.save(path)
+    doc.close()
+    ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
+    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    assert [page['status'] for page in pages] == ['ready', 'partial', 'ready']
+    assert Path(pages[1]['file_path']).read_text() == 'Page 2'
+    assert 'image_file_path' not in pages[1]
+    assert manager.repository.get_record(ref.artifact_id).status == 'partial'

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint
 
 from pal.shared.tool_protocol import ToolCallIR, ToolContextMessageIR
@@ -412,6 +414,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "name": record.alias,
             "display_name": record.alias,
             "family": record.family,
+            "purpose": record.guidance.purpose,
+            "module": record.module_id,
             "description": record.compiled_description,
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
@@ -1293,7 +1297,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
         try:
             lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
             existing = self.result_snapshots.lookup_path(call.args["file_path"]) if call.args.get("file_path") else None
-            ref = existing or (refs[0] if refs else self.result_snapshots.capture(text, call_id=call.call_id, lifetime=lifetime))
+            # A component attachment is not evidence of complete result coverage.
+            # Reads of managed snapshots keep their original source reference;
+            # other results must preserve the exact pre-budget result body.
+            encoded = text.encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()
+            matching = next((item for item in refs if item.digest == digest
+                             and item.size_bytes == len(encoded)), None)
+            ref = existing if managed_snapshot and manifest else matching
+            if ref is None:
+                ref = self.result_snapshots.capture(text, call_id=call.call_id,
+                    lifetime=lifetime, coverage="complete result text")
             refs = tuple(dict.fromkeys((*refs, ref)))
             hint = render_snapshot_hint(ref) + extra
         except OSError as exc:
@@ -1306,7 +1320,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "Do not repeat side effects merely to retrieve output." + extra
             )
         preview_allowance = max(0, min(int(budget.preview_chars or 1000), limit - len(hint) - len(tail) - 4))
-        marker = "\n... [output omitted; see complete snapshot] ...\n"
+        marker = "\n... [output omitted] ...\n"
         if preview_allowance < len(marker):
             # The preview cannot fit even its omission marker: the documented
             # minimum-envelope exception applies. Owners compose results

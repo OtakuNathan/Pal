@@ -116,6 +116,12 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
         "raw_result": raw,
         "error_kind": "tool_execution" if is_error else None,
     }
+    if is_error:
+        structured["next_step"] = (
+            "For argument errors, use read_tool with the called Pal alias to inspect its exact schema. "
+            f"For server failures, inspect mcp_server_read(name={server_id!r}) and mcp_show. "
+            "Reconcile external writes before retrying; an error does not prove no side effect occurred."
+        )
     status = RuntimeStatus.ERROR if is_error else RuntimeStatus.OK
     title = "MCP tool execution failed" if is_error else "MCP tool result"
     structured_text = render_titled_structured_for_llm(title, structured)
@@ -135,6 +141,7 @@ def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind:
         "error_kind": "protocol",
         "error": error_text,
         "error_type": exc.__class__.__name__,
+        "next_step": f"Inspect mcp_show and mcp_server_read(name={server_id!r}) for transport/server state. Correct the reported cause; reconcile external writes before retrying.",
     }
     return CapabilityResult(
         status=RuntimeStatus.ERROR,

@@ -233,75 +233,74 @@ class PdfArtifactProcessor:
 
         doc = fitz.open(str(context.original_path))
         try:
-            page_texts: list[str] = []
             page_locations = []
+            blocks = []
             next_line = 1
-            max_pages = min(int(context.policy.pdf.max_pages), len(doc))
+            page_count = len(doc)
+            max_pages = min(max(0, int(context.policy.pdf.max_pages)), page_count)
             pages_dir = context.representations_dir() / "pages"
             pages_dir.mkdir(parents=True, exist_ok=True)
-            for index in range(max_pages):
-                page = doc.load_page(index)
-                text = str(page.get_text("text") or "").strip()
-                page_path = pages_dir / f"page_{index + 1:04d}.txt"
-                page_path.write_text(text, encoding="utf-8")
-                page_locations.append({"page": index + 1, "file_path": str(page_path),
-                                       "has_text": bool(text),
-                                       "start_line": next_line if text else None,
-                                       "end_line": next_line + text.count("\n") if text else None})
-                if text:
-                    next_line += text.count("\n") + 2
-                    page_texts.append(text)
-                    context.put_representation(
-                        ArtifactRepresentation(
-                            representation_id=_representation_id(record.artifact_id, REPRESENTATION_PAGE_TEXT, str(index + 1)),
-                            artifact_id=record.artifact_id,
-                            representation_kind=REPRESENTATION_PAGE_TEXT,
-                            selector={"page": index + 1},
-                            path=str(page_path),
-                            mime_type="text/plain",
-                            size_bytes=page_path.stat().st_size,
-                            text_preview=_preview(text),
-                            summary=_preview(text),
-                            status=ARTIFACT_STATUS_READY,
-                        )
-                    )
-            combined = "\n\n".join(page_texts)
+            text_chars = 0
+            for index in range(page_count):
+                location = {"page": index + 1, "status": "not_processed", "has_text": False}
+                page_locations.append(location)
+                if index >= max_pages:
+                    location["reason"] = "configured page limit"
+                    continue
+                errors = []
+                try:
+                    text = str(doc.load_page(index).get_text("text") or "").strip()
+                    page_path = pages_dir / f"page_{index + 1:04d}.txt"
+                    page_path.write_text(text, encoding="utf-8")
+                    block = f"=== Page {index + 1} ===\n{text}\n\n"
+                    location.update(file_path=str(page_path), has_text=bool(text),
+                        start_line=next_line + 1 if text else None,
+                        end_line=next_line + 1 + text.count("\n") if text else None)
+                    blocks.append(block)
+                    next_line += block.count("\n")
+                    text_chars += len(text)
+                    context.put_representation(ArtifactRepresentation(
+                        representation_id=_representation_id(record.artifact_id, REPRESENTATION_PAGE_TEXT, str(index + 1)),
+                        artifact_id=record.artifact_id, representation_kind=REPRESENTATION_PAGE_TEXT,
+                        selector={"page": index + 1}, path=str(page_path), mime_type="text/plain",
+                        size_bytes=page_path.stat().st_size, text_preview=_preview(text),
+                        summary=_preview(text), status=ARTIFACT_STATUS_READY,
+                    ))
+                except Exception as exc:
+                    errors.append(f"text: {exc}")
+                try:
+                    images = _render_pdf_page_images(context, record, doc, page_indices=(index,))
+                    location["image_file_path"] = images[index + 1]
+                except Exception as exc:
+                    errors.append(f"image: {exc}")
+                location["status"] = "partial" if errors else "ready"
+                if errors:
+                    location["errors"] = errors
+            combined = "".join(blocks)
             index_path = context.representations_dir() / "page_index.json"
+            full_path = context.representations_dir() / "normalized.txt"
+            full_path.write_text(combined, encoding="utf-8")
+            partial = any(page["status"] != "ready" for page in page_locations)
             page_access = {"page_index_file_path": str(index_path),
                            "page_file_pattern": str(pages_dir / "page_{page:04d}.txt"),
-                           "page_count": len(doc), "extracted_pages": max_pages,
-                           "extraction_truncated": max_pages < len(doc)}
-            if combined:
-                full_path = context.representations_dir() / "normalized.txt"
-                full_path.write_text(combined, encoding="utf-8")
-                context.put_representation(ArtifactRepresentation(
-                    representation_id=_representation_id(record.artifact_id, REPRESENTATION_TEXT, "full"),
-                    artifact_id=record.artifact_id, representation_kind=REPRESENTATION_TEXT,
-                    path=str(full_path), mime_type="text/plain", size_bytes=full_path.stat().st_size,
-                    text_preview=_preview(combined), summary=_preview(combined),
-                    metadata=page_access,
-                ))
-                _write_text_chunks(context, record.artifact_id, combined)
-            if len(combined.strip()) < context.policy.pdf.textless_min_chars:
-                _render_pdf_page_images(context, record, doc)
-            page_images = {rep.selector.get("page"): rep.path for rep in
-                           context.repository.list_representations(record.artifact_id,
-                               representation_kind=REPRESENTATION_PAGE_IMAGE)}
-            for location in page_locations:
-                if location["page"] in page_images:
-                    location["image_file_path"] = page_images[location["page"]]
+                           "page_count": page_count, "extracted_pages": sum("file_path" in page for page in page_locations),
+                           "extraction_truncated": max_pages < page_count}
+            context.put_representation(ArtifactRepresentation(
+                representation_id=_representation_id(record.artifact_id, REPRESENTATION_TEXT, "full"),
+                artifact_id=record.artifact_id, representation_kind=REPRESENTATION_TEXT,
+                path=str(full_path), mime_type="text/plain", size_bytes=full_path.stat().st_size,
+                text_preview=_preview(combined), summary=_preview(combined), metadata=page_access,
+                status=ARTIFACT_STATUS_PARTIAL if partial else ARTIFACT_STATUS_READY,
+            ))
+            _write_text_chunks(context, record.artifact_id, combined)
             index_path.write_text(json.dumps({**page_access, "pages": page_locations},
                                              ensure_ascii=False, indent=2), encoding="utf-8")
-            page_count = len(doc)
         finally:
             doc.close()
-        return replace(
-            record,
+        return replace(record,
             summary=f"PDF artifact {record.file_name}, {page_count} page(s)",
-            status=ARTIFACT_STATUS_READY if combined else ARTIFACT_STATUS_PARTIAL,
-            metadata={**dict(record.metadata), "page_count": page_count, "extracted_text_chars": len(combined),
-                      **page_access},
-        )
+            status=ARTIFACT_STATUS_PARTIAL if partial else ARTIFACT_STATUS_READY,
+            metadata={**dict(record.metadata), "extracted_text_chars": text_chars, **page_access})
 
 
 @dataclass
@@ -431,11 +430,13 @@ def image_data_url(path: Path, *, mime_type: str = "image/jpeg") -> str:
     return f"data:{mime_type or mimetypes.guess_type(path.name)[0] or 'application/octet-stream'};base64,{encoded}"
 
 
-def _render_pdf_page_images(context: ArtifactProcessingContext, record: ArtifactRecord, doc) -> None:
-    limit = min(int(context.policy.pdf.eager_fallback_page_images), len(doc))
+def _render_pdf_page_images(context: ArtifactProcessingContext, record: ArtifactRecord, doc, *, page_indices=None) -> dict[int, str]:
+    if page_indices is None:
+        page_indices = range(min(int(context.policy.pdf.max_pages), len(doc)))
     images_dir = context.representations_dir() / "page_images"
     images_dir.mkdir(parents=True, exist_ok=True)
-    for index in range(limit):
+    images = {}
+    for index in page_indices:
         page = doc.load_page(index)
         pix = page.get_pixmap(alpha=False)
         raw_path = images_dir / f"page_{index + 1:04d}.png"
@@ -456,6 +457,9 @@ def _render_pdf_page_images(context: ArtifactProcessingContext, record: Artifact
                 metadata={"base64_size_bytes": _base64_size(normalized.stat().st_size)},
             )
         )
+
+        images[index + 1] = str(normalized)
+    return images
 
 
 def _write_text_chunks(context: ArtifactProcessingContext, artifact_id: str, text: str) -> None:

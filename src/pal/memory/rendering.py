@@ -30,6 +30,9 @@ def build_recall_structured_payload(
         "retrieval_mode": metadata.get("retrieval_mode"),
         "degraded": metadata.get("degraded"),
         "degraded_reason": metadata.get("degraded_reason"),
+        "mem_ref": metadata.get("mem_ref"),
+        "lookup_status": metadata.get("lookup_status"),
+        "successors": metadata.get("successors"),
     }
     minimal_metadata = {key: value for key, value in minimal_metadata.items() if value not in (None, "", False)}
     if minimal_metadata:
@@ -51,11 +54,17 @@ def render_recall_result_for_llm(
         "When updating or deleting memory, copy the complete mem_ref exactly, including prefixes such as fact: or case:.",
     ]
 
+    if query.mem_ref:
+        metadata = result.metadata or {}
+        lines.append(f"mem_ref: {query.mem_ref}; lookup_status: {metadata.get('lookup_status', 'unavailable')}")
+        if metadata.get("successors"):
+            lines.append("successors: " + ", ".join(metadata["successors"]))
     item_lines = _render_hit_lines(list(result.hits or []), view=normalized_view)
     if item_lines:
         lines.extend(item_lines)
     else:
-        lines.append("No matching memories found.")
+        if not query.mem_ref:
+            lines.append("No matching memories found.")
     lines.append("</recalled_memories>")
     return "\n".join(lines)
 

@@ -419,3 +419,27 @@ def test_only_delivered_source_lines_grant_edits(tmp_path, monkeypatch, disk_ful
         assert 'line-0500' in path.read_text()
     finally:
         core.close()
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_component_snapshot_never_substitutes_for_full_budgeted_result(tmp_path, failed):
+    from pal.shared.tool_protocol import CompleteResult, FailedResult, EffectOutcome, RetryDirective
+    runtime = ExecutionRuntime(runtime_root=tmp_path)
+    try:
+        body = runtime.result_snapshots.capture('body', call_id='c', lifetime='s', coverage='page text')
+        text = 'body\n' + '\n'.join(f'link{i}: https://example.test/' + 'x' * 80 for i in range(100))
+        if failed:
+            result = FailedResult(error_code='test', error='failed', effect=EffectOutcome.NONE,
+                                  retry=RetryDirective.DO_NOT_RETRY, llm_text=text, snapshot_refs=(body,))
+        else:
+            result = CompleteResult(output={}, effect=EffectOutcome.NONE, llm_text=text, snapshot_refs=(body,))
+        limited = runtime._budget_invocation_result(result, new_tool_call(name='test', args={}),
+            budget=ToolCallBudget(max_output_chars=1000, preview_chars=400), turn_id='t')
+        assert len(limited.snapshot_refs) == 2
+        full = limited.snapshot_refs[-1]
+        assert Path(full.path).read_text() == text
+        assert full.coverage == 'complete result text'
+        assert full.path in limited.llm_text
+        assert Path(body.path).read_text() == 'body'
+    finally:
+        runtime.shutdown()

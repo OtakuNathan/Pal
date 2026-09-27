@@ -241,3 +241,59 @@ def test_domain_partial_alias_and_purpose_synonym(tmp_path):
         assert hits('lsp_incoming_calls') == ['lsp_incoming_calls']
     finally:
         runtime.shutdown()
+
+
+def test_inventory_is_compact_but_exact_schema_remains_available(runtime):
+    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'exec_tools', 'args': {}}))
+    assert result.ok
+    compact, _ = json.JSONDecoder().raw_decode(result.llm_text)
+    assert compact['tools']
+    for tool in compact['tools']:
+        assert set(tool) == {'name', 'purpose', 'module', 'invocation_mode'}
+    full = runtime.execute_tool(new_tool_call(name='read_tool', args={'name': 'read_file'}))
+    assert full.ok
+    assert 'file_path' in full.llm_text
+    assert len(result.llm_text) < len(json.dumps(result.structured))
+
+
+def test_model_list_contains_selection_capabilities_without_credentials():
+    from types import SimpleNamespace
+    from pal.llm.capabilities import LLMIntrospectionProvider
+    from pal.shared import IntrospectionCall
+    endpoints = [SimpleNamespace(endpoint_id=name, model_id=name, provider='test',
+        supports_vision=vision, supports_tools=True, context_window=64000, api_key='SECRET')
+        for name, vision in [('text', False), ('vision', True)]]
+    runtime = SimpleNamespace(endpoint_resolver=SimpleNamespace(enabled=lambda: endpoints))
+    result = LLMIntrospectionProvider(runtime).list_endpoints(IntrospectionCall(name='llm_list'))
+    assert [item['name'] for item in result.structured['items'] if item['supports_vision']] == ['vision']
+    assert all(item['context_window'] == 64000 for item in result.structured['items'])
+    assert 'SECRET' not in result.llm_text
+
+
+def test_builtin_tool_navigation_references_declared_public_aliases():
+    import ast
+    import re
+    from pathlib import Path
+    from pal.skill.builtin_skills import builtin_declared_skills
+    aliases = set()
+    references = set()
+    for path in (Path(__file__).parents[1] / 'src' / 'pal').rglob('*.py'):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func.id if isinstance(node.func, ast.Name) else ''
+            if function == 'capability_action':
+                for keyword in node.keywords:
+                    if keyword.arg == 'aliases':
+                        try:
+                            aliases.update(ast.literal_eval(keyword.value))
+                        except (ValueError, TypeError):
+                            pass  # Dynamic plugin aliases are checked at projection time.
+            elif function == 'ToolGuidance':
+                for keyword in node.keywords:
+                    if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                        references.update(re.findall(r'\(use ([a-z][a-z0-9_]+)[).,]', keyword.value.value))
+    for skill in builtin_declared_skills():
+        references.update(skill.capability_refs)
+    assert not references - aliases, sorted(references - aliases)

@@ -26,10 +26,10 @@ class ResultSnapshotStore:
         self._listeners: dict[int, object] = {}
         self._lock = threading.RLock()
 
-    def capture(self, text: str, *, call_id: str, lifetime: str) -> ResultSnapshotRef:
-        return self.capture_chunks((text.encode("utf-8"),), call_id=call_id, lifetime=lifetime)
+    def capture(self, text: str, *, call_id: str, lifetime: str, coverage: str = "unknown") -> ResultSnapshotRef:
+        return self.capture_chunks((text.encode("utf-8"),), call_id=call_id, lifetime=lifetime, coverage=coverage)
 
-    def capture_chunks(self, chunks, *, call_id: str, lifetime: str) -> ResultSnapshotRef:
+    def capture_chunks(self, chunks, *, call_id: str, lifetime: str, coverage: str = "unknown") -> ResultSnapshotRef:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         identity = uuid4().hex
         path = self.root / (identity + ".txt")
@@ -50,7 +50,7 @@ class ResultSnapshotStore:
             temporary.unlink(missing_ok=True)
             path.unlink(missing_ok=True)
             raise
-        ref = ResultSnapshotRef(identity, str(path.resolve()), digest.hexdigest(), size, call_id)
+        ref = ResultSnapshotRef(identity, str(path.resolve()), digest.hexdigest(), size, call_id, coverage)
         with self._lock:
             self._refs[identity] = ref
             self._pending.setdefault((lifetime, call_id), set()).add(identity)
@@ -243,8 +243,8 @@ class ResultSnapshotStore:
 
 
 def render_snapshot_hint(ref: ResultSnapshotRef) -> str:
-    return (f"Complete output snapshot: {ref.path}\n"
-            "Immutable output from this invocation, not current source state. "
+    return (f"Output snapshot: {ref.path}\nCoverage: {ref.coverage}.\n"
+            "Immutable captured output, not current source state. "
             "Search this local file with rg or read selected lines with read_file. "
             "Query again if current state is needed; do not replay side-effecting operations merely to refresh output.")
 
@@ -253,7 +253,7 @@ def head_tail(text: str, budget: int) -> tuple[str, tuple[tuple[int, int], ...]]
     budget = max(0, budget)
     if len(text) <= budget:
         return text, ((0, len(text)),)
-    marker = "\n... [output omitted; see complete snapshot] ...\n"
+    marker = "\n... [output omitted] ...\n"
     if budget < len(marker):
         return "", ()
     usable = max(0, budget - len(marker))
@@ -281,7 +281,8 @@ def capture_stream_files(store, streams, *, call_id, lifetime):
                     yield decoder.decode(data).encode("utf-8")
                 yield decoder.decode(b"", final=True).encode("utf-8")
             yield b"\n"
-    return store.capture_chunks(chunks(), call_id=call_id, lifetime=lifetime)
+    return store.capture_chunks(chunks(), call_id=call_id, lifetime=lifetime,
+                                coverage="captured stdout/stderr byte ranges")
 
 
 def file_preview(ref, budget=1000):

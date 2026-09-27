@@ -74,7 +74,7 @@ def test_browser_storage_failure_keeps_preview_without_exposing_full_body(runtim
     assert document['text_file_error'] == 'disk full'
     assert 'text_file' not in document and '_full_text' not in document
     assert 'full private body' not in result.llm_text
-    assert 'saving the full text failed' in document['next_step']
+    assert 'saving the full text failed' in document['next_step'].lower()
     assert result.snapshot_refs == ()
 
 
@@ -140,3 +140,37 @@ def test_truncated_browser_operations_keep_full_output_without_reexecution(runti
         saved = path.read_text()
         assert (json.loads(saved) if action == 'evaluate' else saved) == value
         assert result.snapshot_refs[0].path == str(path)
+
+
+@pytest.mark.parametrize('broker', [False, True])
+def test_all_links_survive_preview_budget_in_receiving_runtime(runtime, broker):
+    links = [{'href': f'https://example.test/{i}', 'text': 'x' * 1200} for i in range(501)]
+    worker = object.__new__(_PlaywrightCliWorker)
+    worker._run = lambda *args, **kwargs: json.dumps({'text': 'body', 'links': links})
+    payload = worker._read_document(SimpleNamespace(), args={'max_links': 1}, timeout_ms=1000)
+    assert len(payload['document']['links']) == 1
+    provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **kwargs: payload))
+    if broker:
+        result = provider.read(IntrospectionCall(name='browser_read', meta={'broker_run_id': 'run'}))
+        wire = web_result_to_payload(result)
+        provider = WebFetchIntrospectionProvider(service=None, read_delegate=lambda _: web_result_from_payload(wire))
+    result = provider.read(IntrospectionCall(name='browser_read', meta={
+        'execution_runtime': runtime, 'turn_id': 'links'}))
+    document = result.structured['document']
+    assert json.loads(Path(document['links_file']['file_path']).read_text()) == links
+    assert Path(document['text_file']['file_path']).read_text() == 'body'
+    assert document['links_count'] == 501
+    assert '_full_files' not in result.llm_text
+
+
+def test_layout_file_preserves_all_elements_beyond_preview_limit(runtime):
+    elements = [{'text': f'element {i}', 'geometry': {'x': i}} for i in range(21)]
+    worker = object.__new__(_PlaywrightCliWorker)
+    worker._run = lambda *args, **kwargs: json.dumps({'matched_count': 21, 'elements': elements})
+    payload = worker._dispatch_action(SimpleNamespace(), action='inspect_layout',
+                                     args={'selector': '.item', 'max_elements': 1}, timeout_ms=1000)
+    assert len(payload['inspection']['elements']) == 1
+    provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **kwargs: payload))
+    result = provider.inspect_layout(IntrospectionCall(name='browser_inspect_layout', meta={
+        'execution_runtime': runtime, 'turn_id': 'layout'}))
+    assert json.loads(Path(result.structured['text_file']['file_path']).read_text())['elements'] == elements

@@ -60,6 +60,28 @@ class SkillSubsystemTests(unittest.TestCase):
         self.database.close()
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def test_patch_validates_fields_clears_values_and_preserves_noop_version(self):
+        from pal.skill.tools import SkillUpdateTool
+        from unittest.mock import patch
+        skill = SkillDescriptor(skill_id="test.patch", module_id="skill", title="Patch", summary="Test", manual_text="Do the work", activation_terms=("old",), avoid_when="old")
+        self.skill_repository.upsert_skill(skill)
+        tool = SkillUpdateTool(self.service)
+        result = tool.invoke({"skill_id": skill.skill_id, "patch": {"activation_terms": [], "avoid_when": ""}})
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.structured["changed"])
+        current = self.skill_repository.get_skill(skill.skill_id)
+        self.assertEqual(current.activation_terms, ())
+        self.assertEqual(current.avoid_when, "")
+        with patch.object(self.service, "_write_skill_file", side_effect=AssertionError("no-op wrote file")):
+            for value in ({}, {"activation_terms": [], "avoid_when": ""}):
+                result = tool.invoke({"skill_id": skill.skill_id, "patch": value})
+                self.assertFalse(result.structured["changed"])
+                self.assertEqual(result.structured["skill"]["version"], current.version)
+        for value in ({"manual": "typo"}, {"title": " "}, {"manual_text": ""}, {"enabled": None}, {"applicability_star": {"typo": "x"}}):
+            result = tool.invoke({"skill_id": skill.skill_id, "patch": value})
+            self.assertEqual(result.status, "invalid")
+        self.assertEqual(self.skill_repository.get_skill(skill.skill_id).version, current.version)
+
     def test_assimilate_plain_text_creates_candidate_without_commit(self) -> None:
         result = asyncio.run(
             SkillAssimilateTool(service=self.service).ainvoke(

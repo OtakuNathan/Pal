@@ -1,8 +1,12 @@
 # Tool output snapshots
 
 Large tool output is delivered as a bounded head/tail preview and the path of an
-immutable UTF-8 output file. The file contains the complete rendered result of
-that invocation. Search it with `rg` or read selected lines with `read_file`.
+immutable UTF-8 output file. Each reference states its coverage: a complete result
+text, a named content component, captured stream intervals, or unknown for legacy
+references. A component attachment does not imply complete result coverage. The
+budget boundary saves the full pre-budget result text unless an existing file's
+size and digest match that text. Search files with `rg` or read selected lines
+with `read_file`. Short statuses and errors remain inline.
 `read_file` keeps its existing line/range schema; unusually long lines can be
 examined using ordinary shell text tools. A truncated oversized source line receives
 a conditional shell inspection/edit hint; `edit_file` still requires complete
@@ -71,3 +75,20 @@ Offline streaming sample on the development host: copying 32 MiB of stdout into
 an immutable snapshot used about 1.01 MiB peak traced Python allocations and took
 0.44 seconds; the preview was 1,026 characters. This measures the copy/preview
 path only, not process RSS, remote transport, or model behavior.
+
+## Content capture and PDF pages
+
+Browser text, links, accessibility snapshots, find/evaluate output, layout and
+click tab listings retain captured content in receiving-runtime files. Preview
+limits do not cut the saved content. Network request bodies remain bounded
+samples, with capture status, truncation and known original character count;
+unsupported bodies and Request streams are explicitly unavailable.
+
+PDF parsing produces an index for every original page, including blank and
+unprocessed pages. Each processed page has text and a full-page image when
+those processing steps succeed. The flat text includes page headings; index
+line ranges point to page text. `max_pages` limits processing, and failures or
+limits produce partial status with per-page evidence. Legacy textless/fallback
+image settings no longer select pages. PDF pixels are imported on demand using
+`artifact_import` with an indexed image path, then injected only if the model
+supports vision and its image budget permits.

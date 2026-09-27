@@ -131,12 +131,12 @@ class MemoryIntrospectionProvider:
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
         guidance=ToolGuidance(purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
             use_when="The user requests dreaming, a dry run, its status/report, or changes to automatic scheduling and configuration.",
-            do_not_use_when="For immediate memory corrections, use update.",
+            do_not_use_when="For immediate memory corrections, use update_memory.",
             failure_next_steps="Read the run report; failed runs preserve the published generation."))
     def dreaming(self, call: IntrospectionCall) -> IntrospectionResult:
         service = self.context.port_registry.get("memory.dreaming:dreaming")
         if service is None:
-            return IntrospectionResult(status="unavailable", text="Dreaming is only available on the main Pal runtime.")
+            return IntrospectionResult(status="unavailable", text="Dreaming is only available on the main Pal runtime.", llm_text="Dreaming is only available on the main Pal runtime.")
         operation = str(call.args.get("operation") or "status")
         run_id = call.args.get("run_id")
         if operation in {"configure", "enable", "disable"}:
@@ -144,7 +144,7 @@ class MemoryIntrospectionProvider:
                 changes = call.args.get("config") if operation == "configure" else {"enabled": operation == "enable"}
                 result = service.configure(changes)
             except (ValueError, TypeError) as exc:
-                return IntrospectionResult(status="invalid", text=f"Invalid dreaming configuration: {exc}")
+                return IntrospectionResult(status="invalid", text=f"Invalid dreaming configuration: {exc}", llm_text=f"Invalid dreaming configuration: {exc}")
         elif operation == "config":
             result = service.status()["current_configuration"]
         elif operation in {"status", "report"}:
@@ -154,7 +154,7 @@ class MemoryIntrospectionProvider:
         elif operation == "resume":
             result = service.start(resume=run_id or service.status().get("run_id"))
         else:
-            return IntrospectionResult(status="invalid", text="Unsupported dreaming operation.")
+            return IntrospectionResult(status="invalid", text="Unsupported dreaming operation.", llm_text="Unsupported dreaming operation.")
         return IntrospectionResult(status="ok", text="Dreaming", structured=result,
             llm_text=render_titled_structured_for_llm("Dreaming", result))
 
@@ -174,7 +174,7 @@ class MemoryIntrospectionProvider:
         repo = getattr(provider, "repository", None)
         storage = getattr(repo, "catalog", None)
         if storage is None:
-            return IntrospectionResult(status="unavailable", text="No memory archive is available.")
+            return IntrospectionResult(status="unavailable", text="No memory archive is available.", llm_text="No memory archive is available.")
         ref = str(call.args.get("mem_ref") or "")
         query = str(call.args.get("query") or "")
         results = storage.history(ref, repo=repo) if ref else storage.search_archive(query, limit=int(call.args.get("limit") or 8), repo=repo)
@@ -330,7 +330,7 @@ class MemoryIntrospectionProvider:
         family="recall",
         action_name="recall",
         guidance=ToolGuidance(
-            purpose="Recall durable memory records from the active memory provider.",
+            purpose="Recall durable memory by semantic search or exact mem_ref from the active provider.",
             use_when=(
                 "The task depends on durable facts or past experience missing from the current context. "
                 "For recurring failures or past repair decisions, use kind='case' with concrete error, symptom or fix terms."
@@ -367,11 +367,12 @@ class MemoryIntrospectionProvider:
         provider = self.service.l3_selector.resolve()
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
+            mem_ref=str(call.args.get("mem_ref") or "").strip() or None,
             level=str(call.args.get("level") or "warm"),
             queries=[str(value) for value in list(call.args.get("queries") or [])],
             topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
             task_id=task_id,
-            limit=int(call.args.get("limit") or 8),
+            limit=int(call.args.get("limit") or 5),
             kind=str(call.args.get("kind")) if call.args.get("kind") is not None else None,
             scope=_recall_scope_for_task_id(task_id),
             view=normalize_recall_view(call.args.get("view")),
@@ -493,7 +494,7 @@ class MemoryIntrospectionProvider:
                 "Not for new memories (use remember_memory). "
                 "Do not invent or shorten mem_ref values."
             ),
-            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If the update outcome is uncertain, recall that mem_ref and reconcile its current content before following any retry affordance.",
+            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If the update outcome is uncertain, use recall_memory with that exact mem_ref and reconcile its current content before following any retry affordance.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
@@ -554,7 +555,7 @@ class MemoryIntrospectionProvider:
             do_not_use_when=(
                 "Do not invent or shorten mem_ref values."
             ),
-            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If deletion may have succeeded, reconcile by recalling that mem_ref before following any retry affordance; do not issue a blind duplicate delete.",
+            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If deletion may have succeeded, reconcile with recall_memory(mem_ref=<exact returned ref>) before following any retry affordance; do not issue a blind duplicate delete.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,

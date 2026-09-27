@@ -88,7 +88,7 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
             use_when="A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing.",
-            do_not_use_when="The image is already inline or the artifact_id is already available. Reading ordinary source text (use read_file).",
+            do_not_use_when="The same image is already inline. A PDF artifact_id does not mean its page images are inline; import an image_file_path from its page index when pixels are needed. Reading ordinary source text (use read_file).",
             failure_next_steps="Check the local path, image validity and size. Registration works without vision; core attaches pixels only when the selected model supports vision and image budgets permit. If pixels are not attached, discover a suitable OCR/image-analysis capability when needed; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with artifact_info. Reconcile uncertain outcomes with list_artifacts before retrying.",
         ),
         InputModel=ArtifactImportInput,

@@ -12,6 +12,7 @@ class ResultSnapshotRef:
     digest: str
     size_bytes: int
     origin_call_id: str = ""
+    coverage: str = "unknown"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -20,7 +21,8 @@ class ResultSnapshotRef:
     def from_dict(cls, value: Mapping) -> ResultSnapshotRef:
         return cls(snapshot_id=str(value["snapshot_id"]), path=str(value["path"]),
                    digest=str(value["digest"]), size_bytes=int(value["size_bytes"]),
-                   origin_call_id=str(value.get("origin_call_id", "")))
+                   origin_call_id=str(value.get("origin_call_id", "")),
+                   coverage=str(value.get("coverage", "unknown")))
 
 
 def message_snapshot_refs(message) -> tuple[ResultSnapshotRef, ...]:
