@@ -695,7 +695,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.structured["returncode"], 0)
         self.assertEqual(str(result.structured["stdout"]).strip(), "pong")
-        self.assertTrue(result.text.startswith("pong"))
+        self.assertTrue(result.text.startswith("exit_code: 0\nstdout:\npong"))
+        self.assertIn("exit_code: 0", result.llm_text)
         self.assertEqual(result.invocation_result.effect.value, "applied")
 
     def test_shell_exec_builtin_tool_allows_file_operations(self) -> None:
