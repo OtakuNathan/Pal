@@ -1074,7 +1074,7 @@ ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
         'out_channel_name': (str, Field(None, description='Optional endpoint name from channel_list. Omit to use the current conversation for a new task, or preserve an existing task destination. A specified channel uses its unique default destination unless out_reply_target is given.')),
         'enabled': (bool, Field(None)),
         'out_reply_target': (dict[str, Any], Field(None, description='Optional explicit provider destination. Usually omit: harness resolves this conversation or the specified channel default. Supply only a known target when overriding; Telegram uses chat_id and optional thread_id.')),
-        'schedule': (dict[str, Any], Field(None, description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
+        'schedule': (dict[str, Any], Field(None, description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. For once, run_at_utc must be a future ISO datetime. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
     },
 )
 
@@ -1120,7 +1120,7 @@ ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput = _strict
     'ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput',
     {
         'name': (str, Field(..., description='Task name returned by proactive_list.')),
-        'schedule': (dict[str, Any], Field(..., description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
+        'schedule': (dict[str, Any], Field(..., description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. For once, run_at_utc must be a future ISO datetime. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
     },
 )
 

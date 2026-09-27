@@ -124,8 +124,10 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
         )
     status = RuntimeStatus.ERROR if is_error else RuntimeStatus.OK
     title = "MCP tool execution failed" if is_error else "MCP tool result"
-    structured_text = render_titled_structured_for_llm(title, structured)
-    llm_text = f"{title}:\n{text}\n\n{structured_text}" if is_error else structured_text
+    # Preserve the protocol payload internally for output-schema validation.
+    # The model sees it once, without the additional extracted tool_text copy.
+    visible = {key: value for key, value in structured.items() if key != "tool_text"}
+    llm_text = render_titled_structured_for_llm(title, visible)
     return CapabilityResult(
         status=status,
         text=text,
@@ -147,7 +149,7 @@ def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind:
         status=RuntimeStatus.ERROR,
         text=f"MCP {kind} protocol error: {error_text}",
         structured=structured,
-        llm_text=f"MCP protocol error:\n{error_text}\n\n{render_titled_structured_for_llm('MCP protocol error detail', structured)}",
+        llm_text=render_titled_structured_for_llm("MCP protocol error", structured),
     )
 
 
@@ -166,7 +168,9 @@ def normalize_prompt_result(result: dict[str, Any], *, server_id: str, prompt_na
         status=RuntimeStatus.OK,
         text=f"Rendered MCP prompt: {prompt_name}",
         structured=structured,
-        llm_text=render_titled_structured_for_llm("Rendered MCP prompt", structured),
+        llm_text=render_titled_structured_for_llm("Rendered MCP prompt", {
+            key: value for key, value in structured.items() if key not in {"messages", "description"}
+        }),
     )
 
 

@@ -54,8 +54,10 @@ def render_recall_result_for_llm(
         "When updating or deleting memory, copy the complete mem_ref exactly, including prefixes such as fact: or case:.",
     ]
 
+    metadata = result.metadata or {}
+    if metadata.get("degraded") or metadata.get("degraded_reason"):
+        lines.append("Recall degraded: " + str(metadata.get("degraded_reason") or "retrieval is incomplete"))
     if query.mem_ref:
-        metadata = result.metadata or {}
         lines.append(f"mem_ref: {query.mem_ref}; lookup_status: {metadata.get('lookup_status', 'unavailable')}")
         if metadata.get("successors"):
             lines.append("successors: " + ", ".join(metadata["successors"]))
@@ -64,7 +66,8 @@ def render_recall_result_for_llm(
         lines.extend(item_lines)
     else:
         if not query.mem_ref:
-            lines.append("No matching memories found.")
+            lines.append("No matching memories returned." if metadata.get("degraded") or metadata.get("degraded_reason")
+                         else "No matching memories found.")
     lines.append("</recalled_memories>")
     return "\n".join(lines)
 
@@ -87,6 +90,11 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult) -> str
     lines = [f"Memory {action} result:", f"status: {result.status}"]
     if mem_ref:
         lines.append(f"mem_ref: {mem_ref}")
+    metadata = result.metadata or {}
+    if metadata.get("reason"):
+        lines.append(f"reason: {metadata['reason']}")
+    if metadata.get("successors"):
+        lines.append("successors: " + ", ".join(metadata["successors"]))
     return "\n".join(lines)
 
 

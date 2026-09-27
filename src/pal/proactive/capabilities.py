@@ -621,12 +621,6 @@ class ProactiveIntrospectionProvider:
                 text="name is required",
                 llm_text="name is required",
             )
-        if not isinstance(schedule, dict):
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text="schedule must be an object",
-                llm_text="schedule must be an object",
-            )
         normalized_schedule, invalid = _normalize_schedule_argument(schedule, required=True)
         if invalid is not None:
             return invalid
@@ -718,23 +712,39 @@ class ProactiveIntrospectionProvider:
 def _normalize_schedule_argument(raw: object, *, required: bool) -> tuple[dict[str, object], IntrospectionResult | None]:
     if raw is None:
         if required:
-            return {}, _invalid_result("schedule is required")
+            return {}, _invalid_schedule_result("schedule is required")
         return {"cadence": "manual", "timezone": "UTC"}, None
     if not isinstance(raw, dict):
-        return {}, _invalid_result("schedule must be an object")
+        return {}, _invalid_schedule_result("schedule must be an object")
 
-    cadence = str(raw.get("cadence") or "manual").strip().lower()
+    unknown = set(raw) - {"cadence", "timezone", "cron", "run_at_utc"}
+    if unknown:
+        return {}, _invalid_schedule_result("Unknown schedule fields: " + ", ".join(sorted(unknown)))
+    for key, value in raw.items():
+        if not isinstance(value, str) or not value.strip():
+            return {}, _invalid_schedule_result(f"schedule.{key} must be a non-empty string")
+    if "cadence" not in raw and ({"cron", "run_at_utc"} & set(raw)):
+        return {}, _invalid_schedule_result("schedule.cadence is required when cron or run_at_utc is supplied")
+
+    cadence = str(raw.get("cadence", "manual")).strip().lower()
     if cadence not in _PROACTIVE_SCHEDULE_CADENCES:
-        return {}, _invalid_result(
+        return {}, _invalid_schedule_result(
             "schedule.cadence must be manual, cron, or once",
             structured={"cadence": cadence},
+        )
+
+    allowed = {"cadence", "timezone"} | ({"cron"} if cadence == "cron" else {"run_at_utc"} if cadence == "once" else set())
+    incompatible = set(raw) - allowed
+    if incompatible:
+        return {}, _invalid_schedule_result(
+            f"Fields incompatible with schedule.cadence={cadence}: " + ", ".join(sorted(incompatible))
         )
 
     timezone_name = str(raw.get("timezone") or "UTC").strip() or "UTC"
     try:
         timezone_info = ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
-        return {}, _invalid_result(
+    except (ZoneInfoNotFoundError, ValueError):
+        return {}, _invalid_schedule_result(
             "schedule.timezone must be a valid IANA timezone",
             structured={"timezone": timezone_name},
         )
@@ -746,13 +756,15 @@ def _normalize_schedule_argument(raw: object, *, required: bool) -> tuple[dict[s
     if cadence == "cron":
         cron_expr = str(raw.get("cron") or "").strip()
         if not cron_expr:
-            return {}, _invalid_result("schedule.cron is required when cadence is cron")
+            return {}, _invalid_schedule_result("schedule.cron is required when cadence is cron")
+        if len(cron_expr.split()) != 5:
+            return {}, _invalid_schedule_result("schedule.cron must be a valid 5-field cron expression")
         try:
             import croniter
 
             croniter.croniter(cron_expr, datetime.now(timezone_info))
         except Exception:
-            return {}, _invalid_result(
+            return {}, _invalid_schedule_result(
                 "schedule.cron must be a valid 5-field cron expression",
                 structured={"cron": cron_expr},
             )
@@ -761,11 +773,11 @@ def _normalize_schedule_argument(raw: object, *, required: bool) -> tuple[dict[s
 
     run_at_raw = str(raw.get("run_at_utc") or "").strip()
     if not run_at_raw:
-        return {}, _invalid_result("schedule.run_at_utc is required when cadence is once")
+        return {}, _invalid_schedule_result("schedule.run_at_utc is required when cadence is once")
     try:
         parsed = datetime.fromisoformat(run_at_raw.replace("Z", "+00:00"))
     except ValueError:
-        return {}, _invalid_result(
+        return {}, _invalid_schedule_result(
             "schedule.run_at_utc must be an ISO datetime",
             structured={"run_at_utc": run_at_raw},
         )
@@ -773,12 +785,16 @@ def _normalize_schedule_argument(raw: object, *, required: bool) -> tuple[dict[s
         parsed = parsed.replace(tzinfo=timezone_info)
     target = parsed.astimezone(timezone.utc)
     if target <= datetime.now(timezone.utc):
-        return {}, _invalid_result(
+        return {}, _invalid_schedule_result(
             "schedule.run_at_utc must be in the future",
             structured={"run_at_utc": run_at_raw},
         )
     normalized["run_at_utc"] = target.isoformat()
     return normalized, None
+
+
+def _invalid_schedule_result(text: str, *, structured: dict[str, object] | None = None) -> IntrospectionResult:
+    return _invalid_result("Task parameter error: " + text, structured=structured)
 
 
 def _invalid_result(text: str, *, structured: dict[str, object] | None = None) -> IntrospectionResult:

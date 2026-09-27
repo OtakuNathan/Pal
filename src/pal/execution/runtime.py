@@ -1304,7 +1304,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             digest = hashlib.sha256(encoded).hexdigest()
             matching = next((item for item in refs if item.digest == digest
                              and item.size_bytes == len(encoded)), None)
-            ref = existing if managed_snapshot and manifest else matching
+            # Snapshot reads intentionally omit source-edit delivery authority;
+            # their original reference remains valid without a manifest.
+            ref = existing if managed_snapshot else matching
             if ref is None:
                 ref = self.result_snapshots.capture(text, call_id=call.call_id,
                     lifetime=lifetime, coverage="complete result text")

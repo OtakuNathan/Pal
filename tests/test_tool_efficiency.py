@@ -71,7 +71,7 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             result = asyncio.run(runtime.execute_tool_async(call)) if async_call else runtime.execute_tool(call)
             visible = json.loads(result.llm_text)
             assert 'output_schema' in result.structured
-            assert 'example' in result.structured
+            assert 'example' not in result.structured  # No fabricated example for run_shell.
             assert 'output_schema' not in visible and 'example' not in visible
             assert visible['input_schema'] == result.structured['input_schema']
             assert 'Output shape:' not in visible['description']
@@ -79,8 +79,8 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             # surfaces as result-side recovery on real failures; it is not
             # part of the standing description.
             assert 'Failure next steps:' not in visible['description']
-            for retained in ('Execution semantics:', 'Valid example:'):
-                assert retained in visible['description']
+            assert 'Execution semantics:' in visible['description']
+            assert 'Valid example:' not in visible['description']
         result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name':'exec_tools','args':{}}))
         assert all('output_schema' in item for item in result.structured['tools'])
         assert all('output_schema' not in item for item in json.loads(result.invocation_result.llm_text)['tools'])

@@ -145,3 +145,48 @@ def test_internal_proactive_turn_can_create_outputless_or_explicitly_routed_task
     })
     assert not invalid.ok
     assert "bad" not in manager.registered
+
+
+@pytest.mark.parametrize("schedule", [
+    {"cron": "0 9 * * *"},
+    {"cadance": "cron", "cron": "0 9 * * *"},
+    {"cadence": "manual", "cron": "0 9 * * *"},
+    {"cadence": "once", "cron": "0 9 * * *"},
+    {"cadence": "cron"},
+    {"cadence": "cron", "cron": "0 9 * * * *"},
+    {"cadence": "cron", "cron": 123},
+    {"cadence": None},
+    {"timezone": ""},
+    {"timezone": "/etc/passwd"},
+])
+def test_invalid_schedule_reports_task_parameter_error_without_creating(env, schedule):
+    runtime, manager, _ = env
+    result = invoke(runtime, "proactive_create", {
+        "name": "bad_schedule", "goal": "remind me", "schedule": schedule,
+    })
+    assert not result.ok
+    assert "Task parameter error:" in result.llm_text
+    assert "schedule" in result.llm_text
+    assert "bad_schedule" not in manager.registered
+
+
+@pytest.mark.parametrize("schedule", [{}, {"cadence": "manual"}, {"timezone": "UTC"}])
+def test_explicit_manual_defaults_remain_valid(env, schedule):
+    runtime, manager, _ = env
+    result = invoke(runtime, "proactive_create", {
+        "name": "manual", "goal": "run on request", "schedule": schedule,
+    })
+    assert result.ok, result.llm_text
+    assert manager.registered["manual"].schedule["cadence"] == "manual"
+
+
+def test_invalid_schedule_update_preserves_existing_task(env):
+    runtime, manager, _ = env
+    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    before = manager.registered["reminder"]
+    result = invoke(runtime, "proactive_update_schedule", {
+        "name": "reminder", "schedule": {"cron": "0 9 * * *"},
+    })
+    assert not result.ok
+    assert "Task parameter error:" in result.llm_text
+    assert manager.registered["reminder"] == before

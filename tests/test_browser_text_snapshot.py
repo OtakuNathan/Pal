@@ -46,7 +46,7 @@ def test_browser_full_text_is_saved_in_receiving_runtime_and_readable(runtime, b
     result = provider.read(call)
     document = result.structured['document']
     path = Path(document['text_file']['file_path'])
-    assert path.is_relative_to(runtime.result_snapshots.root)
+    assert path.resolve().is_relative_to(runtime.result_snapshots.root.resolve())
     assert path.read_text() == text
     assert '_full_text' not in document and '_full_text' not in result.llm_text
     assert text not in result.llm_text and 'rg/read_file' in document['next_step']

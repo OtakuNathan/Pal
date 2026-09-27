@@ -2755,7 +2755,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 )
             )
             self.assertEqual(invalid.status, "invalid")
-            self.assertIn("schedule.cadence", invalid.text)
+            self.assertIn("Task parameter error: Unknown schedule fields: hour, minute", invalid.text)
 
             created = core.context.execution_runtime.execute(
                 CapabilityCall(
@@ -3912,7 +3912,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0].text)
         tool_message = next(message for message in generate_requests[-1].messages if message.role.value == "tool")
         self.assertTrue(tool_message.parts[0].snapshot_refs)
-        self.assertIn("Complete output snapshot:", tool_message.text)
+        self.assertIn("Output snapshot:", tool_message.text)
 
     def test_turn_runtime_preserves_delivered_tool_results_until_compaction(self) -> None:
         class MultiToolLLMRuntime:
@@ -4023,6 +4023,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
         self.assertTrue(read.ok, read.text)
         self.assertEqual(read.snapshot_refs, (ref,))
+        self.assertIn("wc -lc", read.llm_text)
+        self.assertIn("bounded character/byte fragments", read.llm_text)
         self.assertIsNone(read.invocation_result.context_delivery)
 
     def test_snapshot_preview_includes_both_ends(self):

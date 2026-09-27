@@ -245,7 +245,9 @@ class ResultSnapshotStore:
 def render_snapshot_hint(ref: ResultSnapshotRef) -> str:
     return (f"Output snapshot: {ref.path}\nCoverage: {ref.coverage}.\n"
             "Immutable captured output, not current source state. "
-            "Search this local file with rg or read selected lines with read_file. "
+            "Locate relevant lines with rg -n; if file size is unknown, inspect it with wc -lc. "
+            "Read bounded ranges with read_file. For oversized lines, use run_shell to extract "
+            "bounded character/byte fragments from this file rather than copying it again. "
             "Query again if current state is needed; do not replay side-effecting operations merely to refresh output.")
 
 
