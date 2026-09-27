@@ -61,9 +61,9 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="capability_call",
         guidance=ToolGuidance(
             purpose="Invoke one indirect capability by its exact alias.",
-            use_when="When the exact alias and sufficient valid contract are already known. Discover or inspect only missing information. Direct tools must be invoked directly.",
+            use_when="Invoke a known indirect alias with the arguments you judge appropriate.",
             do_not_use_when="For direct capabilities — they must be invoked directly and are rejected here.",
-            failure_next_steps="Follow the returned error and recovery affordance. Read the contract only for missing or changed argument/execution semantics; discovery cannot repair an offline target or failed command.",
+            failure_next_steps="Follow the returned error and recovery affordance.",
         ),
         aliases=("call_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
@@ -89,14 +89,14 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="search",
         guidance=ToolGuidance(
-            purpose="Search capabilities by task or alias. Start with query and optionally module_name; add namespace/family filters only using values observed in hits or facets.",
+            purpose="Search callable capabilities by task or alias.",
             use_when="When you need to find a capability by what it does but don't know its exact alias.",
-            do_not_use_when="When you already know the alias (use read_tool or call_tool). When you want to invoke a known capability.",
+            do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode.",
             failure_next_steps="For empty results, use filter_suggestions or remove guessed filters. Use facets=true to discover classifications before narrowing; family is not a business-domain taxonomy.",
             next_tool_hints=(
                 NextToolHint(
                     name="read_tool",
-                    use_when="A search hit identifies the capability whose complete contract is needed.",
+                    use_when="A hit's guidance and input_contract leave missing information; otherwise invoke the selected tool immediately.",
                 ),
             ),
         ),

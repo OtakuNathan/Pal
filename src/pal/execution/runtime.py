@@ -81,7 +81,7 @@ from pal.shared import (
     RuntimeStatus,
     SINGLETON_TARGET,
 )
-from pal.shared.text_search import jieba_search_terms
+from pal.execution.discovery_terms import tool_search_terms
 
 if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
@@ -116,6 +116,7 @@ def _is_plugin_lifecycle_tool(name: object) -> bool:
     normalized = str(name or "").strip()
     aliases = {
         "plugin_attach",
+        "plugin_reattach",
         "plugin_detach",
         "plugin_enable",
         "plugin_disable",
@@ -125,6 +126,17 @@ def _is_plugin_lifecycle_tool(name: object) -> bool:
     if normalized in aliases:
         return True
     return normalized in {f"op_plugin_mgmt_{alias.removeprefix('plugin_')}" for alias in aliases}
+
+
+def _is_package_job_tool(name: object) -> bool:
+    # These resident handlers only queue/wait/read jobs. The background package
+    # owner holds the write fence for activation; a waiting read fence would
+    # prevent that worker from completing.
+    return str(name or "").strip() in {
+        "package_install", "package_prepare", "package_status", "plugin_uninstall",
+        "op_plugin_package_install", "op_plugin_package_prepare",
+        "intro_module_plugins_status", "op_plugin_mgmt_uninstall",
+    }
 
 
 def _merge_explicit_model_fields(
@@ -648,7 +660,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if isinstance(binding, RejectedResult):
             return binding
         try:
-            gate = self.lifecycle_gate.write() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read()
+            gate = self._invocation_gate(call.name)
             with gate:
                 raw = self._call_record_sync(
                     record, binding, call, validated, turn_id, budget, allow_tools
@@ -726,7 +738,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if isinstance(binding, RejectedResult):
             return binding
         try:
-            gate = self.lifecycle_gate.write_async() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read_async()
+            gate = self._invocation_gate(call.name, asynchronous=True)
             async with gate:
                 raw = await self._call_record_async(
                     record, binding, call, validated, turn_id, budget, allow_tools
@@ -816,7 +828,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     ToolAffordance(
                         tool="read_tool",
                         arguments={"name": record.alias},
-                        reason="Use the returned validation errors to correct the call. The input schema and example are available here if the argument requirements remain unclear.",
+                        reason="Invalid arguments. Use read_tool to inspect the exact schema, then correct the call.",
                     )
                 ],
                 details=details,
@@ -964,12 +976,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if str(item).strip()
         }
         include_facets = bool(args.get("facets", False))
+        explicit_limit = args.get("top_k") is not None or args.get("limit") is not None
         try:
-            limit = max(1, int(args.get("top_k") or args.get("limit") or 10))
+            limit = max(1, int(args.get("top_k") or args.get("limit") or 3))
         except (TypeError, ValueError):
-            limit = 10
-        terms = tuple(item.lower() for item in jieba_search_terms(query))
-        scored: list[tuple[int, str, dict[str, Any]]] = []
+            limit = 3
+        terms = set(tool_search_terms(query))
+        scored = []
         query_matches: list[dict[str, Any]] = []
         for alias, item in generation.search_records.items():
             item_namespace = str(item.get("namespace") or "").lower()
@@ -977,26 +990,26 @@ class ExecutionRuntime(ExecutionRuntimePort):
             item_module = str(item.get("module_id") or "").lower()
             item_tags = {str(tag).lower() for tag in item.get("tags", ())}
             alias_text = alias.lower()
-            search_text = str(item["search_text"]).lower()
-            haystack = f"{alias_text} {search_text} {item_family} {item_module} {' '.join(item_tags)}"
-            score = 0
-            if query:
-                if alias_text == query:
-                    score += 100
-                elif alias_text.startswith(query):
-                    score += 40
-                if query in search_text:
-                    score += 20
-            for term in terms:
-                if term == alias_text:
-                    score += 30
-                elif term in alias_text:
-                    score += 12
-                if term in search_text:
-                    score += 5
-                if term in {item_family, item_module, *item_tags}:
-                    score += 3
-            if terms and score == 0:
+            alias_terms = set(tool_search_terms(alias_text))
+            purpose_terms = set(tool_search_terms(str(item.get("purpose") or "")))
+            alias_coverage = len(terms & alias_terms)
+            purpose_coverage = len(terms & purpose_terms)
+            coverage = len(terms & (alias_terms | purpose_terms))
+            prefix = bool(query) and " " not in query and alias_text.startswith(query)
+            # Exact names and their unordered component words outrank prose.
+            # Purpose supports synonyms; applicability/other-tool instructions
+            # and registry classifications are not positive task evidence.
+            if query and alias_text == query:
+                tier = 5
+            elif terms and terms == alias_terms:
+                tier = 4
+            elif terms and (terms <= alias_terms or prefix):
+                tier = 3
+            elif terms and coverage == len(terms):
+                tier = 2
+            else:
+                tier = 1 if coverage else 0
+            if terms and not tier:
                 continue
             query_matches.append(item)
             if ((namespace and item_namespace != namespace)
@@ -1005,10 +1018,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     or (tags and not tags.issubset(item_tags))):
                 continue
             hit = dict(item)
-            hit["score"] = score
-            scored.append((score, alias, hit))
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        hits = [item for _, _, item in scored[:limit]]
+            hit["score"] = tier * 10000 + coverage * 100 + alias_coverage * 10 + purpose_coverage
+            scored.append((tier, coverage, alias_coverage, purpose_coverage, alias, hit))
+        scored.sort(key=lambda row: (-row[0], -row[1], -row[2], -row[3], row[4]))
+        candidates = scored
+        if not explicit_limit and scored and scored[0][0] >= 2:
+            # A precise match should not be padded with weaker neighbours.
+            # An explicit limit allows broader discovery when requested.
+            candidates = [row for row in scored if row[0] == scored[0][0]]
+        hits = [row[-1] for row in candidates[:limit]]
         result: dict[str, Any] = {
             "hits": hits,
             "total_count": len(scored),
@@ -1028,7 +1046,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             },
         }
         if include_facets:
-            result["facets"] = _search_facets(item for _, _, item in scored)
+            result["facets"] = _search_facets(row[-1] for row in scored)
             if result["truncated"]:
                 result["usage_hint"] = "Narrow with namespace, module_name, family, or tags."
         if not scored and query_matches:
@@ -1038,7 +1056,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "Remove or correct filters using filter_suggestions; family is not module_name."
             )
         elif not scored:
-            result["usage_hint"] = "No matching tools. Try another alias or broader task keywords."
+            result["usage_hint"] = "No matching tools. Try English alias keywords [domain] [action] [object] (e.g. 'lsp incoming calls', 'browser screenshot') or task synonyms; omit unknown filters."
         return result
 
     @staticmethod
@@ -1660,8 +1678,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return None
         return min(candidates)
 
+    def _invocation_gate(self, name: object, *, asynchronous: bool = False):
+        if _is_package_job_tool(name):
+            return contextlib.nullcontext()
+        if _is_plugin_lifecycle_tool(name):
+            return self.lifecycle_gate.write_async() if asynchronous else self.lifecycle_gate.write()
+        return self.lifecycle_gate.read_async() if asynchronous else self.lifecycle_gate.read()
+
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
-        gate = self.lifecycle_gate.write() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read()
+        gate = self._invocation_gate(call.name)
         with gate:
             return self._call_registered_unlocked(call)
 
@@ -1678,7 +1703,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return result
 
     async def call_registered_async(self, call: CapabilityCall) -> CapabilityResult:
-        gate = self.lifecycle_gate.write_async() if _is_plugin_lifecycle_tool(call.name) else self.lifecycle_gate.read_async()
+        gate = self._invocation_gate(call.name, asynchronous=True)
         async with gate:
             return await self._call_registered_async_unlocked(call)
 

@@ -271,6 +271,14 @@ class PluginHost:
         self.third_party_repository.delete(plugin_id)
 
     def attach(self, plugin_id: str) -> dict[str, Any]:
+        """Load an enabled plugin, preserving an already attached generation."""
+        return self._activate(plugin_id, reload=False)
+
+    def reattach(self, plugin_id: str) -> dict[str, Any]:
+        """Replace the generation and restore dependents suspended by the reload."""
+        return self._activate(plugin_id, reload=True)
+
+    def _activate(self, plugin_id: str, *, reload: bool) -> dict[str, Any]:
         from pal.packages.uninstall import removal_record
         if removal_record(self.runtime_root, plugin_id):
             return {"status": RuntimeStatus.ERROR, "plugin_id": plugin_id, "reason": "plugin_uninstalled_or_removal_pending"}
@@ -279,7 +287,15 @@ class PluginHost:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         if not record.enabled:
             return _plugin_disabled_result(plugin_id)
-        status = self._reload_plugin(plugin_id) if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
+        if not reload and plugin_id in self.generations:
+            return {
+                "status": RuntimeStatus.OK if record.attached else RuntimeStatus.ERROR,
+                "plugin_id": plugin_id,
+                "enabled": record.enabled,
+                "attached": record.attached,
+                **({"reason": "plugin_cleanup_pending", "error": record.last_error} if not record.attached else {}),
+            }
+        status = self._reload_plugin(plugin_id) if reload and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
         current = self._record(plugin_id) or record
         return {
             "status": status,
@@ -316,11 +332,16 @@ class PluginHost:
         plugin_id = self.module_to_plugin.get(str(module_id or "").strip())
         if not plugin_id:
             return lifecycle_owner_not_found(module_id, self.owner_id)
+        was_attached = plugin_id in self.generations
         result = self.attach(plugin_id)
-        return self._owner_result(module_id, plugin_id, result, fresh_instance=result.get("status") == RuntimeStatus.OK)
+        return self._owner_result(module_id, plugin_id, result, fresh_instance=not was_attached)
 
     def reload_module(self, module_id: str) -> ModuleLifecycleOwnerResult:
-        return self.attach_module(module_id)
+        plugin_id = self.module_to_plugin.get(str(module_id or "").strip())
+        if not plugin_id:
+            return lifecycle_owner_not_found(module_id, self.owner_id)
+        result = self.reattach(plugin_id)
+        return self._owner_result(module_id, plugin_id, result, fresh_instance=True)
 
     def enable(self, plugin_id: str) -> dict[str, Any]:
         from pal.packages.uninstall import removal_record

@@ -19,9 +19,14 @@ pal package status --runtime-root ~/.pal
 The CLI installs while Pal is stopped; starting Pal or using the existing owner
 rescan/attach path activates prepared files. A runtime lease prevents CLI file
 replacement under a running Pal. In a running Pal, use indirect `package_install`
-or `package_prepare`; they return a job id immediately. `package_status` reports
-job progress, package records and activation results. `plugins_list` describes
-these follow-up tools. Downloads do not hold the runtime lifecycle write fence.
+or `package_prepare`. They wait up to `wait_ms` (default 1000, maximum 5000)
+for the result. Longer jobs return a job id and notification availability; a
+scheduled completion event supplies the result to Pal in a continuation turn
+when idle, bound to the initiating conversation. Notices are best effort within the live runtime and are not replayed
+after restart. Use `package_status` for unavailable notices or diagnostics;
+with a job id it also accepts a bounded `wait_ms`. It reports job progress,
+package records and activation results. Downloads and tool waits do not hold
+the runtime lifecycle fence; the worker owns the activation write fence.
 
 Legacy `pal provider install *.whl --force` remains supported through the shared
 installation pipeline. Existing hand-deployed plugins without installation
@@ -145,7 +150,9 @@ No live browser worker is constructed during installation verification.
 `plugin_disable` persists the startup preference, including for builtins, and
 uses the existing dependency-aware detach. `plugin_detach` is temporary.
 `plugin_uninstall(name, purge_data=false)` removes a community installation; it
-runs as a package job and is followed with `package_status`. Builtins and channel
+runs as a package job with a brief completion wait and, when available, a
+completion event to Pal for the initiating task. Use `package_status` when
+notification is unavailable or cleanup diagnostics are needed. Builtins and channel
 providers are outside this operation's scope. Offline equivalent:
 
 ```sh

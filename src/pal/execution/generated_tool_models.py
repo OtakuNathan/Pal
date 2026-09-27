@@ -43,9 +43,9 @@ ArtifactCapabilitiesArtifactIntrospectionProviderReadInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderReadInput',
     {
         'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
-        'representation': (Literal['auto', 'text', 'page_text', 'chunk_text', 'transcript', 'metadata'], Field('auto', description='Text-like representation only. Do not use this to inspect visual image pixels.')),
-        'page': (int, Field(None, ge=1, description='1-based artifact page number from artifact_info; selects page_text. Mutually exclusive with chunk; not a tool-result page.')),
-        'chunk': (int, Field(None, ge=1, description='1-based artifact chunk number from artifact_info; selects chunk_text. Mutually exclusive with page.')),
+        'representation': (Literal['auto', 'text', 'page_text', 'chunk_text', 'transcript', 'metadata'], Field('auto', description='Defaults to automatic selection of a text-like representation; no prior artifact_info is needed. Does not inspect visual image pixels.')),
+        'page': (int, Field(None, ge=1, description='1-based artifact page number; selects page_text. Use a known page directly, or artifact_info for metadata. Mutually exclusive with chunk; not a tool-result page.')),
+        'chunk': (int, Field(None, ge=1, description='1-based artifact chunk number; selects chunk_text. Use a known chunk directly, or artifact_info for metadata. Mutually exclusive with page.')),
         'max_chars': (int, Field(12000, ge=1, description='Text preview character budget. Use page/chunk to focus on a representation.')),
     },
 )
@@ -376,20 +376,20 @@ ExecutionShellExecShellExecCapabilityMixinShellOutput = _strict_model(
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput',
     {
-        'name': (str, Field(..., description='Exact indirect alias. Use search_tools/read_tool first when unsure.')),
-        'args': (dict[str, Any], Field(None, description="Arguments matching that capability's schema from read_tool.")),
+        'name': (str, Field(..., description='Exact indirect alias.')),
+        'args': (dict[str, Any], Field(None, description="Arguments for the capability.")),
     },
 )
 
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput',
     {
-        'query': (str, Field(None, description="Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.")),
+        'query': (str, Field(None, description="Search short English alias keywords: [domain] [action] [object], e.g. 'remember memory', 'lsp prepare workspace', 'browser screenshot'. Include a known domain; spaces/underscores and reordered words work. Purpose also supports task synonyms.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Optional registry namespace from hits/facets. inspect aliases introspection; action aliases operation. Omit when unknown; read-only tools can also be registered under operation.')),
         'family': (str, Field(None, description='Exact explicitly declared family copied from hits/facets. Empty family in a hit means undeclared, not its namespace or module. Omit on initial search; use module_name for channel/skill/etc.')),
         'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
-        'top_k': (int, Field(None, description='Maximum number of compact hits to return.', ge=1)),
+        'top_k': (int, Field(None, description='Maximum callable hits; default up to 3 strongest matches, or one exact match. Set explicitly for broader results.', ge=1)),
         'limit': (int, Field(None, description='Alias for top_k; top_k takes precedence when both are supplied.', ge=1)),
         'facets': (bool, Field(None, description='Default false. Set true to include namespace/module/family counts for broad-search narrowing.')),
     },
@@ -402,6 +402,11 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem = _stri
         'search_text': (str, Field(...)),
         'invocation_mode': (Literal['direct', 'indirect'], Field(...)),
         'input_shape': (dict[str, Any], Field(...)),
+        'input_contract': (dict[str, Any], Field(...)),
+        'purpose': (str, Field(...)),
+        'use_when': (str, Field(...)),
+        'do_not_use_when': (str, Field(...)),
+        'execution': (dict[str, Any], Field(...)),
         'namespace': (str, Field(...)),
         'family': (str, Field(...)),
         'module_id': (str, Field(...)),
@@ -1061,9 +1066,9 @@ ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
         'goal': (str, Field(...)),
         'method': (str, Field(None)),
         'skill_refs': (list[str], Field(None, description='Semantic skill names returned by skill_search.')),
-        'out_channel_name': (str, Field(None, description='Endpoint name returned by channel_list.')),
+        'out_channel_name': (str, Field(None, description='Optional endpoint name from channel_list. Omit to use the current conversation for a new task, or preserve an existing task destination. A specified channel uses its unique default destination unless out_reply_target is given.')),
         'enabled': (bool, Field(None)),
-        'out_reply_target': (dict[str, Any], Field(None, description='Provider-specific destination copied from a known inbound reply_target or an existing proactive task. Auth state is not a destination. Telegram uses chat_id and optional thread_id; do not invent session_id/request_id.')),
+        'out_reply_target': (dict[str, Any], Field(None, description='Optional explicit provider destination. Usually omit: harness resolves this conversation or the specified channel default. Supply only a known target when overriding; Telegram uses chat_id and optional thread_id.')),
         'schedule': (dict[str, Any], Field(None, description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
     },
 )
@@ -1093,7 +1098,8 @@ ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput = _stri
     'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput',
     {
         'name': (str, Field(..., description='Task name returned by proactive_list.')),
-        'out_channel_name': (str, Field(None, description='Endpoint name returned by channel_list.')),
+        'out_channel_name': (str, Field(None, description='Endpoint name from channel_list; omit or empty to clear output. Its unique default/current conversation target is resolved automatically.')),
+        'out_reply_target': (dict[str, Any], Field(None, description='Optional known destination within the new channel. Channel and target are updated together; the old channel target is never reused across channels.')),
     },
 )
 

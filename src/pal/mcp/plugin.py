@@ -186,7 +186,7 @@ class McpManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
-            do_not_use_when="Restarting the manager (use plugin_attach with name='mcp'). Attaching one server (use mcp_attach).",
+            do_not_use_when="Restarting the manager (use plugin_reattach with name='mcp'). Attaching one server (use mcp_attach).",
             failure_next_steps="Inspect mcp_show and mcp_server_list to reconcile current manager and server state. Correct config syntax or projection errors before retrying.",
         ), aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:

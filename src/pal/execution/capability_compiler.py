@@ -145,6 +145,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                         else {}
                     ),
                     **dict(action_blueprint.metadata),
+                    "examples_generated": not bool(action_blueprint.examples),
                 },
                 lifecycle_scope=lifecycle_scope,
                 module_id=module_id,

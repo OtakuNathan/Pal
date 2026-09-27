@@ -4921,6 +4921,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertNotIn("bunshin_start_workflow", generation.indirect_aliases)
             start_schema = start_descriptor.InputModel.model_json_schema(mode="validation")
             self.assertIn("task_spec", start_schema["properties"])
+            self.assertIn("task_spec_file", start_schema["properties"])
             self.assertIn("skill_refs", start_schema["properties"])
             self.assertNotIn("source_files", start_schema["properties"])
             task_spec_schema = start_schema["properties"]["task_spec"]
@@ -4929,7 +4930,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertIn("authoritative_text", task_spec_description)
             self.assertIn("Do not summarize, paraphrase, normalize, reinterpret", task_spec_description)
             self.assertIn("omit examples", task_spec_description)
-            self.assertIn("path/reference", task_spec_description)
+            self.assertIn("task_spec_file", task_spec_description)
             self.assertIn("exact leading and trailing whitespace", task_spec_description)
             self.assertIn("every final newline", task_spec_description)
             self.assertEqual(
@@ -4963,11 +4964,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "Start one durable Bunshin workflow from the complete, lossless authoritative task specification and "
                 "bind its future delivery to the channel that owns the current turn.",
             )
-            self.assertIn("inspect skill_search with read_tool", start_descriptor.guidance.use_when)
-            self.assertIn("invoke it through call_tool", start_descriptor.guidance.use_when)
+            self.assertIn("Reuse known skill contracts", start_descriptor.guidance.use_when)
+            self.assertIn("read_tool is needed only for missing contract information", start_descriptor.guidance.use_when)
             self.assertIn("ask whether to provide them", start_descriptor.guidance.use_when)
             self.assertIn("explicitly approved names in skill_refs", start_descriptor.guidance.use_when)
-            self.assertIn("read the complete content", start_descriptor.guidance.use_when)
+            self.assertIn("pass task_spec_file", start_descriptor.guidance.use_when)
             self.assertIn("task_spec.authoritative_text", start_descriptor.guidance.use_when)
             self.assertIn("including every final newline", start_descriptor.guidance.use_when)
             self.assertIn("cannot substitute for the full task specification", start_descriptor.guidance.use_when)
@@ -7077,6 +7078,67 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             service.start_workflow(
                 {**base, "workflow_id": "wf_requirement_legacy", "source_files": ["legacy.txt"]}
             )
+
+    def test_start_snapshots_requirement_file_outside_worker_workspace(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        repo = self.runtime_root / "worker-repo"
+        repo.mkdir()
+        source = self.runtime_root / "requirements.md"
+        raw = "\ufeff  # 原始需求\r\n\r\n0000 / 0248 / 69\n\t保留示例。  \r\n\r\n".encode("utf-8")
+        source.write_bytes(raw)
+        started = self._start_workflow(service, {
+            "title": "Snapshot requirement file",
+            "profile": "software_engineering.v2_coder",
+            "goal": "Implement the requirements",
+            "workspace": {"kind": "existing_repo", "repo_path": str(repo)},
+            "task_spec_file": str(source),
+            "task_spec": {"acceptance": "Run the repository tests."},
+        })
+        source.write_text("Changed after submission", encoding="utf-8")
+        workflow = service.repository.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
+        request = service.artifacts.read_json(dict(workflow.payload["request_ref"]))
+        ledger = service.artifacts.read_json(request["requirements_ref"])
+        original = ledger["original"]
+        self.assertEqual(original["authoritative_text"].encode("utf-8"), raw)
+        self.assertEqual(original["authoritative_source"], {
+            "path": str(source.resolve()),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        })
+        self.assertEqual(original["acceptance"], "Run the repository tests.")
+        self.assertEqual(request["workspace"]["repo_path"], str(repo))
+        self.assertEqual(request["references"], [])
+        materialized = service.task_ledger.materialize(request["requirements_ref"])
+        import yaml
+        task_yaml = yaml.safe_load((materialized.root / "task.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(task_yaml["original"]["authoritative_text"].encode("utf-8"), raw)
+
+    def test_invalid_requirement_file_does_not_create_a_task(self) -> None:
+        service = BunshinV2WorkflowService(self.runtime_root)
+        invalid_utf8 = self.runtime_root / "invalid.txt"
+        invalid_utf8.write_bytes(b"\xff")
+        blank = self.runtime_root / "blank.txt"
+        blank.write_text(" \r\n", encoding="utf-8")
+        valid = self.runtime_root / "valid.txt"
+        valid.write_text("Exact requirements\n", encoding="utf-8")
+        base = {"goal": "Read a requirement file"}
+        invalid_requests = [
+            {"task_spec_file": "relative.txt"},
+            {"task_spec_file": str(self.runtime_root / "missing.txt")},
+            {"task_spec_file": str(self.runtime_root)},
+            {"task_spec_file": str(invalid_utf8)},
+            {"task_spec_file": str(blank)},
+            {"task_spec_file": ""},
+            {"task_spec_file": 42},
+            {"task_spec_file": str(valid), "task_spec": {"authoritative_text": "Other text"}},
+            {"task_spec_file": str(valid), "task_spec": {"authoritative_source": {"path": "fake"}}},
+            {"task_spec_file": str(valid), "requirements_ref": {"sha256": "a" * 64, "artifact_type": "TaskLedgerArtifact"}},
+            {"task_spec_file": str(valid), "operation": "standalone_review", "artifact_ref": {"sha256": "b" * 64, "artifact_type": "ContractArtifact"}},
+        ]
+        for invalid in invalid_requests:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "task_spec_file"):
+                service.start_workflow({**base, **invalid})
+        self.assertEqual(service.repository.search_tasks(include_archived=True, limit=10), ())
 
     def test_effect_replay_after_side_effect_before_ack_is_idempotent(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)

@@ -60,15 +60,16 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
     use_when=(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
         "that benefits from architect/coder/verifier gates, or a task the user explicitly asks Bunshin to perform. "
-        "Choose by identity binding and task nature, not by prose length or step count. Before calling, inspect "
-        "skill_search with read_tool and invoke it through call_tool to find a relevant operation manual. If any are "
-        "found, ask whether to provide them and wait; pass only explicitly approved names in skill_refs. Supply the "
-        "canonical profile, short goal, narrow workspace, and complete task_spec. When the authoritative requirements "
-        "are in a file or prior user content, read the complete content and put it directly and losslessly in "
-        "task_spec.authoritative_text. Do not summarize, paraphrase, normalize, reinterpret, omit examples, or replace "
-        "the content with a path or reference. Preserve exact leading and trailing whitespace, including every final "
-        "newline. The short goal and title are routing metadata only and cannot substitute for the full task "
-        "specification. "
+        "Choose by identity binding and task nature, not by prose length or step count. Reuse known skill contracts, "
+        "discovery results, and the user's existing approval for this workflow. Use skill_search only when relevant "
+        "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
+        "manuals without approval, ask whether to provide them and wait; pass only explicitly approved names in "
+        "skill_refs. Supply the canonical profile, short goal, narrow workspace, and complete task specification. "
+        "For requirements in a local UTF-8 file, pass task_spec_file; the harness snapshots its exact text into "
+        "task_spec.authoritative_text and records its source digest, without requiring a foreground read or copy. "
+        "For requirements in conversation, supply the exact text in task_spec.authoritative_text, including every "
+        "final newline. Do not summarize, paraphrase, normalize, reinterpret, or omit examples. The short goal and "
+        "title are routing metadata only and cannot substitute for the full task specification. "
         "Use review_then_execute with an external architecture artifact, execute_trusted only for a Manager-trusted "
         "artifact, standalone_review for review-only work, and review_and_repair for bounded repair."
     ),
@@ -140,7 +141,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
         default=None,
         description=(
             "Short routing objective only. It cannot substitute for, summarize, or carry "
-            "the authoritative requirements; for new_requirement, task_spec is the "
+            "the authoritative requirements; for new_requirement, task_spec or task_spec_file supplies the "
             "complete semantic source of truth."
         ),
     )
@@ -149,13 +150,13 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
         default=None,
         description=(
             "Complete, lossless task specification for new_requirement. This becomes "
-            "task.yaml.original in the immutable ledger. When authoritative requirements "
-            "come from a file or prior user content, first read the complete content, then "
-            "put the exact text in an authoritative_text string inside this object. Do not "
-            "summarize, paraphrase, normalize, reinterpret, omit examples, or replace that "
-            "content with a path/reference. Preserve exact leading and trailing whitespace, "
-            "including every final newline. Other structured fields may accompany "
-            "authoritative_text. Later user-authorized changes are append-only revisions."
+            "task.yaml.original in the immutable ledger. For conversation requirements, put "
+            "the exact text in authoritative_text. Do not summarize, paraphrase, normalize, "
+            "reinterpret, or omit examples. Preserve exact leading and trailing whitespace, "
+            "including every final newline. For a local requirement file, use task_spec_file "
+            "instead of copying its content; this object may supply additional structured fields, "
+            "but authoritative_text and authoritative_source are then harness-owned. Later "
+            "user-authorized changes are append-only revisions."
         ),
         json_schema_extra={
             "examples": [
@@ -168,10 +169,19 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
             ]
         },
     )
+    task_spec_file: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to a local UTF-8 requirement file for new_requirement. The harness reads it once, "
+            "preserves exact text and line endings in the immutable task ledger, and records its source digest. "
+            "The file may be outside the worker repository; it does not widen workspace access. Do not also "
+            "supply task_spec.authoritative_text or task_spec.authoritative_source. No foreground read is required."
+        ),
+    )
     skill_refs: list[str] | None = Field(
         default=None,
         description=(
-            "Exact active Pal skill names returned by skill_search that the user explicitly approved for this "
+            "Exact active Pal skill names already known or discovered with skill_search that the user explicitly approved for this "
             "workflow. The Manager injects their manuals as user-side system reminders "
             "when each logical role session is first spawned."
         ),

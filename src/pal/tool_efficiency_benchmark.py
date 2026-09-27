@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from dataclasses import replace
 import hashlib
 import json
@@ -23,6 +24,7 @@ from pal.core.runtime_config import RuntimeConfig
 from pal.eval_tools import _build_report, _run_case, load_tools_benchmark
 from pal.execution.capabilities import register_with_core
 from pal.execution.contracts import ToolCallBudget
+from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolHandlerResult, rejection
 from pal.llm.credentials import LLMCredentialResolver
 from pal.llm.models import LLMEndpointModel
@@ -30,8 +32,46 @@ from pal.llm.runtime import EndpointResolver, LLMRuntime, build_default_endpoint
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.shared.json_values import thaw_json
+from pal.shared.tool_protocol import ToolContextMessageIR
 
 MANIFEST = Path(__file__).parents[2] / 'benchmarks/tools/efficiency-v2.json'
+
+_FIXTURE_PNG = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+)
+
+
+class _BrowserFixture:
+    def __init__(self, root):
+        self.runtime_root = root
+
+    def execute(self, **kwargs):
+        if kwargs['action'] == 'screenshot':
+            return {'png_base64': base64.b64encode(_FIXTURE_PNG).decode(),
+                    'page': {'url': 'https://example.com/', 'title': 'Fixture'}}
+        if kwargs['action'] == 'navigate':
+            return {'action': 'navigate', 'navigation_completed': True,
+                    'content_status': 'available', 'page': {'url': 'https://example.com/'},
+                    'document': {'text': 'Fixture webpage content', 'links': [], 'title': 'Fixture'}}
+        return {'action': kwargs['action']}
+
+    def health(self):
+        return {'healthy': True}
+
+    def stop_sync(self):
+        pass
+
+    async def shutdown_async(self):
+        pass
+
+
+class _ArtifactFixture:
+    async def import_local_for_turn(self, source, **kwargs):
+        assert Path(source.local_cached_path).is_file()
+        return CapabilityResult(status='ok', text='registered', llm_text='registered',
+            structured={'artifact_id': 'art_fixture'},
+            context_messages=(ToolContextMessageIR(content='Fixture screenshot registered.',
+                                                   semantic_kind='artifact_import', artifact_ids=('art_fixture',)),))
 
 
 class FixtureExecution:
@@ -46,6 +86,27 @@ class FixtureExecution:
         self.runtime = self.core.context.execution_runtime
         self.prepared = False
         self.unsafe_attempts = 0
+        if case_id.startswith('affordance-'):
+            from pal.channel import ChannelRuntime
+            from pal.proactive import ProactiveManager, register_with_core as register_proactive
+            from pal.web_fetch import WebFetchService, register_with_core as register_browser
+
+            register_browser(self.core.context, WebFetchService(browser_manager=_BrowserFixture(root)))
+            self.core.publish_module_capabilities('web_fetch')
+            self.runtime.register_provider_ref('artifact:artifact', _ArtifactFixture())
+            channel = ChannelRuntime()
+            channel.endpoint_registry.register(SimpleNamespace(
+                endpoint=SimpleNamespace(endpoint_id='telegram_main'),
+                derive_default_reply_target=lambda: {'chat_id': '42'},
+            ))
+            self.core.context.port_registry['channel:channel'] = channel
+            self.runtime.register_provider_ref('core:turn_io', SimpleNamespace(
+                capture_delivery_binding=lambda turn_id: {
+                    'channel_id': 'telegram_main', 'reply_target': {'chat_id': '42'},
+                },
+            ))
+            register_proactive(self.core.context, ProactiveManager())
+            self.core.publish_module_capabilities('proactive')
 
     def _lsp(self, method, args):
         partial = self.case_id == 'lsp-partial'
@@ -71,6 +132,8 @@ class FixtureExecution:
         args = call.args.get('args', {}) if call.name == 'call_tool' else call.args
         allowed = {'search_tools','read_tool','exec_show','exec_tools','read_file',
                    'lsp_prepare_workspace','lsp_status','lsp_doctor','lsp_diagnostics','lsp_document_symbols'}
+        if self.case_id.startswith('affordance-'):
+            allowed.update({'browser_navigate', 'browser_screenshot', 'proactive_create'})
         blocked = alias not in allowed and self.registry_generation.record_for_alias(alias) is not None
         if alias == 'read_file':
             target = (self.root / str(args.get('file_path') or '')).resolve()
@@ -146,8 +209,8 @@ def summarize(runs):
     }
 
 
-async def worker(runtime_root: Path, snapshot: Path):
-    manifest, cases = load_tools_benchmark(MANIFEST)
+async def worker(runtime_root: Path, snapshot: Path, manifest_path: Path = MANIFEST):
+    manifest, cases = load_tools_benchmark(manifest_path)
     values = json.loads(snapshot.read_text())
     llm = build_llm(runtime_root, values)
     try:
@@ -189,7 +252,8 @@ async def compare(args):
     snapshot = target/'endpoint.json'
     snapshot.write_text(json.dumps(values))
     snapshot.chmod(0o600)
-    manifest, cases = load_tools_benchmark(MANIFEST)
+    manifest_path = args.manifest.resolve()
+    manifest, cases = load_tools_benchmark(manifest_path)
     processes, errors = {}, []
     rows = {'base':[], 'search':[]}
     last = {}
@@ -198,6 +262,7 @@ async def compare(args):
             log = (target/f'{label}.stderr').open('w')
             processes[label] = (await asyncio.create_subprocess_exec(sys.executable,'-m','pal.tool_efficiency_benchmark',
                 '--worker','--runtime-root',str(args.runtime_root.resolve()),'--snapshot',str(snapshot),
+                *(['--manifest', str(manifest_path)] if manifest_path != MANIFEST.resolve() else []),
                 cwd=worktree,env={**os.environ,'PYTHONPATH':str(worktree.resolve()/'src')},
                 stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=log,limit=4*1024*1024),log)
         for repetition in range(1,4):
@@ -219,7 +284,7 @@ async def compare(args):
                         'ok':result['run']['eventual_correct'],'tokens':summarize([result['run']])['total_tokens']}),flush=True)
         reports = {}
         for label in rows:
-            reports[label] = _build_report(manifest=manifest,manifest_path=MANIFEST,
+            reports[label] = _build_report(manifest=manifest,manifest_path=manifest_path,
                 generation_hash=last.get(label,{}).get('generation',''),tool_contracts=last.get(label,{}).get('specs',[]),runs=rows[label],
                 requested_endpoint_id=values['endpoint_id'],expected_model_id=values['model_id'])
             reports[label]['efficiency'] = summarize(rows[label])
@@ -237,7 +302,7 @@ async def compare(args):
             'discovery_tokens_lower':s['discovery_tokens']<b['discovery_tokens']}
         result = {'checks':checks,'selected':'search' if all(checks.values()) else 'base' if base['passed'] and checks['complete_pairs'] and b['usage_complete'] and not b['unsafe_attempts'] and not b['forbidden_or_dangerous_runs'] else 'neither',
                   'base':b,'search':s,'errors':errors,'endpoint_id':values['endpoint_id'],'model_id':values['model_id'],
-                  'manifest_sha256':hashlib.sha256(MANIFEST.read_bytes()).hexdigest()}
+                  'manifest_sha256':hashlib.sha256(manifest_path.read_bytes()).hexdigest()}
         (target/'comparison.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
     finally:
@@ -261,10 +326,11 @@ def main():
     parser.add_argument('--endpoint')
     parser.add_argument('--worker',action='store_true')
     parser.add_argument('--snapshot',type=Path)
+    parser.add_argument('--manifest',type=Path,default=MANIFEST)
     args = parser.parse_args()
     if not args.worker and not all((args.base,args.search,args.output)):
         parser.error('--base, --search and --output are required for comparison')
-    asyncio.run(worker(args.runtime_root,args.snapshot) if args.worker else compare(args))
+    asyncio.run(worker(args.runtime_root,args.snapshot,args.manifest) if args.worker else compare(args))
 
 
 if __name__ == '__main__':

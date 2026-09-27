@@ -159,25 +159,78 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.structured["reason"], "artifact_too_large")
         self.assertEqual(len(self.repository.list_records()), 0)
 
-    async def test_local_image_import_requires_known_vision_support(self) -> None:
+    async def test_screenshot_call_reaches_core_image_projection_without_import_call(self) -> None:
+        import base64
+        from PIL import Image
+        from pal.llm.ir import ImagePartIR, ArtifactRefPartIR
+        from pal.web_fetch import register_with_core as register_browser
+
+        source = self.root / "page.png"
+        Image.new("RGB", (20, 20), color="blue").save(source)
+        calls = []
+
+        def execute(**kwargs):
+            calls.append(kwargs["action"])
+            return {"png_base64": base64.b64encode(source.read_bytes()).decode("ascii")}
+
+        browser = SimpleNamespace(
+            execute=execute, browser_manager=SimpleNamespace(runtime_root=self.root),
+            health=lambda: {}, shutdown_sync=lambda: None, shutdown_async=lambda: None,
+        )
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        register_artifact_with_core(core.context, self.manager)
+        core.publish_module_capabilities("artifact")
+        register_browser(core.context, browser)
+        core.publish_module_capabilities("web_fetch")
+        call = new_tool_call(name="call_tool", args={"name": "browser_screenshot", "args": {}})
+        try:
+            result = await runtime.execute_tool_async(call, turn_id=self.turn_id)
+            self.assertTrue(result.ok, result.llm_text)
+            self.assertEqual(calls, ["screenshot"])
+            self.assertEqual(result.structured["registration"], "registered")
+            self.assertEqual(len(self.repository.list_records()), 1)
+            artifact_id = result.structured["artifact_id"]
+            self.assertEqual(result.context_messages[0].artifact_ids, (artifact_id,))
+            self.assertNotIn("base64", result.llm_text)
+            captured = []
+            core.context.port_registry["memory:memory"] = SimpleNamespace(
+                append_l1_user_contexts=lambda turn_id, messages: captured.extend(messages))
+            await core.turn_executor._append_l1_tool_context_messages_async(
+                SimpleNamespace(turn_id=self.turn_id), (call,), (result,))
+            for capabilities, expected in (({"supports_vision": True}, 1), ({"supports_vision": False}, 0), ({}, 0)):
+                projected = core.turn_executor._project_messages_for_prompt(
+                    captured, turn_id=self.turn_id, artifact_scope_key=self.scope_key, capabilities=capabilities)
+                self.assertEqual(sum(isinstance(p, ImagePartIR) for p in projected[0].parts), expected)
+                self.assertTrue(any(isinstance(p, ArtifactRefPartIR) for p in captured[0].parts))
+        finally:
+            runtime.shutdown()
+
+    async def test_local_image_import_registers_without_vision_and_projects_by_capability(self) -> None:
         from PIL import Image
 
-        # Custom processor suffixes must use the same vision gate as standard PNGs.
+        # Custom processor suffixes retain image validation without a vision gate.
         path = self.root / "local.capture"
         Image.new("RGB", (8, 8)).save(path, format="PNG")
         self.manager.processor_registry.suffix_kind_map[".capture"] = "image"
-        for facts, reason in (({"supports_vision": False}, "vision_not_supported"), ({}, "vision_capability_unavailable")):
+        for facts in ({"supports_vision": False}, {}):
             before = len(self.repository.list_records())
             runtime = _ToolRuntime(self.scope_key)
             runtime.provider_registry["core:turn_io"].llm_capabilities_for_turn = lambda turn_id: facts
             result = await ArtifactImportTool(self.manager).ainvoke(
                 {"path": str(path)}, runtime=runtime, turn_id=self.turn_id,
             )
-            self.assertEqual(result.status, RuntimeStatus.UNSUPPORTED)
-            self.assertEqual(result.structured["reason"], reason)
-            self.assertIn("search_tools", result.structured["next_step"])
-            self.assertFalse(result.context_messages)
-            self.assertEqual(len(self.repository.list_records()), before)
+            self.assertEqual(result.status, RuntimeStatus.OK)
+            artifact_id = result.structured["artifact_id"]
+            self.assertEqual(result.context_messages[0].artifact_ids, (artifact_id,))
+            self.assertEqual(len(self.repository.list_records()), before + 1)
+            for capabilities, count in ((facts, 0), ({"supports_vision": True}, 1), ({"supports_vision": False}, 0)):
+                exposure = self.manager.select_prompt_exposure(self.scope_key, self.turn_id, "", capabilities, artifact_ids=(artifact_id,))
+                self.assertEqual(len(exposure.inline_parts), count)
             self.assertTrue(path.is_file())
             text_path = self._write_source("document.txt")
             text_result = await ArtifactImportTool(self.manager).ainvoke(

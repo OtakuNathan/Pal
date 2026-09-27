@@ -20,15 +20,20 @@ def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
 
 BrowserNavigateInput = _strict_model(
     "BrowserNavigateInput",
-    {"url": (str, Field(...)), "timeout_ms": (int, Field(60000))},
+    {
+        "url": (str, Field(...)),
+        "timeout_ms": (int, Field(60000)),
+        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Maximum rendered page text characters.")),
+        "max_links": (int, Field(80, ge=0, le=500, description="Maximum page links; zero omits links.")),
+    },
 )
 BrowserReadInput = _strict_model(
     "BrowserReadInput",
     {
         "url": (str | None, Field(None)),
         "timeout_ms": (int, Field(60000)),
-        "max_chars": (int, Field(12000)),
-        "max_links": (int, Field(80)),
+        "max_chars": (int, Field(12000, ge=1000, le=100000, description="Maximum rendered page text characters.")),
+        "max_links": (int, Field(80, ge=0, le=500, description="Maximum page links; zero omits links.")),
     },
 )
 BrowserSnapshotInput = _strict_model(

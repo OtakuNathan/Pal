@@ -12,6 +12,7 @@ import pytest
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.tool_semantics import EffectKind, InvocationMode, RetryPolicy
+from pal.shared.tool_protocol import new_tool_call
 from pal.web_fetch import BrowserServiceError, WebFetchService, browser_session_key, register_with_core
 from pal.web_fetch.browser_service import (
     PLAYWRIGHT_CLI_VERSION,
@@ -53,8 +54,8 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     for name in ("browser_read", "browser_snapshot", "browser_find", "browser_status",
                  "browser_extensions", "browser_extension_manage"):
         assert name in navigate["description"]
-    assert "read_tool" in navigate["description"]
-    assert "call_tool" in navigate["description"]
+    assert "`browser_read` (indirect)" in navigate["description"]
+    assert "a separate read is unnecessary" in navigate["description"]
     assert "browser_click" not in direct
     assert "browser_screenshot" not in direct
 
@@ -63,6 +64,11 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     assert descriptors["browser_read"].InputModel.__module__ == "pal.web_fetch.tool_models"
     assert not any(name.startswith("web_fetch_provider_") for name in descriptors)
     assert not {"read_web", "inspect_web_layout", "screenshot_web"} & set(descriptors)
+    for query, expected in (("read webpage", "browser_navigate"), ("find controls", "browser_find")):
+        found = core.context.execution_runtime.execute_tool(
+            new_tool_call(name="search_tools", args={"query": query})
+        )
+        assert found.structured["hits"][0]["alias"] == expected
     assert descriptors["browser_click"].execution.invocation_mode == InvocationMode.INDIRECT
     assert descriptors["browser_click"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
     assert descriptors["browser_click"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
@@ -75,6 +81,48 @@ def test_session_keys_are_stable_non_reversible_and_require_a_lifetime() -> None
     assert len(browser_session_key("conversation-1")) == 64
     with pytest.raises(ValueError, match="execution lifetime"):
         browser_session_key("")
+
+
+@pytest.mark.parametrize("action", ["navigate", "read"])
+def test_navigation_reads_content_once_and_honors_link_budget(tmp_path, action):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    calls = []
+
+    def run(record, argv, **kwargs):
+        calls.append(argv)
+        return json.dumps({"text": "x" * 1100, "links": [{"href": "https://example.com"}]}) if argv[0] == "eval" else ""
+
+    worker._run = run
+    record = SimpleNamespace(key="a" * 64)
+    result = worker._dispatch_action(record, action=action, args={"url": "https://example.com", "max_chars": 1000, "max_links": 0}, timeout_ms=1000)
+    assert [call[0] for call in calls] == ["goto", "eval"]
+    assert result["navigation_completed"] is True
+    assert len(result["document"]["text"]) == 1000
+    assert result["document"]["text_truncated"] is True
+    assert result["document"]["links"] == []
+    assert '"maxLinks": 0' in calls[-1][1]
+
+
+def test_navigation_text_failure_recovers_without_second_navigation(tmp_path):
+    worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
+    calls = []
+
+    def run(record, argv, **kwargs):
+        calls.append(argv[0])
+        if argv[0] == "eval":
+            raise BrowserServiceError("text unavailable", code="cli_command_failed")
+        return ""
+
+    worker._run = run
+    record = SimpleNamespace(key="a" * 64)
+    result = worker._dispatch_action(record, action="navigate", args={"url": "https://example.com"}, timeout_ms=1000)
+    assert result["navigation_completed"] is True
+    assert result["content_status"] == "unavailable"
+    assert "without url" in result["next_step"]
+    worker._run = lambda record, argv, **kwargs: calls.append(argv[0]) or '{"text":"recovered"}'
+    reread = worker._dispatch_action(record, action="read", args={}, timeout_ms=1000)
+    assert reread["document"]["text"] == "recovered"
+    assert calls == ["goto", "eval", "eval"]
 
 
 def test_user_positionals_are_separated_from_cli_options() -> None:

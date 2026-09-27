@@ -10,7 +10,7 @@ The resident surface is fully determined by capability descriptors at registry c
 
 - Every `CapabilityDescriptor` declares `invocation_mode`: `DIRECT` or `INDIRECT`.
 - `DIRECT` descriptors are compiled into the registry generation's `provider_specs` and exposed to the LLM as function-calling tools.
-- `INDIRECT` descriptors stay out of the tool window. They remain discoverable through `tool_search` and invocable through `read_tool` / `tool_call`.
+- `INDIRECT` descriptors stay out of the tool window. They remain discoverable through `search_tools` and invocable through `call_tool`. Use `read_tool` only when the search hit or context lacks contract details needed for a correct call.
 
 There is no tool-surface config file and no runtime refresh command. Changing direct exposure is a descriptor change in the owning module (applied on the next Pal start), not a TOML edit.
 
@@ -20,8 +20,15 @@ There is no tool-surface config file and no runtime refresh command. Changing di
 
 ## Discovery Schema
 
-`tool_search` is the resident discovery entry point. Its primary argument is
+`search_tools` is the resident discovery entry point. Its primary argument is
 `query`, not `name`.
+
+Search with English alias words in `[domain] [action] [object]` form, such as
+`remember memory`, `lsp incoming calls`, or `browser screenshot`. Exact aliases
+and alias prefixes also work. Search
+matches words, including words separated by underscores in aliases; `install`
+does not match `uninstall`. Broad or unmatched queries can be refined using
+the result's hit and filter guidance.
 
 Important arguments:
 
@@ -29,13 +36,19 @@ Important arguments:
 - `namespace`: `intro`/`introspection` for inspection capabilities, or
   `op`/`operation` for mutating/external-service actions
 - `family`: optional family filter
-- `module_id`: optional module filter
+- `module_name`: optional module filter
 - `tags`: optional tag filters
-- `top_k` / `limit`: compact hit count
+- `top_k` / `limit`: hit count, default up to 3 strongest matches; an exact alias
+  normally returns one match. An explicit limit permits broader results.
 - `facets`: defaults to false; when true, include namespace/module/family counts
   for broad-search narrowing
 
-The default result should stay compact and return top hits only. Facets are
+Each hit includes purpose, use/avoid conditions, invocation and effect semantics,
+and a title-stripped input JSON Schema that retains validation constraints.
+The structured record also retains its former `input_shape` field for callers.
+Call a selected tool directly (or via `call_tool` for indirect tools) when the
+hit supplies enough information; `read_tool` remains available for missing
+contract details. Facets are
 available when the model needs narrowing statistics, but they should not be
 returned by default.
 
@@ -44,6 +57,13 @@ returned by default.
 Artifact tools accept `artifact_id`, not arbitrary local paths.
 
 `artifact_grep` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
+
+Image import and browser screenshots register artifacts regardless of the
+selected model's vision support. Core may attach their pixels within its image
+budget when the endpoint supports vision. Otherwise the artifact reference is
+available, but Pal cannot claim to have inspected pixels. `browser_navigate`
+opens a page and returns its text, metadata, and links in the same call;
+`browser_read` can reread the current page after interaction.
 
 ## MCP Tool Boundary
 

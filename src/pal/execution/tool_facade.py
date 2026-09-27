@@ -256,32 +256,22 @@ def compile_tool_description(
     example: dict[str, Any] | None,
     next_tool_lines: tuple[str, ...] = (),
 ) -> str:
-    enum_values = _schema_enum_values(input_schema)
     sections = [
         f"Purpose: {guidance.purpose.strip()}",
         f"Use when: {guidance.use_when}",
         f"Do not use when: {guidance.do_not_use_when}",
         (
             "Execution semantics: "
-            f"invocation_mode={execution.invocation_mode.value}; "
             f"effect_kind={execution.effect_kind.value}; "
             f"idempotency={execution.idempotency.value}; "
             f"retry_policy={execution.retry_policy.value}; "
 
         ),
     ]
-    if enum_values:
-        rendered = "; ".join(f"{path}={json.dumps(values, ensure_ascii=False)}" for path, values in enum_values)
-        sections.append(f"Valid enum/const values: {rendered}")
     if example is not None:
         sections.append(f"Valid example: {json.dumps(example, ensure_ascii=False, sort_keys=True)}")
     if next_tool_lines:
         sections.append("Possible next tools:\n" + "\n".join(f"- {line}" for line in next_tool_lines))
-    sections.extend(
-        [
-            f"Invoke using the exact alias `{alias}`.",
-        ]
-    )
     return "\n".join(sections)
 
 

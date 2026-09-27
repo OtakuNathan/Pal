@@ -48,14 +48,14 @@ FILE_READ_GUIDANCE = ToolGuidance(
         "re-read only if the file changed."
     ),
     use_when=(
-        "Reading local source, configuration, immutable output snapshots, or other UTF-8 text. Use ranges for multiple "
+        "Reading local source, configuration, immutable output snapshots, or an artifact's supplied text_file.file_path. Use ranges for multiple "
         "blocks of the same file (for example scattered definitions found by rg) instead of "
         "several single-range calls; each block renders with its own header and truncation note. "
         "Search locates relevant code; before using edit_file, use read_file to deliver the affected ranges. "
         "Reuse valid delivered reads. Shell output and reads of output snapshots do not authorize edits to the original file."
     ),
     do_not_use_when=(
-        "Binary files, images, PDFs, or channel-delivered artifacts. Reading several different "
+        "Binary files, images, or raw PDFs/audio. Use their extracted text_file path when supplied. Reading several different "
         "files at once (read_file reads one file per call; batch ranges apply within one file). "
         "offset and limit here count lines, not characters. "
         "Do not re-read an unchanged covered block after read_file returns an unchanged marker; "

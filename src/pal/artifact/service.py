@@ -74,7 +74,7 @@ class ArtifactRepresentationRegistry:
         if self.auto_priority is None:
             self.auto_priority = {
                 ARTIFACT_KIND_TEXT: (REPRESENTATION_TEXT, REPRESENTATION_CHUNK_TEXT, REPRESENTATION_METADATA),
-                ARTIFACT_KIND_PDF: (REPRESENTATION_CHUNK_TEXT, REPRESENTATION_PAGE_TEXT, REPRESENTATION_PAGE_IMAGE, REPRESENTATION_METADATA),
+                ARTIFACT_KIND_PDF: (REPRESENTATION_TEXT, REPRESENTATION_CHUNK_TEXT, REPRESENTATION_PAGE_TEXT, REPRESENTATION_PAGE_IMAGE, REPRESENTATION_METADATA),
                 ARTIFACT_KIND_AUDIO: (REPRESENTATION_TRANSCRIPT, REPRESENTATION_METADATA),
                 ARTIFACT_KIND_IMAGE: (REPRESENTATION_METADATA, REPRESENTATION_NORMALIZED_IMAGE),
             }
@@ -363,6 +363,28 @@ class ArtifactManager:
                     pass
             return removed
 
+    async def import_local_for_turn(
+        self,
+        source: StoredArtifact | Path | str,
+        *,
+        runtime: Any,
+        turn_id: str,
+        source_channel: str = "local_file",
+    ) -> Any:
+        """Owner entrypoint for tools producing conversation artifacts.
+
+        Registration is independent of model capabilities. Core decides the
+        representation when projecting the reference into the next request.
+        """
+        from pal.artifact.tools import ArtifactImportTool
+
+        stored = source if isinstance(source, StoredArtifact) else None
+        return await ArtifactImportTool(self).ainvoke(
+            {"path": stored.local_cached_path if stored is not None else str(source)},
+            runtime=runtime, turn_id=turn_id, stored_source=stored,
+            source_channel=source_channel,
+        )
+
     def register_ingested(
         self,
         stored_or_path: Any,
@@ -532,7 +554,10 @@ class ArtifactManager:
             truncated=truncated,
             selection=dict(selected.selector),
             metadata={**self._record_dict(record), "representation": self._representation_dict(selected)},
-            next_actions=_next_actions_for(record),
+            text_file=_text_file_metadata(selected),
+            next_actions=("Read the complete text_file.file_path with read_file or search it with run_shell and rg. "
+                          "For oversized lines use bounded shell reads. This is a managed read-only input; copy it before editing.",)
+                         if _text_file_metadata(selected) else (),
         )
 
     def artifact_search(
@@ -630,7 +655,18 @@ class ArtifactManager:
                 )
             )
         results.sort(key=lambda item: (-item.score, item.representation_id))
-        return tuple(results[: max(1, int(top_k or 5))])
+        # Full-text, page, and chunk representations may contain the same hit.
+        # Keep one text body and retain every location before applying top_k.
+        unique = {}
+        for item in results:
+            location = {"representation_id": item.representation_id,
+                        "representation": item.representation, "selector": dict(item.selector)}
+            previous = unique.get(item.text)
+            if previous is None:
+                unique[item.text] = replace(item, locations=(location,))
+            elif location not in previous.locations:
+                unique[item.text] = replace(previous, locations=(*previous.locations, location))
+        return tuple(list(unique.values())[: max(1, int(top_k or 5))])
 
     def select_prompt_exposure(
         self,
@@ -702,7 +738,7 @@ class ArtifactManager:
                     continue
                 if not inlined:
                     manifest_lines.append(self._tool_handling_manifest(record))
-                    needs_tool_handling = True
+                    needs_tool_handling = needs_tool_handling or not bool(self._text_file_for_record(record))
             if retired_count and not live_count:
                 text = (
                     "The referenced artifact handlers have retired. Their managed bytes and representations "
@@ -726,7 +762,7 @@ class ArtifactManager:
                 )
                 text = (
                     "These are short-lived conversation artifacts Pal can read by artifact_id. "
-                    "Use artifact tools only when the current user request depends on them. "
+                    "Use the supplied text_file directly with rg/read_file when text is needed; use artifact tools for missing paths, representations or metadata. "
                     "Do not treat artifact_id as a local path. "
                     "Managed artifact files are read-only inputs; copy one to an ordinary workspace path before modifying it. "
                     "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
@@ -817,6 +853,17 @@ class ArtifactManager:
         return []
 
     def _tool_handling_manifest(self, record: ArtifactRecord) -> str:
+        text_file = self._text_file_for_record(record)
+        if text_file:
+            return (
+                f"- artifact_id: {record.artifact_id}\n"
+                f"  file_name: {_prompt_scalar(record.file_name)}\n"
+                f"  kind: {record.kind}\n"
+                f"  text_file: {_prompt_scalar(text_file)}\n"
+                "  handling: use run_shell with rg to locate text and read_file to read lines; "
+                "use shell for oversized lines. The text is already extracted; no processor discovery "
+                "or read_artifact call is required. Copy this managed input before editing."
+            )
         local_file = _local_file_metadata(record)
         representations = [
             _representation_prompt_dict(item)
@@ -874,8 +921,13 @@ class ArtifactManager:
             return None
         for kind in (REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT):
             for rep in self.repository.list_representations(record.artifact_id, representation_kind=kind):
-                if rep.text_preview and len(rep.text_preview) <= self.policy.text.inline_budget_chars:
-                    return rep
+                path = _existing_path_text(rep.path)
+                if not path:
+                    continue
+                with Path(path).open(encoding="utf-8", newline="") as stream:
+                    text = stream.read(self.policy.text.inline_budget_chars + 1)
+                if text and len(text) <= self.policy.text.inline_budget_chars:
+                    return replace(rep, text_preview=text)
         return None
 
     def _select_representation(
@@ -981,13 +1033,25 @@ class ArtifactManager:
             summary=record.summary,
             status=record.status,
             available_actions=tuple(actions),
+            text_file=self._text_file_for_record(record),
         )
+
+    def _text_file_for_record(self, record: ArtifactRecord) -> dict[str, Any]:
+        for kind in (REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT):
+            for rep in self.repository.list_representations(record.artifact_id, representation_kind=kind):
+                result = _text_file_metadata(rep)
+                if result:
+                    return result
+        return {}
 
     def _record_dict(self, record: ArtifactRecord) -> dict[str, Any]:
         metadata = _sanitize_metadata_for_llm(record.metadata)
         local_file = _local_file_metadata(record)
         if local_file:
             metadata["local_file"] = local_file
+        text_file = self._text_file_for_record(record)
+        if text_file:
+            metadata["text_file"] = text_file
         return {
             "artifact_id": record.artifact_id,
             "kind": record.kind,
@@ -1115,6 +1179,21 @@ def _representation_prompt_dict(representation: ArtifactRepresentation) -> dict[
         "summary": representation.summary,
         "status": representation.status,
     }
+
+
+def _text_file_metadata(representation: ArtifactRepresentation) -> dict[str, Any]:
+    if representation.representation_kind not in {
+        REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT, REPRESENTATION_PAGE_TEXT, REPRESENTATION_CHUNK_TEXT,
+    }:
+        return {}
+    path = _existing_path_text(representation.path)
+    if not path:
+        return {}
+    return {"file_path": path, "representation": representation.representation_kind,
+            "selector": dict(representation.selector), "read_only": True,
+            **{key: representation.metadata[key]
+               for key in ("pages", "page_count", "extracted_pages", "extraction_truncated")
+               if key in representation.metadata}}
 
 
 def _local_file_metadata(record: ArtifactRecord) -> dict[str, Any]:

@@ -8,6 +8,7 @@ from pal.execution.tool_semantics import (
 )
 from pal.execution.tool_facade import NextToolHint, ToolGuidance
 from pal.packages.jobs import PackageJobs
+from pal.packages.notifications import PackageCompletionSource
 from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput, PluginUninstallInput
 from pathlib import Path
 
@@ -55,6 +56,7 @@ class PluginsIntrospectionProvider:
     host: PluginHost
     module_id: str = "plugins"
     package_jobs: PackageJobs | None = None
+    completion_events: PackageCompletionSource | None = None
 
     def jobs(self) -> PackageJobs:
         if self.package_jobs is None:
@@ -62,56 +64,68 @@ class PluginsIntrospectionProvider:
         return self.package_jobs
 
     def shutdown_packages(self) -> None:
+        if self.completion_events is not None:
+            self.completion_events.close()
         if self.package_jobs is not None:
             self.package_jobs.shutdown()
 
     def _package_result(self, action, **args) -> IntrospectionResult:
         try:
             payload = action(**args)
-            status = RuntimeStatus.OK
+            status = RuntimeStatus.ERROR if payload.get("status") == "failed" else RuntimeStatus.OK
         except Exception as exc:
             payload = {"error": str(exc)}
             status = RuntimeStatus.ERROR
         return IntrospectionResult(status=status, text="Package operation", structured=payload,
                                    llm_text=render_titled_structured_for_llm("Package operation", payload))
 
+    def _start_package_job(self, call: IntrospectionCall, operation: str, **args) -> IntrospectionResult:
+        if self.completion_events is None:
+            self.completion_events = PackageCompletionSource(self.host.context)
+        return self._package_result(
+            self.jobs().start, operation=operation,
+            wait_ms=call.args.get("wait_ms", 1000),
+            on_complete=self.completion_events.notifier(call.meta.get("turn_id")),
+            **args,
+        )
+
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="package", action_name="install",
-        guidance=ToolGuidance(purpose="Install a local plugin package, prepare its private dependencies, and activate it through its owner.",
-            use_when="A plugin package is ready to install or upgrade.", do_not_use_when="Only dependencies of an installed plugin need repair; use package_prepare.",
+        guidance=ToolGuidance(purpose="Install a local plugin or channel provider package, prepare its private dependencies, and activate it through its owner.",
+            use_when="A plugin or channel provider .palpkg, or legacy provider .whl, is ready to install or upgrade. The call briefly waits for completion; longer jobs report notification availability. A scheduled completion event wakes Pal to continue the initiating task; do not poll.", do_not_use_when="Only dependencies of an installed package need repair; use package_prepare.",
             failure_next_steps="Read package_status. Failure does not confirm installation or activation; retry after correcting the reported cause.",
-            next_tool_hints=(NextToolHint(name="package_status", use_when="Follow the returned installation job."),)),
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Notification is unavailable, the outcome is uncertain, or detailed diagnostics are needed."),)),
         InputModel=PackageInstallInput, aliases=("package_install",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     def package_install(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._package_result(self.jobs().start, operation="install", path=Path(call.args["path"]))
+        return self._start_package_job(call, "install", path=Path(call.args["path"]))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="package", action_name="prepare",
         guidance=ToolGuidance(purpose="Prepare or repair an installed package's dependencies without modifying Pal's Python environment.",
-            use_when="An installed plugin or builtin such as web_fetch has missing runtime dependencies.",
+            use_when="An installed plugin, channel provider, or builtin such as web_fetch has missing runtime dependencies; select its package kind. Briefly waits for completion; if a completion notice is scheduled, do not poll.",
             do_not_use_when="Installing a new artifact; use package_install.",
             failure_next_steps="Inspect package_status for the stage and cause. Missing system privileges or configuration must be resolved before retrying.",
-            next_tool_hints=(NextToolHint(name="package_status", use_when="Inspect preparation progress and verification."),)),
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Notification is unavailable, the outcome is uncertain, or preparation diagnostics are needed."),)),
         InputModel=PackagePrepareInput, aliases=("package_prepare",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     def package_prepare(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._package_result(self.jobs().start, operation="prepare", name=call.args["name"], kind=call.args.get("kind", "plugin"))
+        return self._start_package_job(call, "prepare", name=call.args["name"], kind=call.args.get("kind", "plugin"))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="uninstall",
         guidance=ToolGuidance(purpose="Uninstall a third-party plugin through detach and remove its installation registration; retain data by default.",
             use_when="The user wants to remove an installed community plugin, optionally clearing declared owned data.",
             do_not_use_when="Temporary detach or disabling startup. Built-in plugins and channel providers cannot be uninstalled here.",
             failure_next_steps="Inspect package_status and retry the same uninstall. Cleanup failure preserves remaining resources; undeclared data cannot be purged.",
-            next_tool_hints=(NextToolHint(name="package_status", use_when="Follow the uninstall job and inspect retained data or unfinished cleanup."),)),
+            next_tool_hints=(NextToolHint(name="package_status", use_when="Notification is unavailable, or retained data and unfinished cleanup need inspection."),)),
         InputModel=PluginUninstallInput, aliases=("plugin_uninstall",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     def uninstall(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._package_result(self.jobs().start, operation="uninstall", name=call.args["name"],
+        return self._start_package_job(call, "uninstall", name=call.args["name"],
                                     purge_data=bool(call.args.get("purge_data", False)))
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", family="package", action_name="status",
         guidance=ToolGuidance(purpose="Inspect package installation stages, failures, private environments and activation results.",
-            use_when="Following an installation job or diagnosing dependencies.", do_not_use_when="Reading a plugin's application data.",
+            use_when="Inspecting progress or diagnosing dependencies; use job_id and bounded wait_ms when no completion notification is available.", do_not_use_when="Repeated polling when a completion notice is scheduled. Reading a plugin's application data.",
             failure_next_steps="Unknown jobs may belong to another runtime root; verify the selected runtime."),
         InputModel=PackageStatusInput, aliases=("package_status",), execution=INDIRECT_LOCAL_READ)
     def package_status(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._package_result(self.jobs().status, job_id=call.args.get("job_id"))
+        return self._package_result(self.jobs().status, job_id=call.args.get("job_id"), wait_ms=call.args.get("wait_ms", 0))
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
@@ -161,10 +175,10 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="attach",
         guidance=ToolGuidance(
-            purpose="Attach an enabled plugin's runtime instance to the current runtime.",
+            purpose="Load an enabled plugin into the current runtime; an already attached instance is preserved.",
             use_when="Reconnecting a detached plugin that is already enabled.",
-            do_not_use_when="Attaching a disabled plugin (use plugin_enable — it enables and attaches in one step). Detaching (use plugin_detach).",
-            failure_next_steps="If disabled, call plugin_enable first. If the plugin name is unknown, check plugins_list.",
+            do_not_use_when="Reloading changed plugin code (use plugin_reattach). Attaching a disabled plugin (use plugin_enable — it enables and attaches in one step). Detaching (use plugin_detach).",
+            failure_next_steps="If disabled, use plugin_enable, which also attaches it. If cleanup is pending, fix the reported cause and use plugin_reattach. If the plugin name is unknown, check plugins_list.",
         ),
         aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -177,6 +191,30 @@ class PluginsIntrospectionProvider:
             text="plugin attach result",
             structured=result,
             llm_text=render_titled_structured_for_llm("Plugin attach result", result),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="reattach",
+        guidance=ToolGuidance(
+            purpose="Reload an enabled plugin's code and runtime instance in one operation, restoring affected dependents.",
+            use_when="Plugin implementation changed or its runtime needs restarting. A detached enabled plugin is loaded. No prior detach is needed.",
+            do_not_use_when="Loading a detached plugin without replacing a live instance (use plugin_attach). Enabling a disabled plugin (use plugin_enable). Resident core changes require a host restart; channel provider code uses channel_reload_provider.",
+            failure_next_steps="Inspect plugins_list for load or cleanup errors and affected dependents. Correct the reported cause before retrying; reload can interrupt dependent plugins and does not promise rollback.",
+        ),
+        aliases=("plugin_reattach",),
+        InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
+        execution=INDIRECT_CONTROL,
+    )
+    def reattach(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.host.reattach(str(call.args.get("name") or ""))
+        return IntrospectionResult(
+            status=result["status"],
+            text="plugin reattach result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin reattach result", result),
         )
 
     @capability_action(
@@ -255,7 +293,7 @@ class PluginsIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Rescan plugin directories to discover newly installed or updated plugins.",
             use_when="New plugins were installed or plugin configuration files changed.",
-            do_not_use_when="Restarting one specific plugin (use plugin_attach after detach, or plugin_enable). Rescanning channel providers (use channel_provider_rescan).",
+            do_not_use_when="Reloading or restarting one specific plugin (use plugin_reattach). Rescanning channel providers (use channel_provider_rescan).",
             failure_next_steps="If scan_errors occur, check plugin manifest files. Previous plugin generation is preserved on error.",
         ), aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:

@@ -350,7 +350,7 @@ class MemoryIntrospectionProvider:
                 ),
                 NextToolHint(
                     name="update_memory",
-                    use_when="The user explicitly corrects a known memory; semantic consolidation belongs to dreaming.",
+                    use_when="A corresponding recalled record needs additional, corrected or superseding information. If it already contains the information, no write is needed; semantic consolidation belongs to dreaming.",
                 ),
                 NextToolHint(
                     name="forget_memory",
@@ -398,7 +398,8 @@ class MemoryIntrospectionProvider:
                 "For facts, preferences, project context, prior decisions. "
                 "After fixing a bug or completing a debugging session with reusable lessons — write kind='case'. "
                 "Remember creates a new record; semantic duplicates are handled by dreaming. "
-                "Use update_memory only for an explicit correction to a known record, never for speculative consolidation."
+                "If a corresponding record is already recalled, use update_memory to add, correct or supersede its information. "
+                "Do not recall solely as a prerequisite for every new memory, or consolidate unrelated records speculatively."
             ),
             do_not_use_when=(
                 "Not for current runtime state or external facts. "
@@ -484,7 +485,8 @@ class MemoryIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Update an existing durable memory record.",
             use_when=(
-                "Instead of remember_memory when a recalled record is being corrected, superseded, or already covers the candidate. "
+                "Instead of remember_memory when a corresponding recalled record needs additional, corrected or superseding information. "
+                "If it already contains all the candidate information, no write is needed; recalling alone does not require an update. "
                 "Copy mem_ref exactly from recall_memory results, including prefixes like fact: or case:."
             ),
             do_not_use_when=(

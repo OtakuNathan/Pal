@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -25,6 +26,35 @@ TASK_LEDGER_ARTIFACT = "TaskLedgerArtifact"
 TASK_LEDGER_YAML_ARTIFACT = "TaskLedgerYamlArtifact"
 
 _SAFE_STAMP = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def snapshot_task_spec_file(path: str, task_spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Capture file bytes once so later role sessions never depend on a mutable path."""
+    spec = dict(task_spec or {})
+    if {"authoritative_text", "authoritative_source"}.intersection(spec):
+        raise ValueError("task_spec_file cannot be combined with authoritative_text or authoritative_source")
+    source = Path(path).expanduser()
+    if not source.is_absolute():
+        raise ValueError("task_spec_file must be an absolute path")
+    try:
+        source = source.resolve(strict=True)
+        if not source.is_file():
+            raise ValueError("task_spec_file must be a regular UTF-8 file")
+        content = source.read_bytes()
+        text = content.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"Cannot read task_spec_file as UTF-8: {exc}") from exc
+    if not text.strip():
+        raise ValueError("task_spec_file must not be empty or blank")
+    spec.update(
+        authoritative_text=text,
+        authoritative_source={
+            "path": str(source),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        },
+    )
+    return spec
 
 
 class _StrictModel(BaseModel):

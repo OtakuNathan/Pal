@@ -61,16 +61,17 @@ _BROWSER_SKILL_MANUAL = """# Stateful Browser Use
 
 Use the browser capabilities for JavaScript-rendered pages and interactive UI work.
 
-1. Use `browser_navigate` as the browser discovery entry point. Its next-tool hints lead to
-   page inspection and extension tools via `read_tool` / `call_tool`. If the current page
-   already suffices, discover and call `browser_read` directly; no extra navigation is required.
+1. Use `browser_navigate` to open a URL and read its rendered text and links in one call.
+   Reuse the returned content; do not follow it with browser_read unless content is missing
+   or has changed. Use browser_read without url to reread the current page after interaction.
 2. Use `browser_snapshot` or `browser_find` to obtain current element refs.
 3. Call the narrow interaction capability such as `browser_click` or `browser_fill`.
 4. Inspect the changed page again; refs may become stale after any action.
    Click results include open tabs when reported by the browser. Popups do not
    automatically become current: use browser_tabs list/select, then read or snapshot.
    If a popup appears later, list tabs again; do not repeat the click blindly.
-5. Use `browser_screenshot` only when pixel evidence is useful.
+5. Use `browser_screenshot` when pixel evidence is useful. It registers the image for core
+   to attach automatically when the selected model supports vision; do not import it again.
 
 The browser profile belongs to the current conversation. `browser_close` releases live
 processes but keeps login state; `browser_clear_cache` clears HTTP cache while retaining
@@ -166,12 +167,12 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="navigate",
         guidance=ToolGuidance(
-            purpose="Open a URL in the current conversation's full Chromium browser. It supports interactive pages and loading local Manifest V3 extensions, including extensions you develop and test here.",
-            use_when="Starting an interactive browser workflow or changing pages.",
+            purpose="Open a URL in this conversation's Chromium browser and return rendered text, metadata and links. Supports interactive pages and local Manifest V3 extensions.",
+            use_when="Reading a new webpage or starting an interactive browser workflow. Reuse the returned document; a separate read is unnecessary unless content changed or extraction failed.",
             do_not_use_when="Only raw HTTP/API content is needed.",
             failure_next_steps="An explicit URL skips saved-page restoration. For page_restore_failed, provide a new HTTP(S) URL; do not edit last_url or reset login data. For startup failures inspect browser_status. For target-page failures check the URL/network; the main Pal may use run_shell with curl when raw HTTP content suffices.",
             next_tool_hints=(
-                NextToolHint(name="browser_read", use_when="Read rendered text, metadata, and links; omit url to use the current page."),
+                NextToolHint(name="browser_read", use_when="Page content changed or navigation returned content_status=unavailable; omit url to read the current page."),
                 NextToolHint(name="browser_snapshot", use_when="Inspect controls and obtain element refs before interacting."),
                 NextToolHint(name="browser_find", use_when="Locate specific text or controls without a full snapshot."),
                 NextToolHint(name="browser_status", use_when="Inspect browser health or diagnose startup failures."),
@@ -194,8 +195,8 @@ class WebFetchIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             purpose="Read rendered text, metadata, and links from the current conversation's browser page.",
-            use_when="Reading a specific rendered page; provide url to navigate first or omit it to read the current page.",
-            do_not_use_when="Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
+            use_when="Rereading the current page after content changed or navigation returned content_status=unavailable; omit url to reuse the page. A url is also accepted for tool surfaces without browser_navigate.",
+            do_not_use_when="Reading a new URL when browser_navigate is available: it opens the page and returns content directly. Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
             failure_next_steps="For page_restore_failed, supply a new HTTP(S) url here or use browser_navigate; this skips the saved page without clearing login data. Do not edit last_url. For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
         ),
         InputModel=BrowserReadInput,
@@ -310,7 +311,7 @@ class WebFetchIntrospectionProvider:
     def network(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "network", "Browser network")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(purpose="Save the current page or target as a local PNG screenshot; use artifact_import to attach it for visual inspection.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="artifact_import", use_when="The screenshot was saved and Pal needs to inspect its pixels; pass artifact.local_cached_path as path."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(purpose="Capture the current page or target as a PNG and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="artifact_import", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             key, persistent = self._scope(call)

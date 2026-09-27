@@ -70,6 +70,45 @@ def test_v2_manifest_and_usage_count_reasoning_once():
     assert summary['discovery_tokens'] == 130
 
 
+def test_affordance_manifest_and_isolated_effects(tmp_path):
+    from pal.eval_tools import load_tools_benchmark
+    manifest, cases = load_tools_benchmark(MANIFEST.with_name('affordance-v1.json'))
+    assert len(cases) == 4
+    assert manifest['version'] == 'pal.tools-affordance.v1'
+    fixture = FixtureExecution(tmp_path, 'affordance-proactive-current')
+    try:
+        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='call_tool', args={
+            'name': 'proactive_create', 'args': {'name': 'fixture_followup', 'goal': 'review fixture'},
+        }), turn_id='eval:affordance-proactive-current:1'))
+        assert result.ok, result.llm_text
+        assert result.structured['out_reply_target'] == {'chat_id': '42'}
+        assert fixture.unsafe_attempts == 0
+    finally:
+        fixture.close()
+
+    fixture = FixtureExecution(tmp_path, 'affordance-navigate-content')
+    try:
+        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='browser_navigate', args={
+            'url': 'https://example.com/',
+        }), turn_id='eval:affordance-navigate-content:1'))
+        assert result.ok, result.llm_text
+        assert result.structured['document']['text'] == 'Fixture webpage content'
+        assert fixture.unsafe_attempts == 0
+    finally:
+        fixture.close()
+
+    fixture = FixtureExecution(tmp_path, 'affordance-screenshot')
+    try:
+        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='call_tool', args={
+            'name': 'browser_screenshot', 'args': {},
+        }), turn_id='eval:affordance-screenshot:1'))
+        assert result.ok, result.llm_text
+        assert result.structured['registration'] == 'registered'
+        assert fixture.unsafe_attempts == 0
+    finally:
+        fixture.close()
+
+
 def test_fixture_allows_real_read_file_contract(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'pyproject.toml').write_text('[project]\nname = "fixture"\n')

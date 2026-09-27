@@ -515,7 +515,13 @@ class _PlaywrightCliWorker:
                 ) from exc
             raise
         record.last_used_at = time.time()
-        page = dict(payload.get("page") or self._page_state(record, timeout_ms=timeout_ms))
+        try:
+            page = dict(payload.get("page") or self._page_state(record, timeout_ms=timeout_ms))
+        except BrowserServiceError as exc:
+            if not payload.get("navigation_completed"):
+                raise
+            page = {}
+            payload["page_state_error"] = exc.to_dict()
         record.last_url = str(page.get("url") or record.last_url)
         if record.persistent:
             self._write_profile_meta(record)
@@ -528,6 +534,23 @@ class _PlaywrightCliWorker:
         )
         return payload
 
+    def _read_document(self, record: _SessionRecord, *, args: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
+        max_chars = max(1000, min(100000, int(args.get("max_chars") or 12000)))
+        raw_max_links = args.get("max_links")
+        max_links = max(0, min(500, int(80 if raw_max_links is None else raw_max_links)))
+        raw = self._run(
+            record, ["eval", _read_page_script(max_chars=max_chars, max_links=max_links)],
+            timeout_ms=timeout_ms, raw=True,
+        )
+        document = _parse_json_object(raw, "browser read")
+        text = str(document.get("text") or "").strip()
+        document["text_truncated"] = bool(document.get("text_truncated")) or len(text) > max_chars
+        document["text"] = text[:max_chars].rstrip()
+        links = list(document.get("links") or [])
+        document["links_truncated"] = bool(document.get("links_truncated")) or len(links) > max_links
+        document["links"] = links[:max_links]
+        return {"document": document, "content_status": "available"}
+
     def _dispatch_action(
         self,
         record: _SessionRecord,
@@ -536,29 +559,25 @@ class _PlaywrightCliWorker:
         args: dict[str, Any],
         timeout_ms: int,
     ) -> dict[str, Any]:
-        if action == "navigate":
-            self._run(record, _cli_args("goto", self._navigation_url(record.key, args.get("url"))), timeout_ms=timeout_ms, raw=True)
-            return {}
-        if action == "read":
+        if action in {"navigate", "read"}:
             url = str(args.get("url") or "").strip()
-            if url:
+            navigated = action == "navigate" or bool(url)
+            if navigated:
                 self._run(record, _cli_args("goto", self._navigation_url(record.key, url)), timeout_ms=timeout_ms, raw=True)
-            max_chars = max(1000, min(100000, int(args.get("max_chars") or 12000)))
-            max_links = max(0, min(500, int(args.get("max_links") or 80)))
-            raw = self._run(
-                record,
-                ["eval", _read_page_script(max_chars=max_chars, max_links=max_links)],
-                timeout_ms=timeout_ms,
-                raw=True,
-            )
-            document = _parse_json_object(raw, "browser read")
-            text = str(document.get("text") or "").strip()
-            document["text_truncated"] = len(text) > max_chars
-            document["text"] = text[:max_chars].rstrip()
-            links = list(document.get("links") or [])
-            document["links_truncated"] = len(links) > max_links
-            document["links"] = links[:max_links]
-            return {"document": document}
+            try:
+                payload = self._read_document(record, args=args, timeout_ms=timeout_ms)
+            except BrowserServiceError as exc:
+                if not navigated:
+                    raise
+                return {
+                    "navigation_completed": True,
+                    "content_status": "unavailable",
+                    "read_error": exc.to_dict(),
+                    "next_step": "Navigation completed, but page text could not be read. Use browser_read without url to read the current page; do not navigate again solely to recover text.",
+                }
+            if navigated:
+                payload["navigation_completed"] = True
+            return payload
         if action == "snapshot":
             options: list[str] = []
             target = str(args.get("target") or "").strip()

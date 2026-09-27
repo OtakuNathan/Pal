@@ -87,11 +87,12 @@ class ToolGuidanceCompilationTests(unittest.TestCase):
             )
 
             record = runtime.registry_generation.direct_aliases["starter"]
-            self.assertIn("Invoke it directly as `direct_next`", record.compiled_description)
-            self.assertIn('read_tool(name="indirect_next")', record.compiled_description)
-            self.assertIn('call_tool(name="indirect_next", args=...)', record.compiled_description)
+            self.assertIn("`direct_next` (direct) — continue directly", record.compiled_description)
+            self.assertIn("`indirect_next` (indirect) — continue indirectly", record.compiled_description)
+            from pal.shared.tool_routing import TOOL_ROUTING_DEVELOPER_GUIDANCE
+            self.assertIn("call_tool(name=alias, args=...)", TOOL_ROUTING_DEVELOPER_GUIDANCE)
             self.assertIn("starter-purpose-token", record.search_document)
-            self.assertIn("direct_next", record.search_document)
+            self.assertNotIn("direct_next", record.search_document)
             self.assertNotIn("negative-only-token", record.search_document)
             self.assertNotIn("failure-only-token", record.search_document)
         finally:

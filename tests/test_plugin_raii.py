@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.core import PalCore
 from pal.plugins import PluginHost
@@ -14,7 +15,7 @@ from pal.shared import RuntimeStatus
 
 
 def test_plugin_lifecycle_gate_recognizes_aliases_and_canonical_paths() -> None:
-    for action in ("attach", "detach", "enable", "disable", "rescan", "rescan_and_attach_new_first_party"):
+    for action in ("attach", "reattach", "detach", "enable", "disable", "rescan", "rescan_and_attach_new_first_party"):
         assert _is_plugin_lifecycle_tool(f"plugin_{action}")
         assert _is_plugin_lifecycle_tool(f"op_plugin_mgmt_{action}")
     assert not _is_plugin_lifecycle_tool("mcp_attach")
@@ -127,6 +128,12 @@ def test_reload_cascades_dependents_but_does_not_restore_manual_detach(tmp_path:
         old_dependent = host.generations["dependent"].instance
 
         assert host.attach("base")["status"] == RuntimeStatus.OK
+        assert host.generations["base"].instance is old_base
+        assert host.generations["dependent"].instance is old_dependent
+        assert not [item for item in ledger if item[1] == "cleanup"]
+        assert not host.attach_module("base").fresh_instance
+
+        assert host.reattach("base")["status"] == RuntimeStatus.OK
         assert host.generations["base"].instance is not old_base
         assert host.generations["dependent"].instance is not old_dependent
         assert [item[:2] for item in ledger if item[1] == "cleanup"][-2:] == [
@@ -135,11 +142,50 @@ def test_reload_cascades_dependents_but_does_not_restore_manual_detach(tmp_path:
         ]
 
         assert host.detach("dependent")["status"] == RuntimeStatus.OK
-        assert host.attach("base")["status"] == RuntimeStatus.OK
+        result = host.reload_module("base")
+        assert result.status == RuntimeStatus.OK
+        assert result.fresh_instance
+        assert "dependent" not in host.generations
+        assert host.detach("base")["status"] == RuntimeStatus.OK
+        assert host.reattach("base")["status"] == RuntimeStatus.OK
+        assert "base" in host.generations
         assert "dependent" not in host.generations
     finally:
         host.shutdown()
         sys.path.remove(str(builtin_root))
+
+
+def test_reattach_stops_on_cleanup_failure_and_can_recover(tmp_path: Path) -> None:
+    root = tmp_path / "builtin"
+    _write_plugin(root, "cleanup_test")
+    ledger = []
+    core = PalCore()
+    host = PluginHost(context=core.context, runtime_root=tmp_path,
+                      builtin_root=root, services={"ledger": ledger})
+    fail_cleanup = True
+
+    def cleanup():
+        if fail_cleanup:
+            raise RuntimeError("cleanup blocked")
+
+    sys.path.insert(0, str(root))
+    try:
+        host.bootstrap()
+        old = host.generations["cleanup_test"]
+        old.scope.defer(cleanup)
+        assert host.reattach("cleanup_test")["status"] == RuntimeStatus.ERROR
+        assert host.generations["cleanup_test"] is old
+        assert host.first_party_records["cleanup_test"].last_load_status == "cleanup_failed"
+        assert host.attach("cleanup_test")["status"] == RuntimeStatus.ERROR
+        assert [item[1] for item in ledger].count("start") == 1
+        fail_cleanup = False
+        assert host.reattach("cleanup_test")["status"] == RuntimeStatus.OK
+        assert host.generations["cleanup_test"] is not old
+        assert [item[1] for item in ledger].count("start") == 2
+    finally:
+        fail_cleanup = False
+        host.shutdown()
+        sys.path.remove(str(root))
 
 
 def test_bootstrap_never_publishes_plugin_with_disabled_dependency(tmp_path: Path) -> None:
@@ -162,6 +208,10 @@ def test_bootstrap_never_publishes_plugin_with_disabled_dependency(tmp_path: Pat
         record = host.first_party_records["dependent"]
         assert record.last_load_status == "load_failed"
         assert record.last_error == "dependency disabled or missing: base"
+        assert host.reattach("base")["status"] != RuntimeStatus.OK
+        with patch.object(host.third_party_repository, "get", return_value=None):
+            assert host.reattach("missing")["status"] == RuntimeStatus.NOT_FOUND
+        assert not host.generations
     finally:
         host.shutdown()
         sys.path.remove(str(builtin_root))
@@ -306,7 +356,7 @@ def test_plugin_core_subscription_is_replaced_and_closed_with_generation(tmp_pat
         first = core.context.require_port("display_observer:events")
         assert first.get(timeout=0)[0] == RUNTIME_SNAPSHOT
         core.context.core_event_bus.emit(MEMORY_SLEEP, {"sleeping": True})
-        host.attach("display_observer")
+        host.reattach("display_observer")
         assert first.closed
         with pytest.raises(Empty):
             first.get(timeout=0)

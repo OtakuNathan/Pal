@@ -1464,7 +1464,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             # result-side recovery, not in the standing description.
             self.assertNotIn("recall_memory", memory_write_description)
             self.assertIn("reconcile with recall_memory", memory_write.guidance.failure_next_steps)
-            self.assertIn("Use update_memory only for an explicit correction", memory_write_description)
+            self.assertIn("If a corresponding record is already recalled, use update_memory", memory_write_description)
             self.assertIn("semantic duplicates are handled by dreaming", memory_write_description)
             self.assertIn("fact:/case:", memory_write.guidance.failure_next_steps)
             memory_write_properties = memory_write.input_schema["properties"]
@@ -2734,6 +2734,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
+            channels = ChannelRuntime()
+            for endpoint_id, default_target in (("socket_default", {}), ("telegram_main", {"chat_id": "12345"})):
+                channels.endpoint_registry.register(SimpleNamespace(
+                    endpoint=SimpleNamespace(endpoint_id=endpoint_id),
+                    derive_default_reply_target=lambda target=default_target: dict(target),
+                ))
+            core.context.port_registry["channel:channel"] = channels
             register_proactive_with_core(core.context, ProactiveManager())
             core.publish_module_capabilities("proactive")
 
@@ -2781,7 +2788,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             self.assertEqual(changed_channel.status, "ok")
             self.assertEqual(changed_channel.structured["out_channel_id"], "telegram_main")
-            self.assertEqual(changed_channel.structured["out_reply_target"], {"session_id": "session-1", "request_id": "req-1"})
+            self.assertEqual(changed_channel.structured["out_reply_target"], {"chat_id": "12345"})
 
             changed_target = core.context.execution_runtime.execute(
                 CapabilityCall(

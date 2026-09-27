@@ -157,9 +157,9 @@ and web integrations belong to plugins. Check actual availability before use.
 | Identity in durable storage | Setup exposes name, language, vibe, tone, core policy, timezone. After an authorized external edit, `identity_show` refreshes the resident projection. | Language/tone/preferences update in subsequent prompt assembly; system name and core policy are captured at startup and require host restart. There is no identity-write CLI subcommand. |
 | config.toml `[read]`, `[budget]`, `[stagnation]`, `[llm]` | File configuration covers read/output limits, prompt/tool budgets, stagnation thresholds, LLM retry/timeouts/wait notices. Resident consumers load at startup; hand off restart. | Validate TOML and supported keys/types: the loader can silently fall back to defaults or ignore invalid fields. Endpoint refresh does not reload this file for the resident core. |
 | config.toml `[memory]` embedding settings | Configure remote/local Ollama URLs, model, keep-alive, timeouts and fallback cooldown. Setup exposes remote URLs and model. Reattach `sqlite_vec_l3` to rebuild its embedding provider from the file. | Inspect the active memory provider and embedding health; changing a model does not prove existing embeddings were rebuilt. Index refresh is a distinct operation, not a config reload. |
-| Existing plugin source | `plugin_attach` on an already attached enabled plugin reloads its generation; inspect declared reload_modules and ownership. | Check load errors, attached state and the affected capabilities; dependencies may be suspended/reloaded. Do not promise zero interruption. |
-| New plugin / manifest changes | `plugin_rescan` discovers metadata; then attach the enabled plugin. `plugin_enable` enables and attaches a disabled plugin. | Rescan alone does not reload existing code. Verify discovery, lifecycle result, and a representative operation. |
-| Online package installation | Prefer `package_install` and follow its job with `package_status`; `package_prepare` repairs dependencies. The installer coordinates the relevant lifecycle owner. | Inspect both preparation and activation results. Preserve intentionally inactive state and avoid another attach/reload if installation already performed it. |
+| Existing plugin source | `plugin_reattach` replaces an enabled plugin's generation in one call; inspect declared reload_modules and ownership. `plugin_attach` preserves an already loaded instance. | Check load errors, attached state and the affected capabilities; dependencies may be suspended/reloaded. Do not promise zero interruption. |
+| New plugin / manifest changes | `plugin_rescan` discovers metadata; then attach a new enabled plugin or reattach an existing loaded plugin. `plugin_enable` enables and attaches a disabled plugin. | Rescan alone does not reload existing code. Verify discovery, lifecycle result, and a representative operation. |
+| Online package installation | Prefer `package_install`; it briefly waits, then reports completion-notice availability. Use `package_status` only when no notice is available or diagnostics are needed; `package_prepare` repairs dependencies. The installer coordinates the relevant lifecycle owner. | Inspect both preparation and activation results. Preserve intentionally inactive state and avoid another attach/reload if installation already performed it. |
 | New/removed/enabled/disabled channel provider | `channel_provider_rescan` discovers physical provider changes and eligible endpoint rows. | Inspect scan/load errors, provider mapping, endpoint health/auth/backlog. A provider without configured usable endpoint rows is not a working channel. |
 | Existing channel provider code/manifest/resources | `channel_reload_provider` explicitly stops transports, unloads code, loads and reattaches that provider. | Failure leaves code unloaded and capabilities withdrawn while hubs retain queued delivery; fix and retry. Do not promise automatic rollback to the old generation. |
 | One channel connection or authorization | `channel_restart_endpoint` rebuilds the connection without code reload. Use channel enable/disable/attach/detach and set_auth_material capabilities for their named operations. | Inspect endpoint state, authorization, health and backlog. The recovery socket has a resident boundary. |
@@ -196,7 +196,7 @@ Observations are best effort, not a durable completion or delivery protocol.
 
 Read `docs/pal_core_events.md` and the matching channel/plugin manual for routing,
 snapshots and lifecycle details. Existing provider changes use
-`channel_reload_provider`; plugin changes use `plugin_attach`. Confirm the loaded
+`channel_reload_provider`; plugin changes use `plugin_reattach`. Confirm the loaded
 runtime supports these hooks; adding/changing resident bus implementation still
 requires an external host restart.
 
@@ -227,16 +227,19 @@ Do not rerun the whole setup wizard merely to work around a missing narrow sette
 
 ## Verify and hand off
 
-For screenshot-based self-inspection, save the screenshot through the appropriate
-browser/desktop capability, then call `artifact_import` with the local image path.
-The import copies the file into current-conversation artifacts and attaches a
-reference for prompt projection. `browser_screenshot` returns its source path in
-`artifact.local_cached_path`. A path or stored_artifact_id alone is not pixel
-input. Inspect pixels only when the next model request attaches the image inline
-and the model supports vision; read_artifact is text-only. Image import checks
-current-turn capabilities through core and rejects missing or unsupported vision
-before creating an artifact. On that error, discover an OCR or image-analysis
-tool with search_tools and verify that it accepts local paths. OCR extracts text;
+For screenshot-based self-inspection, use the appropriate browser/desktop capability.
+`browser_screenshot` registers a current-conversation artifact and returns its
+reference; reuse it without another `artifact_import`. If only a local file was
+saved and registration is confirmed absent, follow the result's recovery to import
+it. If registration is uncertain, reconcile with list_artifacts before importing;
+if an error includes an artifact_id, inspect that artifact instead. The screenshot
+source path is `artifact.local_cached_path`.
+Core attaches the image inline when the active model supports vision and projection
+limits allow it; otherwise the artifact remains available without inline pixels.
+Import does not require vision support. A path or stored_artifact_id alone is not
+pixel input. Inspect pixels only when the model request includes the inline image;
+read_artifact is text-only. When pixels cannot be inspected, discover an OCR or
+image-analysis tool with search_tools if needed and verify its accepted input. OCR extracts text;
 it does not establish full visual inspection. If no suitable tool exists, explain
 the limitation and the concrete endpoint-switching steps. Missing vision support,
 processing failure, size limits, or an expired reference must be reported rather
@@ -329,8 +332,11 @@ the package venv. Optional `hooks="install_hooks.py"` supplies check/prepare/ver
 functions returning a JSON object with boolean `ok`. Check must work before the
 backend is installed. Prepare/verify use its private interpreter.
 
-Use indirect `package_install` to install and activate a local package in a running Pal, then
-`package_status` to follow its job and actual activation state. CLI installation
+Use indirect `package_install` to install and activate a local package in a running Pal.
+It briefly waits for completion. For longer jobs, a scheduled completion event wakes Pal to continue the
+initiating task when idle; do not poll. If notification is unavailable, use
+`package_status` with the job_id and bounded wait_ms. Inspect actual activation
+state before deciding whether further work is needed. CLI installation
 is offline and cannot replace files while that runtime is running. Do not repeat
 attach/reload if the installation already activated the requested generation. Use `package_prepare` to retry dependency
 preparation. Do not manually pip-install plugin dependencies into Pal's Python.
@@ -464,15 +470,16 @@ Attach, detach, and reattach must be clean:
 2. Return a `ModuleHandle` whose module ID is stable.
 3. Let core/plugin host publish and withdraw capabilities; do not manually mutate the compiled index.
 4. Put external resources in `cleanup_callbacks` or provider `detach` methods.
-5. After code changes, call `plugin_attach` on the already attached enabled plugin to reload it. Rescan first if manifest metadata changed. Explicit detach is for taking the plugin offline, not a prerequisite for every reload.
+5. After code changes, call `plugin_reattach` to reload the enabled plugin in one operation. Rescan first if manifest metadata changed. Use `plugin_detach` to take it offline; `plugin_attach` loads it without replacing an already attached instance.
 
 Useful operations:
 
 - `plugin_rescan`: discover plugin manifests.
-- `plugin_attach`: attach or refresh a plugin.
+- `plugin_attach`: load a plugin, preserving an already attached instance.
+- `plugin_reattach`: unload and reload an enabled plugin and restore affected dependents.
 - `plugin_detach`: temporarily detach a plugin.
 - `plugin_disable`: persistently disable startup and detach, including builtins.
-- `plugin_uninstall`: remove a community installation through a package job; retain data by default. Follow `package_status`. Explicit purge requires declared `[uninstall] data_paths`; builtins and providers are not supported.
+- `plugin_uninstall`: remove a community installation through a package job; retain data by default. Await a scheduled completion notice; use `package_status` if notification is unavailable or cleanup diagnostics are needed. Explicit purge requires declared `[uninstall] data_paths`; builtins and providers are not supported.
 - `plugin_enable`: enable and attach a disabled plugin.
 - `search_tools`: find capabilities after attach.
 - `call_tool`: call a capability by discovered name.
@@ -822,7 +829,7 @@ Provider build code may call `context.register_cleanup(callback)` and expose opt
 
 Use `channel_restart_endpoint` to rebuild one connection through its already loaded provider. It does not reload provider modules or discover new providers. Do not add a redundant endpoint restart after a successful provider reload.
 
-For installation, `pal provider install WHEEL --runtime-root ROOT` and `pal package install PATH --runtime-root ROOT` are offline commands guarded by the runtime lock. In a running Pal use `package_install`, follow `package_status`, and inspect the owner's activation result before adding any rescan/reload. A successful package installation can already perform the provider load.
+For installation, `pal provider install WHEEL --runtime-root ROOT` and `pal package install PATH --runtime-root ROOT` are offline commands guarded by the runtime lock. In a running Pal use `package_install`, await its result or scheduled completion notice (use `package_status` if unavailable), and inspect the owner's activation result before adding any rescan/reload. A successful package installation can already perform the provider load.
 
 Never stop, restart, or kill your own hosting service or process from inside the active turn. If a change to Pal core or the recovery socket genuinely requires a full process restart, make the work durable and hand that restart off to the user or an external supervisor.
 
@@ -918,6 +925,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             capability_refs=(
                 "plugin_rescan",
                 "plugin_attach",
+                "plugin_reattach",
                 "plugin_detach",
                 "plugin_enable",
                 "search_tools",

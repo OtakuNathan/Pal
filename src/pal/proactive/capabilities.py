@@ -34,6 +34,7 @@ from pal.shared import (
     IntrospectionCall,
     IntrospectionResult,
     RuntimeStatus,
+    SourceKind,
     capability_action,
     capability_node,
 )
@@ -102,6 +103,25 @@ class ProactiveIntrospectionProvider:
     mounted: bool = True
     degraded: bool = False
     refresh_capabilities: Callable[[], None] | None = None
+    context: MainContext | None = None
+
+    def _current_delivery_binding(self, call: IntrospectionCall) -> dict[str, object]:
+        runtime = self.context.execution_runtime if self.context is not None else None
+        turn_io = getattr(runtime, "provider_registry", {}).get("core:turn_io")
+        capture = getattr(turn_io, "capture_delivery_binding", None)
+        return dict(capture(call.meta.get("turn_id")) or {}) if callable(capture) else {}
+
+    def _resolve_destination(
+        self, call: IntrospectionCall, *, endpoint_id: str | None = None,
+        reply_target: dict[str, object] | None = None,
+    ) -> tuple[str, dict[str, object]]:
+        current = self._current_delivery_binding(call)
+        channel = self.context.port_registry.get("channel:channel") if self.context is not None else None
+        resolve = getattr(channel, "resolve_output_destination", None)
+        if not callable(resolve):
+            raise ValueError("Channel destination resolver is unavailable; inspect channel_list before creating or moving a scheduled output.")
+        result = resolve(endpoint_id=endpoint_id, reply_target=reply_target, current_binding=current)
+        return str(result["channel_id"]), dict(result["reply_target"])
 
     def iter_proactive_tasks(self) -> list[ProactiveTarget]:
         items: list[ProactiveTarget] = []
@@ -322,8 +342,8 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="create",
         guidance=ToolGuidance(
-            purpose="Create or replace a proactive task for future work.",
-            use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications.",
+            purpose="Create or replace a proactive task for future work. New tasks default to this conversation; replacing a task preserves its destination unless specified. An explicit channel uses its unique default destination when no target is supplied.",
+            use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications. Internal proactive turns without a channel binding can create tasks without output.",
             do_not_use_when="Not for one-shot immediate tasks (handle directly).",
             failure_next_steps="Correct invalid schedule/cron syntax; use channel_list to verify an output channel name.",
         ),
@@ -352,14 +372,34 @@ class ProactiveIntrospectionProvider:
         schedule, invalid = _normalize_schedule_argument(call.args.get("schedule"), required=False)
         if invalid is not None:
             return invalid
+        requested_channel = str(call.args.get("out_channel_name") or "").strip() or None
+        target = dict(out_reply_target_raw)
+        existing = self.manager.registered.get(proactive_id)
+        if existing is not None and requested_channel is None and not target:
+            out_channel_id, target = existing.out_channel_id, dict(existing.out_reply_target)
+        elif requested_channel is None and not target and (
+            not call.meta.get("turn_id")
+            or self._current_delivery_binding(call).get("channel_kind") == SourceKind.PROACTIVE
+        ):
+            # Scheduled internal turns have a turn_id but a synthetic delivery
+            # binding. They retain the same output-less creation workflow.
+            out_channel_id = None
+        else:
+            try:
+                out_channel_id, target = self._resolve_destination(
+                    call, endpoint_id=requested_channel or (existing.out_channel_id if existing else None),
+                    reply_target=target or None,
+                )
+            except ValueError as exc:
+                return _invalid_result(str(exc), structured={"reason": "destination_unresolved"})
         definition = self.manager.create_task(
             proactive_id=proactive_id,
             goal=goal,
             method=str(call.args.get("method") or "").strip(),
             skill_refs=[str(item).strip() for item in skill_refs_raw if str(item).strip()],
-            out_channel_id=str(call.args.get("out_channel_name") or "").strip() or None,
+            out_channel_id=out_channel_id,
             schedule=schedule,
-            out_reply_target=dict(out_reply_target_raw),
+            out_reply_target=target,
             enabled=enabled_raw,
         )
         self._refresh_capabilities()
@@ -458,7 +498,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_channel",
         guidance=ToolGuidance(
-            purpose="Set or clear which channel endpoint receives a proactive task's output.",
+            purpose="Set a proactive task's channel and destination together, or clear output. Without an explicit target, use the current conversation on that channel or its unique default destination; never carry a target across channels.",
             use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
             do_not_use_when="Setting a specific reply target within a channel (use proactive_set_output_target).",
             failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. Verify the channel name with channel_list.",
@@ -475,16 +515,30 @@ class ProactiveIntrospectionProvider:
                 text="name is required",
                 llm_text="name is required",
             )
-        raw_channel = call.args.get("out_channel_name")
-        out_channel_id = str(raw_channel or "").strip() or None
-        updated = self.manager.set_output_channel(proactive_id, out_channel_id)
-        if updated is None:
+        existing = self.manager.registered.get(proactive_id)
+        if existing is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
+        out_channel_id = str(call.args.get("out_channel_name") or "").strip() or None
+        raw_target = call.args.get("out_reply_target")
+        if raw_target is not None and not isinstance(raw_target, dict):
+            return _invalid_result("out_reply_target must be an object")
+        if out_channel_id is None:
+            if raw_target:
+                return _invalid_result("out_channel_name is required when setting an output target")
+            target = {}
+        else:
+            try:
+                out_channel_id, target = self._resolve_destination(
+                    call, endpoint_id=out_channel_id, reply_target=raw_target or None,
+                )
+            except ValueError as exc:
+                return _invalid_result(str(exc), structured={"reason": "destination_unresolved"})
+        updated = self.manager.set_output_destination(proactive_id, out_channel_id, target)
         self._refresh_capabilities()
         payload = {
             "name": proactive_id,
@@ -763,7 +817,7 @@ def register_with_core(
         handle.published_capabilities = context.execution_runtime.mount_subtree(handle)
 
     manager.on_change = refresh_capabilities
-    provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities)
+    provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities, context=context)
     source = ProactiveEventSource(manager=manager)
     event_handler = ProactiveTriggerHandler(manager=manager, runner=runner)
     handle = ModuleHandle(

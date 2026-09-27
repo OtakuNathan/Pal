@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from typing import Any
 from datetime import datetime, timezone
@@ -242,6 +242,16 @@ class ProactiveManager(ProactiveManagerPort):
             schedule=dict(current.schedule),
             enabled=current.enabled,
         )
+        self.register(updated)
+        return updated
+
+    def set_output_destination(
+        self, proactive_id: str, out_channel_id: str | None, out_reply_target: dict[str, object],
+    ) -> ProactiveDefinition | None:
+        current = self.registered.get(proactive_id)
+        if current is None:
+            return None
+        updated = replace(current, out_channel_id=out_channel_id, out_reply_target=dict(out_reply_target))
         self.register(updated)
         return updated
 

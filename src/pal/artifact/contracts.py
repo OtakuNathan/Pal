@@ -172,6 +172,7 @@ class ArtifactRef:
     summary: str
     status: str
     available_actions: tuple[str, ...] = ()
+    text_file: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +182,7 @@ class ArtifactRef:
             "summary": self.summary,
             "status": self.status,
             "available_actions": list(self.available_actions),
+            "text_file": dict(self.text_file),
         }
 
 
@@ -222,6 +224,7 @@ class ArtifactReadResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     next_actions: tuple[str, ...] = ()
     reason: str = ""
+    text_file: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -235,6 +238,7 @@ class ArtifactReadResult:
             "metadata": dict(self.metadata),
             "next_actions": list(self.next_actions),
             "reason": self.reason,
+            "text_file": dict(self.text_file),
         }
 
 
@@ -268,6 +272,7 @@ class ArtifactContentSearchResult:
     score: float
     text: str
     selector: dict[str, Any] = field(default_factory=dict)
+    locations: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -277,6 +282,7 @@ class ArtifactContentSearchResult:
             "score": self.score,
             "text": self.text,
             "selector": dict(self.selector),
+            "locations": [dict(item) for item in self.locations],
         }
 
 

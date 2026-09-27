@@ -140,7 +140,9 @@ class TestDescriptorLayering:
             record = runtime.registry_generation.indirect_aliases["echo"]
             assert "search_tools" in record.compiled_description
             assert "Failure next steps" not in record.compiled_description
-            assert "search_tools" in record.search_document
+            # Next-tool hints remain in the definition, but must not make this
+            # tool a hit for unrelated discovery queries.
+            assert "search_tools" not in record.search_document
             # Reading the tool shows the same stable description, not a
             # failure handbook (A03).
             read = runtime.invoke_direct_tool(

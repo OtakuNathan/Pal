@@ -63,7 +63,7 @@ class ControlIntrospectionProvider:
             purpose="Show control module status.",
             use_when="Diagnosing whether the control plane is mounted or in degraded mode.",
             do_not_use_when="Checking core runtime state (use core_observe). Checking execution tool count (use exec_show).",
-            failure_next_steps="Read-only diagnostic. If control must be restarted, use plugin_attach with name=control.",
+            failure_next_steps="Read-only diagnostic. Control is resident; implementation changes require a host restart.",
         ),
         aliases=("control_show",),
     )

@@ -18,6 +18,12 @@ TOOL_EXECUTION_SYSTEM_POLICY = (
 
 
 TOOL_ROUTING_DEVELOPER_GUIDANCE = (
+    "- Invoke direct tools by their exposed name; invoke indirect tools through call_tool(name=alias, args=...). "
+    "Search using short English alias keywords: [domain] [action] [object], e.g. "
+    "remember memory, lsp prepare workspace, or browser screenshot. Include a known domain; "
+    "spaces and underscores both work, word order is flexible, and a complete alias need not be guessed. Search hits include guidance and input contracts: "
+    "call immediately when these suffice. Use read_tool only for missing or changed contract information, "
+    "or when a validation error does not provide enough information to correct the call.\n"
     "- Treat each tool's guidance and returned affordances as its continuation contract. "
     "After a tool call, follow a suggested next tool only when its stated `use_when` condition "
     "matches the observed result and current task.\n"

@@ -188,7 +188,7 @@ class LspManagerPluginProvider:
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
             do_not_use_when="Checking workspace readiness (use lsp_status). Running server health check (use lsp_doctor).",
-            failure_next_steps="If last_error is set, reload with plugin_attach name='lsp'.",
+            failure_next_steps="If last_error is set, reload with plugin_reattach name='lsp'.",
         ), aliases=("lsp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -201,17 +201,18 @@ class LspManagerPluginProvider:
         family="lsp",
         action_name="status",
         guidance=ToolGuidance(
-            purpose="Report workspace LSP readiness and server health.",
-            use_when="Workspace readiness is unknown, relevant configuration changed, or an LSP operation reported a readiness problem.",
-            do_not_use_when="A successful preparation or recent LSP result already establishes readiness for the unchanged workspace. Module-level status (use lsp_show). One server health (use lsp_doctor).",
-            failure_next_steps="If not ready, run lsp_prepare_workspace first.",
+            purpose="Report recorded workspace preparation and LSP server health. An absent preparation record alone does not block individual queries.",
+            use_when="Inspecting workspace-wide preparation and server health, or diagnosing a readiness problem reported by an LSP operation.",
+            do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. A recent result already establishes readiness for the unchanged workspace. Module-level status (use lsp_show). One server health (use lsp_doctor).",
+            failure_next_steps="Follow the reported cause. workspace_not_prepared means no preparation record exists, not that every query requires preparation. Use lsp_prepare_workspace when project environment setup is needed or changed; use lsp_doctor for a specific server failure.",
             next_tool_hints=(
                 NextToolHint(name="lsp_document_symbols", use_when="A known file's symbol structure must be mapped."),
                 NextToolHint(name="lsp_workspace_symbols", use_when="A symbol must be located by name across the workspace."),
                 NextToolHint(name="lsp_definition", use_when="A known symbol's declaration or definition must be located."),
                 NextToolHint(name="lsp_references", use_when="Consumers of a known symbol must be found."),
                 NextToolHint(name="lsp_hover", use_when="Type or documentation at a known position is needed."),
-                NextToolHint(name="lsp_prepare_call_hierarchy", use_when="Caller or callee relationships are needed."),
+                NextToolHint(name="lsp_incoming_calls", use_when="Callers of a symbol at a known file position are needed; preparation is internal."),
+                NextToolHint(name="lsp_outgoing_calls", use_when="Callees of a symbol at a known file position are needed; preparation is internal."),
                 NextToolHint(name="lsp_diagnostics", use_when="A source file needs language-server diagnostics."),
             ),
         ),
@@ -231,10 +232,10 @@ class LspManagerPluginProvider:
         family="lsp",
         action_name="prepare_workspace",
         guidance=ToolGuidance(
-            purpose="Prepare and prewarm one workspace before LSP navigation or diagnostics.",
-            use_when="Once after selecting a project/worktree, and again only when compile commands, include paths, or language settings change.",
-            do_not_use_when="Not a substitute for reading source. Not for non-LSP projects.",
-            failure_next_steps="If preparation reports an unrecognized workspace or missing server, inspect lsp_status and lsp_doctor through read_tool/call_tool, then correct compile_commands.json, language settings, or server availability before retrying.",
+            purpose="Configure a workspace's LSP project environment and optionally prewarm its language servers.",
+            use_when="Project environment setup is needed, such as C/C++ compile commands or include paths; those settings changed; a query reported missing project context; or workspace prewarming is explicitly requested.",
+            do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. Selecting a project alone does not require preparation. Not for non-LSP projects.",
+            failure_next_steps="Follow result-specific recovery. Use lsp_doctor for one failing server or lsp_status when workspace-wide diagnosis is needed; correct the reported environment or server problem before retrying. Reuse known tool contracts.",
             next_tool_hints=(
                 NextToolHint(name="lsp_status", use_when="Preparation was partial or failed and workspace-wide readiness must be inspected."),
                 NextToolHint(name="lsp_doctor", use_when="Preparation was partial or failed and one selected language server needs diagnosis."),
@@ -382,7 +383,7 @@ class LspManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
-            do_not_use_when="Restarting the manager (use plugin_attach with name='lsp').",
+            do_not_use_when="Restarting the manager (use plugin_reattach with name='lsp').",
             failure_next_steps="Inspect lsp_show and lsp_status to reconcile manager readiness. Correct LSP config syntax or server availability before retrying.",
         ), aliases=("lsp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
@@ -698,4 +699,8 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
         status = RuntimeStatus.ERROR
     elif status == "partial":
         status = RuntimeStatus.OK
-    return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))
+    projection = dict(payload)
+    evidence = payload.get("evidence")
+    if isinstance(evidence, dict) and "result" in payload and evidence.get("result") == payload["result"]:
+        projection["evidence"] = {key: value for key, value in evidence.items() if key != "result"}
+    return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, projection))

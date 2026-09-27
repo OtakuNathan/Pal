@@ -83,6 +83,7 @@ class ChannelEndpointListItem:
     attached: bool
     paired: bool
     provider_id: str = ""
+    default_destination_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,10 @@ class ChannelIntrospectionProvider:
                 attached=target.attached,
                 paired=target.runtime_endpoint.paired if target.runtime_endpoint is not None else False,
                 provider_id=getattr(self._provider_for_target(target), "provider_id", ""),
+                default_destination_available=bool(
+                    target.runtime_endpoint is not None
+                    and target.runtime_endpoint.derive_default_reply_target()
+                ),
             ).__dict__
             for target in self.iter_endpoints()
         ]
@@ -235,7 +240,7 @@ class ChannelIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Send a local file attachment back to the channel that started the current turn.",
             use_when="The user asked for a generated file (image, document, code) to be sent back through the channel.",
-            do_not_use_when="Sending plain text (use channel_send_message). Writing a local file (use write_file).",
+            do_not_use_when="For an ordinary text reply to the current turn, respond normally without a sending tool. Use channel_send_message only for a separate initiated text delivery. Writing a local file (use write_file).",
             failure_next_steps="If the local path is invalid, use run_shell with a bounded existence/type check; read_file is only for UTF-8 text. If the endpoint is unavailable, inspect channel_list. If delivery may have been accepted, reconcile with the recipient before retrying so the attachment is not sent twice.",
         ),
         aliases=("send_channel_attachment",),

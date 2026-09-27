@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +52,7 @@ class BrowserScreenshotTool:
                 "size_bytes": stored.size_bytes,
                 "sha256": stored.sha256,
             }
-            payload["next_step"] = "To inspect pixels, call artifact_import with path=artifact.local_cached_path; the saved path alone is not inline image input."
-            return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
+            return await self._attach_saved_screenshot(payload, stored, runtime, turn_id)
         except BrowserServiceError as exc:
             return _result(RuntimeStatus.ERROR, "Browser screenshot failed", {"error": exc.to_dict()})
         except Exception as exc:
@@ -62,6 +61,33 @@ class BrowserScreenshotTool:
                 "Browser screenshot failed",
                 {"error": {"code": "screenshot_failed", "message": str(exc), "retryable": False}},
             )
+
+    async def _attach_saved_screenshot(self, payload, stored, runtime, turn_id) -> CapabilityResult:
+        owner = getattr(runtime, "provider_registry", {}).get("artifact:artifact")
+        register = getattr(owner, "import_local_for_turn", None)
+        if not callable(register):
+            payload["registration"] = "unavailable"
+            payload["next_step"] = "Screenshot saved but not registered or attached inline: artifact owner is unavailable. Once available, use artifact_import with artifact.local_cached_path."
+            return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
+        try:
+            imported = await register(stored, runtime=runtime, turn_id=turn_id, source_channel="web_fetch")
+        except Exception as exc:
+            payload["registration"] = "unknown"
+            payload["registration_error"] = str(exc)
+            payload["next_step"] = "Screenshot saved; registration outcome is uncertain and no inline image was delivered. Inspect list_artifacts before importing the saved path again."
+            return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
+        if imported.status != RuntimeStatus.OK:
+            payload["registration"] = "failed"
+            payload["registration_error"] = dict(imported.structured or {})
+            payload["next_step"] = "Screenshot saved but not attached inline. Resolve the registration error; an existing artifact_id can be inspected with artifact_info."
+            return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
+        payload["artifact_id"] = imported.structured["artifact_id"]
+        payload["registration"] = "registered"
+        payload["next_step"] = "Use the attached image if core supplies pixels for this model; otherwise use the artifact metadata and discover suitable image processing if needed. Do not import this screenshot again."
+        return replace(
+            _result(RuntimeStatus.OK, "Browser screenshot registered", payload),
+            context_messages=imported.context_messages,
+        )
 
 
 def _runtime_root(runtime: Any, service: WebFetchService) -> Path:

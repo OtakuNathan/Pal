@@ -52,6 +52,7 @@ from pal.bunshin.v2.task_ledger import (
     TASK_LEDGER_ARTIFACT,
     TaskLedgerService,
     TaskRevisionAuthority,
+    snapshot_task_spec_file,
     validate_task_ledger,
 )
 
@@ -329,6 +330,10 @@ class BunshinV2WorkflowService:
             raise ValueError("new_requirement workflow requires goal")
         if operation != "new_requirement" and not artifact_ref:
             raise ValueError(f"{operation} requires artifact_ref")
+        if data.get("task_spec_file") is not None:
+            if operation != "new_requirement" or requirements_ref:
+                raise ValueError("task_spec_file requires new_requirement without an existing task ledger")
+            data["task_spec"] = snapshot_task_spec_file(data.pop("task_spec_file"), data.get("task_spec"))
 
         task_id = str(data.get("task_id") or "").strip()
         task_was_selected = bool(task_id)
@@ -1839,7 +1844,7 @@ def workflow_request_from_snapshot(
 def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
     if "source_files" in data:
         raise ValueError(
-            "source_files was removed; foreground Pal must synthesize the complete task_spec"
+            "source_files was removed; supply task_spec or one task_spec_file"
         )
     workspace = data.get("workspace")
     if workspace is not None and not isinstance(workspace, Mapping):
@@ -1865,6 +1870,9 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
     task_spec = data.get("task_spec")
     if task_spec is not None and not isinstance(task_spec, Mapping):
         raise ValueError("workflow task_spec must be an object")
+    task_spec_file = data.get("task_spec_file")
+    if task_spec_file is not None and (not isinstance(task_spec_file, str) or not task_spec_file.strip()):
+        raise ValueError("workflow task_spec_file must be a non-empty path string")
 
 
 def _normalize_skill_refs(value: Any) -> list[str]:

@@ -14,6 +14,23 @@ TOOL_GUIDANCE_FIELDS = (
 )
 
 
+BUNSHIN_DEFAULT_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
+    {
+        "op_web_search": MappingProxyType(
+            {
+                "do_not_use_when": "Fetching a specific webpage (use browser_read with url). Reading local files (use read_file).",
+            }
+        ),
+        "op_browser_read": MappingProxyType(
+            {
+                "use_when": "Reading a specific rendered page; provide url to navigate and read in one call, or omit it to reread the current page after content changed.",
+                "do_not_use_when": "Searching the web (use search_web) or reading local files (use read_file). Reuse page content already available when it is sufficient.",
+            }
+        ),
+    }
+)
+
+
 BUNSHIN_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
     {
         "op_exec_shell": MappingProxyType(
@@ -116,6 +133,9 @@ def bunshin_tool_guidance(
     role_patch: Mapping[str, Any] | None = None,
 ) -> ToolGuidance:
     values = guidance.model_dump(mode="python")
+    # Adapt Pal's default routing to the narrower worker surface, while keeping
+    # role-specific applicability. Only sandbox rules below override a role.
+    values.update(BUNSHIN_DEFAULT_TOOL_GUIDANCE_OVERRIDES.get(str(canonical_path or "").strip(), {}))
     if role_patch:
         values.update(
             normalize_tool_guidance_patch(

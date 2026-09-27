@@ -201,7 +201,7 @@ class SkillSearchTool:
         structured = {"hits": hits, "count": len(hits)}
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
-            structured["next_action"] = "To use a matched active skill, call skill_inject with its name before answering from it."
+            structured["next_action"] = "Reuse an applicable manual already in context. Call skill_inject by name only when a matched active skill is needed and its manual is missing; metadata-only lookup needs no injection."
         llm_text = _render_skill_tool_payload(self.service, "Skill search", structured)
         return CapabilityResult(
             status=RuntimeStatus.OK,

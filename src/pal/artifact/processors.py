@@ -233,6 +233,8 @@ class PdfArtifactProcessor:
         doc = fitz.open(str(context.original_path))
         try:
             page_texts: list[str] = []
+            page_locations = []
+            next_line = 1
             max_pages = min(int(context.policy.pdf.max_pages), len(doc))
             pages_dir = context.representations_dir() / "pages"
             pages_dir.mkdir(parents=True, exist_ok=True)
@@ -240,6 +242,9 @@ class PdfArtifactProcessor:
                 page = doc.load_page(index)
                 text = str(page.get_text("text") or "").strip()
                 if text:
+                    page_locations.append({"page": index + 1, "start_line": next_line,
+                                           "end_line": next_line + text.count("\n")})
+                    next_line += text.count("\n") + 2
                     page_texts.append(text)
                     page_path = pages_dir / f"page_{index + 1:04d}.txt"
                     page_path.write_text(text, encoding="utf-8")
@@ -259,6 +264,16 @@ class PdfArtifactProcessor:
                     )
             combined = "\n\n".join(page_texts)
             if combined:
+                full_path = context.representations_dir() / "normalized.txt"
+                full_path.write_text(combined, encoding="utf-8")
+                context.put_representation(ArtifactRepresentation(
+                    representation_id=_representation_id(record.artifact_id, REPRESENTATION_TEXT, "full"),
+                    artifact_id=record.artifact_id, representation_kind=REPRESENTATION_TEXT,
+                    path=str(full_path), mime_type="text/plain", size_bytes=full_path.stat().st_size,
+                    text_preview=_preview(combined), summary=_preview(combined),
+                    metadata={"pages": page_locations, "page_count": len(doc),
+                              "extracted_pages": max_pages, "extraction_truncated": max_pages < len(doc)},
+                ))
                 _write_text_chunks(context, record.artifact_id, combined)
             if len(combined.strip()) < context.policy.pdf.textless_min_chars:
                 _render_pdf_page_images(context, record, doc)
@@ -269,7 +284,8 @@ class PdfArtifactProcessor:
             record,
             summary=f"PDF artifact {record.file_name}, {page_count} page(s)",
             status=ARTIFACT_STATUS_READY if combined else ARTIFACT_STATUS_PARTIAL,
-            metadata={**dict(record.metadata), "page_count": page_count, "extracted_text_chars": len(combined)},
+            metadata={**dict(record.metadata), "page_count": page_count, "extracted_text_chars": len(combined),
+                      "extracted_pages": max_pages, "text_pages": page_locations},
         )
 
 

@@ -982,6 +982,37 @@ class ChannelRuntime(ChannelRuntimePort):
     def list_endpoints(self) -> tuple[ChannelEndpointBase, ...]:
         return self.endpoint_registry.values()
 
+    def resolve_output_destination(
+        self,
+        *,
+        endpoint_id: str | None = None,
+        reply_target: dict[str, Any] | None = None,
+        current_binding: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one durable destination without sending or guessing a target."""
+        current = dict(current_binding or {})
+        requested = str(endpoint_id or current.get("channel_id") or "").strip()
+        if not requested:
+            raise ValueError("No current channel destination. Supply out_channel_name from channel_list.")
+        endpoint = self.get_endpoint(requested)
+        if endpoint is None:
+            raise ValueError(f"Channel endpoint {requested!r} is unavailable; inspect channel_list.")
+        if reply_target is not None:
+            target = dict(reply_target)
+        elif requested == str(current.get("channel_id") or "") and current.get("reply_target"):
+            target = dict(current["reply_target"])
+        else:
+            target = dict(endpoint.derive_default_reply_target() or {})
+        if not target:
+            raise ValueError(
+                f"Channel endpoint {requested!r} has no unambiguous destination. "
+                "Supply a known out_reply_target or create the task from the intended conversation."
+            )
+        channel_kind = str(getattr(endpoint.endpoint, "channel_kind", "") or "").lower()
+        if channel_kind == "telegram" and not str(target.get("chat_id") or "").strip():
+            raise ValueError(f"Telegram endpoint {requested!r} requires a chat_id in out_reply_target.")
+        return {"channel_id": requested, "reply_target": target}
+
     async def send_message(self, endpoint_id: str, message: str) -> ChannelMessageReceipt:
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:

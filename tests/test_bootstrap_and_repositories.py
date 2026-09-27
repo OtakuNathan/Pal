@@ -843,7 +843,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.structured["scan_errors"], ["broken manifest"])
 
-    def test_plugin_attach_refreshes_import_cache_and_recompiles_capabilities(self) -> None:
+    def test_plugin_reattach_refreshes_import_cache_and_recompiles_capabilities(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = self._compose_runtime(
             wizard=self.wizard,
@@ -919,11 +919,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(first.text, "v1")
 
-            detached = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="plugin_detach", args={"name": "demo_reload"})
-            )
-            self.assertEqual(detached.status, "ok")
-
             time.sleep(1.1)
             write_impl("v2")
             write_runtime()
@@ -931,6 +926,12 @@ class PalV2BootstrapTests(unittest.TestCase):
                 CapabilityCall(name="plugin_attach", args={"name": "demo_reload"})
             )
             self.assertEqual(attached.status, "ok")
+            unchanged = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
+            self.assertEqual(unchanged.text, "v1")
+            reattached = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="plugin_reattach", args={"name": "demo_reload"})
+            )
+            self.assertEqual(reattached.status, "ok")
             second = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(second.text, "v2")
             self.assertIn("demo_reload_ping", handle.core.context.capability_registry.descriptors)

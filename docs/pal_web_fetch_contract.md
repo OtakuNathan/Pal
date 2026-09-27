@@ -16,7 +16,7 @@
 
 ## Lifecycle
 
-`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，唯一生命周期入口是 Plugin Hub 的 `plugin_attach` / `plugin_detach`。
+`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，生命周期入口是 Plugin Hub 的 `plugin_attach` / `plugin_detach` / `plugin_reattach`。attach 保留已加载实例；reattach 在一次调用中卸载并重新加载。
 
 sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不随 sidecar、插件刷新或 Pal 重启删除；`browser_close` 只释放活进程，`browser_reset(confirm=true)` 才删除当前对话 profile。
 

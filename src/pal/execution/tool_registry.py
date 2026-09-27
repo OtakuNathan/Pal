@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from pal.execution.contracts import CapabilityDescriptor
+from pal.execution.tool_presentation import compact_input_contract
 from pal.execution.tool_facade import (
     EffectKind,
     InvocationMode,
@@ -321,6 +322,11 @@ def compile_registry_generation(
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
+            "input_contract": compact_input_contract(record.input_schema),
+            "purpose": record.guidance.purpose,
+            "use_when": record.guidance.use_when,
+            "do_not_use_when": record.guidance.do_not_use_when,
+            "execution": record.execution.model_dump(mode="json", exclude={"invocation_mode"}),
             "namespace": record.namespace,
             "family": record.family,
             "module_id": record.module_id,
@@ -460,7 +466,9 @@ def _compile_record(
         guidance = descriptor.guidance
         execution = descriptor.execution
 
-    example = dict(examples[0]) if examples else None
+    # Generated placeholders exercise schema validation only. They are not
+    # task examples and can violate business constraints (e.g. a no-op edit).
+    example = dict(examples[0]) if examples and not descriptor.metadata.get("examples_generated") else None
     for candidate in examples:
         if input_model is not None:
             input_model.model_validate(candidate, strict=True)
@@ -510,13 +518,9 @@ def _compile_next_tool_lines(
         if hint.name == record.alias:
             raise ValueError(f"tool {record.alias!r} must not point to itself as a next tool")
         if hint.name in direct_aliases:
-            route = f"Invoke it directly as `{hint.name}`."
+            route = "direct"
         elif hint.name in indirect_aliases:
-            route = (
-                f"Invoke it with `call_tool(name={json.dumps(hint.name)}, args=...)`. "
-                f"If its arguments or execution semantics are unknown, inspect "
-                f"`read_tool(name={json.dumps(hint.name)})` first."
-            )
+            route = "indirect"
         elif (
             not record.is_mcp
             and not record.binding.descriptor.detachable
@@ -532,7 +536,7 @@ def _compile_next_tool_lines(
             )
         else:
             route = "It is not available in the current tool surface; do not attempt to invoke it."
-        lines.append(f"`{hint.name}` — {hint.use_when.strip()} {route}")
+        lines.append(f"`{hint.name}` ({route}) — {hint.use_when.strip()}")
     return tuple(lines)
 
 
@@ -543,8 +547,6 @@ def _compile_search_document(record: CompiledToolRecord) -> str:
         for part in (
             record.alias,
             guidance.purpose,
-            guidance.use_when,
-            *(value for hint in guidance.next_tool_hints for value in (hint.name, hint.use_when)),
             record.family,
             record.module_id,
             *record.tags,

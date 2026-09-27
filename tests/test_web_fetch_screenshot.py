@@ -71,6 +71,8 @@ class BrowserScreenshotToolTests(unittest.TestCase):
         self.assertTrue(str(artifact["stored_artifact_id"]).startswith("artifact_"))
         self.assertTrue(Path(artifact["local_cached_path"]).is_file())
         self.assertNotIn("png_base64", result.structured)
+        self.assertEqual(result.structured["registration"], "unavailable")
+        self.assertFalse(result.context_messages)
         self.assertEqual(service.calls[0]["session_key"], "a" * 64)
 
     def test_call_tool_reaches_browser_screenshot_with_conversation_scope(self) -> None:

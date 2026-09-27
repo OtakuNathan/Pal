@@ -59,20 +59,6 @@ class ArtifactImportTool:
                 file_name=path.name,
             )
             if kind == ARTIFACT_KIND_IMAGE:
-                runtime = kwargs.get("runtime")
-                turn_io = getattr(runtime, "provider_registry", {}).get("core:turn_io")
-                resolve = getattr(turn_io, "llm_capabilities_for_turn", None)
-                facts = resolve(kwargs.get("turn_id")) if callable(resolve) else {}
-                if not isinstance(facts, dict) or not facts.get("supports_vision"):
-                    return _result(RuntimeStatus.UNSUPPORTED, "Image import unavailable", {
-                        "reason": "vision_not_supported" if isinstance(facts, dict) and "supports_vision" in facts else "vision_capability_unavailable",
-                        "next_step": (
-                            "Use search_tools to find an OCR or image-analysis tool that explicitly accepts local paths, "
-                            "then pass this source path using that tool's schema. OCR provides text, not full visual inspection. "
-                            "If no suitable tool exists, explain the missing capability and how to select a vision-capable endpoint. "
-                            "Do not retry artifact_import unchanged or claim to have inspected pixels."
-                        ),
-                    })
                 from PIL import Image
 
                 try:
@@ -81,10 +67,10 @@ class ArtifactImportTool:
                 except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
                     return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", {"reason": "artifact_processing_failed"})
             ref = self.service.register_ingested(
-                path,
+                kwargs.get("stored_source") or path,
                 scope_key=scope_key,
                 turn_id=str(kwargs.get("turn_id") or ""),
-                source_channel="local_file",
+                source_channel=str(kwargs.get("source_channel") or "local_file"),
             )
             payload = {"artifact": ref.to_dict(), "artifact_id": ref.artifact_id}
             if ref.status == "failed":

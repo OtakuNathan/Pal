@@ -1,0 +1,44 @@
+{
+  "version": "pal.tools-affordance.v1",
+  "temperature": 0,
+  "reasoning": "medium",
+  "repetitions": 3,
+  "max_output_tokens": 8192,
+  "cases": [
+    {
+      "id": "affordance-search-lsp",
+      "category": "discovery",
+      "prompt": "Check diagnostics for sample.py in this Python workspace. Prepare the workspace if needed, find the diagnostics capability, and use it. Use a search hit's arguments when they suffice.",
+      "expected_alias": "lsp_diagnostics",
+      "expected_first_alias": "lsp_prepare_workspace",
+      "required_aliases": ["lsp_prepare_workspace", "lsp_diagnostics"],
+      "forbidden_aliases": ["read_tool"],
+      "expected_output": {"status": "ok", "diagnostics": []}
+    },
+    {
+      "id": "affordance-navigate-content",
+      "category": "selection",
+      "prompt": "Open https://example.com/ in the browser and report its rendered page text.",
+      "expected_alias": "browser_navigate",
+      "forbidden_aliases": ["browser_read"],
+      "expected_output": {"document": {"text": "Fixture webpage content"}}
+    },
+    {
+      "id": "affordance-screenshot",
+      "category": "discovery",
+      "prompt": "Capture a browser screenshot and register it for this conversation's next model input.",
+      "expected_alias": "browser_screenshot",
+      "expected_first_alias": "search_tools",
+      "forbidden_aliases": ["artifact_import"],
+      "expected_output": {"registration": "registered", "artifact_id": "art_fixture"}
+    },
+    {
+      "id": "affordance-proactive-current",
+      "category": "discovery",
+      "prompt": "Create a proactive task named fixture_followup with goal 'Remember to review the fixture later' and deliver its future output to this chat.",
+      "expected_alias": "proactive_create",
+      "expected_first_alias": "search_tools",
+      "expected_output": {"out_channel_id": "telegram_main", "out_reply_target": {"chat_id": "42"}}
+    }
+  ]
+}
