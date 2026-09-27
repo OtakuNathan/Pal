@@ -190,3 +190,17 @@ def test_invalid_schedule_update_preserves_existing_task(env):
     assert not result.ok
     assert "Task parameter error:" in result.llm_text
     assert manager.registered["reminder"] == before
+
+
+@pytest.mark.parametrize("alias", ["proactive_last_run", "proactive_list_runs"])
+def test_history_unavailable_is_distinct_from_empty(env, alias):
+    runtime, manager, _ = env
+    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    empty = invoke(runtime, alias, {"name": "reminder"})
+    assert empty.ok, empty.llm_text
+    assert empty.structured["history_status"] == "empty"
+    manager.repository = None
+    unavailable = invoke(runtime, alias, {"name": "reminder"})
+    assert unavailable.structured["history_status"] == "unavailable"
+    assert "repository is not configured" in unavailable.llm_text
+    assert unavailable.llm_text != empty.llm_text

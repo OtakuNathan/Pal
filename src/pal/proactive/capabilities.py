@@ -272,7 +272,8 @@ class ProactiveIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None,
+                       "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
@@ -281,14 +282,14 @@ class ProactiveIntrospectionProvider:
             )
         run = repository.latest_run(target.proactive_id)
         if run is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None, "history_status": "empty"}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive task has not run yet",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run)}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
@@ -319,7 +320,8 @@ class ProactiveIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": []}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": [],
+                       "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
@@ -328,7 +330,7 @@ class ProactiveIntrospectionProvider:
             )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
         items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
-        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": items}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": items, "history_status": "available" if items else "empty"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive run history",

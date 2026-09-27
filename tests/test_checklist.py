@@ -254,6 +254,9 @@ class TestChecklistCapabilities:
         result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "zzz"}))
         assert result.status == RuntimeStatus.ERROR
         assert result.structured is not None and result.structured["error"] == "step_not_found"
+        assert result.structured["plan"] == [{"step": "a", "status": "pending"}]
+        assert '"step":"a"' in result.llm_text
+        assert "checklist_show" not in result.llm_text
         assert "echo" not in result.structured
 
     def test_show_and_clear(self):
@@ -549,3 +552,39 @@ class TestToolEchoFanOut:
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert len(captured) == 1
         assert "checklist_check:call-1" in continuation.echoed_keys
+
+
+def test_duplicate_steps_rejected_without_replacing_current_plan():
+    service = ChecklistService()
+    service.upsert([{"step": "original"}])
+    before = service.show()
+    with pytest.raises(ValueError, match="duplicate checklist step"):
+        service.upsert([{"step": "run tests"}, {"step": " run tests "}])
+    assert service.show() == before
+
+
+def test_unknown_step_large_plan_is_recoverable_from_snapshot():
+    import json
+    from pathlib import Path
+    from pal.execution.contracts import ToolCallBudget
+    from pal.shared.tool_protocol import new_tool_call
+    core = PalCore()
+    register_execution_with_core(core.context)
+    service = ChecklistService()
+    register_checklist_with_core(core.context, service)
+    core.publish_module_capabilities("execution")
+    core.publish_module_capabilities("checklist")
+    plan = [{"step": f"phase-{i}: " + "x" * 900} for i in range(64)]
+    service.upsert(plan)
+    runtime = core.context.execution_runtime
+    try:
+        result = runtime.execute_tool(new_tool_call(name="checklist_check", args={"step": "missing"}),
+                                      budget=ToolCallBudget(max_output_chars=2000))
+        assert not result.ok
+        assert result.snapshot_refs
+        saved = Path(result.snapshot_refs[0].path).read_text()
+        payload = json.loads(saved.split("\n", 1)[1])
+        assert [item["step"] for item in payload["plan"]] == [item["step"] for item in plan]
+        assert service.show().done == 0
+    finally:
+        runtime.shutdown()

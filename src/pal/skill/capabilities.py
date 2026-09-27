@@ -199,7 +199,7 @@ class SkillIntrospectionProvider:
             purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
             use_when="A skill is no longer relevant or is producing false-positive activations.",
             do_not_use_when="Forgetting a durable fact (use forget_memory). Permanently deleting skill data (this only disables).",
-            failure_next_steps="If the skill name is not found, verify it with skill_search. Re-enable by using skill_update to set status back to active.",
+            failure_next_steps="If the skill name is not found, verify it with skill_search. Re-enable with skill_update using patch={'status': 'active', 'enabled': true}; both fields are required to restore availability.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,

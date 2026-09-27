@@ -60,6 +60,21 @@ class SkillSubsystemTests(unittest.TestCase):
         self.database.close()
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def test_disable_reenable_and_read_expose_actual_availability(self):
+        from pal.skill.tools import SkillUpdateTool
+        self.skill_repository.upsert_skill(SkillDescriptor(
+            skill_id="test.restore", module_id="skill", title="Restore", summary="Test", manual_text="Do work"))
+        self.service.disable_skill("test.restore")
+        tool = SkillUpdateTool(self.service)
+        tool.invoke({"skill_id": "test.restore", "patch": {"status": "active"}})
+        read = SkillReadTool(self.service).invoke({"skill_id": "test.restore"})
+        self.assertFalse(read.structured["skill"]["enabled"])
+        self.assertFalse(read.structured["skill"]["active"])
+        result = tool.invoke({"skill_id": "test.restore", "patch": {"status": "active", "enabled": True}})
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(self.skill_repository.get_skill("test.restore").active)
+        self.assertEqual(SkillInjectTool(self.service).invoke({"skill_id": "test.restore"}).status, "ok")
+
     def test_patch_validates_fields_clears_values_and_preserves_noop_version(self):
         from pal.skill.tools import SkillUpdateTool
         from unittest.mock import patch

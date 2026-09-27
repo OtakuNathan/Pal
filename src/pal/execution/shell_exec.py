@@ -339,7 +339,8 @@ class ShellExecTool:
             if not display_text:
                 display_text = f"command exited with code {execution.returncode}"
             error_code = "" if ok else "command_failed"
-        output_text = _render_shell_output(display_text, execution.stdout, execution.stderr)
+        output_text = f"exit_code: {execution.returncode if execution.returncode is not None else 'unavailable'}\n"
+        output_text += _render_shell_output(display_text, execution.stdout, execution.stderr)
         if execution.snapshot_text:
             output_text += "\n" + execution.snapshot_text
         structured = {
@@ -439,12 +440,14 @@ class ShellExecTool:
 
 
 def _render_shell_output(display_text: str, stdout: str, stderr: str) -> str:
-    sections = [display_text]
     stripped_stdout = stdout.strip()
     stripped_stderr = stderr.strip()
-    if stripped_stdout and stripped_stdout != display_text:
+    sections = []
+    if display_text and display_text not in (stripped_stdout, stripped_stderr):
+        sections.append(display_text)
+    if stripped_stdout:
         sections.extend(("stdout:", stripped_stdout))
-    if stripped_stderr and stripped_stderr != display_text:
+    if stripped_stderr:
         sections.extend(("stderr:", stripped_stderr))
     return "\n".join(sections)
 

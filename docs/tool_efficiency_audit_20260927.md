@@ -227,3 +227,12 @@ python -m pytest -q \
 - CI 修复快照递归落盘回归、过期契约断言及 macOS 临时目录符号链接比较。
 
 本地最终相关回归 **114 passed**，警告来自既有依赖弃用提示。PDF 解析性能、MCP 图像路由及源文件扫描策略按讨论保持原状；全量验证交给 GitHub CI，未部署运行中实例。
+
+## 恢复提示与状态可见性补充整改
+
+- Skill 重新启用提示明确同时设置 status=active / enabled=true；读取和搜索展示 enabled 与实际 active，保留两个字段各自的语义。
+- Shell 的模型可见结果展示退出码和 stdout/stderr 标签，保留超时、取消和落盘失败说明。
+- Checklist 创建拒绝去除首尾空白后的重复步骤且保留原计划；步骤匹配失败直接提供当前计划，超大结果通过现有快照机制恢复。
+- Proactive 运行历史明确区分 unavailable、empty、available；没有历史仓库不再暗示从未运行。
+
+本地相关回归：126 passed，17 subtests passed，两个既有依赖弃用警告。完整测试交给 GitHub CI；未激活运行中实例。

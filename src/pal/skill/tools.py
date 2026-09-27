@@ -19,6 +19,8 @@ def skill_summary_dict(skill) -> dict[str, Any]:
         "title": skill.title,
         "summary": skill.summary,
         "status": skill.status,
+        "enabled": skill.enabled,
+        "active": skill.active,
         "use_when": skill.use_when,
         "avoid_when": skill.avoid_when,
         "activation_terms": list(skill.activation_terms),

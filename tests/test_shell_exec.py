@@ -223,3 +223,15 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_exit_code_and_both_streams_are_visible_without_rerunning():
+    from pal.execution.shell_exec import _ShellExecution
+    for code in (0, 2, 7):
+        result = ShellExecTool._execution_result("test", None, 1000,
+            _ShellExecution(returncode=code, stdout="body stdout", stderr="body stderr"))
+        assert f"exit_code: {code}" in result.llm_text
+        assert "stdout:\nbody stdout" in result.llm_text
+        assert "stderr:\nbody stderr" in result.llm_text
+        assert result.llm_text.count("body stdout") == 1
+        assert result.llm_text.count("body stderr") == 1

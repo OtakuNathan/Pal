@@ -61,12 +61,16 @@ class ChecklistService:
             if len(plan) > self.MAX_ITEMS:
                 raise ValueError(f"checklist plan exceeds {self.MAX_ITEMS} steps")
             items: list[ChecklistItem] = []
+            seen_steps: set[str] = set()
             for entry in plan:
                 step = str(entry.get("step") or "").strip()
                 if not step:
                     raise ValueError("checklist steps must be non-empty strings")
                 if len(step) > self.MAX_STEP_CHARS:
                     raise ValueError(f"checklist step exceeds {self.MAX_STEP_CHARS} chars")
+                if step in seen_steps:
+                    raise ValueError(f"duplicate checklist step: {step!r}; use distinct step text")
+                seen_steps.add(step)
                 status = str(entry.get("status") or "pending").strip()
                 if status not in _VALID_STATUSES:
                     raise ValueError(f"invalid checklist status: {status!r}")

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class ChecklistStepModel(StrictToolModel):
-    step: str = Field(min_length=1, max_length=1000)
+    step: str = Field(min_length=1, max_length=1000, description="Exact step text, unique within the plan after trimming surrounding whitespace.")
     status: Literal["pending", "in_progress", "completed"] = "pending"
 
 
@@ -39,7 +39,7 @@ class ChecklistUpsertInput(StrictToolModel):
 
 
 class ChecklistCheckInput(StrictToolModel):
-    step: str = Field(min_length=1, max_length=1000)
+    step: str = Field(min_length=1, max_length=1000, description="Exact step text, unique within the plan after trimming surrounding whitespace.")
 
 
 def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
@@ -113,7 +113,7 @@ class ChecklistIntrospectionProvider:
                 "; update when phases materially change. Batch creation or updates with independent useful calls. Routine edit-and-test work needs no checklist."
             ),
             do_not_use_when="The active checklist already matches the work.",
-            failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
+            failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a unique non-empty step string and an optional status of pending/in_progress/completed.",
             next_tool_hints=(
                 NextToolHint(
                     name="checklist_check",
@@ -165,11 +165,11 @@ class ChecklistIntrospectionProvider:
             purpose="Mark one exact step as completed; checking the last unfinished step automatically closes the checklist.",
             use_when="The step is already confirmed complete. Prefer calling alongside the next useful tools in the same response, rather than in a separate bookkeeping round.",
             do_not_use_when="Completion depends on results from tools in the same batch; wait for those results first. No checklist is active.",
-            failure_next_steps="If no checklist is active, it may already have closed; open a new one only if work remains. If the step does not match exactly, use checklist_show to recover its text.",
+            failure_next_steps="If no checklist is active, it may already have closed; open a new one only if work remains. If the step does not match exactly, copy its exact text from the returned current plan.",
             next_tool_hints=(
                 NextToolHint(
                     name="checklist_show",
-                    use_when="The exact remaining step text or overall progress must be inspected.",
+                    use_when="The exact remaining step text or overall progress is needed and not already present in the returned plan or current context.",
                 ),
                 NextToolHint(
                     name="checklist_clear",
@@ -193,14 +193,14 @@ class ChecklistIntrospectionProvider:
                 llm_text="No active checklist; it may already have completed and closed. Use checklist_upsert only if work remains.",
             )
         if not outcome.found:
+            payload = {"changed": False, "step": step, "error": "step_not_found",
+                       "plan": [dict(item) for item in outcome.snapshot.plan],
+                       "next_step": "Copy the exact step text from this current plan."}
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="checklist step not found",
-                structured={"changed": False, "step": step, "error": "step_not_found"},
-                llm_text=(
-                    f"Step {step!r} is not in the active checklist. "
-                    "Use checklist_show to see the exact step texts."
-                ),
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Checklist step not found", payload),
             )
         payload = {
             "changed": outcome.changed,
