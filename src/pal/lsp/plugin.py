@@ -188,7 +188,7 @@ class LspManagerPluginProvider:
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
             do_not_use_when="Checking workspace readiness (use lsp_status). Running server health check (use lsp_doctor).",
-            failure_next_steps="If last_error is set, reload with plugin_reattach name='lsp'.",
+            failure_next_steps="Inspect the reported cause. Correct configuration errors before rescanning; use plugin_reattach name='lsp' when the manager lifecycle needs recovery. cached_snapshot is historical, not a live health check.",
         ), aliases=("lsp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -392,9 +392,11 @@ class LspManagerPluginProvider:
             self._ensure_manager_started()
             payload = self.client.rescan_sync()
             self.last_health = dict(payload)
-            return IntrospectionResult(status=RuntimeStatus.OK, text="lsp rescan", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan", payload))
+            status = payload.get("status") or RuntimeStatus.OK
+            self.last_error = "; ".join(str(error) for error in payload.get("errors", ())) if status != RuntimeStatus.OK else ""
+            return IntrospectionResult(status=status, text="lsp rescan" if status == RuntimeStatus.OK else "lsp rescan failed", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan", payload))
         except Exception as exc:
-            payload = {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
+            payload = self._rpc_error("rescan", exc)
             return IntrospectionResult(status=RuntimeStatus.ERROR, text="lsp rescan failed", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan failed", payload))
 
     def _ensure_manager_started(self) -> None:
@@ -538,26 +540,34 @@ class LspManagerPluginProvider:
             if isinstance(server, dict) and "name" not in server:
                 server["name"] = str(server.get("server_id") or "")
             self.last_health = dict(payload)
+            self.last_error = ""
             return payload
         except Exception as exc:
-            return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
+            return self._rpc_error(method, exc)
+
+    def _rpc_error(self, method: str, exc: Exception) -> dict[str, Any]:
+        self.last_error = f"{exc.__class__.__name__}: {exc}"
+        # Keep cached observations available through lsp_show, never as this
+        # request's operation/result or as evidence of a running process.
+        current = self._status_payload()
+        current.pop("cached_snapshot", None)
+        return {**current, "status": RuntimeStatus.ERROR, "operation": method,
+                "error": self.last_error}
 
     def _status_payload(self) -> dict[str, Any]:
         process_status = self._process_status()
         return {
             "module_id": "lsp",
-            "manager_running": self._manager_running(),
+            "manager_running": process_status is not None and process_status[1] is None,
             "manager_owned": process_status is not None and process_status[1] is None,
             "log_sink": current_service_log_sink_description(),
             "last_error": self.last_error,
-            **dict(self.last_health or {}),
+            "cached_snapshot": dict(self.last_health or {}),
         }
 
     def _manager_running(self) -> bool:
         process_status = self._process_status()
-        if process_status is not None and process_status[1] is None:
-            return True
-        return bool((self.last_health or {}).get("ok"))
+        return process_status is not None and process_status[1] is None
 
 
 def _failing_servers(payload: dict[str, Any]) -> list[str]:

@@ -99,3 +99,59 @@ def test_prepare_workspace_is_only_resident_lsp_tool() -> None:
         assert "lsp_status" not in names
     finally:
         handle.shutdown_sync()
+
+
+def test_failed_request_does_not_replay_cached_success(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    provider = LspManagerPluginProvider(runtime_root=tmp_path)
+    monkeypatch.setattr(provider, "_ensure_manager_started", Mock())
+    monkeypatch.setattr(provider.client, "operation_sync", Mock(return_value={
+        "status": "ok", "operation": "hover", "result": {"value": "OLD_HOVER"}, "ok": True,
+    }))
+    provider._request_or_error("hover", {})
+    monkeypatch.setattr(provider, "_ensure_manager_started", Mock(side_effect=RuntimeError("startup failed")))
+    result = provider.definition(CapabilityCall(name="lsp_definition", args={"file": "a.py", "line": 0, "character": 0}))
+    assert result.status == "error"
+    assert result.structured["operation"] == "definition"
+    assert "result" not in result.structured
+    assert "OLD_HOVER" not in result.llm_text
+    assert "startup failed" in result.llm_text
+    shown = provider.show(CapabilityCall(name="lsp_show", args={}))
+    assert shown.structured["manager_running"] is False
+    assert shown.structured["cached_snapshot"]["result"]["value"] == "OLD_HOVER"
+    assert "startup failed" in shown.structured["last_error"]
+
+
+def test_rescan_preserves_manager_failure_and_current_exception(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    provider = LspManagerPluginProvider(runtime_root=tmp_path)
+    monkeypatch.setattr(provider, "_ensure_manager_started", Mock())
+    rescan = Mock(return_value={"status": "error", "errors": ["bad.toml: invalid TOML"]})
+    monkeypatch.setattr(provider.client, "rescan_sync", rescan)
+    failed = provider.rescan()
+    assert failed.status == "error"
+    assert "bad.toml" in failed.llm_text
+    assert "bad.toml" in provider.last_error
+    rescan.return_value = {"status": "ok", "errors": []}
+    assert provider.rescan().status == "ok"
+    assert provider.last_error == ""
+    rescan.side_effect = RuntimeError("current transport failure")
+    failed = provider.rescan()
+    assert failed.status == failed.structured["status"] == "error"
+    assert failed.structured["operation"] == "rescan"
+    assert "current transport failure" in failed.llm_text
+
+
+@pytest.mark.parametrize("returncode,expected_running", [(None, True), (1, False)])
+def test_manager_liveness_comes_from_process_not_cache(tmp_path, returncode, expected_running):
+    from unittest.mock import Mock
+    provider = LspManagerPluginProvider(runtime_root=tmp_path)
+    provider.last_health = {"ok": True, "manager_running": True, "last_error": "old"}
+    provider.last_error = "current"
+    provider.process = Mock(pid=123, poll=Mock(return_value=returncode))
+    shown = provider._status_payload()
+    assert shown["manager_running"] is expected_running
+    assert shown["manager_owned"] is expected_running
+    assert shown["last_error"] == "current"
+    if not expected_running:
+        assert provider._manager_running() is False

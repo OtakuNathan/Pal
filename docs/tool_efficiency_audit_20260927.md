@@ -244,3 +244,11 @@ python -m pytest -q \
 - 诊断通知核对文档版本，过滤版本不匹配的通知且不唤醒等待者；无版本通知保留为 version_unknown，外层不宣称与当前文件匹配。文档版本在发送通知前登记，避免即时响应被误判。
 
 相关回归 86 passed，两个既有依赖弃用警告。全量验证由 GitHub CI 执行，未激活运行中实例。
+
+## LSP 外层状态隔离
+
+- RPC/启动错误仅返回当前操作与当前错误，不再展开历史结果；历史观察在 lsp_show 的 cached_snapshot 中明确隔离。
+- manager_running / manager_owned 由本次进程状态决定，不以缓存 ok 推断存活；当前 last_error 不被历史字段覆盖。
+- lsp_rescan 保留 manager 返回的扫描状态和配置错误；成功恢复后清除旧错误。show 的恢复说明区分配置修正与生命周期恢复。
+
+本地相关回归 43 passed，两个既有依赖弃用警告。全量验证交给 GitHub CI，未激活运行中实例。
