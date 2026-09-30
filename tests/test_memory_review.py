@@ -340,7 +340,9 @@ def test_manager_rejects_stale_or_superseded_proposal_sources():
     from pal.bunshin.v2.contracts import AggregateType
     workflow = SimpleNamespace(aggregate_id="workflow", payload={"task_id": "task", "execution_epoch_id": "epoch"})
     node = SimpleNamespace(workflow_id="workflow", state="ACCEPTED", payload={"epoch_id": "epoch"})
-    repository = SimpleNamespace(read_snapshot=lambda kind, identity: workflow if kind == AggregateType.WORKFLOW else node)
+    repository = SimpleNamespace(snapshots=SimpleNamespace(
+        read_snapshot=lambda kind, identity: workflow if kind == AggregateType.WORKFLOW else node,
+    ))
     manager = SimpleNamespace(v2_service=SimpleNamespace(repository=repository))
     source = {"task_id": "task", "workflow_id": "workflow",
               "source_dependencies": {"epoch_id": "epoch", "node_run_id": "node", "requires_accepted": True}}
