@@ -12,6 +12,7 @@ def test_concurrent_projection_change_cannot_skip_module_replacement(monkeypatch
         return AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=epoch + ':module',
             workflow_id='workflow', state='BLOCKED_BY_DEPS', version=1,
+            created_at='2026-09-30T00:00:00Z', updated_at='2026-09-30T00:00:00Z',
             payload={'module_name': 'module', 'node_kind': 'unit', 'epoch_id': epoch,
                      'module_responsibility': responsibility, 'unit_contract_ref': {}},
         )
