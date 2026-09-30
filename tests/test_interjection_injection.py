@@ -86,7 +86,7 @@ class _FakeLLMPort(NonStreamingLLM):
             breakdown={},
         )
 
-    async def agenerate(self, request, *, on_submitted=None) -> LLMGenerationResult:
+    async def agenerate(self, request, *, on_submitted=None, **options) -> LLMGenerationResult:
         self.requests.append(request)
         self.generation_index += 1
         if self.generation_index == 1:

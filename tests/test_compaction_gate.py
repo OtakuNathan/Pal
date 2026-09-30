@@ -100,7 +100,7 @@ class _BlockingLLM(NonStreamingLLM):
     def supports_streaming(self, request=None):
         return False
 
-    async def agenerate(self, request, *, on_submitted=None):
+    async def agenerate(self, request, *, on_submitted=None, **options):
         self.requests += 1
         await self.release.wait()
         raise AssertionError("blocking llm must never finish in these tests")
