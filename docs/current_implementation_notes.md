@@ -2,6 +2,24 @@
 
 This file is a short sync point for the current codebase when older design notes lag behind implementation.
 
+## Domain communication contracts
+
+Domain-owned protocols describe service calls; `PortKey[T]` identifies them at
+assembly without erasing their type. `PortRegistry` validates declared methods
+and call signatures before publication. A rejected candidate cannot replace a
+published service. `PortRef.current` resolves the current generation rather
+than retaining an implementation after detach or reattach.
+
+Required capabilities must be declared, not inferred by callers using
+`getattr`, signature inspection or retrying a different signature after
+`TypeError`. Optional capabilities have explicit optional ports. Reflection
+for module admission, SDK boundaries and incomplete diagnostic snapshots
+remains isolated at those boundaries.
+
+`mypy-contracts.ini` lists the migrated type-checking surface. The dynamic-access
+inventory prevents new probes while remaining domains are migrated; each
+domain change removes retired entries rather than replenishing that baseline.
+
 ## Prompt Assembly
 
 Current system block order:

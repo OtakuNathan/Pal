@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pal.shared import IntrospectionPort, PromptFragmentProvider
+from pal.shared.ports import PortKey
 
 if TYPE_CHECKING:
     from pal.core.runtime_state import RuntimeStatePort
@@ -29,6 +30,7 @@ class ModuleHandle:
     control_action_handlers: dict[str, Any] = field(default_factory=dict)
     provider_refs: list[str] = field(default_factory=list)
     ports: dict[str, Any] = field(default_factory=dict)
+    port_contracts: tuple[PortKey[object], ...] = ()
     published_capabilities: list[str] = field(default_factory=list)
     mounted_subtree: "MountedSubtreeHandle | None" = None
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)

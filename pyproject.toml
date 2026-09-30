@@ -48,6 +48,7 @@ local-embeddings = [
     "sentence-transformers>=3.0,<4",
 ]
 test = [
+    "mypy>=1.15,<2",
     "hypothesis>=6.100,<7",
     "hypothesis-jsonschema>=0.23,<1",
     "pytest>=8,<9",

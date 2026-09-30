@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar, overload
 
 from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
@@ -12,6 +12,9 @@ from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.turn_events import TurnEventBus
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared import IntrospectionPort
+from pal.shared.ports import PortKey, PortRegistry
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -25,9 +28,11 @@ class MainContext:
     lifecycle_owner_registry: ModuleLifecycleOwnerRegistry = field(default_factory=ModuleLifecycleOwnerRegistry)
     turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
     introspection_registry: dict[str, IntrospectionPort] = field(default_factory=dict)
-    port_registry: dict[str, Any] = field(default_factory=dict)
+    port_registry: PortRegistry = field(default_factory=PortRegistry)
 
     def __post_init__(self):
+        if not isinstance(self.port_registry, PortRegistry):
+            self.port_registry = PortRegistry(self.port_registry)
         from pal.execution.extensions import execution_slot
         self.execution_runtime = execution_slot(self.execution_runtime)
 
@@ -53,8 +58,11 @@ class MainContext:
         existing_introspection = self.introspection_registry.get(module_id)
         if existing_introspection is not None and existing_introspection is not introspection:
             raise ValueError(f"module introspection provider already registered: {module_id}")
+        for contract in handle.port_contracts:
+            self.port_registry.declare(contract)
         for port_name, port in handle.ports.items():
             key = f"{module_id}:{port_name}"
+            self.port_registry.validate(key, port)
             existing = self.port_registry.get(key)
             if existing is not None and existing is not port:
                 raise ValueError(f"module port already registered: {key}")
@@ -103,5 +111,13 @@ class MainContext:
         self.module_registry.unregister(module_id, expected=handle)
         return True
 
-    def require_port(self, key: str) -> Any:
+    @overload
+    def require_port(self, key: PortKey[T]) -> T: ...
+
+    @overload
+    def require_port(self, key: str) -> Any: ...
+
+    def require_port(self, key: PortKey[T] | str) -> T | Any:
+        if isinstance(key, PortKey):
+            return self.port_registry.require(key)
         return self.port_registry[key]
