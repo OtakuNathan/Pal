@@ -114,9 +114,13 @@ def _refresh_ephemeral_role_reference_binds(
     previous fence's scratch paths inside the sandbox.
     """
 
+    # File references must use the same directory bind and filename include
+    # as their first-attempt projection.
+    from pal.bunshin.workspace_tools import _normalized_reference_paths
+
     current_references = {
         str(item.get("name") or ""): dict(item)
-        for item in list(dict(current_pack.workspace or {}).get("reference_paths") or [])
+        for item in _normalized_reference_paths(dict(current_pack.workspace or {}))
         if isinstance(item, Mapping)
         and str(item.get("name") or "") in EPHEMERAL_ROLE_INPUT_NAMES
         and not bool(item.get("bound_input"))

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -34,6 +36,7 @@ from pal.llm.model_hooks import ModelHook, ModelHookRegistry
 from pal.llm.response_hooks import ProviderResponseHookError
 from pal.llm.repository import RuntimeSettingRepository
 from pal.llm.runtime import EndpointResolver, LLMRuntime
+from pal.llm.shapes.base import _JSONFrame
 from pal.llm.transport import (
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
@@ -251,6 +254,66 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
 
 
 class LLMRuntimeIRTests(unittest.TestCase):
+    def test_decode_failure_is_logged_and_classified_after_bounded_retries(self) -> None:
+        class MalformedTransport:
+            attempts = 0
+
+            def frames(self, endpoint, request):
+                self.attempts += 1
+                yield _JSONFrame(0, {
+                    "type": "response.created",
+                    "response": {"id": "gen-test"},
+                })
+                yield _JSONFrame(1, {
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": {
+                        "type": "function_call", "id": "item-1", "call_id": "call-1",
+                        "name": "read", "arguments": '{"private_argument":"secret-value"',
+                    },
+                })
+
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                transport = MalformedTransport()
+                endpoint = _endpoint()
+                endpoint.wire_shape = "openai_response"
+                runtime = LLMRuntime(
+                    EndpointResolver(endpoints=(endpoint,)), _Settings(),
+                    endpoint_invoker=ShapeEndpointInvoker(transport=transport),
+                    config=RuntimeConfig(
+                        runtime_root=Path(tempfile.mkdtemp()), llm_endpoint_retry_attempts=2,
+                    ),
+                )
+                log_root = tempfile.TemporaryDirectory()
+                self.addCleanup(log_root.cleanup)
+                with patch.dict(os.environ, {"PAL_LOG_ROOT": log_root.name}), self.assertLogs("pal.llm.endpoint", level="WARNING") as captured:
+                    if streaming:
+                        async def consume():
+                            return [update async for update in runtime.astream(_request())]
+                        response = asyncio.run(consume())[-1].response
+                    else:
+                        response = runtime.generate(_request()).response
+                self.assertEqual(transport.attempts, 2)
+                self.assertEqual(response.finish_reason, LLMFinishReason.ERROR)
+                self.assertEqual(response.message.metadata["failure_kind"], "decode_error")
+                self.assertEqual(response.message.metadata["error_type"], "ShapeDecodeError")
+                logs = "\n".join(captured.output)
+                self.assertIn("tool read arguments contained invalid JSON", logs)
+                self.assertIn("generation=gen-test", logs)
+                self.assertIn("frames=2", logs)
+                self.assertIn("response.output_item.done", logs)
+                self.assertNotIn("secret-value", logs)
+                self.assertNotIn("private_argument", logs)
+                files = list(Path(log_root.name).glob("llm-decode-failures/*.json"))
+                self.assertEqual(len(files), 2)
+                for file in files:
+                    evidence = json.loads(file.read_text())
+                    self.assertTrue(evidence["complete_capture"])
+                    self.assertEqual(evidence["provider_generation_id"], "gen-test")
+                    self.assertIn("ShapeDecodeError", evidence["traceback"])
+                    self.assertIn("secret-value", evidence["frames"][-1]["payload"]["item"]["arguments"])
+                    self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+
     def test_detached_stream_retirement_suppresses_task_failure(self) -> None:
         runtime = LLMRuntime(
             EndpointResolver(endpoints=(_endpoint(),)),

@@ -895,7 +895,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                         fresh.workspace["reference_paths"][0],
                         {
                             **fresh.workspace["reference_paths"][1],
-                            "path": str(retry_preparation),
+                            "path": str(retry_preparation / "workspace_preparation.json"),
                         },
                     ],
                 },
@@ -930,7 +930,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(
             retry_attempt.workspace["reference_paths"][1]["path"],
-            "/pal/references/workspace_preparation",
+            "/pal/references/workspace_preparation/workspace_preparation.json",
+        )
+        self.assertEqual(
+            retry_attempt.metadata["sandbox"]["reference_binds"][1]["include"],
+            ["workspace_preparation.json"],
         )
         role_socket = self.runtime_root / "data" / "bunshin-role" / "role.sock"
         role_socket.parent.mkdir(parents=True, exist_ok=True)
@@ -942,7 +946,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 argv=["/bin/true"],
             )
         self.assertIn(str(task.resolve()), argv)
-        self.assertIn(str(retry_preparation.resolve()), argv)
+        self.assertIn(str((retry_preparation / "workspace_preparation.json").resolve()), argv)
         self.assertNotIn(str(first_preparation.resolve()), argv)
 
     def test_workspace_tooling_uses_explicit_accepted_language_context(self) -> None:

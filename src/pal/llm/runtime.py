@@ -66,6 +66,7 @@ from pal.llm.response_hooks import (
     ProviderResponseHookRegistry,
 )
 from pal.llm.usage import LLMUsageLedger
+from pal.llm.shapes.base import ShapeDecodeError
 from pal.llm.transport import (
     RequestSubmission,
     DirectSDKTransport,
@@ -2041,6 +2042,8 @@ def _classify_retry_error(exc: Exception) -> str:
         return "response_error"
     if isinstance(exc, ProviderResponseHookError):
         return "response_error"
+    if isinstance(exc, ShapeDecodeError):
+        return "decode_error"
     message = str(exc).lower()
     error_type = type(exc).__name__.lower()
     if any(
@@ -2090,6 +2093,7 @@ def _retryable_error_kind(error_kind: str) -> bool:
         "rate_limit",
         "server",
         "response_error",
+        "decode_error",
         "unknown",
     }
 

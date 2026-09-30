@@ -135,9 +135,14 @@ class FailureOrchestrator:
                 report=report,
             )
         if signal.subsystem == "llm":
+            decode_failure = signal.failure_kind == "decode_error"
             verification = VerificationResult(
                 status=FAILURE_VERIFICATION_FAILED,
-                reason="LLM provider fallback was exhausted; inline repair cannot continue without a healthy model endpoint.",
+                reason=(
+                    "LLM response decoding failed; inline repair cannot continue with this response."
+                    if decode_failure else
+                    "LLM provider fallback was exhausted; inline repair cannot continue without a healthy model endpoint."
+                ),
                 evidence={"origin": origin, **context_payload},
             )
             failure_runtime.record_verification(draft, verification)
@@ -148,7 +153,12 @@ class FailureOrchestrator:
                     "why_blocked": verification.reason,
                     "current_blocker": draft.primary_blocker,
                     "impact": "LLM-backed reasoning is unavailable for the current turn.",
-                    "recommended_next_step": "Restore a healthy LLM endpoint or credential before retrying.",
+                    "recommended_next_step": (
+                        "Inspect the LLM decode diagnostic in the service logs; retry the request, "
+                        "or use another endpoint if the error persists."
+                        if decode_failure else
+                        "Restore a healthy LLM endpoint or credential before retrying."
+                    ),
                 },
             )
             feedback = failure_runtime.render_user_feedback(draft, verification=verification, report=report)

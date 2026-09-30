@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -16,13 +17,14 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.attempts import LLMAttemptResult
+from pal.llm.decode_diagnostics import DecodeFailureCapture
 from pal.llm.response_evidence import WireResponseEvidence
 from pal.llm.models import LLMEndpointModel
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.request_hooks import apply_provider_request_hooks
 from pal.llm.shapes import codec_for_shape
-from pal.llm.shapes.base import EncodedRequest, ShapeContext
+from pal.llm.shapes.base import EncodedRequest, ShapeContext, ShapeDecodeError
 from pal.llm.transport import (
     DirectSDKTransport,
     RequestSubmission,
@@ -36,6 +38,7 @@ from pal.shared import LLMFinishReason
 
 
 CredentialResolver = Callable[[LLMEndpointModel], str | None]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -165,11 +168,17 @@ class ShapeEndpointInvoker:
         last: LLMResponseUpdate | None = None
         frames = None
         decoded = None
+        frame_count = 0
+        last_event_type = ""
+        failure_capture = DecodeFailureCapture()
 
         def observed_frames():
-            nonlocal frames
+            nonlocal frames, frame_count, last_event_type
             frames = iter(self._transport().frames(endpoint, transport_request))
             for frame in frames:
+                failure_capture.observe(frame)
+                frame_count += 1
+                last_event_type = str(frame.payload.get("type") or "")[:120]
                 observe_submission()
                 evidence.observe(frame)
                 yield frame
@@ -208,6 +217,23 @@ class ShapeEndpointInvoker:
                 stream_control and stream_control.cancelled
             ) else "failed"
             error_type = type(exc).__name__
+            if isinstance(exc, ShapeDecodeError):
+                capture_path = failure_capture.save(
+                    exc, endpoint_id=str(endpoint.endpoint_id), model_id=str(endpoint.model_id),
+                    wire_shape=shape.value, attempt_id=request_id, streaming=stream,
+                    provider_generation_id=evidence.provider_generation_id,
+                    actual_provider=evidence.actual_provider,
+                    returned_model=evidence.returned_model,
+                )
+                # Decoder messages describe structure; never log wire payloads
+                # or chained JSON exceptions (which can contain tool input).
+                logger.warning(
+                    "LLM decode failed endpoint=%s model=%s shape=%s attempt=%s "
+                    "generation=%s frames=%s last_event=%r reason=%r capture=%s",
+                    endpoint.endpoint_id, endpoint.model_id, shape.value, request_id,
+                    evidence.provider_generation_id, frame_count, last_event_type,
+                    str(exc)[:500], capture_path or "unavailable",
+                )
             # Preserve the original exception type for existing retry policy.
             with contextlib.suppress(AttributeError, TypeError):
                 exc.llm_attempt_recorded = self.attempt_sink is not None

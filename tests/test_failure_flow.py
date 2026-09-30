@@ -111,6 +111,23 @@ def _core_with_failure_runtime() -> PalCore:
 
 
 class FailureFlowTests(unittest.TestCase):
+    def test_decode_failure_recommends_diagnostics_without_credential_repair(self) -> None:
+        core = _core_with_failure_runtime()
+        llm = _RecordingFailureLLM()
+        core.context.port_registry["llm:llm"] = llm
+        result = asyncio.run(core.handle_failure_async(
+            FailureSignal(
+                subsystem="llm", component="openrouter-gpt-6.1-sol",
+                failure_kind="decode_error", severity="high",
+                primary_blocker="ShapeDecodeError (decode_error)",
+            ),
+            origin="llm_request",
+        ))
+        self.assertEqual(llm.requests, [])
+        self.assertIn("service logs", result.user_feedback.next_step)
+        self.assertNotIn("credential", result.user_feedback.next_step)
+        self.assertNotIn("fallback was exhausted", result.verification.reason)
+
     def test_expected_lifecycle_delivery_failure_does_not_enter_safe_mode(self) -> None:
         core = _RecordingFailureCore()
         handler = FailureEventHandler(core=core)
