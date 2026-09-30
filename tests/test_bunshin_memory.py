@@ -253,7 +253,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             ],
         )
         self.assertIn("dynamic role working state", request.messages[-1].text)
-        self.assertIn('<pal_context kind="state"', request.messages[-1].text)
+        self.assertIn('<pal_context name="', request.messages[-1].text)
 
     def test_bunshin_prompt_reconciles_settled_and_active_tool_results_together(
         self,

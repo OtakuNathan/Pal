@@ -57,7 +57,7 @@ def prepare_context(
         if key not in current and not old.get("withdrawn"):
             current[key] = {"key": key, "role": old["role"], "content": "", "withdrawn": True,
                             "kind": "state", "instruction": old.get("instruction", False),
-                            "coverage_kind": old.get("coverage_kind", "")}
+                            "coverage_kind": old.get("coverage_kind", ""), "title": old.get("title", "")}
     for key, item in [*current.items(), *((item["key"], item) for item in events)]:
         kind = item.get("kind", "state")
         if kind not in {"state", "event"}:
@@ -90,10 +90,21 @@ def prepare_context(
                 changed = changed or previous is None or revision != previous["revision"]
             else:
                 revision = (previous["revision"] if previous else 0) + int(changed)
+            title = str((previous or {}).get("title") or item.get("title") or "").strip()
+            if not (previous or {}).get("title"):
+                base = title or "Context"
+                used = {source.get("title") for source in sources.values()}
+                title = base
+                suffix = 2
+                while title in used:
+                    title = f"{base} ({suffix})"
+                    suffix += 1
+                if previous is not None:
+                    previous["title"] = title
             # Stable instruction blocks are covered by the frozen prefix initially.
             if item.get("instruction") and (rebuild or (previous is None and not state.get("initialized"))):
                 sources[key] = {"digest": digest, "revision": revision, "role": role,
-                                "instruction": True, "prefix": True, "withdrawn": semantic["withdrawn"]}
+                                "instruction": True, "prefix": True, "withdrawn": semantic["withdrawn"], "title": title}
                 continue
             if not changed and (previous.get("prefix") or previous.get("message_id") in visible):
                 continue
@@ -101,21 +112,20 @@ def prepare_context(
             covered = _checklist_coverage(turn.messages, item)
             if covered:
                 sources[key] = {"digest": digest, "revision": revision, "message_id": covered,
-                                "role": role, "withdrawn": semantic["withdrawn"], "coverage_kind": "checklist"}
+                                "role": role, "withdrawn": semantic["withdrawn"], "coverage_kind": "checklist", "title": title}
                 continue
         sequence = int(state.get("delivery_sequence", 0)) + 1
         state["delivery_sequence"] = sequence
         message_id = f"prompt-context:{turn.turn_id}:{sequence}"
         withdrawn = semantic["withdrawn"]
         action = "withdraw" if withdrawn else "occurred" if kind == "event" else "restore" if previous and not changed else "replace"
-        attributes = (f'kind="{kind}" key="{escape(key, quote=True)}" revision="{revision}" '
-                      f'scope="turn" turn_id="{escape(turn.turn_id, quote=True)}" '
-                      f'action="{action}"')
         if kind == "event":
-            attributes += f' event_id="{escape(str(item["event_id"]), quote=True)}"'
-        if previous:
-            attributes += f' replaces="{previous["revision"]}"'
-        header = f"<pal_context {attributes}>\n"
+            title = str(item.get("title") or "Context event").strip()
+        header = f'<pal_context name="{escape(title, quote=True)}">\n'
+        if withdrawn:
+            header += "The earlier context under this heading no longer applies.\n"
+        elif previous:
+            header += "Use this context in place of earlier content under this heading.\n"
         if item.get("instruction"):
             header += "<pal_defaults>Unless the current user request specifies otherwise:\n"
         footer = ("\n</pal_defaults>" if item.get("instruction") else "") + "\n</pal_context>"
@@ -131,12 +141,14 @@ def prepare_context(
                           prompt_region=PromptRegionIR.ACTIVE_HISTORY,
                           metadata={"pal_authored": True, "scope_turn_id": turn.turn_id,
                                     "context_key": key, "context_kind": kind, "source_revision": revision,
-                                    "withdrawn": withdrawn})
+                                    "withdrawn": withdrawn, "context_title": title, "context_action": action,
+                                    **({"event_id": str(item["event_id"])} if kind == "event" else {}),
+                                    **({"replaces_revision": previous["revision"]} if previous else {})})
         additions.append(message)
         if kind == "state":
             sources[key] = {"digest": digest, "revision": revision, "message_id": message_id,
                             "role": role, "withdrawn": withdrawn, "instruction": bool(item.get("instruction")),
-                            "coverage_kind": item.get("coverage_kind", "")}
+                            "coverage_kind": item.get("coverage_kind", ""), "title": title}
     if rebuild:
         retained = {source.get("message_id") for source in sources.values()
                     if not source.get("withdrawn") and not source.get("instruction")}

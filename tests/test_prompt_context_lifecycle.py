@@ -39,15 +39,17 @@ def test_changes_withdrawal_and_recovery_keep_source_revision():
         turn, added = advance(turn, [candidate(value)])
         records.extend(added)
     assert [m.metadata['source_revision'] for m in records] == [1, 2, 3]
-    assert 'replaces="2"' in records[-1].text
+    assert records[-1].metadata["replaces_revision"] == 2
+    assert "in place of earlier content" in records[-1].text
     lost = replace(turn, messages=turn.messages[:1])
     restored, added = advance(lost, [candidate()])
     assert len(added) == 1 and added[0].metadata['source_revision'] == 3
     assert added[0].message_id != records[-1].message_id
-    assert 'action="restore"' in added[0].text
+    assert added[0].metadata["context_action"] == "restore"
     withdrawn, added = advance(restored, [])
     assert added[0].metadata['withdrawn']
-    assert 'action="withdraw"' in added[0].text
+    assert added[0].metadata["context_action"] == "withdraw"
+    assert "no longer applies" in added[0].text
     assert advance(withdrawn, [])[1] == ()
 
 
@@ -106,7 +108,8 @@ def test_runtime_guidance_stays_after_original_user_block(shape):
     encoded = codec_for_shape(shape).encode(request, ShapeContext(shape, 'fixture', 'fixture'))
     assert len(encoded.message_spans) == 2
     assert encoded.message_spans[0].cache_targets != encoded.message_spans[1].cache_targets
-    assert 'scope="turn"' in str(encoded.payload)
+    assert '<pal_context name="' in str(encoded.payload)
+    assert 'scope="turn"' not in str(encoded.payload)
 
 
 def test_default_snapshot_does_not_freeze_changed_guidance():
@@ -199,7 +202,8 @@ def test_distinct_events_from_same_source_and_new_event_at_rebuild():
     turn = turn.append_prompt_contexts(additions, state)
     assert len(additions) == 1
     assert projected_context(turn) == list(additions)
-    assert 'event_id="three"' in additions[0].text
+    assert additions[0].metadata["event_id"] == "three"
+    assert "event_id=" not in additions[0].text
 
 
 def test_compaction_drops_expired_control_and_does_not_reuse_its_anchor():
@@ -219,3 +223,37 @@ def test_compaction_drops_expired_control_and_does_not_reuse_its_anchor():
     assert 'expired finalization' not in str(request.messages)
     assert request.metadata.get('preferred_endpoint_source') is None
     assert snapshot.replay_request is replay
+
+
+@pytest.mark.parametrize("shape", list(WireShape))
+def test_harness_bookkeeping_stays_out_of_encoded_context(shape):
+    turn = L1TurnIR.begin("private-turn-sentinel", user_text="Keep revision=42 in my document")
+    item = candidate("Today's date is 2026-09-30.", key="private-key-sentinel", title="Current Date")
+    turn, _ = advance(turn, [item])
+    turn, _ = advance(turn, [{**item, "content": "Today's date is 2026-10-01."}])
+    turn, _ = advance(turn, [])
+    turn, _ = advance(turn, [candidate("Installation completed.", key="private-event-key",
+                                      kind="event", event_id="private-event-sentinel")])
+    request = LLMRequestIR(tools=(), messages=turn.messages, policy=GenerationPolicyIR(max_output_tokens=20))
+    payload = str(codec_for_shape(shape).encode(request, ShapeContext(shape, "fixture", "fixture")).payload)
+    for private in ("private-turn-sentinel", "private-key-sentinel", "private-event-key",
+                    "private-event-sentinel", "source_revision", "replaces_revision", "action=", "scope="):
+        assert private not in payload
+    assert "Current Date" in payload
+    assert "no longer applies" in payload
+    assert "in place of earlier content" in payload
+    assert "revision=42" in payload
+    assert turn.messages[-1].metadata["event_id"] == "private-event-sentinel"
+
+
+def test_duplicate_titles_have_stable_distinct_replacement_targets():
+    items = [candidate("A", key="first", title='Notes & "facts"'),
+             candidate("B", key="second", title='Notes & "facts"')]
+    turn, added = advance(L1TurnIR.begin("t"), items)
+    titles = [message.metadata["context_title"] for message in added]
+    assert len(set(titles)) == 2
+    assert "&amp;" in added[0].text and "&quot;" in added[0].text
+    turn, added = advance(turn, [{**items[1], "content": "C"}])
+    assert added[0].metadata["context_title"] == titles[1]
+    assert added[1].metadata["context_title"] == titles[0]
+    assert added[1].metadata["withdrawn"]

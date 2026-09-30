@@ -2228,6 +2228,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(fragment.metadata["prompt_target"], "runtime_reminder")
         self.assertEqual(fragment.metadata["block_id"], "control_constraints")
+        self.assertIn("degraded", fragment.content)
+        self.assertNotIn("Mounted=", fragment.content)
+        self.assertNotIn("deterministic", fragment.content)
 
     def test_today_for_timezone_uses_configured_timezone(self) -> None:
         fixed_utc = datetime(2026, 7, 2, 16, 30, tzinfo=timezone.utc)

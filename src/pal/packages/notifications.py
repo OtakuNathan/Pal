@@ -171,10 +171,11 @@ class PackageCompletionSource:
                 "not a new user request. Continue unfinished work from the initiating task within its existing "
                 "authorization. Do not repeat the operation. Inspect the actual activation result; "
                 "completion alone does not mean activation succeeded.</runtime_context_update>\n"
-                + render_structured_for_llm({"opening_turn_id": opening_turn, **state})
+                + render_structured_for_llm(state)
             )
             message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
-                                  message_id=identity, semantic_kind="runtime_context_artifact")
+                                  message_id=identity, semantic_kind="runtime_context_artifact",
+                                  metadata={"opening_turn_id": opening_turn})
             opening = EventEnvelope(event_kind=EVENT, source_kind="packages", payload=message, event_id=identity)
             continuation = TurnContinuation(turn_id=identity, opening_event=opening, delivery_binding=binding,
                 program=completion_program(opening, **core.turn_execution_options()), correlation_id=opening_turn)

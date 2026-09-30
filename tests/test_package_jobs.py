@@ -159,7 +159,11 @@ def test_completion_wakes_pal_once_when_idle_with_original_binding(failed, model
             assert len(messages) == 1
             assert 'installed_inactive' in messages[0].text and 'mutated' not in messages[0].text
             assert messages[0].semantic_kind == 'runtime_context_artifact'
+            assert 'opening_turn_id' not in messages[0].text
+            assert messages[0].metadata['opening_turn_id'] == 'opening'
+            assert 'test' in messages[0].text
             continuation = core.run_turn_continuation_async.call_args.args[0]
+            assert continuation.correlation_id == 'opening'
             assert continuation.delivery_binding is binding
             assert continuation.delivery_binding.response_handle.reply_target == {'chat_id': 123}
             assert not core.state.active_turns and not core.state.turn_tasks

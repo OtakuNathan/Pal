@@ -636,16 +636,16 @@ class PromptCompiler:
             if block.block_id not in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "skill_guide", "knowledge_storage_boundary"}:
                 continue
             candidates.append({"key": f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
-                               "role": "developer", "content": self._project_llm_text(block.content), "instruction": True})
+                               "role": "developer", "title": block.title, "content": self._project_llm_text(block.content), "instruction": True})
         for index, block in enumerate(prompt_ir.user_context_blocks):
             if block.block_id.startswith("l1_recent_context") or block.block_id == "memory_current_summary":
                 continue
             candidates.append({"key": f"reference:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
-                               "role": "user", "parts": self._resolve_artifact_images([
+                               "role": "user", "title": block.title, "parts": self._resolve_artifact_images([
                                    {"role": "user", "content": self._render_user_context_parts(block)}])[0]["content"]})
         for index, block in enumerate(prompt_ir.runtime_reminder_blocks):
             candidates.append({"key": f"runtime:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
-                               "role": "developer", "content": self._project_llm_text(block.content),
+                               "role": "developer", "title": block.title, "content": self._project_llm_text(block.content),
                                "coverage_kind": block.metadata.get("coverage_kind", ""),
                                "source_revision": block.metadata.get("source_revision"),
                                **({"kind": "event", "event_id": block.metadata["event_id"]} if block.metadata.get("event_id") else {})})

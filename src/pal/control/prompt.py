@@ -13,14 +13,19 @@ class ControlPromptFragmentProvider(PromptFragmentProvider):
     module_id: str = "control"
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
-        status = "degraded" if self.provider.degraded else "normal"
         if not self.provider.degraded and context.turn_kind != "control":
             return []
+        if not self.provider.mounted:
+            guidance = "Control operations are unavailable."
+        elif self.provider.degraded:
+            guidance = "Control operations are degraded. Check tool results before assuming success."
+        else:
+            guidance = "Control operations are available through the control tools."
         return [
             PromptFragment(
                 section="runtime",
                 title="Control Constraints",
-                content=f"Control plane is deterministic. Mounted={self.provider.mounted}. Status={status}.",
+                content=guidance,
                 priority=20,
                 metadata={
                     "prompt_target": "runtime_reminder",
