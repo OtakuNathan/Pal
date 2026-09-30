@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import base64
 import json
 from dataclasses import dataclass
@@ -9,7 +8,7 @@ from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
 from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
-from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, BunshinRoleGatewayClient
+from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env, RoleGatewayArtifactStore
 from pal.bunshin.v2.architecture_templates import (
     compiled_architecture_definition_from_mapping,
 )
@@ -36,6 +35,7 @@ from pal.bunshin.v2.service import BunshinV2WorkflowService
 from pal.bunshin.v2.skeleton import preflight_architecture_workspace_submission
 from pal.bunshin.v2.task_ledger import validate_task_ledger
 from pal.bunshin.v2.submission_drafts import (
+    decode_remote_draft_snapshot,
     SubmissionDraftContext,
     SubmissionDraftSnapshot,
     SubmissionDraftStore,
@@ -67,13 +67,6 @@ ROLE_SUBMISSION_ARTIFACT_TYPES = {
 
 def role_submission_artifact_type(submission_kind: str) -> str:
     return str(ROLE_SUBMISSION_ARTIFACT_TYPES.get(str(submission_kind or "")) or "")
-
-
-def role_gateway_client_from_env(runtime_root: Path) -> BunshinRoleGatewayClient | None:
-    token = str(os.environ.get(ROLE_GATEWAY_TOKEN_ENV) or "").strip()
-    if not token:
-        return None
-    return BunshinRoleGatewayClient(Path(runtime_root), token)
 
 
 def _graph_role_binding(value: Mapping[str, Any]) -> RoleBinding:
@@ -823,35 +816,3 @@ class RoleAssignmentGateway:
         if context.draft_kind not in allowed_kinds:
             raise ValueError("submission Draft kind does not match its assignment")
         return context
-
-
-def decode_remote_draft_snapshot(value: Mapping[str, Any]) -> SubmissionDraftSnapshot:
-    return SubmissionDraftSnapshot.from_mapping(dict(value.get("snapshot") or {}))
-
-
-@dataclass
-class RoleGatewayArtifactStore:
-    client: BunshinRoleGatewayClient
-
-    def put_bytes(
-        self,
-        data: bytes,
-        *,
-        artifact_type: str,
-        schema_version: str = "1",
-        media_type: str = "application/octet-stream",
-        provenance: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, Any] | None = None,
-        child_refs: tuple[tuple[str, str], ...] = (),
-    ) -> ArtifactRef:
-        _ = provenance, metadata, child_refs
-        response = self.client.request_sync(
-            "artifact_put",
-            {
-                "data_base64": base64.b64encode(bytes(data)).decode("ascii"),
-                "artifact_type": str(artifact_type),
-                "schema_version": str(schema_version),
-                "media_type": str(media_type),
-            },
-        )
-        return ArtifactRef.from_mapping(dict(response.get("artifact_ref") or {}))

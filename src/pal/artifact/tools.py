@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import mimetypes
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pal.artifact.contracts import ARTIFACT_KIND_IMAGE
-from pal.artifact.service import ArtifactManager
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.shared.tool_protocol import ToolContextMessageIR
+
+if TYPE_CHECKING:
+    from pal.artifact.service import ArtifactManager
 
 
 def _scope_from_runtime(runtime: Any, turn_id: str | None) -> str:

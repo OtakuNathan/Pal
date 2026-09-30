@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
-from pal.execution.runtime import ExecutionRuntime
 from pal.execution.session_state import (
     InMemoryLogicalExecutionState,
     LogicalExecutionContext,
 )
+
+if TYPE_CHECKING:
+    from pal.execution.runtime import ExecutionRuntime
 
 
 EXECUTION_RUNTIME_STATE_SCHEMA_VERSION = "2"

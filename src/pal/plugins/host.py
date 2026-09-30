@@ -30,14 +30,11 @@ from pal.plugins.contracts import (
 )
 from pal.plugins.lifecycle import PluginGeneration, PluginScope, _run_awaitable
 from pal.plugins.repository import PluginBundleRepository
+from pal.plugins.paths import _source_plugins_root
 from pal.shared import RuntimeStatus
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
-
-
-def _source_plugins_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "plugins_builtin"
 
 
 def _module_cache_prefixes(

@@ -7,7 +7,6 @@ from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.tool_facade import ToolGuidance
 from pal.execution.file_capabilities import FileCapabilityMixin, get_file_state_cache as _get_file_state_cache
 from pal.execution.file_state import FileStateCache
-from pal.execution.runtime import ExecutionRuntime
 from pal.execution.shell_exec import ShellExecCapabilityMixin
 from pal.execution.tool_search import (
     ExecutionDiscoveryCapabilityMixin,
@@ -26,6 +25,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+    from pal.execution.runtime import ExecutionRuntime
 
 
 # Isolated cache factory for direct business-tool tests and adapters. Runtime

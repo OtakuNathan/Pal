@@ -2199,7 +2199,7 @@ class BunshinRunner:
         if self._manager_submission_receipt_observed:
             return True
         try:
-            from pal.bunshin.v2.role_gateway import role_gateway_client_from_env
+            from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
 
             client = role_gateway_client_from_env(self.runtime_root)
             if client is None:

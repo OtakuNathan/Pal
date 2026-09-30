@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from pal.packages.process import PackageError, run_command
-from pal.web_fetch.browser_service import (
+from pal.web_fetch.runtime_paths import (
     BrowserRuntimePaths, NODE_MINIMUM_MAJOR, PLAYWRIGHT_CLI_PACKAGE, PLAYWRIGHT_CLI_VERSION,
     _chromium_installed, _installed_cli_version,
 )

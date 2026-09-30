@@ -189,7 +189,7 @@ class SubmissionDraftStore:
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = Path(runtime_root)
         self.db_path = bunshin_db_path(self.runtime_root)
-        from pal.bunshin.v2.role_gateway import role_gateway_client_from_env
+        from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
 
         self._role_gateway = role_gateway_client_from_env(self.runtime_root)
 
@@ -371,8 +371,6 @@ class SubmissionDraftStore:
     ) -> SubmissionDraftSnapshot:
         self._assert_authoring_contract(context)
         if self._role_gateway is not None:
-            from pal.bunshin.v2.role_gateway import decode_remote_draft_snapshot
-
             return decode_remote_draft_snapshot(
                 self._role_gateway.request_sync(
                     "draft_read",
@@ -924,3 +922,7 @@ def _parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def decode_remote_draft_snapshot(value: Mapping[str, Any]) -> SubmissionDraftSnapshot:
+    return SubmissionDraftSnapshot.from_mapping(dict(value.get("snapshot") or {}))

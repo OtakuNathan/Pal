@@ -5,19 +5,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from pal.llm.ir import LLMRequestIR, LLMResponseUpdate, WireShape
-
-
-class ProviderResponseHookError(RuntimeError):
-    """A provider response could not be normalized into Pal's LLM IR."""
-
-
-@dataclass(frozen=True)
-class ProviderResponseHookContext:
-    endpoint_id: str
-    provider_id: str
-    model_id: str
-    wire_shape: WireShape
-    request: LLMRequestIR
+from pal.llm.response_hook_contracts import ProviderResponseHookContext, ProviderResponseHookError
 
 
 ResponseNormalizer = Callable[

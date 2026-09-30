@@ -45,7 +45,7 @@ def bound_reference_payload(
         # Resolve the authenticated immutable input by name in that case;
         # never accept a caller-supplied host path as a fallback.
         if bool(item.get("bound_input")) or not path.is_file():
-            from pal.bunshin.v2.role_gateway import role_gateway_client_from_env
+            from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
 
             gateway = role_gateway_client_from_env(
                 Path(str(workspace.get("runtime_root") or ""))

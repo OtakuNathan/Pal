@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterable, Iterator
 
 from pal.llm.ir import LLMResponseDeltaKind, LLMResponseUpdate
-from pal.llm.response_hooks import (
+from pal.llm.response_hook_contracts import (
     ProviderResponseHookContext,
     ProviderResponseHookError,
 )

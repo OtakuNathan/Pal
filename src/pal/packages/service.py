@@ -91,7 +91,7 @@ class PackageService:
     def _target(self, artifact: PackageArtifact) -> Path:
         if artifact.kind == "provider":
             return self.runtime_root / "channel" / "providers" / artifact.package_id
-        from pal.plugins.host import _source_plugins_root
+        from pal.plugins.paths import _source_plugins_root
         if (_source_plugins_root() / artifact.package_id / "plugin.toml").is_file():
             raise PackageError("Community package id conflicts with a built-in plugin")
         if (self.runtime_root / "plugins" / "_builtin" / artifact.package_id).exists():
@@ -104,7 +104,7 @@ class PackageService:
     def _legacy_remote(self, name: str) -> Path | None:
         # Only the retired, Pal-managed remote manifest may yield its identity.
         # Preserve the entire directory outside discovery, including local files.
-        from pal.plugins.host import _source_plugins_root
+        from pal.plugins.paths import _source_plugins_root
         root = self.runtime_root / "plugins" / "_builtin"
         path = root / name
         manifest = path / "plugin.toml"
@@ -291,7 +291,7 @@ class PackageService:
             return self._install_artifact(artifact)
 
     def _prepare_builtin(self, name: str) -> dict:
-        from pal.plugins.host import _source_plugins_root
+        from pal.plugins.paths import _source_plugins_root
         manifest_path = _source_plugins_root() / name / "plugin.toml"
         if not manifest_path.is_file():
             raise PackageError("Unknown builtin package")

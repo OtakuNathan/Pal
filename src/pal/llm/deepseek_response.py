@@ -19,7 +19,7 @@ from pal.llm.ir import (
     TextPartIR,
     ThinkingLevel,
 )
-from pal.llm.response_hooks import (
+from pal.llm.response_hook_contracts import (
     ProviderResponseHookContext,
     ProviderResponseHookError,
 )

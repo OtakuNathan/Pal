@@ -51,7 +51,7 @@ def validate_data_paths(runtime_root, paths, *, other_paths=()):
 
 
 def _other_data_paths(root, name):
-    from pal.plugins.host import _source_plugins_root
+    from pal.plugins.paths import _source_plugins_root
     paths = []
     for base in (root / "plugins/community", root / "plugins/_builtin", _source_plugins_root()):
         for file in base.glob("*/plugin.toml"):
@@ -79,7 +79,7 @@ def _safe_install_target(root, name):
 def uninstall(service, name, *, purge_data=False):
     name = valid_id(name)
     root = service.runtime_root
-    from pal.plugins.host import _source_plugins_root
+    from pal.plugins.paths import _source_plugins_root
     if ((root / "plugins/_builtin" / name).exists() or (_source_plugins_root() / name / "plugin.toml").exists()
             or (service.activation and name in service.activation.host.first_party_records)):
         raise PackageError("Built-in plugins cannot be uninstalled; use plugin_disable")

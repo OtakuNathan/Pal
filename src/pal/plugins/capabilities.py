@@ -11,6 +11,7 @@ from pal.packages.jobs import PackageJobs
 from pal.packages.notifications import PackageCompletionSource
 from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput, PluginUninstallInput
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pal.execution.generated_tool_models import (
     PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -22,7 +23,6 @@ from pal.execution.generated_tool_models import (
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
-from pal.plugins.host import PluginHost
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -33,6 +33,9 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+
+if TYPE_CHECKING:
+    from pal.plugins.host import PluginHost
 
 
 @capability_node(

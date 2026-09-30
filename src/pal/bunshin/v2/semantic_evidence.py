@@ -519,7 +519,7 @@ def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
 
 def _artifact_store(workspace: Mapping[str, Any]) -> Any:
     root = _runtime_root(workspace)
-    from pal.bunshin.v2.role_gateway import (
+    from pal.bunshin.v2.role_gateway_client import (
         RoleGatewayArtifactStore,
         role_gateway_client_from_env,
     )
