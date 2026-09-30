@@ -1756,66 +1756,9 @@ def _transfer_endpoint_runtime_state(
     if old_endpoint is None or old_endpoint is new_endpoint:
         return
 
-    for attribute in (
-        "mailbox",
-        "outbox",
-        "attachment_outbox",
-        "status_outbox",
-        "stream_update_outbox",
-        "_unacknowledged_frames",
-    ):
-        old_queue = getattr(old_endpoint, attribute, None)
-        new_queue = getattr(new_endpoint, attribute, None)
-        old_items = getattr(old_queue, "items", old_queue)
-        new_items = getattr(new_queue, "items", new_queue)
-        if old_items is None or new_items is None or not old_items:
-            continue
-        candidate_items = tuple(new_items)
-        new_items.clear()
-        new_items.extend(old_items)
-        new_items.extend(candidate_items)
-        old_items.clear()
-
-    for attribute in (
-        "_reported_reply_failures",
-        "_stream_sessions",
-        "_interactive_messages",
-        "_tagged_message_targets",
-        "_session_replacements",
-        "_stream_handle_ids_by_key",
-    ):
-        old_values = getattr(old_endpoint, attribute, None)
-        new_values = getattr(new_endpoint, attribute, None)
-        if not isinstance(old_values, dict) or not isinstance(new_values, dict):
-            continue
-        for key, value in old_values.items():
-            new_values.setdefault(key, value)
-        old_values.clear()
-
-    for attribute in (
-        "_retired_session_ids",
-        "_streamed_text_handles",
-        "_streamed_text_keys",
-    ):
-        old_values = getattr(old_endpoint, attribute, None)
-        new_values = getattr(new_endpoint, attribute, None)
-        if not isinstance(old_values, set) or not isinstance(new_values, set):
-            continue
-        new_values.update(old_values)
-        old_values.clear()
-
-    if bool(getattr(old_endpoint, "_allow_single_session_rebind", False)):
-        setattr(new_endpoint, "_allow_single_session_rebind", True)
-
-    old_commands = list(
-        getattr(old_endpoint, "_control_commands_manifest", ()) or ()
-    )
-    if old_commands and not getattr(
-        new_endpoint,
-        "_control_commands_manifest",
-        None,
-    ):
-        new_endpoint._control_commands_manifest = old_commands
+    state = old_endpoint.export_pending_state()
+    new_endpoint.import_pending_state(state)
+    old_endpoint.clear_pending_state()
 
 
 def _queued_delivery_id(item: Any) -> str:

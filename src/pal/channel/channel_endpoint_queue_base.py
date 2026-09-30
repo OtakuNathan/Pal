@@ -10,6 +10,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from pal.channel.reload_contracts import EndpointPendingState
+
 from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelEnvelope,
@@ -61,6 +63,55 @@ class ChannelEndpointQueueBase(ABC):
         init=False,
         repr=False,
     )
+
+    def export_pending_state(self) -> EndpointPendingState:
+        return EndpointPendingState(
+            mailbox=tuple(self.mailbox.items), replies=tuple(self.outbox),
+            attachments=tuple(self.attachment_outbox), statuses=tuple(self.status_outbox),
+            stream_updates=tuple(self.stream_update_outbox),
+            reported_reply_failures=dict(self._reported_reply_failures),
+            stream_sessions=dict(self._stream_sessions),
+            interactive_messages=dict(self._interactive_messages),
+            control_commands=tuple(self._control_commands_manifest),
+            transport=self.export_transport_pending_state(),
+        )
+
+    def import_pending_state(self, state: EndpointPendingState) -> None:
+        self.import_transport_pending_state(state.transport)
+        # Older work stays ahead of anything the candidate queued at startup.
+        self.mailbox.items.extendleft(reversed(state.mailbox))
+        self.outbox.extendleft(reversed(state.replies))
+        self.attachment_outbox.extendleft(reversed(state.attachments))
+        self.status_outbox.extendleft(reversed(state.statuses))
+        self.stream_update_outbox.extendleft(reversed(state.stream_updates))
+        for key, value in state.reported_reply_failures.items():
+            self._reported_reply_failures.setdefault(key, value)
+        for key, value in state.stream_sessions.items():
+            self._stream_sessions.setdefault(key, value)
+        for key, value in state.interactive_messages.items():
+            self._interactive_messages.setdefault(key, value)
+        if not self._control_commands_manifest:
+            self._control_commands_manifest = list(state.control_commands)
+
+    def clear_pending_state(self) -> None:
+        self.mailbox.items.clear()
+        self.outbox.clear()
+        self.attachment_outbox.clear()
+        self.status_outbox.clear()
+        self.stream_update_outbox.clear()
+        self._reported_reply_failures.clear()
+        self._stream_sessions.clear()
+        self._interactive_messages.clear()
+        self.clear_transport_pending_state()
+
+    def export_transport_pending_state(self) -> object | None:
+        return None
+
+    def import_transport_pending_state(self, state: object | None) -> None:
+        pass
+
+    def clear_transport_pending_state(self) -> None:
+        pass
 
     @abstractmethod
     def normalize_raw(self, payload: Any) -> dict[str, Any]:

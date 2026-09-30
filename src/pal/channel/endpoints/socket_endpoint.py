@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pal.channel.reload_contracts import SocketPendingState
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
@@ -105,6 +106,40 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     delivery_quiesce_timeout_seconds: float = 3.0
     # A live connection is not proof the peer is consuming or acknowledging.
     delivery_timeout_seconds: float = 30.0
+
+    def export_transport_pending_state(self) -> SocketPendingState:
+        return SocketPendingState(
+            unacknowledged_frames=tuple(self._unacknowledged_frames),
+            session_replacements=dict(self._session_replacements),
+            stream_handle_ids_by_key=dict(self._stream_handle_ids_by_key),
+            retired_session_ids=frozenset(self._retired_session_ids),
+            streamed_text_handles=frozenset(self._streamed_text_handles),
+            streamed_text_keys=frozenset(self._streamed_text_keys),
+            allow_single_session_rebind=self._allow_single_session_rebind,
+        )
+
+    def import_transport_pending_state(self, state: object | None) -> None:
+        if state is None:
+            return
+        if not isinstance(state, SocketPendingState):
+            raise TypeError("socket endpoint requires SocketPendingState")
+        self._unacknowledged_frames.extendleft(reversed(state.unacknowledged_frames))
+        for key, value in state.session_replacements.items():
+            self._session_replacements.setdefault(key, value)
+        for key, value in state.stream_handle_ids_by_key.items():
+            self._stream_handle_ids_by_key.setdefault(key, value)
+        self._retired_session_ids.update(state.retired_session_ids)
+        self._streamed_text_handles.update(state.streamed_text_handles)
+        self._streamed_text_keys.update(state.streamed_text_keys)
+        self._allow_single_session_rebind |= state.allow_single_session_rebind
+
+    def clear_transport_pending_state(self) -> None:
+        self._unacknowledged_frames.clear()
+        self._session_replacements.clear()
+        self._stream_handle_ids_by_key.clear()
+        self._retired_session_ids.clear()
+        self._streamed_text_handles.clear()
+        self._streamed_text_keys.clear()
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
