@@ -41,6 +41,20 @@ _FIXTURE_PNG = base64.b64decode(
 )
 
 
+class _FixtureTurnIO:
+    def capture_delivery_binding(self, turn_id):
+        return {'channel_id': 'telegram_main', 'reply_target': {'chat_id': '42'}}
+
+    def artifact_scope_for_turn(self, turn_id):
+        return 'fixture'
+
+    def llm_capabilities_for_turn(self, turn_id):
+        return {}
+
+    async def send_attachment_for_turn(self, turn_id, attachment):
+        raise AssertionError('benchmark must not deliver attachments')
+
+
 class _BrowserFixture:
     def __init__(self, root):
         self.runtime_root = root
@@ -100,11 +114,7 @@ class FixtureExecution:
                 derive_default_reply_target=lambda: {'chat_id': '42'},
             ))
             self.core.context.port_registry['channel:channel'] = channel
-            self.runtime.register_provider_ref('core:turn_io', SimpleNamespace(
-                capture_delivery_binding=lambda turn_id: {
-                    'channel_id': 'telegram_main', 'reply_target': {'chat_id': '42'},
-                },
-            ))
+            self.runtime.register_provider_ref('core:turn_io', _FixtureTurnIO())
             register_proactive(self.core.context, ProactiveManager())
             self.core.publish_module_capabilities('proactive')
 

@@ -107,9 +107,8 @@ class ProactiveIntrospectionProvider:
 
     def _current_delivery_binding(self, call: IntrospectionCall) -> dict[str, object]:
         runtime = self.context.execution_runtime if self.context is not None else None
-        turn_io = getattr(runtime, "provider_registry", {}).get("core:turn_io")
-        capture = getattr(turn_io, "capture_delivery_binding", None)
-        return dict(capture(call.meta.get("turn_id")) or {}) if callable(capture) else {}
+        turn_io = runtime.turn_io if runtime is not None else None
+        return dict(turn_io.capture_delivery_binding(call.meta.get("turn_id"))) if turn_io is not None else {}
 
     def _resolve_destination(
         self, call: IntrospectionCall, *, endpoint_id: str | None = None,

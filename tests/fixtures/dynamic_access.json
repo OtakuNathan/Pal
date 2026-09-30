@@ -3,23 +3,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/artifact/tools.py:_scope_from_runtime:getattr(runtime, 'provider_registry', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/artifact/tools.py:_scope_from_runtime:getattr(turn_io, 'artifact_scope_for_turn', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bootstrap/service.py:StubRuntimeHandle.proactive_repository:getattr(manager, 'repository', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bootstrap/service.py:StubRuntimeHandle.stop_async:getattr(handle, 'shutdown_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bootstrap/service.py:StubRuntimeHandle.stop_async:getattr(handle, 'shutdown_sync', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -483,18 +467,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._capture_delivery_binding:getattr(port, 'capture_delivery_binding', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._capture_delivery_binding:getattr(runtime, 'provider_registry', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._capture_delivery_binding:getattr(self.context, 'execution_runtime', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'attached', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -875,38 +847,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(new_endpoint, '_control_commands_manifest', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(new_endpoint, attribute, None)": {
-    "count": 3,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(new_queue, 'items', new_queue)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(old_endpoint, '_allow_single_session_rebind', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(old_endpoint, '_control_commands_manifest', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(old_endpoint, attribute, None)": {
-    "count": 3,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:getattr(old_queue, 'items', old_queue)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:_transfer_endpoint_runtime_state:setattr(new_endpoint, '_allow_single_session_rebind', True)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/channel/tool_activity.py:ToolActivityRouter.__call__:getattr(endpoint, 'supports_tool_activity', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -916,18 +856,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/control/interactions.py:_endpoint_field:getattr(endpoint, field_name, None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/control/interactions.py:build_control_panel_interaction:getattr(spec, 'interaction_action_key', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/control/interactions.py:build_control_panel_interaction:getattr(spec, 'panel_button', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/control/interactions.py:build_control_panel_interaction:getattr(spec, 'panel_label', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -1855,14 +1783,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/runtime_state.py:RuntimeSnapshotCoordinator.restore:getattr(port, 'finish_restore_state', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/runtime_state.py:RuntimeSnapshotCoordinator.restore:getattr(port, 'readable_schema_versions', (str(port.schema_version),))": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/runtime_state.py:RuntimeSnapshotIdentity.__post_init__:getattr(self, field_name)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2419,14 +2339,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/execution/channel_attachment.py:ChannelSendAttachmentTool.ainvoke:getattr(runtime, 'provider_registry', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/channel_attachment.py:ChannelSendAttachmentTool.ainvoke:getattr(turn_io, 'send_attachment_for_turn', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/execution/contracts.py:CapabilityDescriptor.__post_init__:getattr(model, '__pydantic_root_model__', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2568,10 +2480,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/execution/runtime.py:ExecutionRuntime.shutdown:getattr(handle, 'terminate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime_state.py:ExecutionRuntimeStatePort.finish_restore_state:getattr(port, 'module_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2967,14 +2875,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/llm/runtime.py:_invoker_accepts_native_sink:getattr(invoker, method)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/runtime.py:_invoker_accepts_native_sink:inspect.signature(getattr(invoker, method))": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/llm/runtime.py:_is_stub_endpoint:getattr(endpoint, 'capabilities_blob', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3047,30 +2947,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/lsp/manager.py:LspManager._ensure_attached:getattr(session.connector, 'extra_args', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/lsp/manager.py:LspManager._ensure_attached:getattr(session.connector, 'healthy', True)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/lsp/manager.py:LspManager._ensure_attached:getattr(state.connector, 'extra_args', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/lsp/manager.py:LspManager._ensure_attached:getattr(state.connector, 'healthy', True)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/lsp/manager.py:LspManager._server_summary:getattr(session.connector, 'extra_args', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/lsp/manager.py:_attach_error_detail:getattr(connector, 'stderr_tail_text', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/main.py:main:getattr(args, 'check', False)": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3083,10 +2959,6 @@
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/mcp/manager.py:McpManager.read_server:getattr(state.connector, '_stderr_lines', [])": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/mcp/plugin.py:McpManagerPluginBundle.register_with_core.refresh_capabilities:getattr(skill, 'register_declared_module', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3096,18 +2968,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/mcp/plugin.py:McpManagerPluginProvider._prepare_image_payload:getattr(artifact_manager, 'info', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/mcp/plugin.py:McpManagerPluginProvider._prepare_image_payload:getattr(runtime, 'provider_registry', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/mcp/plugin.py:McpManagerPluginProvider._prepare_image_payload:getattr(self.core_context, 'execution_runtime', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/mcp/plugin.py:McpManagerPluginProvider._prepare_image_payload:getattr(turn_io, 'artifact_scope_for_turn', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -3551,10 +3411,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/plugins/host.py:PluginHost._call_plugin_factory:inspect.signature(factory)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/plugins/host.py:PluginHost._register_skill_declarations:getattr(skill, 'register_declared_module', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3655,19 +3511,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/plugins/lifecycle.py:StagedMainContext.__getattr__:getattr(self._real, name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/plugins/lifecycle.py:_StagedExecutionRuntime.__getattr__:getattr(self._real, name)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/plugins/lifecycle.py:_StagedL3Registry.__getattr__:getattr(self._real, name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/plugins/lifecycle.py:_StagedRegistry.__getattr__:getattr(self._real, name)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -3683,27 +3531,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/proactive/capabilities.py:ProactiveIntrospectionProvider._current_delivery_binding:getattr(runtime, 'provider_registry', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/proactive/capabilities.py:ProactiveIntrospectionProvider._current_delivery_binding:getattr(turn_io, 'capture_delivery_binding', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/proactive/capabilities.py:ProactiveIntrospectionProvider._resolve_destination:getattr(channel, 'resolve_output_destination', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/proactive/repository.py:ProactiveRepository.upsert_definition:setattr(instance, key, value)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/proactive/turns.py:settled_output_text:getattr(outcome, 'final_reply', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/proactive/turns.py:settled_output_text:getattr(outcome, 'reply_texts', ())": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -3787,14 +3619,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/skill/service.py:SkillService._sanitize_with_llm_or_fallback:getattr(self.llm_runtime, 'agenerate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/skill/service.py:SkillService._sanitize_with_llm_or_fallback:getattr(self.llm_runtime, 'generate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/skill/service.py:SkillService.register_declared_module:getattr(descriptor, 'module_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3824,14 +3648,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/skill/service.py:_collect_skill_blueprints:getattr(value, '__skill_blueprints__', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/skill/tools.py:_project_skill_text:getattr(runtime, 'project_llm_text', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/skill/tools.py:_render_skill_tool_payload:getattr(runtime, 'project_llm_value', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

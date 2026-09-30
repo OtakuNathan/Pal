@@ -84,14 +84,14 @@ def build_control_panel_interaction(
 ) -> InteractionMessageSpec:
     rows: list[tuple[InteractionButtonSpec, ...]] = []
     for spec in control_plane.list_panel_commands():
-        if not getattr(spec, "panel_button", False):
+        if not spec.panel_button:
             continue
-        action_key = str(getattr(spec, "interaction_action_key", "") or "").strip() or "control.command.run"
+        action_key = str(spec.interaction_action_key or "").strip() or "control.command.run"
         action_args = {"command_name": spec.name} if action_key == "control.command.run" else {}
         rows.append(
             (
                 InteractionButtonSpec(
-                    label=str(getattr(spec, "panel_label", "") or spec.name),
+                    label=str(spec.panel_label or spec.name),
                     action_key=action_key,
                     action_args=action_args,
                 ),

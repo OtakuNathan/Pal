@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -9,6 +8,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from pal.foundation.persistence import utc_now
+from pal.llm.contracts import LLMRuntimePort
+from pal.execution.contracts import ExecutionProjectionPort
 from pal.llm.conversions import request_ir_from_prompt
 from pal.shared import LLMFinishReason
 from pal.shared.text_search import jieba_search_terms
@@ -31,8 +32,8 @@ from pal.skill.decorators import SkillBlueprint
 @dataclass
 class SkillService:
     repository: SkillRepository = field(default_factory=SkillRepository)
-    llm_runtime: Any | None = None
-    execution_runtime: Any | None = None
+    llm_runtime: LLMRuntimePort | None = None
+    execution_runtime: ExecutionProjectionPort | None = None
     runtime_root: Path | None = None
     inject_manual_char_budget: int = SKILL_INJECT_MANUAL_CHAR_BUDGET
     admission_manual_char_budget: int = SKILL_ADMISSION_MANUAL_CHAR_BUDGET
@@ -202,21 +203,7 @@ class SkillService:
             tools=[],
             metadata={"purpose": "skill_assimilation_sanitizer", "response_mode_hint": "operational"},
         )
-        generate = getattr(self.llm_runtime, "agenerate", None)
-        if callable(generate):
-            outcome = await generate(request)
-        else:
-            sync_generate = getattr(self.llm_runtime, "generate", None)
-            if not callable(sync_generate):
-                return _deterministic_sanitized(
-                    source_text=source_text,
-                    frontmatter=frontmatter,
-                    source_format=source_format,
-                    intent=intent,
-                    desired_skill_id=desired_skill_id,
-                    risk_hints=risk_hints,
-                )
-            outcome = await asyncio.to_thread(sync_generate, request)
+        outcome = await self.llm_runtime.agenerate(request)
         if outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
             raise ValueError("sanitizer_context_too_large")
         raw = str(outcome.text or "").strip()

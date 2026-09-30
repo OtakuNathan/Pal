@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+from pal.execution.turn_io_contracts import TURN_IO, TurnIOPort
+
 import hashlib
 
 from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint
@@ -315,7 +318,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def bound_action_index(self):
         return self._registry_generation.canonical_bindings
 
+    @property
+    def turn_io(self) -> TurnIOPort | None:
+        return cast(TurnIOPort | None, self.provider_registry.get(TURN_IO.name))
+
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
+        if provider_id == TURN_IO.name:
+            TURN_IO.validate(provider)
         self.provider_registry[provider_id] = provider
 
     def unregister_provider_ref(self, provider_id: str) -> None:

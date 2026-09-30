@@ -122,10 +122,10 @@ def proactive_turn_program(
 
 
 def settled_output_text(outcome: TurnOutcome) -> str:
-    replies = tuple(str(item).strip() for item in getattr(outcome, "reply_texts", ()) if str(item).strip())
+    replies = tuple(str(item).strip() for item in outcome.reply_texts if str(item).strip())
     if replies:
         return "\n\n".join(replies)
-    return str(getattr(outcome, "final_reply", "") or "")
+    return str(outcome.final_reply or "")
 
 
 def _build_proactive_turn_transcript(

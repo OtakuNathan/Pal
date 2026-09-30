@@ -16,6 +16,7 @@ from typing import Any
 from pal.foundation import utc_now
 from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_client
 from pal.lsp.config import LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
+from pal.lsp.contracts import LspConnectorPort
 from pal.lsp.connector import AsyncLspConnector, LspProtocolError
 from pal.lsp.environment import (
     detect_workspace_languages,
@@ -28,7 +29,7 @@ from pal.lsp.ipc import cleanup_manager_endpoint, lsp_runtime_dir, start_manager
 @dataclass
 class LspWorkspaceSession:
     workspace_root: Path
-    connector: AsyncLspConnector
+    connector: LspConnectorPort
     attached_at: str
     last_used_at: float = field(default_factory=time.monotonic)
     last_used_timestamp: str = field(default_factory=utc_now)
@@ -43,7 +44,7 @@ class LspServerState:
     file_config: LspServerFileConfig
     config_path: Path
     sessions: dict[str, LspWorkspaceSession] = field(default_factory=dict)
-    connector: AsyncLspConnector | None = None
+    connector: LspConnectorPort | None = None
     attached: bool = False
     last_error: str = ""
     last_attached_at: str = ""
@@ -715,7 +716,7 @@ class LspManager:
         params: dict[str, Any],
         *,
         state: LspServerState,
-        connector: AsyncLspConnector,
+        connector: LspConnectorPort,
         workspace_root: Path,
         file_path: Path,
     ) -> dict[str, Any]:
@@ -760,7 +761,7 @@ class LspManager:
 
     async def _call_hierarchy_calls(
         self,
-        connector: AsyncLspConnector,
+        connector: LspConnectorPort,
         *,
         operation: str,
         text_document: dict[str, Any],
@@ -874,9 +875,9 @@ class LspManager:
         session = state.sessions.get(key)
         if (
             session is not None
-            and bool(getattr(session.connector, "healthy", True))
+            and bool(session.connector.healthy)
             and session.connector.workspace_root == workspace_root
-            and tuple(getattr(session.connector, "extra_args", ())) == tuple(extra_args)
+            and tuple(session.connector.extra_args) == tuple(extra_args)
         ):
             session.touch()
             state.connector = session.connector
@@ -888,9 +889,9 @@ class LspManager:
         if (
             state.connector is not None
             and state.attached
-            and bool(getattr(state.connector, "healthy", True))
+            and bool(state.connector.healthy)
             and state.connector.workspace_root == workspace_root
-            and tuple(getattr(state.connector, "extra_args", ())) == tuple(extra_args)
+            and tuple(state.connector.extra_args) == tuple(extra_args)
         ):
             state.sessions[key] = LspWorkspaceSession(
                 workspace_root=workspace_root,
@@ -971,7 +972,7 @@ class LspManager:
     async def _close_connector_or_fence(
         self,
         state: LspServerState,
-        connector: AsyncLspConnector,
+        connector: LspConnectorPort,
     ) -> None:
         _ = state
         await connector.close()
@@ -1146,7 +1147,7 @@ class LspManager:
                 "workspace_root": str(session.workspace_root),
                 "attached_at": session.attached_at,
                 "last_used_at": session.last_used_timestamp,
-                "extra_args": list(getattr(session.connector, "extra_args", ())),
+                "extra_args": list(session.connector.extra_args),
             }
             for session in sorted(state.sessions.values(), key=lambda item: str(item.workspace_root))
         ]
@@ -1601,10 +1602,9 @@ def _state_supports_language(state: LspServerState, language: str) -> bool:
     return False
 
 
-def _attach_error_detail(exc: Exception, connector: AsyncLspConnector) -> str:
+def _attach_error_detail(exc: Exception, connector: LspConnectorPort) -> str:
     detail = f"{exc.__class__.__name__}: {exc}"
-    stderr_tail_getter = getattr(connector, "stderr_tail_text", None)
-    stderr_tail = stderr_tail_getter() if callable(stderr_tail_getter) else ""
+    stderr_tail = connector.stderr_tail_text()
     if stderr_tail:
         if len(stderr_tail) > 1200:
             stderr_tail = "..." + stderr_tail[-1200:]

@@ -117,6 +117,14 @@ install_hint = "install pyright"
         self.assertEqual(lsp_config_root(self.root), self.root / "plugins" / "lsp" / "servers")
 
 
+class _ConnectorDiagnostics:
+    healthy = True
+    extra_args = ()
+
+    def stderr_tail_text(self):
+        return ""
+
+
 class LspConnectorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_lsp_connector_test_"))
@@ -489,7 +497,7 @@ language_ids = ["foo"]
         compile_commands.write_text("[]\n", encoding="utf-8")
         observed_args: list[tuple[str, ...]] = []
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -625,7 +633,7 @@ language_ids = ["foo"]
         )
         (workspace / "task.yaml").write_text("goal: test\n", encoding="utf-8")
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -711,7 +719,7 @@ language_ids = ["foo"]
             encoding="utf-8",
         )
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -791,7 +799,7 @@ language_ids = ["foo"]
         initialized: list[tuple[str, ...]] = []
         closed: list[tuple[str, ...]] = []
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -884,7 +892,7 @@ language_ids = ["foo"]
         workspace = self.root / "prepared_without_source"
         workspace.mkdir()
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -954,7 +962,7 @@ language_ids = ["foo"]
         header.parent.mkdir(parents=True)
         header.write_text("int value();\n", encoding="utf-8")
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(
                 self,
                 config: LspServerConfig,
@@ -1160,7 +1168,7 @@ language_ids = ["foo"]
         initialized: list[Path] = []
         closed: list[Path] = []
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
                 _ = config
                 self.workspace_root = workspace_root
@@ -1242,7 +1250,7 @@ language_ids = ["foo"]
         workspace_b.mkdir()
         closed: list[Path] = []
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
                 _ = config
                 self.workspace_root = workspace_root
@@ -1303,7 +1311,7 @@ language_ids = ["foo"]
         sample.write_text("symbol value\n", encoding="utf-8")
         attempts: list[Path] = []
 
-        class FailingConnector:
+        class FailingConnector(_ConnectorDiagnostics):
             def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
                 _ = config
                 self.workspace_root = workspace_root
@@ -1347,7 +1355,7 @@ language_ids = ["foo"]
         closed: list[int] = []
         instances: list[object] = []
 
-        class RestartingConnector:
+        class RestartingConnector(_ConnectorDiagnostics):
             def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
                 _ = config
                 self.workspace_root = workspace_root
@@ -1403,7 +1411,7 @@ language_ids = ["foo"]
         sample.write_text("def caller():\n    return target()\n\ndef target():\n    return 1\n", encoding="utf-8")
         (self.root / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
 
-        class FakeConnector:
+        class FakeConnector(_ConnectorDiagnostics):
             def __init__(self, workspace_root: Path) -> None:
                 self.workspace_root = workspace_root
                 self.requests: list[tuple[str, dict]] = []

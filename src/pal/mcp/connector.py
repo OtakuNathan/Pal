@@ -7,34 +7,13 @@ import os
 import re
 import signal
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from pal.mcp.model import McpProtocolError, McpPromptSpec, McpServerConfig, McpToolSpec
 from pal.mcp.normalize import normalize_prompt_payload, normalize_tool_payload
 
 
-class McpConnector(Protocol):
-    server_info: dict[str, Any]
-    server_capabilities: dict[str, Any]
-
-    async def initialize(self) -> None:
-        ...
-
-    async def list_tools_all(self) -> tuple[McpToolSpec, ...]:
-        ...
-
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        ...
-
-    async def list_prompts_all(self) -> tuple[McpPromptSpec, ...]:
-        ...
-
-    async def get_prompt(self, prompt_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        ...
-
-    async def close(self) -> None:
-        ...
-
+from pal.mcp.contracts import McpConnector as McpConnector
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
@@ -64,6 +43,9 @@ class AsyncStdioMcpConnector:
     _closed: bool = False
     _stderr_lines: list[str] = field(default_factory=list)
     _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def stderr_tail(self, limit: int = 20) -> tuple[str, ...]:
+        return tuple(self._stderr_lines[-limit:]) if limit > 0 else ()
 
     async def initialize(self) -> None:
         async with self._lifecycle_lock:

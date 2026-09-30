@@ -165,7 +165,8 @@ def test_pdf_page_image_import_uses_existing_injection_path(manager):
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
     pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
-    runtime = SimpleNamespace(provider_registry={'core:turn_io': SimpleNamespace(artifact_scope_for_turn=lambda _: 'scope')})
+    from tests.turn_fakes import TurnIOFixture
+    runtime = SimpleNamespace(turn_io=TurnIOFixture(scope='scope'))
     result = asyncio.run(ArtifactImportTool(manager).ainvoke({'path': pages[1]['image_file_path']}, runtime=runtime, turn_id='page-view'))
     assert result.status == 'ok', result.llm_text
     image_id = result.structured['artifact_id']

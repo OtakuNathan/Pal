@@ -221,3 +221,29 @@ Execution recognizes declared result envelopes (`CapabilityResult`,
 tool schema. Objects that merely resemble an envelope are invalid raw outputs.
 Execution extensions transfer only the framework state enumerated by
 `adopt_host_state`; plugin-specific state remains with its implementation.
+
+### Plugin and transport admission
+
+Plugin entrypoints implement `build_plugin(context: PluginBuildContext)`. The host
+passes one context and does not infer arguments from a factory signature. Update
+external factories before activating this host version. `context.plugin_dir` and
+`context.runtime_root` replace separate factory parameters; injected services stay
+in `context.services`. Desktop emotion and OLED source entrypoints must be upgraded
+together. Native shell's host-test LLM implements the asynchronous runtime contract.
+
+Staged event-source, event-handler, prompt and control registries expose explicit
+operations. Candidate registration remains unpublished until the generation commits.
+Runtime-state participants declare readable schema versions and a restore completion
+hook; a participant with no deferred work supplies a no-op completion hook.
+
+Endpoint replacement transfers `EndpointPendingState` after candidate startup.
+Socket-specific session and pending-delivery state is owned by `SocketPendingState`;
+the source clears its queues only after successful import. Providers with additional
+pending state implement the transport export/import/clear hooks. Provider-specific
+authorization migration remains at the provider admission boundary.
+
+Tool consumers obtain turn routing through `ExecutionRuntime.turn_io: TurnIOPort | None`.
+Core validates this provider on registration. Artifact scope, attachment delivery,
+LLM capabilities and reply binding have declared methods. LSP and MCP manager-facing
+connector contracts expose health/diagnostic reads; MCP no longer reads a connector's
+private stderr buffer.

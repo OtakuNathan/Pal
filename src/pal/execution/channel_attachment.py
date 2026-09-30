@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import inspect
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.turn_io_contracts import TurnIOHost
 from pal.foundation import AttachmentSpec
 from pal.shared import RuntimeStatus
 
@@ -22,13 +22,11 @@ class ChannelSendAttachmentTool:
             structured={"reason": "async_required"},
         )
 
-    async def ainvoke(self, args: dict[str, Any], *, runtime: Any = None, turn_id: str | None = None) -> CapabilityResult:
+    async def ainvoke(self, args: dict[str, Any], *, runtime: TurnIOHost | None = None, turn_id: str | None = None) -> CapabilityResult:
         if not str(turn_id or "").strip():
             return _failure(RuntimeStatus.INVALID, "turn_id_required", "turn_id is required")
-        runtime_registry = getattr(runtime, "provider_registry", {}) if runtime is not None else {}
-        turn_io = runtime_registry.get("core:turn_io") if isinstance(runtime_registry, dict) else None
-        send = getattr(turn_io, "send_attachment_for_turn", None)
-        if not callable(send):
+        turn_io = runtime.turn_io if runtime is not None else None
+        if turn_io is None:
             return _failure(RuntimeStatus.UNSUPPORTED, "core_turn_io_missing", "core turn I/O port is not available")
         path_text = str(args.get("path") or "").strip()
         if not path_text:
@@ -48,9 +46,7 @@ class ChannelSendAttachmentTool:
             file_name=file_name,
             mime_type=mime_type,
         )
-        result = send(turn_id, attachment)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await turn_io.send_attachment_for_turn(turn_id, attachment)
         if isinstance(result, CapabilityResult):
             return result
         return _failure(RuntimeStatus.ERROR, "invalid_core_turn_io_result", "core turn I/O returned an invalid result")

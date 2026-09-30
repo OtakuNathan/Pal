@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from pal.artifact.contracts import ARTIFACT_KIND_IMAGE
 from pal.execution.contracts import CapabilityResult
+from pal.execution.turn_io_contracts import TurnIOHost
 from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.shared.tool_protocol import ToolContextMessageIR
@@ -15,12 +16,10 @@ if TYPE_CHECKING:
     from pal.artifact.service import ArtifactManager
 
 
-def _scope_from_runtime(runtime: Any, turn_id: str | None) -> str:
-    registry = getattr(runtime, "provider_registry", {}) if runtime is not None else {}
-    turn_io = registry.get("core:turn_io") if isinstance(registry, dict) else None
-    scope_for_turn = getattr(turn_io, "artifact_scope_for_turn", None)
-    if callable(scope_for_turn):
-        scope = scope_for_turn(turn_id)
+def _scope_from_runtime(runtime: TurnIOHost | None, turn_id: str | None) -> str:
+    turn_io = runtime.turn_io if runtime is not None else None
+    if turn_io is not None:
+        scope = turn_io.artifact_scope_for_turn(turn_id)
         if scope:
             return str(scope)
     raise KeyError("artifact_scope_unavailable")

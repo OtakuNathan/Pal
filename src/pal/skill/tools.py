@@ -337,15 +337,13 @@ def _render_injected_skill_for_llm(payload: dict[str, Any]) -> str:
 
 def _render_skill_tool_payload(service: SkillService, title: str, structured: Any) -> str:
     runtime = service.execution_runtime
-    projector = getattr(runtime, "project_llm_value", None)
-    llm_value = projector(structured) if callable(projector) else structured
+    llm_value = runtime.project_llm_value(structured) if runtime is not None else structured
     return render_titled_structured_for_llm(title, llm_value)
 
 
 def _project_skill_text(service: SkillService, value: object) -> str:
     runtime = service.execution_runtime
-    projector = getattr(runtime, "project_llm_text", None)
-    return str(projector(value)) if callable(projector) else str(value or "")
+    return runtime.project_llm_text(value) if runtime is not None else str(value or "")
 
 
 _SEARCH_STOP_WORDS = frozenset("a an the and or to of for in on at by with from as is are be using use".split())

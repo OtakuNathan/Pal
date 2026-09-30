@@ -36,8 +36,12 @@ from pal.mcp.plugin import McpManagerPluginProvider
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 
 
-class _TurnIO:
+from tests.turn_fakes import TurnIOFixture
+
+
+class _TurnIO(TurnIOFixture):
     def __init__(self, scope_key: str) -> None:
+        super().__init__()
         self.scope_key = scope_key
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
@@ -50,7 +54,8 @@ class _TurnIO:
 
 class _ToolRuntime:
     def __init__(self, scope_key: str) -> None:
-        self.provider_registry = {"core:turn_io": _TurnIO(scope_key)}
+        self.turn_io = _TurnIO(scope_key)
+        self.provider_registry = {"core:turn_io": self.turn_io}
 
 
 class _FakeTranscriber:

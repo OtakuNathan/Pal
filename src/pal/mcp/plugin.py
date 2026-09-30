@@ -475,11 +475,8 @@ class McpManagerPluginProvider:
             info = getattr(artifact_manager, "info", None)
             if not callable(info):
                 raise ValueError("artifact service unavailable")
-            runtime = getattr(self.core_context, "execution_runtime", None)
-            registry = getattr(runtime, "provider_registry", {})
-            turn_io = registry.get("core:turn_io") if isinstance(registry, dict) else None
-            scope_for_turn = getattr(turn_io, "artifact_scope_for_turn", None)
-            scope_key = scope_for_turn(turn_id) if callable(scope_for_turn) else None
+            turn_io = self.core_context.execution_runtime.turn_io
+            scope_key = turn_io.artifact_scope_for_turn(turn_id) if turn_io is not None else None
             if not scope_key:
                 raise ValueError("artifact_scope_unavailable")
             artifact = dict(info(artifact_id, str(scope_key)).get("artifact") or {})

@@ -13,6 +13,7 @@ from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_clie
 from pal.mcp.config import McpServerFileConfig, load_mcp_server_file
 from pal.mcp.connector import AsyncStdioMcpConnector
 from pal.mcp.ipc import cleanup_manager_endpoint, mcp_config_root, start_manager_server
+from pal.mcp.contracts import McpConnector
 from pal.mcp.model import McpDiscoverySnapshot, McpProtocolError, McpServerConfig
 
 
@@ -20,7 +21,7 @@ from pal.mcp.model import McpDiscoverySnapshot, McpProtocolError, McpServerConfi
 class McpServerState:
     file_config: McpServerFileConfig
     config_path: Path
-    connector: AsyncStdioMcpConnector | None = None
+    connector: McpConnector | None = None
     snapshot: McpDiscoverySnapshot | None = None
     attached: bool = False
     last_error: str = ""
@@ -203,7 +204,7 @@ class McpManager:
             }
         )
         if state.connector is not None:
-            payload["stderr_tail"] = list(getattr(state.connector, "_stderr_lines", [])[-20:])
+            payload["stderr_tail"] = list(state.connector.stderr_tail())
         return payload
 
     def snapshot(self) -> dict[str, Any]:
@@ -306,7 +307,7 @@ def _config_summary(config: McpServerConfig) -> dict[str, Any]:
     }
 
 
-def _server_has_prompts_capability(connector: AsyncStdioMcpConnector) -> bool:
+def _server_has_prompts_capability(connector: McpConnector) -> bool:
     return "prompts" in connector.server_capabilities
 
 

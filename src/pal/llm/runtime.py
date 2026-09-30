@@ -98,28 +98,6 @@ def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
     return collect
 
 
-def _invoker_accepts_native_sink(invoker: Any, method: str = "invoke_updates", *, keyword: str = "native_sink") -> bool:
-    """Whether the invoker's send method accepts an optional observer.
-
-    Subclasses that narrow the base signature (historically: without
-    ``**kwargs``) must not receive the kwarg — a TypeError at call time
-    would count as an endpoint failure before any attempt runs.
-    """
-
-    import inspect
-
-    try:
-        signature = inspect.signature(getattr(invoker, method))
-    except (TypeError, ValueError, AttributeError):
-        return False
-    if keyword in signature.parameters:
-        return True
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-
-
 class LLMEndpointInvocationError(RuntimeError):
     pass
 
@@ -291,14 +269,6 @@ class LLMRuntime:
     @property
     def projection_port(self) -> LLMProjectionPort:
         return self
-
-    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
-        metadata = request.metadata if request is not None else {}
-        facts = self.resolve_endpoint_facts(
-            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
-            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
-        )
-        return bool(facts.get("supports_streaming", True))
 
     def endpoint_projection_session(
         self,
@@ -853,16 +823,13 @@ class LLMRuntime:
                     if isinstance(self._invoker(), ShapeEndpointInvoker):
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
-                        if on_submitted is not None and _invoker_accepts_native_sink(
-                            self._invoker(), "invoke", keyword="submission_sink"
-                        ):
+                        if on_submitted is not None:
                             invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: the codec-level native capture for THIS attempt
                         # travels back with the send receipt.
-                        if _invoker_accepts_native_sink(self._invoker(), "invoke"):
-                            invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
+                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     response, _ = self._invoker().invoke(
                         endpoint,
                         effective,
@@ -1141,15 +1108,12 @@ class LLMRuntime:
                         invoke_kwargs["stream_control"] = stream_control
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
-                        if on_submitted is not None and _invoker_accepts_native_sink(
-                            self._invoker(), keyword="submission_sink"
-                        ):
+                        if on_submitted is not None:
                             invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
                         # F3: native capture travels back with the receipt.
-                        if _invoker_accepts_native_sink(self._invoker()):
-                            invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
+                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,

@@ -931,12 +931,10 @@ class BunshinV2PublicProvider:
         turn_id = str(call.meta.get("turn_id") or "")
         if self.context is None or not turn_id:
             return {}
-        runtime = getattr(self.context, "execution_runtime", None)
-        port = getattr(runtime, "provider_registry", {}).get("core:turn_io")
-        capture = getattr(port, "capture_delivery_binding", None)
-        if not callable(capture):
+        port = self.context.execution_runtime.turn_io
+        if port is None:
             return {}
-        return dict(capture(turn_id) or {})
+        return dict(port.capture_delivery_binding(turn_id))
 
     def _resolve_rebind_binding(
         self,
