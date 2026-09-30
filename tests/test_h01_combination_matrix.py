@@ -126,7 +126,6 @@ def _executor(host: str, ports: _Ports) -> TurnExecutor:
         SimpleNamespace(port_registry=ports, require_port=ports.require_port),
         SimpleNamespace(diagnostics=[]),
         None,
-        call_port_async=None,
         build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None,
         debug_log_outcome=lambda *a: None,

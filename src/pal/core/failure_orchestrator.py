@@ -49,13 +49,11 @@ class FailureOrchestrator:
         self,
         context,
         *,
-        call_port_async: Callable[..., Awaitable[Any]],
         build_canonical_prompt: Callable[..., Any],
         debug_log_prompt: Callable[[LLMRequestIR], None],
         tool_surface,
     ) -> None:
         self.context = context
-        self._call_port_async = call_port_async
         self._build_canonical_prompt = build_canonical_prompt
         self._debug_log_prompt = debug_log_prompt
         self.tool_surface = tool_surface
@@ -225,7 +223,7 @@ class FailureOrchestrator:
                 )
                 self._debug_log_prompt(request)
                 try:
-                    outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
+                    outcome = await llm_runtime.agenerate(request)
                 except Exception as exc:
                     return FailureFlowOutcome(
                         verification=VerificationResult(
@@ -253,13 +251,7 @@ class FailureOrchestrator:
                 bus = self.context.core_event_bus
                 bus.emit(TURN_TOOL_CALL_BEFORE, tool_event)
                 try:
-                    tool_result = await self._call_port_async(
-                        self.context.execution_runtime,
-                        "execute_tool_async",
-                        "execute_tool",
-                        effect.tool_call,
-                        allow_tools=True,
-                    )
+                    tool_result = await self.context.execution_runtime.execute_tool_async(effect.tool_call, allow_tools=True)
                 except Exception as exc:
                     text = f"safe-mode tool failed: {type(exc).__name__}: {exc}"
                     tool_result = ToolExecutionResult(
@@ -367,13 +359,8 @@ class FailureOrchestrator:
             "action_text": record.action_text,
             "result_text": record.result_text,
         }
-        await self._call_port_async(
-            self.context.execution_runtime,
-            "execute_async",
-            "execute",
-            CapabilityCall(name="op_memory_write", args=call_args),
-        )
-        memory_service.l2_store.upsert_entries(
+        await self.context.execution_runtime.execute_async(CapabilityCall(name='op_memory_write', args=call_args))
+        memory_service.upsert_l2_entries(
             [
                 L2Entry(
                     entry_id=f"repair_case:{record.subsystem}:{record.component}:{record.failure_kind}",

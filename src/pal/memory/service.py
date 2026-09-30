@@ -49,6 +49,7 @@ from pal.memory.compact import (
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.context_view import L1ContextView
+from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
 from pal.shared.json_values import thaw_json
 from pal.memory.turn_ir import (
     L1TurnIR,
@@ -289,7 +290,7 @@ class InMemoryL2Store(L2Store):
 
 
 @dataclass
-class MemoryService(MemoryServicePort):
+class MemoryService:
     l1_store: InMemoryL1Store = field(default_factory=InMemoryL1Store)
     l2_store: InMemoryL2Store = field(default_factory=InMemoryL2Store)
     l3_selector: L3ProviderSelector | None = None
@@ -319,7 +320,24 @@ class MemoryService(MemoryServicePort):
         self._history_root: Any = None
 
     @property
-    def history_root(self) -> Any:
+    def history(self) -> HistoryReadPort:
+        """Read and change-notification interface to the currently owned history."""
+        return self.l1_store.turns
+
+    def tick_heat(self) -> None:
+        self.l2_store.tick_heat()
+
+    def settled_transcripts(self) -> list[list[L1TranscriptMessage]]:
+        return list(self.l1_store.items)
+
+    def l2_entries(self) -> tuple[L2Entry, ...]:
+        return tuple(self.l2_store.items.values())
+
+    def upsert_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = False) -> list[L2Entry]:
+        return self.l2_store.upsert_entries(entries, touch=touch, top_of_mind=top_of_mind)
+
+    @property
+    def history_root(self) -> HistoryRootPort:
         """Two-segment authority over the live L1 turns (v3 PLAN §3.1).
 
         Attached lazily and healed when the underlying L1TurnStore object is

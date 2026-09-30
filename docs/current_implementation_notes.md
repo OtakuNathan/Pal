@@ -202,3 +202,22 @@ while the role's published capability registry enforces what the LLM can call.
 Capability availability is runtime state.
 
 Persisted metadata may explain prior state, but live facts such as attached status, process status, socket status, and capability availability must be inspected live.
+
+### LLM, history and execution ownership
+
+LLM callers use the asynchronous generation/preflight contract directly. Optional
+projection support is exposed through `projection_port`; projected sessions expose
+the active attempt and owner fence without exposing private runtime records.
+Generation plans contain endpoint specifications rather than ORM instances.
+Per-call progress callbacks stay isolated across concurrent Bunshin/resident calls
+and stop delivering when an asynchronous generation is cancelled.
+
+Memory owns history storage. Consumers read `history` and perform compaction through
+`history_root` contracts, with history transaction data defined independently of the
+implementation. L2 updates retain the explicit `touch` and `top_of_mind` controls.
+
+Execution recognizes declared result envelopes (`CapabilityResult`,
+`ToolHandlerResult`, and invocation results), or validates raw output against the
+tool schema. Objects that merely resemble an envelope are invalid raw outputs.
+Execution extensions transfer only the framework state enumerated by
+`adopt_host_state`; plugin-specific state remains with its implementation.

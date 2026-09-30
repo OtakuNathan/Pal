@@ -38,6 +38,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.llm.projection_contracts import (
+    HistoryView, ProjectionChunk, LeftReplacement,
     AttemptKey,
     ClosedRound,
     EndpointBinding,
@@ -78,79 +79,6 @@ _ITEM_CONTAINER_KEY = {
     "openai_completion": "messages",
     "anthropic_messages": "messages",
 }
-
-
-@dataclass(frozen=True)
-class HistoryView:
-    """What the L1 writer shows the session for one prepare call.
-
-    ``cursor`` is the base of this view and must equal the session frontier
-    (append-proof continuity).  ``messages`` is everything NOT yet frozen
-    into committed chunks — for a fast-path prepare that is the tail after
-    the frontier; after a generation switch it is the full history.
-    """
-
-    cursor: HistoryCursor
-    messages: tuple[LLMMessageIR, ...]
-    epoch_note: str = ""
-
-
-@dataclass(frozen=True)
-class ProjectionChunk:
-    """Immutable wire items for one committed round, carved from a sent request."""
-
-    round_attempt_id: str
-    cursor_before: HistoryCursor
-    cursor_after: HistoryCursor
-    items: tuple[dict, ...]
-    prefix_digest: str
-    # v3 (PLAN §6.2): the semantic message ids this chunk covers.  The rebase
-    # path (on_left_replaced) decides chunk survival from this span instead
-    # of subtracting item counts; an empty span is a legacy chunk that can
-    # no longer participate in a left replacement.
-    semantic_span: tuple[str, ...] = ()
-    # F5 (review af51d74): per-item semantic ownership aligned with ``items``
-    # (same length; empty tuples are legacy items with unknown ownership).
-    # Wire bytes frozen out of a pending tail keep their ORIGINAL owning
-    # span, so a left replacement can retire them from a surviving chunk's
-    # replay instead of letting compacted-away content ride along.
-    item_spans: tuple[tuple[str, ...], ...] = ()
-    # S1 (review 7d182fd): per-BLOCK semantic ownership aligned with both
-    # ``items`` and ``item_spans``.  An Anthropic user-seam merge
-    # concatenates two eras' blocks into ONE wire item; per-item spans
-    # alone cannot retire just the retired-left blocks without dropping
-    # the surviving right's blocks with them (whole-item keep/drop would
-    # misdelete R).  Each entry aligns with that item's content blocks;
-    # an empty entry marks an item without block ownership (whole-item
-    # rules apply, e.g. legacy snapshots or non-list content).
-    item_block_spans: tuple[tuple[tuple[str, ...], ...], ...] = ()
-    # Codec addresses relative to each frozen item; distinct from ownership.
-    item_cache_spans: tuple[ItemSpans, ...] = ()
-
-
-@dataclass(frozen=True)
-class LeftReplacement:
-    """Facts of one committed compact install (v3 PLAN §6.3).
-
-    Carried by the history owner after replace-left: the new seed content,
-    the semantic messages that survive in previously-frozen territory (the
-    right side's already-committed part), and the post-install cursor base
-    future append receipts must continue from.
-    """
-
-    seed_messages: tuple[LLMMessageIR, ...]
-    kept_frozen_messages: tuple[LLMMessageIR, ...]
-    cursor_after: HistoryCursor
-    left_revision: int = 0
-    # B1 (review 4b14ce4): model-view ids of EVERY message this seed
-    # materializes.  A post-compact rebase seed is the standalone continuity
-    # reference alone; a recovery/rebind bootstrap hands this entry the WHOLE
-    # current L model view (summary plus promoted ordinary groups), so its
-    # coverage is that whole view's id set — declaring one id while encoding
-    # more made the next prepare re-append the rest as fresh tail.  The
-    # coverage is established by the SAME encode that materializes the seed:
-    # content first, declaration second, never a fabricated round chunk.
-    seed_coverage_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,6 +200,14 @@ class EndpointProjectionSession:
         self.retired = False
 
     # -- binding lifecycle -------------------------------------------------
+
+    @property
+    def active_attempt(self) -> AttemptKey | None:
+        return self._active.attempt if self._active is not None else None
+
+    @property
+    def owner_fence(self) -> int:
+        return self._owner_fence
 
     def bind(
         self,

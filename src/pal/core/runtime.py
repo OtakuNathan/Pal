@@ -513,7 +513,6 @@ class PalCore(MemoryMaintenanceMixin):
         self.context.execution_runtime.lifecycle_controller = self
         self.failure_orchestrator = FailureOrchestrator(
             self.context,
-            call_port_async=self._call_port_async,
             build_canonical_prompt=self.build_canonical_prompt,
             debug_log_prompt=self._debug_log_prompt,
             tool_surface=self.tool_surface,
@@ -521,7 +520,6 @@ class PalCore(MemoryMaintenanceMixin):
         self.agent_turn_runtime = AgentTurnRuntime.build(
             context=self.context,
             config=self.config,
-            call_port_async=self._call_port_async,
             debug_log_prompt=self._debug_log_prompt,
             debug_log_outcome=self._debug_log_outcome,
             debug_log_reply=self._debug_log_reply,
@@ -1895,7 +1893,7 @@ class PalCore(MemoryMaintenanceMixin):
                 await self.cache_warm_deadline.clear_for_compaction()
             memory_service = self.context.require_port("memory:memory")
             l1_items = list(
-                getattr(getattr(memory_service, "l1_store", None), "items", ())
+                memory_service.settled_transcripts() if memory_service is not None else ()
                 or ()
             )
             if not l1_items:
@@ -2346,15 +2344,6 @@ class PalCore(MemoryMaintenanceMixin):
             await self._deliver_control_delivery_async(delivery, fallback_route=route)
         continuation.pending_compact_memory_candidate_batches.clear()
 
-    async def _call_port_async(self, port, async_name: str, sync_name: str, *args, **kwargs):
-        async_method = getattr(port, async_name, None)
-        if callable(async_method):
-            result = async_method(*args, **kwargs)
-            if inspect.isawaitable(result):
-                return await result
-            return result
-        sync_method = getattr(port, sync_name)
-        return await asyncio.to_thread(sync_method, *args, **kwargs)
 
     def publish_module_capabilities(self, module_id: str) -> list[str]:
         return self.module_lifecycle.publish_module_capabilities(module_id)

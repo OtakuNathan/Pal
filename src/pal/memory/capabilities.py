@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.memory.contracts import MEMORY
+
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     DIRECT_LOCAL_WRITE,
@@ -646,6 +648,7 @@ def register_with_core(
             "memory_review_open": provider.handle_memory_review_open_async,
         },
         ports={"memory": service},
+        port_contracts=(MEMORY,),
         runtime_state_port=MemoryRuntimeStatePort(service),
     )
     context.register_module(handle)

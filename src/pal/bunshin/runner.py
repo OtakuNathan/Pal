@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.llm.projection_contracts import ProjectionSendReceipt
+
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
 import asyncio
@@ -55,6 +57,7 @@ from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LLMCred
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.repository import RuntimeSettingSnapshot
 from pal.llm.contracts import (
+    LLMRuntimePort,
     LLMGenerationResult,
     LLMPreflightAdvice,
     LLMPreflightRequest,
@@ -201,165 +204,126 @@ class BunshinLLMRetryableError(RuntimeError):
 
 
 class _BunshinLLMRuntimeAdapter:
-    def __init__(self, runner: "BunshinRunner", base_runtime: Any, state: "BunshinAgentLoopState") -> None:
+    """Role progress around the same explicit LLM contract used by resident Core."""
+
+    def __init__(self, runner: "BunshinRunner", base_runtime: LLMRuntimePort, state: "BunshinAgentLoopState") -> None:
         self._runner = runner
         self._base = base_runtime
         self._state = state
 
-    def prompt_cache_eligible_anchor_request(self, **kwargs: Any) -> dict[str, Any]:
-        reader = getattr(self._base, "prompt_cache_eligible_anchor_request", None)
-        return dict(reader(**kwargs) or {}) if callable(reader) else {}
-
-    def prompt_cache_confirmed_anchor_request(self, **kwargs: Any) -> dict[str, Any]:
-        reader = getattr(self._base, "prompt_cache_confirmed_anchor_request", None)
-        return dict(reader(**kwargs) or {}) if callable(reader) else {}
+    @property
+    def last_endpoint_id(self) -> str | None:
+        return self._base.last_endpoint_id
 
     @property
-    def supports_streaming(self) -> bool:
-        supports_streaming = getattr(self._base, "supports_streaming", None)
-        if callable(supports_streaming):
-            try:
-                supports_streaming = supports_streaming()
-            except Exception:
-                supports_streaming = False
-        if supports_streaming is not None:
-            return bool(supports_streaming) and callable(getattr(self._base, "astream", None))
-        return callable(getattr(self._base, "astream", None))
+    def last_model_id(self) -> str | None:
+        return self._base.last_model_id
 
-    def resolve_max_output_tokens(
-        self,
-        *,
-        preferred_endpoint_id: str | None = None,
-        preferred_endpoint_source: str | None = None,
-    ) -> int | None:
-        fn = getattr(self._base, "resolve_max_output_tokens", None)
-        if not callable(fn):
-            return None
-        try:
-            return fn(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
-        except TypeError:
-            try:
-                return fn(preferred_endpoint_id=preferred_endpoint_id)
-            except TypeError:
-                return fn()
+    @property
+    def last_projection_receipt(self) -> ProjectionSendReceipt | None:
+        return self._base.last_projection_receipt
 
-    def resolve_endpoint_facts(self, *args, **kwargs) -> dict[str, Any]:
-        fn = getattr(self._base, "resolve_endpoint_facts", None)
-        if not callable(fn):
-            return {}
-        try:
-            value = fn(*args, **kwargs)
-        except TypeError:
-            value = fn()
-        return dict(value or {}) if isinstance(value, dict) else {}
+    @property
+    def projection_port(self):
+        return self._base.projection_port
+
+    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
+        return self._base.supports_streaming(request)
+
+    def prompt_cache_eligible_anchor_request(self, *, logical_scope_id="pal:resident", endpoint_id=""):
+        return self._base.prompt_cache_eligible_anchor_request(
+            logical_scope_id=logical_scope_id, endpoint_id=endpoint_id,
+        )
+
+    def prompt_cache_confirmed_anchor_request(self, *, logical_scope_id="pal:resident", endpoint_id=""):
+        return self._base.prompt_cache_confirmed_anchor_request(
+            logical_scope_id=logical_scope_id, endpoint_id=endpoint_id,
+        )
+
+    def resolve_max_output_tokens(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
+        return self._base.resolve_max_output_tokens(
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+
+    def resolve_endpoint_facts(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
+        return self._base.resolve_endpoint_facts(
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+
+    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        return self._base.preflight(request)
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        method = getattr(self._base, "apreflight", None)
-        if callable(method):
-            result = method(request)
-            return await result if inspect.isawaitable(result) else result
-        method = getattr(self._base, "preflight", None)
-        if callable(method):
-            result = method(request)
-            if inspect.isawaitable(result):
-                return await result
-            return await asyncio.to_thread(lambda: result)
-        return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
+        return await self._base.apreflight(request)
 
-    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
-        is_compaction = "compaction" in str(
-            request.metadata.get("purpose") or ""
-        ).lower()
+    def generate(self, request, *, projection=None, projection_binding=None,
+                 projection_attempt_id="", generation_plan=None, on_submitted=None):
+        return self._base.generate(
+            request, projection=projection, projection_binding=projection_binding,
+            projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
+            on_submitted=on_submitted,
+        )
+
+    async def agenerate(self, request, *, projection=None, projection_binding=None,
+                        projection_attempt_id="", generation_plan=None, on_submitted=None,
+                        on_event=None):
+        is_compaction = "compaction" in str(request.metadata.get("purpose") or "").lower()
         if not is_compaction:
             await self._runner._emit_progress(
-                "llm_round_started",
-                round=self._state.llm_round_count,
-                tool_call_count=self._state.tool_call_count,
-                tool_count=len(list(request.tools or [])),
+                "llm_round_started", round=self._state.llm_round_count,
+                tool_call_count=self._state.tool_call_count, tool_count=len(request.tools),
             )
-        restore_event_sink = self._install_llm_progress_sink()
-        method = getattr(self._base, "agenerate", None)
-        try:
-            if callable(method):
-                awaitable = method(request)
-            else:
-                sync_method = getattr(self._base, "generate")
-                awaitable = asyncio.to_thread(sync_method, request)
-            if is_compaction:
-                return await awaitable
-            return await self._runner._await_with_progress_heartbeat(
-                awaitable,
-                phase="llm_round_waiting",
-                round=self._state.llm_round_count,
-                tool_call_count=self._state.tool_call_count,
-            )
-        finally:
-            restore_event_sink()
-
-    async def astream(self, request: LLMRequestIR) -> AsyncIterator[Any]:
-        await self._runner._emit_progress(
-            "llm_round_started",
-            round=self._state.llm_round_count,
-            tool_call_count=self._state.tool_call_count,
-            tool_count=len(list(request.tools or [])),
+        awaitable = self._base.agenerate(
+            request, projection=projection, projection_binding=projection_binding,
+            projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
+            on_submitted=on_submitted, on_event=self._progress_sink(on_event),
         )
-        restore_event_sink = self._install_llm_progress_sink()
-        iterator = None
+        if is_compaction:
+            return await awaitable
+        return await self._runner._await_with_progress_heartbeat(
+            awaitable, phase="llm_round_waiting", round=self._state.llm_round_count,
+            tool_call_count=self._state.tool_call_count,
+        )
+
+    async def astream(self, request, *, projection=None, projection_binding=None,
+                      projection_attempt_id="", generation_plan=None, on_submitted=None,
+                      on_event=None):
+        await self._runner._emit_progress(
+            "llm_round_started", round=self._state.llm_round_count,
+            tool_call_count=self._state.tool_call_count, tool_count=len(request.tools),
+        )
+        iterator = self._base.astream(
+            request, projection=projection, projection_binding=projection_binding,
+            projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
+            on_submitted=on_submitted, on_event=self._progress_sink(on_event),
+        )
         try:
-            method = getattr(self._base, "astream", None)
-            if not callable(method):
-                raise AttributeError("wrapped bunshin LLM runtime does not implement astream")
-            iterator = method(request).__aiter__()
             while True:
                 try:
                     update = await self._runner._await_with_progress_heartbeat(
-                        anext(iterator),
-                        phase="llm_round_waiting",
+                        anext(iterator), phase="llm_round_waiting",
                         round=self._state.llm_round_count,
                         tool_call_count=self._state.tool_call_count,
                     )
                 except StopAsyncIteration:
-                    return
+                    break
                 yield update
         finally:
-            close = getattr(iterator, "aclose", None)
-            if callable(close):
-                with contextlib.suppress(Exception):
-                    await close()
-            restore_event_sink()
+            await iterator.aclose()
 
-    def _install_llm_progress_sink(self) -> Callable[[], None]:
-        sentinel = object()
-        try:
-            previous = getattr(self._base, "event_sink")
-        except Exception:
-            previous = sentinel
-        loop = asyncio.get_running_loop()
-
+    def _progress_sink(self, observer):
         def sink(event: dict[str, Any]) -> None:
-            payload = dict(event or {})
+            if observer is not None:
+                observer(event)
+            payload = dict(event)
             phase = str(payload.pop("phase", "") or "llm_endpoint_event")
             payload.setdefault("round", self._state.llm_round_count)
             payload.setdefault("tool_call_count", self._state.tool_call_count)
+            asyncio.create_task(self._runner._emit_progress(phase, **payload))
+        return sink
 
-            def schedule() -> None:
-                asyncio.create_task(self._runner._emit_progress(phase, **payload))
-
-            loop.call_soon_threadsafe(schedule)
-
-        try:
-            setattr(self._base, "event_sink", sink)
-        except Exception:
-            return lambda: None
-
-        def restore() -> None:
-            with contextlib.suppress(Exception):
-                if previous is sentinel:
-                    delattr(self._base, "event_sink")
-                else:
-                    setattr(self._base, "event_sink", previous)
-
-        return restore
 
 class _BunshinOutputPort:
     def __init__(self, runner: "BunshinRunner") -> None:
@@ -899,7 +863,7 @@ class BunshinRunner:
             )
         if semantic_input_is_new:
             with contextlib.suppress(Exception):
-                state.memory_service.l2_store.tick_heat()
+                state.memory_service.tick_heat()
         agent_turn_runtime = self._build_bunshin_agent_runtime(bundle, state, continuation)
         executor = agent_turn_runtime.executor
         current: EffectResult | None = None
@@ -1002,14 +966,14 @@ class BunshinRunner:
         prefix = f"{run_id}:invocation:"
         active = [
             turn
-            for turn in memory_service.l1_store.turns.turns
+            for turn in memory_service.history.turns
             if turn.state == L1TurnState.ACTIVE and turn.turn_id.startswith(prefix)
         ]
         if active and reuse_active:
             return max(active, key=lambda turn: int(turn.revision)).turn_id
 
         base = f"{run_id}:invocation:{active_input_id}"
-        existing = memory_service.l1_store.turns.get(base)
+        existing = memory_service.history.get(base)
         if existing is None or existing.state == L1TurnState.ACTIVE:
             return base
 
@@ -1017,7 +981,7 @@ class BunshinRunner:
         suffix = 0
         while True:
             recovery_id = f"{base}:recovery:{token}" if suffix == 0 else f"{base}:recovery:{token}:{suffix}"
-            if memory_service.l1_store.turns.get(recovery_id) is None:
+            if memory_service.history.get(recovery_id) is None:
                 memory_service.begin_l1_turn(
                     recovery_id,
                     user_text=str(user_text or ""),
@@ -1044,7 +1008,7 @@ class BunshinRunner:
         turn so checkpoint recovery cannot accumulate parallel active L1
         protocols.
         """
-        for turn in tuple(memory_service.l1_store.turns.turns):
+        for turn in tuple(memory_service.history.turns):
             if str(turn.state) != L1TurnState.ACTIVE or turn.turn_id == active_turn_id:
                 continue
             try:
@@ -1069,7 +1033,7 @@ class BunshinRunner:
             return False
         if memory_service is None:
             return True
-        for turn in memory_service.l1_store.turns.turns:
+        for turn in memory_service.history.turns:
             if turn.state != L1TurnState.ACTIVE:
                 continue
             if turn.pending_call_ids:
@@ -1504,7 +1468,6 @@ class BunshinRunner:
         runtime = AgentTurnRuntime.build(
             context=context,
             config=bundle.config or RuntimeConfig.defaults(),
-            call_port_async=self._call_port_async,
             debug_log_prompt=lambda _continuation, request: self._debug_log_bunshin_llm_request(state, request),
             debug_log_outcome=lambda _continuation, outcome: self._debug_log_bunshin_llm_outcome(state, outcome),
             debug_log_reply=lambda _continuation, text: self._debug_log_bunshin_reply(text),
@@ -1769,15 +1732,6 @@ class BunshinRunner:
     def _debug_log_bunshin_reply(self, text: object) -> None:
         self._append_prompt_debug_log(render_reply_debug_log(text, context=self._prompt_debug_context()))
 
-    async def _call_port_async(self, port: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
-        async_method = getattr(port, async_name, None)
-        if callable(async_method):
-            result = async_method(*args, **kwargs)
-            if inspect.isawaitable(result):
-                return await result
-            return result
-        sync_method = getattr(port, sync_name)
-        return await asyncio.to_thread(sync_method, *args, **kwargs)
 
     def _render_durable_role_context(self) -> str:
         binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
@@ -2455,7 +2409,7 @@ class BunshinRunner:
         }
         if self._memory_generation_id:
             experience_payload["memory_generation_id"] = self._memory_generation_id
-            entries = self._result_memory_service.l2_store.items.values() if self._result_memory_service is not None else ()
+            entries = self._result_memory_service.l2_entries() if self._result_memory_service is not None else ()
             experience_payload["memory_refs"] = sorted({entry.source_ref for entry in entries
                 if entry.source_ref.startswith(("fact:", "case:"))})
         payload = {

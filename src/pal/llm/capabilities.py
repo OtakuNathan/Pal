@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.llm.models import LLMEndpointModel
+from pal.llm.contracts import LLM_RUNTIME, LLM_QUERY
 from pal.llm.runtime import LLMRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -609,7 +610,8 @@ def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandl
         control_action_handlers={
             "show_llm_status": provider.handle_status_control_action,
         },
-        ports={"llm": runtime},
+        ports={"llm": runtime, "query": runtime},
+        port_contracts=(LLM_RUNTIME, LLM_QUERY),
         shutdown_sync=runtime.close,
     )
     context.register_module(handle)

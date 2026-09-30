@@ -38,6 +38,9 @@ class PortKey(Generic[T_co]):
             for name in base.__annotations__ if "__annotations__" in vars(base) else ():
                 if not name.startswith("_") and getattr(value, name, _MISSING) is _MISSING:
                     raise PortContractError(f"{self.name}: missing field {name}")
+        for name, member in inspect.getmembers(contract):
+            if isinstance(member, property) and inspect.getattr_static(value, name, _MISSING) is _MISSING:
+                raise PortContractError(f"{self.name}: missing property {name}")
         for name, expected in inspect.getmembers(contract, inspect.isfunction):
             if name.startswith("_"):
                 continue

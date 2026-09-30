@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+
+from tests.llm_fakes import NonStreamingLLM
 from dataclasses import replace
 
 from pal.channel.contracts import (
@@ -66,20 +68,26 @@ def _make_envelope(
     )
 
 
-class _FakeLLMPort:
+class _FakeLLMPort(NonStreamingLLM):
+    projection_port = None
+    def supports_streaming(self, request=None):
+        return False
     """Non-streaming fake LLM: first generation issues one tool call,
     subsequent generations return a plain text reply."""
 
     def __init__(self) -> None:
         self.generation_index = 0
+        self.requests = []
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        self.requests.append(request.request)
         return LLMPreflightAdvice(
             status=LLMPreflightStatus.READY.value,
             breakdown={},
         )
 
-    async def agenerate(self, request) -> LLMGenerationResult:
+    async def agenerate(self, request, *, on_submitted=None) -> LLMGenerationResult:
+        self.requests.append(request)
         self.generation_index += 1
         if self.generation_index == 1:
             return LLMGenerationResult(
@@ -138,20 +146,8 @@ class InterjectionInjectionTests(unittest.TestCase):
             state=self.state,
             config=RuntimeConfig.defaults(),
         )
-        self.captured_prompts = []
+        self.captured_prompts = self.fake_llm.requests
         self.interjection_enqueued = False
-
-        async def call_port_async(port, async_name: str, sync_name: str, *args, **kwargs):
-            if async_name == "apreflight":
-                self.captured_prompts.append(args[0].request)
-                return LLMPreflightAdvice(
-                    status=LLMPreflightStatus.READY.value,
-                    breakdown={},
-                )
-            if async_name == "agenerate":
-                self.captured_prompts.append(args[0])
-                return await port.agenerate(args[0])
-            raise AssertionError(f"unexpected port call: {async_name}")
 
         async def execute_tool_async(call, *, allow_tools, budget, turn_id):
             # Simulate the user sending a message while the tool runs.
@@ -181,7 +177,6 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.runtime = AgentTurnRuntime.build(
             context=self.context,
             config=RuntimeConfig.defaults(),
-            call_port_async=call_port_async,
             debug_log_prompt=lambda *_: None,
             debug_log_outcome=lambda *_: None,
             debug_log_reply=lambda *_: None,

@@ -102,7 +102,7 @@ def _executor(memory, runtime):
         SimpleNamespace(port_registry=ports, require_port=ports.__getitem__,
                         execution_runtime=None),
         SimpleNamespace(diagnostics=[]), None,
-        call_port_async=call_port, build_canonical_prompt=None,
+         build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None, debug_log_outcome=lambda *a: None,
         debug_log_reply=lambda *a: None, build_llm_tool_contracts=lambda: [],
         handle_failure_async=None, render_failure_feedback_text=lambda _: '',

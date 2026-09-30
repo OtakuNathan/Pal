@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.llm.contracts import LLMRuntimePort, LLMGenerationResult, LLMPreflightAdvice
+
 import asyncio
 import inspect
 import json
@@ -729,24 +731,10 @@ class CompactionEngine:
         )
 
     async def _generate(
-        self,
-        llm_runtime: Any,
-        request: LLMRequestIR,
-    ) -> Any:
-        method = getattr(llm_runtime, "agenerate", None)
-        if callable(method):
-            value = method(request)
-            if inspect.isawaitable(value):
-                return await asyncio.wait_for(
-                    value,
-                    timeout=max(0.1, float(self.timeout_seconds or 0.1)),
-                )
-            return value
-        method = getattr(llm_runtime, "generate", None)
-        if not callable(method):
-            raise RuntimeError("LLM runtime does not expose agenerate/generate")
+        self, llm_runtime: LLMRuntimePort, request: LLMRequestIR,
+    ) -> LLMGenerationResult:
         return await asyncio.wait_for(
-            asyncio.to_thread(method, request),
+            llm_runtime.agenerate(request),
             timeout=max(0.1, float(self.timeout_seconds or 0.1)),
         )
 
@@ -999,24 +987,12 @@ def _estimate_visible_tokens(text: str) -> int:
 
 
 async def _preflight(
-    llm_runtime: Any,
-    request: LLMRequestIR,
-) -> Any | None:
-    preflight_request = LLMPreflightRequest(request=request)
-    method = getattr(llm_runtime, "apreflight", None)
-    if callable(method):
-        try:
-            value = method(preflight_request)
-            return await value if inspect.isawaitable(value) else value
-        except Exception:
-            return None
-    method = getattr(llm_runtime, "preflight", None)
-    if callable(method):
-        try:
-            return await asyncio.to_thread(method, preflight_request)
-        except Exception:
-            return None
-    return None
+    llm_runtime: LLMRuntimePort, request: LLMRequestIR,
+) -> LLMPreflightAdvice | None:
+    try:
+        return await llm_runtime.apreflight(LLMPreflightRequest(request=request))
+    except Exception:
+        return None
 
 
 def _positive_int(value: Any) -> int | None:

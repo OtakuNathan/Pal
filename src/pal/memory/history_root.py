@@ -64,147 +64,24 @@ __all__ = [
 SUMMARY_TURN_ID = "compact-summary"
 
 
-class HistoryRootError(RuntimeError):
-    """Base error carrying identity facts, never a bare ERROR string."""
-
-    def __init__(self, message: str, **detail: Any) -> None:
-        super().__init__(message)
-        self.detail: dict[str, Any] = dict(detail)
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"{type(self).__name__}({self.detail or str(self)})"
-
-
-class CompactLaneBusy(HistoryRootError):
-    """A second compact run cannot open while one is live (I06)."""
-
-
-class NoBeneficialCompaction(HistoryRootError):
-    """L is empty or already the minimal summary seed (L08)."""
-
-
-class FrozenLeftDuringCompact(HistoryRootError):
-    """The cut cannot move while a compact run is live (I04, F05, L07)."""
-
-
-class LeftChangedSinceCapture(HistoryRootError):
-    """L no longer matches the snapshot captured for this run (CAS)."""
-
-
-class TerminalClosed(HistoryRootError):
-    """The run already reached a terminal state; late events hold no power."""
-
-    def __init__(self, message: str, *, run_id: str, phase: str, winner: str) -> None:
-        super().__init__(message, run_id=run_id, phase=phase, winner=winner)
-        self.run_id = run_id
-        self.phase = phase
-        self.winner = winner
-
-
-class StaleRun(HistoryRootError):
-    """The referenced run is not the current run (X04)."""
-
-
-class CandidateConflict(HistoryRootError):
-    """A different candidate already won this run's READY slot (C07)."""
-
-
-class StaleProducer(HistoryRootError):
-    """Producer token belongs to an earlier session incarnation (X05)."""
-
-
-class CompactPhase(StrEnum):
-    RUNNING = "running"
-    READY = "ready"
-    COMMITTED = "committed"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-    @property
-    def terminal(self) -> bool:
-        return self in (CompactPhase.COMMITTED, CompactPhase.CANCELLED, CompactPhase.FAILED)
-
-
-@dataclass(frozen=True)
-class CutPosition:
-    """Logical L/R boundary over the store's ordered turns.
-
-    ``turn_count`` turns are wholly in L; when ``intra_messages > 0`` the
-    boundary turn ``turns[turn_count]`` contributes its first
-    ``intra_messages`` messages to L (closed-round prefix of an active turn).
-    """
-
-    turn_count: int
-    intra_messages: int = 0
-    revision: int = 0
-    cut_id: str = ""
-
-    def advanced(self, *, turn_count: int, intra_messages: int) -> "CutPosition":
-        return CutPosition(
-            turn_count=turn_count,
-            intra_messages=intra_messages,
-            revision=self.revision + 1,
-            cut_id=f"cut-{uuid4().hex[:12]}",
-        )
-
-
-@dataclass(frozen=True)
-class LeftSnapshot:
-    """Frozen view of L captured when a compact run opens (I04, I10)."""
-
-    run_id: str
-    cut: CutPosition
-    turns: tuple[L1TurnIR, ...]
-    stamp: str
-
-    def message_ids(self) -> tuple[str, ...]:
-        return tuple(message.message_id for turn in self.turns for message in turn.messages)
-
-
-@dataclass
-class CompactRun:
-    run_id: str
-    reason: str
-    parent_turn_id: str
-    snapshot: LeftSnapshot
-    phase: CompactPhase = CompactPhase.RUNNING
-    candidate: Any | None = None
-    candidate_id: str = ""
-    winner: str = "none"
-    terminal_detail: str = ""
-    deadline_at: float | None = None
-    committed_left_revision: int | None = None
-
-    @property
-    def terminal(self) -> bool:
-        return self.phase.terminal
-
-
-@dataclass(frozen=True)
-class CompactOutcome:
-    run_id: str
-    status: str
-    left_revision: int
-    seed_turn_id: str = ""
-    replayed: bool = False
-    detail: str = ""
-
-
-@dataclass(frozen=True)
-class ProducerToken:
-    """Identity an R producer keeps across left replacement but not reset."""
-
-    incarnation: str
-    turn_id: str
-
-
-@dataclass(frozen=True)
-class PreparedHistorySubmission:
-    incarnation: str
-    cut: CutPosition
-    target: CutPosition
-    messages: tuple[LLMMessageIR, ...]
-    required_ids: frozenset[str]
+from pal.memory.history_contracts import (
+    HistoryRootError,
+    CompactLaneBusy,
+    NoBeneficialCompaction,
+    FrozenLeftDuringCompact,
+    LeftChangedSinceCapture,
+    TerminalClosed,
+    StaleRun,
+    CandidateConflict,
+    StaleProducer,
+    CompactPhase,
+    CutPosition,
+    LeftSnapshot,
+    CompactRun,
+    CompactOutcome,
+    ProducerToken,
+    PreparedHistorySubmission,
+)
 
 
 def _summary_turn(text: str, payload: Mapping[str, Any] | None = None) -> L1TurnIR:

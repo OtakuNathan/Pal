@@ -81,7 +81,11 @@ class _BarrierEngine:
         )
 
 
-class _BlockingLLM:
+from tests.llm_fakes import NonStreamingLLM
+
+
+class _BlockingLLM(NonStreamingLLM):
+    projection_port = None
     """LLM port whose generation parks; keeps started turns alive."""
 
     def __init__(self) -> None:
@@ -93,7 +97,10 @@ class _BlockingLLM:
         from pal.shared import LLMPreflightStatus
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY.value, breakdown={})
 
-    async def agenerate(self, request):
+    def supports_streaming(self, request=None):
+        return False
+
+    async def agenerate(self, request, *, on_submitted=None):
         self.requests += 1
         await self.release.wait()
         raise AssertionError("blocking llm must never finish in these tests")
@@ -149,7 +156,7 @@ def _build_core(tmp_path: Path, *, engine_status: str = "compacted"):
     service = _memory_with_turns(2)
     engine = _BarrierEngine(status=engine_status)
     core.context.port_registry["memory:memory"] = service
-    core.context.port_registry["llm:llm"] = object()
+    core.context.port_registry["llm:llm"] = NonStreamingLLM()
     core.turn_executor._compaction_engine = engine
     replies: list[str] = []
 
@@ -212,7 +219,7 @@ def test_manual_no_op_on_minimal_memory_zero_engine(tmp_path):
         core = PalCore()
         service = MemoryService()
         core.context.port_registry["memory:memory"] = service
-        core.context.port_registry["llm:llm"] = object()
+        core.context.port_registry["llm:llm"] = NonStreamingLLM()
         replies: list[str] = []
 
         async def record_reply(action, text):

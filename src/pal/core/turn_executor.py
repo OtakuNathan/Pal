@@ -102,7 +102,6 @@ class TurnExecutor:
         state,
         turn_manager,
         *,
-        call_port_async: Callable[..., Awaitable[Any]],
         build_canonical_prompt: Callable[..., Any],
         debug_log_prompt: Callable[..., None],
         debug_log_outcome: Callable[..., None],
@@ -124,7 +123,6 @@ class TurnExecutor:
         self.state = state
         self.turn_manager = turn_manager
         self._config = config or RuntimeConfig.defaults()
-        self._call_port_async = call_port_async
         self._build_canonical_prompt = build_canonical_prompt
         self._debug_log_prompt = debug_log_prompt
         self._debug_log_outcome = debug_log_outcome
@@ -176,13 +174,8 @@ class TurnExecutor:
             max_output_tokens=effect.max_output_tokens,
             tools=tools,
         )
-        advice = await self._call_port_async(
-            llm_runtime,
-            "apreflight",
-            "preflight",
-            LLMPreflightRequest(request=prompt)
-        )
-        continuation.prompt_budget_snapshot = dict(getattr(advice, "breakdown", {}) or {})
+        advice = await llm_runtime.apreflight(LLMPreflightRequest(request=prompt))
+        continuation.prompt_budget_snapshot = dict(advice.breakdown or {})
         if self._is_hard_budget_overflow(advice):
             failure_result = await self._handle_failure_async(
                 FailureSignal(
@@ -192,7 +185,7 @@ class TurnExecutor:
                     severity="high",
                     primary_blocker="The current turn exceeds the available context window before any older history can be compacted.",
                     evidence={
-                        "prompt_budget": dict(getattr(advice, "breakdown", {}) or {}),
+                        "prompt_budget": dict(advice.breakdown or {}),
                         "preferred_endpoint_id": prompt.metadata.get("preferred_endpoint_id"),
                         "preferred_model_id": prompt.metadata.get("preferred_model_id"),
                     },
@@ -207,9 +200,9 @@ class TurnExecutor:
             advice = replace(advice, status=LLMPreflightStatus.READY)
         elif (
             self._inject_pending is not None
-            and str(getattr(advice, "status", "")) == LLMPreflightStatus.READY
-            and getattr(continuation, "llm_round_index", 0) >= 1
-            and getattr(self.state, "pending_channel_turns", None)
+            and str(advice.status) == LLMPreflightStatus.READY
+            and continuation.llm_round_index >= 1
+            and self.state.pending_channel_turns
             and not compaction_gate_active(self.state)
         ):
             # Queued interjection admission point (P1 ordering): queued
@@ -232,13 +225,8 @@ class TurnExecutor:
                     max_output_tokens=effect.max_output_tokens,
                     tools=tools,
                 )
-                advice = await self._call_port_async(
-                    llm_runtime,
-                    "apreflight",
-                    "preflight",
-                    LLMPreflightRequest(request=prompt)
-                )
-                continuation.prompt_budget_snapshot = dict(getattr(advice, "breakdown", {}) or {})
+                advice = await llm_runtime.apreflight(LLMPreflightRequest(request=prompt))
+                continuation.prompt_budget_snapshot = dict(advice.breakdown or {})
         return EffectResult(status=RuntimeStatus.OK, payload=advice)
 
     def _round_safe_for_compaction(
@@ -271,7 +259,7 @@ class TurnExecutor:
             _note("memory_service_unavailable")
             return False
         turn_id = str(continuation.turn_id)
-        active_turn_reader = getattr(memory_service, "active_l1_turn", None)
+        active_turn_reader = (memory_service.active_l1_turn if memory_service is not None else None)
         turn = active_turn_reader(turn_id) if callable(active_turn_reader) else None
         if turn is None:
             _note("no_active_l1_turn")
@@ -321,7 +309,7 @@ class TurnExecutor:
             # A04: the rejection is structured evidence — an unknown or
             # unreconciled mutation is explicitly reconcile-required, never
             # silently deleted to fake closure and never re-run.
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "compaction_round_unsafe",
@@ -399,7 +387,7 @@ class TurnExecutor:
                 try:
                     memory_service.reviews.stage_payload(batch, route)
                 except Exception as exc:
-                    diagnostics = getattr(self.state, "diagnostics", None)
+                    diagnostics = self.state.diagnostics
                     if diagnostics is not None:
                         diagnostics.append({
                             "kind": "compaction_candidate_stage_failed",
@@ -421,7 +409,7 @@ class TurnExecutor:
                 touch_artifacts,
             )
 
-            turns_reader = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+            turns_reader = (memory_service.history if memory_service is not None else None)
             turns = getattr(turns_reader, "turns", None) if turns_reader is not None else None
             if turns:
                 live_ids = artifact_ids_from_l1_turns(list(turns or ()))
@@ -429,7 +417,7 @@ class TurnExecutor:
                     touch_artifacts(
                         self.context,
                         live_ids,
-                        str(getattr(self.state, "resident_execution_lifetime_id", "") or ""),
+                        str(self.state.resident_execution_lifetime_id or ""),
                     )
         except Exception:
             pass
@@ -448,7 +436,7 @@ class TurnExecutor:
                     response_mode=LLMResponseMode.CHAT,
                 ),
             )
-        continuation.llm_round_index = getattr(continuation, "llm_round_index", 0) + 1
+        continuation.llm_round_index = continuation.llm_round_index + 1
         llm_runtime = self.context.require_port("llm:llm")
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
@@ -472,7 +460,7 @@ class TurnExecutor:
         )
         snapshot_store = getattr(getattr(self.context, "execution_runtime", None), "result_snapshots", None)
         memory = getattr(self.context, "port_registry", {}).get("memory:memory")
-        history = getattr(getattr(memory, "l1_store", None), "turns", None)
+        history = (memory.history if memory is not None else None)
         if snapshot_store is not None and history is not None:
             snapshot_store.pin_history_request(history, str(continuation.turn_id))
         self._debug_log_prompt(continuation, request)
@@ -505,11 +493,8 @@ class TurnExecutor:
                         generation_plan=projection_pack[2]["plan"],
                         on_submitted=on_submitted,
                     )
-                elif callable(getattr(llm_runtime, "agenerate", None)) and "on_submitted" in inspect.signature(llm_runtime.agenerate).parameters:
-                    outcome = await llm_runtime.agenerate(request, on_submitted=on_submitted)
                 else:
-                    outcome = await self._call_port_async(
-                        llm_runtime, "agenerate", "generate", request)
+                    outcome = await llm_runtime.agenerate(request, on_submitted=on_submitted)
                 # An endpoint error is transport/recovery state, not an assistant
                 # message.  Persisting it into L1 makes a later retry replay a
                 # synthetic assistant turn and, for strict providers such as
@@ -532,8 +517,8 @@ class TurnExecutor:
         refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
         if refresh is not None:
             refresh(continuation)
-        preferred_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", "") or "").strip() or None
-        preferred_model_id = str(getattr(outcome, "preferred_model_id", "") or "").strip() or None
+        preferred_endpoint_id = str(outcome.preferred_endpoint_id or "").strip() or None
+        preferred_model_id = str(outcome.preferred_model_id or "").strip() or None
         if preferred_endpoint_id is None:
             preferred_endpoint_id = str(getattr(llm_runtime, "last_endpoint_id", "") or "").strip() or None
         if preferred_model_id is None:
@@ -626,7 +611,7 @@ class TurnExecutor:
         contribution the projection may freeze.
         """
 
-        if not getattr(continuation, "finalization_only", False):
+        if not continuation.finalization_only:
             return outcome
         if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED:
             continuation.finalization_attempted = True
@@ -643,7 +628,7 @@ class TurnExecutor:
             # pre-boundary provider output that canonical L1 just discarded.
             # Strip it here — the accepted contribution is synthesized text
             # and no provider-native payload may "complete" it.
-            send_receipt = getattr(outcome, "projection_receipt", None)
+            send_receipt = outcome.projection_receipt
             outcome = self._generation_result_from_text(
                 self.fallback_final_reply(continuation),
                 finish_reason=LLMFinishReason.FALLBACK,
@@ -693,15 +678,7 @@ class TurnExecutor:
                     turn_id=continuation.turn_id,
                 )
             else:
-                tool_result = await self._call_port_async(
-                    self.context.execution_runtime,
-                    "execute_tool_async",
-                    "execute_tool",
-                    execution_call,
-                    allow_tools=not continuation.finalization_only,
-                    budget=tool_budget,
-                    turn_id=continuation.turn_id,
-                )
+                tool_result = await self.context.execution_runtime.execute_tool_async(execution_call, allow_tools=not continuation.finalization_only, budget=tool_budget, turn_id=continuation.turn_id)
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
             # Direct-synthesized model-visible errors obey the same bounded
@@ -864,7 +841,7 @@ class TurnExecutor:
             return
         if dedupe_key in continuation.echoed_keys:
             return
-        if getattr(continuation, "delivery_binding", None) is None:
+        if continuation.delivery_binding is None:
             return
         continuation.echoed_keys.add(dedupe_key)
         if continuation.channel_stream_active:
@@ -892,7 +869,7 @@ class TurnExecutor:
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
             "[tool call] turn_id=%s name=%s call_id=%s args=%s",
-            getattr(continuation, "turn_id", ""),
+            continuation.turn_id,
             getattr(tool_call, "name", ""),
             str(getattr(tool_call, "call_id", "") or ""),
             self._log_preview(getattr(tool_call, "args", {}), max_chars=1200),
@@ -901,7 +878,7 @@ class TurnExecutor:
     def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: ToolExecutionResult) -> None:
         LOGGER.debug(
             "[tool result] turn_id=%s name=%s call_id=%s ok=%s status=%s text=%s",
-            getattr(continuation, "turn_id", ""),
+            continuation.turn_id,
             getattr(tool_call, "name", ""),
             str(getattr(tool_call, "call_id", "") or ""),
             bool(getattr(tool_result, "ok", False)),
@@ -912,7 +889,7 @@ class TurnExecutor:
     def _log_tool_call_exception(self, continuation, tool_call: Any, exc: Exception) -> None:
         LOGGER.debug(
             "[tool result] turn_id=%s name=%s call_id=%s ok=False exception=%s text=%s",
-            getattr(continuation, "turn_id", ""),
+            continuation.turn_id,
             getattr(tool_call, "name", ""),
             str(getattr(tool_call, "call_id", "") or ""),
             type(exc).__name__,
@@ -1026,9 +1003,7 @@ class TurnExecutor:
         on_submitted: Any = None,
     ) -> LLMGenerationResult:
         final_response: LLMResponseIR | None = None
-        stream = getattr(llm_runtime, "astream", None)
-        if not callable(stream):
-            raise TypeError("LLM runtime does not implement the astream contract")
+        stream = llm_runtime.astream
         continuation.channel_stream_active = self._channel_supports_stream_delivery(
             continuation
         )
@@ -1041,10 +1016,8 @@ class TurnExecutor:
                 generation_plan=projection_pack[2]["plan"],
                 on_submitted=on_submitted,
             ).__aiter__()
-        elif "on_submitted" in inspect.signature(stream).parameters:
-            iterator = stream(request, on_submitted=on_submitted).__aiter__()
         else:
-            iterator = stream(request).__aiter__()
+            iterator = stream(request, on_submitted=on_submitted).__aiter__()
         schedule = self._llm_wait_status_schedule()
         schedule_index = 0
         started_at = asyncio.get_running_loop().time()
@@ -1085,12 +1058,10 @@ class TurnExecutor:
                     await pending
                 except asyncio.CancelledError:
                     pass
-            close = getattr(iterator, "aclose", None)
-            if callable(close):
-                try:
-                    await close()
-                except (asyncio.CancelledError, RuntimeError):
-                    pass
+            try:
+                await iterator.aclose()
+            except (asyncio.CancelledError, RuntimeError):
+                pass
         if final_response is None:
             return self._generation_result_from_text(
                 "LLM stream completed without a response.",
@@ -1098,12 +1069,12 @@ class TurnExecutor:
             )
         return LLMGenerationResult(
             response=final_response,
-            preferred_endpoint_id=str(getattr(llm_runtime, "last_endpoint_id", "") or "") or None,
-            preferred_model_id=str(getattr(llm_runtime, "last_model_id", "") or "") or None,
+            preferred_endpoint_id=llm_runtime.last_endpoint_id,
+            preferred_model_id=llm_runtime.last_model_id,
             # F2: the stream path reads the runtime's per-generation send
             # receipt (set by the worker thread at the successful send).
             projection_receipt=(
-                getattr(llm_runtime, "last_projection_receipt", None)
+                llm_runtime.last_projection_receipt
                 if projection_pack is not None
                 else None
             ),
@@ -1282,14 +1253,14 @@ class TurnExecutor:
         metadata["artifact_turn_id"] = continuation.turn_id
         metadata["turn_id"] = continuation.turn_id
         metadata["task_id"] = str(assembly_context.task_id or "")
-        metadata["llm_round_index"] = getattr(continuation, "llm_round_index", 0)
+        metadata["llm_round_index"] = continuation.llm_round_index
         if "cache_policy_snapshot" in continuation.turn_settings_snapshot:
             metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         memory_service = self.context.port_registry.get("memory:memory")
         active_turn = None
-        active_reader = getattr(memory_service, "active_l1_turn", None)
+        active_reader = (memory_service.active_l1_turn if memory_service is not None else None)
         if callable(active_reader):
             try:
                 active_turn = active_reader(continuation.turn_id)
@@ -1360,7 +1331,7 @@ class TurnExecutor:
         context_committed = False
         if active_turn is not None:
             from pal.core.prompt_context import prepare_context, projected_context
-            commit_context = getattr(memory_service, "append_l1_prompt_contexts", None)
+            commit_context = (memory_service.append_l1_prompt_contexts if memory_service is not None else None)
             if callable(commit_context):
                 candidates = prompt.metadata.get("context_candidates")
                 if candidates is None:
@@ -1382,7 +1353,7 @@ class TurnExecutor:
         settled_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
         context_view = None
-        view_builder = getattr(memory_service, "l1_context_view", None)
+        view_builder = (memory_service.l1_context_view if memory_service is not None else None)
         if callable(view_builder):
             selected_turns = tuple(getattr(memory_pack, "l1_turns", ()) or ())
             context_view = view_builder(continuation.turn_id, selected_turns)
@@ -1453,7 +1424,7 @@ class TurnExecutor:
             *contextual_messages,
             *tail_messages,
         ]
-        project_continuity = getattr(memory_service, "project_continuity", None)
+        project_continuity = (memory_service.project_continuity if memory_service is not None else None)
         continuity_id = getattr(memory_pack, "metadata", {}).get("continuity_id", "")
         if callable(project_continuity) and continuity_id:
             prompt_messages = project_continuity(prompt_messages)
@@ -1470,7 +1441,7 @@ class TurnExecutor:
         metadata["artifact_turn_id"] = continuation.turn_id
         metadata["turn_id"] = continuation.turn_id
         metadata["task_id"] = str(assembly_context.task_id or "")
-        metadata["llm_round_index"] = getattr(continuation, "llm_round_index", 0)
+        metadata["llm_round_index"] = continuation.llm_round_index
         if "cache_policy_snapshot" in continuation.turn_settings_snapshot:
             metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
@@ -1493,7 +1464,7 @@ class TurnExecutor:
 
     def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
         return self._resolve_llm_capabilities_for_endpoint(
-            getattr(continuation, "preferred_llm_endpoint_id", None)
+            continuation.preferred_llm_endpoint_id
         )
 
     def _resolve_llm_capabilities_for_endpoint(
@@ -1524,8 +1495,8 @@ class TurnExecutor:
 
     @staticmethod
     def _ensure_not_interrupted(continuation) -> None:
-        if getattr(continuation, "interrupted", False):
-            raise asyncio.CancelledError(getattr(continuation, "interrupt_reason", "") or "interrupted")
+        if continuation.interrupted:
+            raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
 
     def _build_prompt_budget_snapshot(
         self,
@@ -1707,7 +1678,7 @@ class TurnExecutor:
 
     @staticmethod
     def _is_hard_budget_overflow(advice) -> bool:
-        breakdown = getattr(advice, "breakdown", {}) or {}
+        breakdown = advice.breakdown or {}
         return bool(breakdown.get("hard_overflow"))
 
     def fallback_final_reply(self, continuation) -> str:
@@ -1737,41 +1708,16 @@ class TurnExecutor:
     # ── response / temperature helpers ───────────────────────────────────
 
     @staticmethod
-    def _llm_runtime_supports_streaming(llm_runtime, request: LLMRequestIR | None = None) -> bool:
-        endpoint_facts = TurnExecutor._llm_runtime_endpoint_facts(llm_runtime, request)
-        if "supports_streaming" in endpoint_facts and not bool(endpoint_facts.get("supports_streaming")):
-            return False
-        supports_streaming = getattr(llm_runtime, "supports_streaming", None)
-        if callable(supports_streaming):
-            try:
-                supports_streaming = supports_streaming(request)
-            except Exception:
-                supports_streaming = False
-        if supports_streaming is not None and not bool(supports_streaming):
-            return False
-        return (
-            callable(getattr(llm_runtime, "astream", None))
-        )
+    def _llm_runtime_supports_streaming(llm_runtime: LLMRuntimePort, request: LLMRequestIR | None = None) -> bool:
+        return llm_runtime.supports_streaming(request)
 
     @staticmethod
-    def _llm_runtime_endpoint_facts(llm_runtime, request: LLMRequestIR | None) -> dict[str, Any]:
-        method = getattr(llm_runtime, "resolve_endpoint_facts", None)
-        if not callable(method):
-            return {}
-        metadata = dict(getattr(request, "metadata", {}) or {}) if request is not None else {}
-        try:
-            facts = method(
-                preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
-                preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
-            )
-        except TypeError:
-            try:
-                facts = method()
-            except Exception:
-                return {}
-        except Exception:
-            return {}
-        return dict(facts or {}) if isinstance(facts, dict) else {}
+    def _llm_runtime_endpoint_facts(llm_runtime: LLMRuntimePort, request: LLMRequestIR | None) -> dict[str, Any]:
+        metadata = request.metadata if request is not None else {}
+        return llm_runtime.resolve_endpoint_facts(
+            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+        )
 
     def infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
         if outcome is not None:
@@ -1814,9 +1760,7 @@ class TurnExecutor:
         message: LLMMessageIR,
     ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
-        method = getattr(memory_service, "stream_l1_assistant", None)
-        if not callable(method):
-            method = getattr(memory_service, "upsert_l1_assistant", None)
+        method = (memory_service.stream_l1_assistant if memory_service is not None else None)
         if not callable(method):
             return
         if not message.semantic_kind:
@@ -1838,10 +1782,10 @@ class TurnExecutor:
         message_id: str,
     ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
-        method = getattr(memory_service, "discard_l1_assistant", None)
+        method = (memory_service.discard_l1_assistant if memory_service is not None else None)
         if not callable(method):
             return
-        active_reader = getattr(memory_service, "active_l1_turn", None)
+        active_reader = (memory_service.active_l1_turn if memory_service is not None else None)
         if callable(active_reader):
             active = active_reader(str(continuation.turn_id))
             if active is None or not any(
@@ -1883,7 +1827,7 @@ class TurnExecutor:
         if not text:
             text = str(dict(getattr(assembly_context, "metadata", {}) or {}).get("proactive_input") or "").strip()
         try:
-            method = getattr(memory_service, "begin_l1_turn")
+            method = memory_service.begin_l1_turn
             method(
                 str(continuation.turn_id),
                 user_text=text,
@@ -1901,7 +1845,7 @@ class TurnExecutor:
         result: ToolExecutionResult,
     ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
-        method = getattr(memory_service, "append_l1_tool_result", None)
+        method = (memory_service.append_l1_tool_result if memory_service is not None else None)
         if not callable(method):
             return
         bind = getattr(self.context.execution_runtime, "bind_result_history", None)
@@ -1909,7 +1853,7 @@ class TurnExecutor:
             bind(memory_service)
         content = self._render_tool_result_content(call, result)
         turn_id = str(continuation.turn_id)
-        previous = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(
+        previous = memory_service.active_l1_turn(
             turn_id
         )
         tool_result = ToolResultIR(
@@ -1949,7 +1893,7 @@ class TurnExecutor:
                     result_id=call.call_id,
                 )
             except Exception:
-                rollback = getattr(memory_service, "rollback_l1_tool_result", None)
+                rollback = (memory_service.rollback_l1_tool_result if memory_service is not None else None)
                 if previous is None or not callable(rollback):
                     raise RuntimeError(
                         "tool delivery commit failed and L1 cannot be rolled back"
@@ -1991,7 +1935,7 @@ class TurnExecutor:
         """Append tool-declared user context after the complete tool-result batch."""
 
         memory_service = self.context.port_registry.get("memory:memory")
-        method = getattr(memory_service, "append_l1_user_contexts", None)
+        method = (memory_service.append_l1_user_contexts if memory_service is not None else None)
         if not callable(method):
             return
         messages: list[LLMMessageIR] = []
@@ -2036,10 +1980,10 @@ class TurnExecutor:
     ) -> str:
         event = getattr(assembly_context, "event", None)
         if event is None:
-            event = getattr(continuation, "opening_event", None)
+            event = continuation.opening_event
         return (
             str(getattr(event, "event_id", "") or "").strip()
-            or str(getattr(continuation, "turn_id", "") or "").strip()
+            or str(continuation.turn_id or "").strip()
         )
 
     # ── post-turn commit ─────────────────────────────────────────────────
@@ -2071,7 +2015,7 @@ class TurnExecutor:
                 # from the caller.
                 raise
             try:
-                memory_service.l2_store.tick_heat()
+                memory_service.tick_heat()
             except Exception:
                 pass
         self._reap_expired_artifacts()
@@ -2145,7 +2089,7 @@ class TurnExecutor:
         if not logical_scope_id:
             bunshin_scope_key = (
                 getattr(assembly_context, "work_order_id", "")
-                or getattr(continuation, "turn_id", "")
+                or (continuation.turn_id if continuation is not None else None)
             )
             logical_scope_id = (
                 f"bunshin:{bunshin_scope_key}"
@@ -2156,20 +2100,12 @@ class TurnExecutor:
         preferred_endpoint_id = (
             preferred_endpoint_id
             or metadata.get("preferred_endpoint_id")
-            or getattr(
-                continuation,
-                "preferred_llm_endpoint_id",
-                None,
-            )
+            or (continuation.preferred_llm_endpoint_id if continuation is not None else None)
         )
         preferred_model_id = (
             preferred_model_id
             or metadata.get("preferred_model_id")
-            or getattr(
-                continuation,
-                "preferred_llm_model_id",
-                None,
-            )
+            or (continuation.preferred_llm_model_id if continuation is not None else None)
         )
         try:
             clock_value = max(
@@ -2184,11 +2120,7 @@ class TurnExecutor:
             bind(memory_service)
 
         def current_l1_result_ids() -> tuple[str, ...]:
-            turns = getattr(
-                getattr(getattr(memory_service, "l1_store", None), "turns", None),
-                "turns",
-                (),
-            )
+            turns = memory_service.history.turns if memory_service is not None else ()
             ids: list[str] = []
             for turn in list(turns or ()):
                 for message in turn.messages:
@@ -2243,7 +2175,7 @@ class TurnExecutor:
         # increment; the first cut is the honest cold-left path.
         import time as _time
 
-        root = getattr(memory_service, "history_root", None)
+        root = (memory_service.history_root if memory_service is not None else None)
         if root is None:
             return CompactionRunResult(
                 status="engine_unavailable",
@@ -2344,7 +2276,7 @@ class TurnExecutor:
             )
             metadata["preferred_endpoint_id"] = preferred_endpoint_id
             metadata["preferred_model_id"] = preferred_model_id
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_warm_replay_engaged",
@@ -2406,7 +2338,7 @@ class TurnExecutor:
                     "reconstructed": "post_commit_packaging_fault",
                 },
             )
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_post_commit_packaging_fault",
@@ -2525,7 +2457,7 @@ class TurnExecutor:
 
     def _history_submission_observer(self, request: LLMRequestIR):
         memory = getattr(self.context, "port_registry", {}).get("memory:memory")
-        root = getattr(memory, "history_root", None)
+        root = (memory.history_root if memory is not None else None)
         if root is None:
             return None
         prepared = root.prepare_submission(m.message_id for m in request.messages)
@@ -2557,35 +2489,29 @@ class TurnExecutor:
         touches the session (J5).
         """
 
-        prepare_plan = getattr(llm_runtime, "prepare_generation_plan", None)
-        if not callable(prepare_plan):
+        projection = llm_runtime.projection_port
+        if projection is None:
             return None
         try:
-            plan = prepare_plan(request)
+            plan = projection.prepare_generation_plan(request)
         except Exception:
             return None
-        if plan is None or getattr(plan, "compact_required", False):
-            return None
-        provider = getattr(llm_runtime, "endpoint_projection_session", None)
-        if not callable(provider):
+        if plan is None or plan.compact_required:
             return None
         scope_id = str(request.metadata.get("prompt_cache_scope_id") or "").strip()
         if not scope_id:
             return None
         try:
-            session = provider(scope_id, plan=plan)
-        except TypeError:
-            # Older runtime contract without the plan parameter: honest cold.
-            return None
+            session = projection.endpoint_projection_session(scope_id, plan=plan)
         except Exception:
             return None
         if session is None:
             return None
-        binding = getattr(session, "binding", None)
-        identity = getattr(session, "identity", None)
+        binding = session.binding
+        identity = session.identity
         if binding is None or identity is None:
             return None
-        if getattr(session, "_active", None) is not None:
+        if session.active_attempt is not None:
             # A round is already open (retry/reentry); do not interleave a
             # second prepare on one lineage.
             return None
@@ -2597,18 +2523,16 @@ class TurnExecutor:
             # Stub hosts have no memory owner: prepare stays cold.
             return None
         memory_service = port_registry.get("memory:memory")
-        root = getattr(memory_service, "history_root", None)
+        root = (memory_service.history_root if memory_service is not None else None)
         if root is None:
             return None
-        root_generation = getattr(root, "left_generation", None)
-        if root_generation is None:
-            root_generation = getattr(root, "left_revision", 0)
+        root_generation = root.left_generation
         root_generation = int(root_generation or 0)
         # Durable storage is not visibility: scoped/excluded control records
         # remain in L1 after the compiler stops sending them. Rebuild once at
         # that legal projection boundary; never replay a hidden instruction.
         visible_ids = {m.message_id for m in plan.effective_request.messages}
-        stored_turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        stored_turns = (memory_service.history if memory_service is not None else None)
         durable_ids: set[str] = set()
         hidden_context_ids: set[str] = set()
         for turn in getattr(stored_turns, "turns", ()):
@@ -2622,7 +2546,7 @@ class TurnExecutor:
         if hidden_context_ids.intersection(session.covered_message_ids()):
             session.rebind(binding, capabilities=plan.capabilities)
             identity = session.identity
-        session_generation = int(getattr(session, "history_left_revision", 0) or 0)
+        session_generation = int(session.history_left_revision or 0)
         if root_generation != session_generation:
             # C3 (review c9cb2d2): a fresh or rebound lineage owns no frozen or
             # pending wire bytes and cannot be replaying retired history — it
@@ -2634,17 +2558,16 @@ class TurnExecutor:
             # rebuilt view.  A lineage that already holds wire content keeps
             # the strict stale refusal (explicit rebase required) — no
             # counter-only permission for a retired prefix.
-            materialized = getattr(session, "has_materialized_content", None)
-            if callable(materialized) and not materialized():
+            if not session.has_materialized_content():
                 self._bootstrap_projection_from_current_left(
                     scope_id, root,
                     memory_service=memory_service, session=session,
                 )
                 session_generation = int(
-                    getattr(session, "history_left_revision", 0) or 0
+                    session.history_left_revision or 0
                 )
         if root_generation != session_generation:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_turn_projection_stale_left",
@@ -2657,10 +2580,7 @@ class TurnExecutor:
         # chunk spans AND the L-owned reference ids a rebase installed —
         # the next request must not re-append the compiler's identical
         # continuity injection as fresh tail (that doubled the summary).
-        covered_reader = getattr(session, "covered_message_ids", None)
-        if not callable(covered_reader):
-            covered_reader = getattr(session, "frozen_message_ids", None)
-        frozen = set(covered_reader()) if callable(covered_reader) else set()
+        frozen = set(session.covered_message_ids())
         # Durable identity = present in the L1 store (or the L-owned
         # continuity reference).  A request message whose id is NOT durable
         # is transient compiler content: it must never freeze into the
@@ -2673,11 +2593,11 @@ class TurnExecutor:
         # wired (direct service-level resets, restored stores).
         frozen_span_ids = {
             str(message_id)
-            for chunk in getattr(session, "chunks", ()) or ()
-            for message_id in (getattr(chunk, "semantic_span", None) or ())
+            for chunk in session.chunks or ()
+            for message_id in (chunk.semantic_span or ())
         }
         if frozen_span_ids and not frozen_span_ids <= durable_ids:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_turn_projection_lineage_stale",
@@ -2719,7 +2639,7 @@ class TurnExecutor:
 
             attempt = AttemptKey(
                 identity,
-                OwnerFence(int(getattr(session, "_owner_fence", 0) or 0)),
+                OwnerFence(int(session.owner_fence or 0)),
                 f"turn-{uuid4().hex[:12]}",
             )
             session.begin_round(attempt, requires_native=False)
@@ -2736,16 +2656,15 @@ class TurnExecutor:
                 ),
             )
         except Exception as exc:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_turn_projection_prepare_failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 })
             try:
-                reject = getattr(session, "reject_commit", None)
-                if callable(reject) and getattr(session, "_active", None) is not None:
-                    reject(attempt.attempt_id, reason="prepare_failed")
+                if session.active_attempt is not None:
+                    session.reject_commit(attempt.attempt_id, reason="prepare_failed")
             except Exception:
                 pass
             return None
@@ -2767,18 +2686,16 @@ class TurnExecutor:
             return
         session = projection_pack[2]["session"]
         attempt = projection_pack[2]["attempt"]
-        active = getattr(session, "_active", None)
+        active = session.active_attempt
         if active is None:
             return
-        if str(getattr(getattr(active, "attempt", None), "attempt_id", "")) != str(
-            attempt.attempt_id
-        ):
+        if active.attempt_id != attempt.attempt_id:
             return
         try:
             session.reject_commit(attempt.attempt_id, reason="round_abandoned")
         except Exception:
             return
-        diagnostics = getattr(self.state, "diagnostics", None)
+        diagnostics = self.state.diagnostics
         if diagnostics is not None:
             diagnostics.append({
                 "kind": "two_segment_turn_projection_abandoned",
@@ -2811,7 +2728,7 @@ class TurnExecutor:
         session = projection_pack[2]["session"]
         attempt = projection_pack[2]["attempt"]
         tail_ids = projection_pack[2]["tail_ids"]
-        diagnostics = getattr(self.state, "diagnostics", None)
+        diagnostics = self.state.diagnostics
 
         def _reject(reason: str) -> None:
             try:
@@ -2825,7 +2742,7 @@ class TurnExecutor:
                     "attempt": attempt.attempt_id,
                 })
 
-        receipt = getattr(outcome, "projection_receipt", None)
+        receipt = outcome.projection_receipt
         if receipt is None:
             # No projection was offered, or the runtime never reported one:
             # without a receipt nothing may freeze (F2).
@@ -2837,8 +2754,8 @@ class TurnExecutor:
         if not getattr(receipt, "applied", False):
             _reject(f"projection_not_applied:{getattr(receipt, 'detail', '')}")
             return
-        accepted = getattr(getattr(outcome, "response", None), "message", None)
-        finish_reason = getattr(getattr(outcome, "response", None), "finish_reason", None)
+        accepted = outcome.response.message
+        finish_reason = outcome.response.finish_reason
         from pal.shared import LLMFinishReason as _FinishReason
 
         if accepted is None or finish_reason in (
@@ -2855,7 +2772,7 @@ class TurnExecutor:
         if native is not None:
             semantic_call_ids = tuple(
                 str(call.call_id)
-                for call in (getattr(outcome, "tool_calls", None) or ())
+                for call in (outcome.tool_calls or ())
             )
             if tuple(native.call_ids) != semantic_call_ids:
                 # The captured native no longer describes the accepted turn:
@@ -2915,7 +2832,7 @@ class TurnExecutor:
                 native_message_id=accepted_id if native_committed else "",
             )
         except Exception as exc:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_turn_projection_commit_failed",
@@ -2938,19 +2855,18 @@ class TurnExecutor:
         L content the rebuilt prefix already carries.
         """
 
-        provider = getattr(llm_runtime, "endpoint_projection_session", None)
-        if not callable(provider):
+        projection = llm_runtime.projection_port
+        if projection is None:
             return
         try:
-            try:
-                session = provider(scope_id, rebind=False)
-            except TypeError:
-                session = provider(scope_id)
+            session = projection.endpoint_projection_session(scope_id, rebind=False)
+            if session is None:
+                return
             self._install_left_replacement(
                 session, memory_service=memory_service, root=root
             )
         except Exception as exc:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_projection_rebase_failed",
@@ -2981,7 +2897,7 @@ class TurnExecutor:
                 session, memory_service=memory_service, root=root
             )
         except Exception as exc:
-            diagnostics = getattr(self.state, "diagnostics", None)
+            diagnostics = self.state.diagnostics
             if diagnostics is not None:
                 diagnostics.append({
                     "kind": "two_segment_projection_bootstrap_failed",
@@ -3001,9 +2917,7 @@ class TurnExecutor:
         native/coverage rules live in ``on_left_replaced`` itself.
         """
 
-        rebase = getattr(session, "on_left_replaced", None)
-        if not callable(rebase):
-            return
+        rebase = session.on_left_replaced
         import hashlib as _hashlib
 
         from pal.llm.projection_contracts import HistoryCursor
@@ -3020,18 +2934,13 @@ class TurnExecutor:
         # not claim chunk survival; a session with no committed chunks
         # keeps nothing.  The cursor epoch comes from the history
         # authority's own left revision, never a hardcoded constant.
-        frozen_reader = getattr(session, "frozen_message_ids", None)
-        frozen_ids = (
-            set(frozen_reader()) if callable(frozen_reader) else set()
-        )
+        frozen_ids = set(session.frozen_message_ids())
         kept = tuple(
             message
             for message in root.right_messages()
             if message.message_id in frozen_ids
         )
-        left_revision = getattr(root, "left_generation", None)
-        if left_revision is None:
-            left_revision = getattr(root, "left_revision", 0)
+        left_revision = root.left_generation
         left_revision = int(left_revision or 0)
         digest = _hashlib.sha256(
             "".join(
@@ -3097,7 +3006,7 @@ class TurnExecutor:
                 if message.semantic_kind != "pal_prompt_context" or message.message_id in visible
             )
         messages = tuple(selected)
-        turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        turns = (memory_service.history if memory_service is not None else None)
         continuity = getattr(turns, "continuity", None)
         if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
             return messages, coverage(messages)
@@ -3132,11 +3041,11 @@ class TurnExecutor:
         """
 
         ids = tuple(str(value) for value in left_ids)
-        turns = getattr(getattr(memory_service, "l1_store", None), "turns", None)
+        turns = (memory_service.history if memory_service is not None else None)
         continuity = getattr(turns, "continuity", None)
         if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
             return ids
-        root = getattr(memory_service, "history_root", None)
+        root = (memory_service.history_root if memory_service is not None else None)
         summary_turn_id = getattr(turns, "summary_turn_id", None)
         if root is None or not summary_turn_id:
             return ids
@@ -3332,7 +3241,7 @@ class TurnExecutor:
             )
             project_into_suffix(projected, settled=True)
         if include_active and active_turn_id:
-            active_turn_reader = getattr(memory_service, "active_l1_turn", None)
+            active_turn_reader = (memory_service.active_l1_turn if memory_service is not None else None)
             active_turn = (
                 active_turn_reader(str(active_turn_id))
                 if callable(active_turn_reader)

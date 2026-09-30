@@ -1,7 +1,7 @@
 """Stable execution handle and transactional plugin-owned implementation replacement."""
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import replace
 
 
 class ExecutionSlot:
@@ -30,7 +30,6 @@ class ExecutionSlot:
         return await self._current.shutdown_async()
 
     def install(self, extension, context, owner_handle):
-        from .runtime import ExecutionRuntime
         if self._installed is not None:
             raise RuntimeError('An execution extension is already active')
         previous = self._current
@@ -38,8 +37,7 @@ class ExecutionSlot:
         saved = (handle.introspection_provider, handle.runtime_state_port, handle.mounted_subtree, handle.published_capabilities)
         candidate = extension.build_runtime(previous)
         # Framework state belongs to the logical execution session, not its implementation.
-        for item in fields(ExecutionRuntime):
-            setattr(candidate, item.name, getattr(previous, item.name))
+        candidate.adopt_host_state(previous)
         try:
             provider = extension.build_provider(candidate)
             state_port = extension.build_state_port(candidate)
@@ -73,14 +71,12 @@ class ExecutionSlot:
             self._installed[0].check_detach(self._current)
 
     def uninstall(self, context, owner_handle):
-        from .runtime import ExecutionRuntime
         if self._installed is None or self._installed[1] is not owner_handle:
             return
         extension, _, previous, saved = self._installed
         extension.check_detach(self._current)
         handle = context.module_registry.require('execution')
-        for item in fields(ExecutionRuntime):
-            setattr(previous, item.name, getattr(self._current, item.name))
+        previous.adopt_host_state(self._current)
         provider, state_port, _, _ = saved
         staged = replace(handle, introspection_provider=provider, runtime_state_port=state_port,
                          mounted_subtree=None, published_capabilities=[])

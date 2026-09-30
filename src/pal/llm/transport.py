@@ -18,6 +18,7 @@ from pal.foundation.fd_lease import (
     FdLeaseInvariantError,
 )
 from pal.llm.ir import WireShape
+from pal.llm.request_contracts import RequestSubmission
 from pal.llm.models import LLMEndpointModel
 from pal.llm.shapes.base import _JSONFrame
 from pal.shared.json_values import thaw_json
@@ -85,16 +86,6 @@ class LLMEndpointSpecStaleError(LLMTransportError):
 
 class LLMProviderStartedError(LLMTransportError):
     """A remote request failed after provider execution had already started."""
-
-
-@dataclass(frozen=True)
-class RequestSubmission:
-    """Observed response admission, independent of output or cache success."""
-
-    request_id: str
-    endpoint_id: str
-    model_id: str
-    message_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)

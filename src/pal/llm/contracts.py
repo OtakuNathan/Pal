@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, AsyncGenerator, Callable, Protocol
 
 from pal.llm.ir import (
     LLMFinishReason,
@@ -18,6 +18,10 @@ from pal.llm.ir import (
 )
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.projection_contracts import ProjectionSendReceipt
+from pal.llm.projection_contracts import EndpointBinding, ProjectionSessionPort
+from pal.llm.request_contracts import LLMPreparedPlan, RequestSubmission
+from pal.llm.shapes.base import EncodedRequest
+from pal.shared.ports import PortKey
 
 
 @dataclass(frozen=True)
@@ -174,21 +178,95 @@ class LLMPreflightAdvice:
     breakdown: dict[str, int | bool] = field(default_factory=dict)
 
 
-class LLMRuntimePort(Protocol):
+class LLMQueryPort(Protocol):
+    def prompt_cache_eligible_anchor_request(
+        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
+    ) -> dict[str, Any]: ...
+
+    def prompt_cache_confirmed_anchor_request(
+        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
+    ) -> dict[str, Any]: ...
+
+    def resolve_endpoint_facts(
+        self, *, preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def resolve_max_output_tokens(
+        self, *, preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> int | None: ...
+
+
+class LLMProjectionPort(Protocol):
+    def prepare_generation_plan(self, request: LLMRequestIR) -> LLMPreparedPlan | None: ...
+
+    def endpoint_projection_session(
+        self, scope_id: str, *, plan: LLMPreparedPlan | None = None, rebind: bool = True,
+    ) -> ProjectionSessionPort | None: ...
+
+    def retire_projection_sessions(self) -> None: ...
+
+
+class LLMRuntimePort(LLMQueryPort, Protocol):
+    @property
+    def projection_port(self) -> LLMProjectionPort | None: ...
+
+    @property
+    def last_endpoint_id(self) -> str | None: ...
+
+    @property
+    def last_model_id(self) -> str | None: ...
+
+    @property
+    def last_projection_receipt(self) -> ProjectionSendReceipt | None: ...
+
     def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         ...
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         ...
 
-    def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
+    def generate(
+        self, request: LLMRequestIR, *,
+        projection: EncodedRequest | None = None,
+        projection_binding: EndpointBinding | None = None,
+        projection_attempt_id: str = "",
+        generation_plan: LLMPreparedPlan | None = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
+    ) -> LLMGenerationResult:
         ...
 
-    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
+    async def agenerate(
+        self, request: LLMRequestIR, *,
+        projection: EncodedRequest | None = None,
+        projection_binding: EndpointBinding | None = None,
+        projection_attempt_id: str = "",
+        generation_plan: LLMPreparedPlan | None = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> LLMGenerationResult:
         ...
 
-    def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
+    def astream(
+        self, request: LLMRequestIR, *,
+        projection: EncodedRequest | None = None,
+        projection_binding: EndpointBinding | None = None,
+        projection_attempt_id: str = "",
+        generation_plan: LLMPreparedPlan | None = None,
+        on_submitted: Callable[[RequestSubmission], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AsyncGenerator[LLMResponseUpdate, None]:
         ...
+
+    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
+        ...
+
+
+
+
+LLM_RUNTIME = PortKey[LLMRuntimePort]("llm:llm", LLMRuntimePort)
+LLM_QUERY = PortKey[LLMQueryPort]("llm:query", LLMQueryPort)
 
 def generation_result_from_values(
     text: str = "",

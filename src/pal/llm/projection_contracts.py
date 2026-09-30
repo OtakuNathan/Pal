@@ -22,10 +22,11 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, Sequence
 
 from pal.llm.continuation_policy import NativeCandidate
-from pal.llm.ir import WireShape
+from pal.llm.ir import WireShape, LLMMessageIR, LLMRequestIR
+from pal.llm.projection_spans import ItemSpans
 
 __all__ = [
     "ProjectionContractError",
@@ -942,3 +943,145 @@ class PreparedRequest:
                 applied_cache_breakpoint_message_ids
             ),
         )
+
+
+@dataclass(frozen=True)
+class HistoryView:
+    """What the L1 writer shows the session for one prepare call.
+
+    ``cursor`` is the base of this view and must equal the session frontier
+    (append-proof continuity).  ``messages`` is everything NOT yet frozen
+    into committed chunks — for a fast-path prepare that is the tail after
+    the frontier; after a generation switch it is the full history.
+    """
+
+    cursor: HistoryCursor
+    messages: tuple[LLMMessageIR, ...]
+    epoch_note: str = ""
+
+
+@dataclass(frozen=True)
+class ProjectionChunk:
+    """Immutable wire items for one committed round, carved from a sent request."""
+
+    round_attempt_id: str
+    cursor_before: HistoryCursor
+    cursor_after: HistoryCursor
+    items: tuple[dict, ...]
+    prefix_digest: str
+    # v3 (PLAN §6.2): the semantic message ids this chunk covers.  The rebase
+    # path (on_left_replaced) decides chunk survival from this span instead
+    # of subtracting item counts; an empty span is a legacy chunk that can
+    # no longer participate in a left replacement.
+    semantic_span: tuple[str, ...] = ()
+    # F5 (review af51d74): per-item semantic ownership aligned with ``items``
+    # (same length; empty tuples are legacy items with unknown ownership).
+    # Wire bytes frozen out of a pending tail keep their ORIGINAL owning
+    # span, so a left replacement can retire them from a surviving chunk's
+    # replay instead of letting compacted-away content ride along.
+    item_spans: tuple[tuple[str, ...], ...] = ()
+    # S1 (review 7d182fd): per-BLOCK semantic ownership aligned with both
+    # ``items`` and ``item_spans``.  An Anthropic user-seam merge
+    # concatenates two eras' blocks into ONE wire item; per-item spans
+    # alone cannot retire just the retired-left blocks without dropping
+    # the surviving right's blocks with them (whole-item keep/drop would
+    # misdelete R).  Each entry aligns with that item's content blocks;
+    # an empty entry marks an item without block ownership (whole-item
+    # rules apply, e.g. legacy snapshots or non-list content).
+    item_block_spans: tuple[tuple[tuple[str, ...], ...], ...] = ()
+    # Codec addresses relative to each frozen item; distinct from ownership.
+    item_cache_spans: tuple[ItemSpans, ...] = ()
+
+
+@dataclass(frozen=True)
+class LeftReplacement:
+    """Facts of one committed compact install (v3 PLAN §6.3).
+
+    Carried by the history owner after replace-left: the new seed content,
+    the semantic messages that survive in previously-frozen territory (the
+    right side's already-committed part), and the post-install cursor base
+    future append receipts must continue from.
+    """
+
+    seed_messages: tuple[LLMMessageIR, ...]
+    kept_frozen_messages: tuple[LLMMessageIR, ...]
+    cursor_after: HistoryCursor
+    left_revision: int = 0
+    # B1 (review 4b14ce4): model-view ids of EVERY message this seed
+    # materializes.  A post-compact rebase seed is the standalone continuity
+    # reference alone; a recovery/rebind bootstrap hands this entry the WHOLE
+    # current L model view (summary plus promoted ordinary groups), so its
+    # coverage is that whole view's id set — declaring one id while encoding
+    # more made the next prepare re-append the rest as fresh tail.  The
+    # coverage is established by the SAME encode that materializes the seed:
+    # content first, declaration second, never a fabricated round chunk.
+    seed_coverage_ids: tuple[str, ...] = ()
+
+
+class ProjectionSessionPort(Protocol):
+    binding: EndpointBinding | None
+    identity: ProjectionIdentity | None
+    frontier: HistoryCursor
+    chunks: tuple[ProjectionChunk, ...]
+
+    @property
+    def active_attempt(self) -> AttemptKey | None: ...
+
+    @property
+    def owner_fence(self) -> int: ...
+
+
+    def bind(self, binding: EndpointBinding, *, capabilities: Mapping[str, Any] | None=None) -> None:
+        ...
+
+    def retire(self) -> None:
+        ...
+
+    def attach_native(self, attempt: AttemptKey, candidate: NativeCandidate) -> None:
+        ...
+
+    def native_for(self, attempt_id: str) -> dict | None:
+        ...
+
+    def begin_round(self, attempt: AttemptKey, *, requires_native: bool) -> None:
+        ...
+
+    def close_round(self) -> AttemptKey:
+        ...
+
+    def observe_commit(self, receipt: HistoryCommitReceipt, *, accepted_messages: Sequence[LLMMessageIR]=(), span_message_ids: Sequence[str]=(), native_message_id: str='') -> None:
+        ...
+
+    def reject_commit(self, attempt_id: str, reason: str) -> None:
+        ...
+
+    def prepare_normal(self, view: HistoryView, *, controls: dict | None=None, request_shell: LLMRequestIR | None=None) -> PreparedRequest:
+        ...
+
+    def rebind(self, binding: EndpointBinding, *, capabilities: Mapping[str, Any] | None=None) -> None:
+        ...
+
+    def prepare_handoff(self, left_messages: Sequence[LLMMessageIR], *, instruction: LLMMessageIR, attempt: AttemptKey, request_shell: LLMRequestIR | None=None, controls: dict | None=None) -> PreparedRequest:
+        ...
+
+    def on_left_replaced(self, change: LeftReplacement) -> None:
+        ...
+
+    def frozen_message_ids(self) -> tuple[str, ...]:
+        ...
+
+    def covered_message_ids(self) -> tuple[str, ...]:
+        ...
+
+    @property
+    def history_left_revision(self) -> int:
+        ...
+
+    def has_materialized_content(self) -> bool:
+        ...
+
+    def prepare(self, view: HistoryView, *, controls: dict | None=None, request_shell: LLMRequestIR | None=None) -> PreparedRequest:
+        ...
+
+    def accept_repaired_round(self, closed: ClosedRound, *, cursor_after: HistoryCursor, block_count: int) -> HistoryCommitReceipt:
+        ...

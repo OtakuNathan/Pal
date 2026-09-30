@@ -121,7 +121,10 @@ def _valid_bunshin_payload() -> str:
     )
 
 
-class _ScriptedLLM:
+from tests.llm_fakes import NonStreamingLLM
+
+
+class _ScriptedLLM(NonStreamingLLM):
     def __init__(
         self,
         outcomes: list[generation_result_from_values | Exception],
@@ -139,7 +142,7 @@ class _ScriptedLLM:
             return self.preflight_hook(request)
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
-    async def agenerate(self, request):
+    async def agenerate(self, request, **options):
         self.generate_requests.append(request)
         if not self.outcomes:
             raise RuntimeError("no scripted outcome")
@@ -150,13 +153,13 @@ class _ScriptedLLM:
 
 
 class _SlowLLM(_ScriptedLLM):
-    async def agenerate(self, request):
+    async def agenerate(self, request, **options):
         self.generate_requests.append(request)
         await asyncio.sleep(1)
         return generation_result_from_values(text=_valid_pal_payload())
 
 
-class _PurposeAwareLLM:
+class _PurposeAwareLLM(NonStreamingLLM):
     def __init__(
         self,
         *,
@@ -169,7 +172,7 @@ class _PurposeAwareLLM:
         self.requests.append(("preflight", request))
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
-    def generate(self, request):
+    def generate(self, request, **options):
         self.requests.append(("generate", request))
         if "compaction" in str(request.metadata.get("purpose") or ""):
             return generation_result_from_values(
@@ -244,6 +247,7 @@ def _attach_hot_cache(llm, service):
         "request": cached_request, "anchor_message_id": anchor.message_id,
         "dialect": "openrouter_openai_explicit", "wire_shape": "openai_response",
     }
+    llm.prompt_cache_eligible_anchor_request = llm.prompt_cache_confirmed_anchor_request
     return live
 
 

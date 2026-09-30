@@ -192,6 +192,29 @@ class ExecutionRuntime(ExecutionRuntimePort):
         repr=False,
     )
 
+    def adopt_host_state(self, previous: ExecutionRuntime) -> None:
+        """Transfer framework-owned session state at a fenced implementation swap.
+
+        Plugin-owned fields stay with their implementation. Keep this explicit so
+        adding an implementation field cannot silently make it transferable.
+        """
+        self.activity_decorator = previous.activity_decorator
+        self.provider_registry = previous.provider_registry
+        self.l3_plugin_registry = previous.l3_plugin_registry
+        self.runtime_root = previous.runtime_root
+        self.logical_state = previous.logical_state
+        self.execution_sessions = previous.execution_sessions
+        self.result_snapshots = previous.result_snapshots
+        self.lifecycle_controller = previous.lifecycle_controller
+        self.lifecycle_gate = previous.lifecycle_gate
+        self.sync_executor_max_workers = previous.sync_executor_max_workers
+        self.sync_executor = previous.sync_executor
+        self._interrupt_handles = previous._interrupt_handles
+        self._interrupt_tasks = previous._interrupt_tasks
+        self._interrupt_state_lock = previous._interrupt_state_lock
+        self._registry_lock = previous._registry_lock
+        self._registry_generation = previous._registry_generation
+
     def __post_init__(self) -> None:
         self.execution_sessions.state_backend = self.logical_state
         if self.result_snapshots is None:
@@ -1163,7 +1186,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         # budget happen once at the invoke-level finalizer, after every
         # override (including native appends) has contributed its fields.
         result = self._normalize_invocation_result_inner(record, call, raw, budget=budget, turn_id=turn_id)
-        if not result.snapshot_refs and getattr(raw, "snapshot_refs", ()):
+        if not result.snapshot_refs and isinstance(raw, CapabilityResult) and raw.snapshot_refs:
             result = result.model_copy(update={"snapshot_refs": tuple(raw.snapshot_refs)})
         return result
 
@@ -1379,20 +1402,18 @@ class ExecutionRuntime(ExecutionRuntimePort):
             affordances = normalize_affordances(raw.affordances, limit=None)
             recovery_hint = str(raw.recovery_hint or "")
             llm_text = raw.llm_text
-        elif isinstance(raw, CapabilityResult) or all(
-            hasattr(raw, attribute) for attribute in ("status", "text", "structured", "llm_text")
-        ):
-            llm_text = str(getattr(raw, "llm_text", "") or "")
-            raw_status = getattr(raw, "status", RuntimeStatus.ERROR)
-            raw_structured = getattr(raw, "structured", None)
-            raw_text = str(getattr(raw, "text", "") or "")
-            raw_receipt = getattr(raw, "effect_receipt", None)
-            raw_delivery = getattr(raw, "context_delivery", None)
+        elif isinstance(raw, CapabilityResult):
+            llm_text = str(raw.llm_text or "")
+            raw_status = raw.status
+            raw_structured = raw.structured
+            raw_text = str(raw.text or "")
+            raw_receipt = raw.effect_receipt
+            raw_delivery = raw.context_delivery
             if isinstance(raw_delivery, dict):
                 context_delivery = dict(raw_delivery)
-            context_messages = tuple(getattr(raw, "context_messages", ()) or ())
-            affordances = normalize_affordances(getattr(raw, "affordances", ()) or (), limit=None)
-            recovery_hint = str(getattr(raw, "recovery_hint", "") or "")
+            context_messages = tuple(raw.context_messages or ())
+            affordances = normalize_affordances(raw.affordances or (), limit=None)
+            recovery_hint = str(raw.recovery_hint or "")
             if isinstance(raw_receipt, EffectReceipt):
                 receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
@@ -1408,7 +1429,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 # fallback fills the recovery hint only when nothing more
                 # specific exists.
                 recovery_hint, owner_affordances = self._safe_failure_guidance(
-                    handler_recovery_hint=str(getattr(raw, "recovery_hint", "") or ""),
+                    handler_recovery_hint=str(raw.recovery_hint or ""),
                     handler_affordances=affordances,
                     declared_failure_next_steps=record.guidance.failure_next_steps.strip(),
                 )
@@ -1480,7 +1501,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         # Handler text is data, including leading/trailing whitespace. Only
         # Pal-owned structured serialization may change presentation.
         rendered = llm_text or render_structured_for_llm(output)
-        refs = tuple(getattr(raw, "snapshot_refs", ()) or ())
+        refs = raw.snapshot_refs if isinstance(raw, CapabilityResult) else ()
         return CompleteResult(
             output=output, effect=outcome, llm_text=rendered,
             affordances=affordances, recovery_hint=recovery_hint, context_delivery=context_delivery,
@@ -1488,9 +1509,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
 
     def bind_result_history(self, memory_service) -> None:
-        history = getattr(getattr(memory_service, "l1_store", None), "turns", None)
-        if history is not None and hasattr(history, "add_change_listener"):
-            self.result_snapshots.bind_history(history)
+        if memory_service is not None:
+            self.result_snapshots.bind_history(memory_service.history)
 
     def configure_runtime_root(self, root) -> None:
         root = Path(root)

@@ -103,3 +103,19 @@ def test_retired_handle_cannot_remove_replacement():
     context.register_module(new)
     assert not context.unregister_module(old)
     assert context.require_port(ECHO) is new.ports["echo"]
+
+
+def test_property_validation_does_not_execute_candidate_getter():
+    class StatePort(Protocol):
+        @property
+        def state(self) -> str: ...
+
+    class State:
+        @property
+        def state(self) -> str:
+            raise AssertionError("admission must not read state")
+
+    key = PortKey[StatePort]("test:state", StatePort)
+    key.validate(State())
+    with pytest.raises(PortContractError, match="missing property state"):
+        key.validate(object())

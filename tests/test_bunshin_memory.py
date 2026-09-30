@@ -163,7 +163,6 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             context,
             SimpleNamespace(diagnostics=[]),
             SimpleNamespace(),
-            call_port_async=lambda *args, **kwargs: None,
             build_canonical_prompt=canonical_prompt,
             debug_log_prompt=lambda *args, **kwargs: None,
             debug_log_outcome=lambda *args, **kwargs: None,

@@ -8,15 +8,9 @@ from pal.core.compaction import CompactionEngine, CompactionPolicy
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_executor import TurnExecutor
+from pal.core.turn_state import AgentTurnRuntimeState
 from pal.llm.ir import LLMRequestIR
 from pal.shared import PromptAssemblyContext
-
-
-@dataclass
-class AgentTurnRuntimeState:
-    """The executor-owned state shared by every agent host."""
-
-    diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -48,7 +42,6 @@ class AgentTurnRuntime:
         *,
         context: Any,
         config: RuntimeConfig,
-        call_port_async: Callable[..., Awaitable[Any]],
         debug_log_prompt: Callable[..., None],
         debug_log_outcome: Callable[..., None],
         debug_log_reply: Callable[..., None],
@@ -114,7 +107,6 @@ class AgentTurnRuntime:
             context,
             resolved_state,
             resolved_guard_host,
-            call_port_async=call_port_async,
             build_canonical_prompt=build_canonical_prompt,
             debug_log_prompt=debug_log_prompt,
             debug_log_outcome=debug_log_outcome,

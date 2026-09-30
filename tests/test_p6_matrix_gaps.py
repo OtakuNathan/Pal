@@ -174,7 +174,11 @@ def _core_with_llm(llm, engine) -> tuple[PalCore, MemoryService]:
     return core, memory_service
 
 
-class _FinalAnswerLLM:
+from tests.llm_fakes import NonStreamingLLM
+from pal.core.turns import TurnContinuation
+
+
+class _FinalAnswerLLM(NonStreamingLLM):
     def preflight(self, request) -> LLMPreflightAdvice:
         return LLMPreflightAdvice(
             status="ready",
@@ -184,12 +188,12 @@ class _FinalAnswerLLM:
             reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
-    def generate(self, request):
+    def generate(self, request, **options):
         return generation_result_from_values(
             text="the final answer", tool_calls=[], finish_reason="stop",
         )
 
-    async def agenerate(self, request):
+    async def agenerate(self, request, **options):
         return self.generate(request)
 
 
@@ -203,7 +207,7 @@ def test_a12_final_answer_turn_never_compacts():
     assert not core.state.compaction_tickets
 
 
-class _CompactThenFinalLLM:
+class _CompactThenFinalLLM(NonStreamingLLM):
     """First generate asks for compaction; after install, real final."""
 
     def __init__(self) -> None:
@@ -218,7 +222,7 @@ class _CompactThenFinalLLM:
             reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
-    def generate(self, request):
+    def generate(self, request, **options):
         self.generate_count += 1
         if self.generate_count == 1:
             return generation_result_from_values(
@@ -229,7 +233,7 @@ class _CompactThenFinalLLM:
             text="final after compaction", tool_calls=[], finish_reason="stop",
         )
 
-    async def agenerate(self, request):
+    async def agenerate(self, request, **options):
         purpose = str(request.metadata.get("purpose") or "")
         if "compaction" in purpose:
             return generation_result_from_values(
@@ -392,7 +396,8 @@ def test_a04_unknown_mutation_rejected_as_reconcile_required():
         service.l1_store.turns.append(L1TurnIR(
             turn_id="t-a04", state=L1TurnState.ACTIVE, messages=[assistant],
         ))
-        continuation = SimpleNamespace(
+        continuation = TurnContinuation(
+            program=iter(()), correlation_id="t-a04",
             turn_id="t-a04", waiting_effect_id=None,
             interrupted=False, interrupt_reason="",
         )

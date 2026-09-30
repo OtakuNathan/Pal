@@ -101,7 +101,6 @@ def _executor(ports, *, engine=None) -> TurnExecutor:
                         execution_runtime=ports.execution_runtime),
         SimpleNamespace(diagnostics=[]),
         None,
-        call_port_async=_call_port_async,
         build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None,
         debug_log_outcome=lambda *a: None,

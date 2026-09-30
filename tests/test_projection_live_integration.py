@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
+from pal.core.turns import TurnContinuation
 
 from pal.core.compaction import CompactionEngine
 from pal.core.pal_compaction import PalCompactionPolicy
@@ -163,7 +164,6 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
                             execution_runtime=None),
             SimpleNamespace(diagnostics=[]),
             None,
-            call_port_async=None,
             build_canonical_prompt=None,
             debug_log_prompt=lambda *a: None,
             debug_log_outcome=lambda *a: None,
@@ -182,7 +182,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             reserved_output_tokens=1024,
             assembly_context=SimpleNamespace(
                 metadata={"prompt_cache_scope_id": "pal:resident"}),
-            continuation=SimpleNamespace(turn_id="task"),
+            continuation=TurnContinuation(turn_id="task", correlation_id="task", program=iter(())),
         ))
         self.assertTrue(result.success, result.failures)
         # The hosted session was rebased: frontier advanced past the install
@@ -202,7 +202,11 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
         root = service.history_root
 
         class _Boom:
-            def endpoint_projection_session(self, scope_id):
+            @property
+            def projection_port(self):
+                return self
+
+            def endpoint_projection_session(self, scope_id, *, rebind=True, plan=None):
                 raise RuntimeError("hosting exploded")
 
             async def agenerate(self, request, *a, **kw):
@@ -220,7 +224,6 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
                             execution_runtime=None),
             SimpleNamespace(diagnostics=diagnostics),
             None,
-            call_port_async=None,
             build_canonical_prompt=None,
             debug_log_prompt=lambda *a: None,
             debug_log_outcome=lambda *a: None,
@@ -238,7 +241,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             reserved_output_tokens=1024,
             assembly_context=SimpleNamespace(
                 metadata={"prompt_cache_scope_id": "pal:resident"}),
-            continuation=SimpleNamespace(turn_id="t"),
+            continuation=TurnContinuation(turn_id="t", correlation_id="t", program=iter(())),
         ))
         self.assertTrue(result.success, result.failures)
         self.assertTrue(any(
@@ -249,14 +252,17 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
 
 
 class _LiveLLM:
+    @property
+    def projection_port(self):
+        return self
     """LLM port facade: agenerate over the fake network + projection host."""
 
     def __init__(self, runtime: LLMRuntime, network: _Network) -> None:
         self._runtime = runtime
         self._network = network
 
-    def endpoint_projection_session(self, scope_id):
-        return self._runtime.endpoint_projection_session(scope_id)
+    def endpoint_projection_session(self, scope_id, *, rebind=True, plan=None):
+        return self._runtime.endpoint_projection_session(scope_id, rebind=rebind, plan=plan)
 
     async def agenerate(self, request, *a, **kw):
         return await self._network.agenerate(request, *a, **kw)

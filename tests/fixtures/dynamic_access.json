@@ -119,14 +119,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._call_port_async:getattr(port, async_name, None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:BunshinRunner._call_port_async:getattr(port, sync_name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bunshin/runner.py:BunshinRunner._close_execution_work:getattr(bundle, 'execution_runtime', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -260,70 +252,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/bunshin/runner.py:BunshinRunner.run:getattr(bundle, 'memory_service', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter._install_llm_progress_sink.restore:delattr(self._base, 'event_sink')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter._install_llm_progress_sink.restore:setattr(self._base, 'event_sink', previous)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter._install_llm_progress_sink:getattr(self._base, 'event_sink')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter._install_llm_progress_sink:setattr(self._base, 'event_sink', sink)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.agenerate:getattr(self._base, 'agenerate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.agenerate:getattr(self._base, 'generate')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.apreflight:getattr(self._base, 'apreflight', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.apreflight:getattr(self._base, 'preflight', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.astream:getattr(iterator, 'aclose', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.astream:getattr(self._base, 'astream', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.prompt_cache_confirmed_anchor_request:getattr(self._base, 'prompt_cache_confirmed_anchor_request', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.prompt_cache_eligible_anchor_request:getattr(self._base, 'prompt_cache_eligible_anchor_request', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.resolve_endpoint_facts:getattr(self._base, 'resolve_endpoint_facts', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.resolve_max_output_tokens:getattr(self._base, 'resolve_max_output_tokens', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.supports_streaming:getattr(self._base, 'astream', None)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:_BunshinLLMRuntimeAdapter.supports_streaming:getattr(self._base, 'supports_streaming', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -1047,14 +975,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/compaction.py:CompactionEngine._generate:getattr(llm_runtime, 'agenerate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/compaction.py:CompactionEngine._generate:getattr(llm_runtime, 'generate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/compaction.py:CompactionEngine.run.log_failure:getattr(getattr(response, 'message', None), 'metadata', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -1108,14 +1028,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/compaction.py:_handoff_tool_calls:getattr(response, 'message', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/compaction.py:_preflight:getattr(llm_runtime, 'apreflight', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/compaction.py:_preflight:getattr(llm_runtime, 'preflight', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -1671,14 +1583,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/runtime.py:PalCore._call_port_async:getattr(port, async_name, None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/runtime.py:PalCore._call_port_async:getattr(port, sync_name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/runtime.py:PalCore._channel_turn_is_pending:getattr(envelope, 'event', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -1736,14 +1640,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/runtime.py:PalCore._flush_control_status_async:getattr(channel_runtime, 'flush_endpoint_status', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/runtime.py:PalCore._handle_compact_memory_async:getattr(getattr(memory_service, 'l1_store', None), 'items', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/runtime.py:PalCore._handle_compact_memory_async:getattr(memory_service, 'l1_store', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -1971,31 +1867,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._abandon_turn_projection_round:getattr(active, 'attempt', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._abandon_turn_projection_round:getattr(getattr(active, 'attempt', None), 'attempt_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._abandon_turn_projection_round:getattr(self.state, 'diagnostics', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._abandon_turn_projection_round:getattr(session, '_active', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._active_input_id:getattr(assembly_context, 'event', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._active_input_id:getattr(continuation, 'opening_event', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._active_input_id:getattr(continuation, 'turn_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2003,23 +1875,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._append_l1_tool_context_messages_async:getattr(memory_service, 'append_l1_user_contexts', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._append_l1_tool_result_async:getattr(getattr(self.context, 'execution_runtime', None), 'commit_tool_delivery', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._append_l1_tool_result_async:getattr(memory_service, 'active_l1_turn', lambda _turn_id: None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._append_l1_tool_result_async:getattr(memory_service, 'append_l1_tool_result', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._append_l1_tool_result_async:getattr(memory_service, 'rollback_l1_tool_result', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2051,10 +1907,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._bootstrap_projection_from_current_left:getattr(self.state, 'diagnostics', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._build_tool_call_budget:getattr(execution_call, 'name', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2064,14 +1916,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor._channel_supports_stream_delivery:getattr(output_port, 'supports_stream_delivery', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._discard_l1_assistant_async:getattr(memory_service, 'active_l1_turn', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._discard_l1_assistant_async:getattr(memory_service, 'discard_l1_assistant', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2095,55 +1939,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._ensure_l1_turn_async:getattr(memory_service, 'begin_l1_turn')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._ensure_l1_turn_async:getattr(self.context.execution_runtime, 'bind_result_history', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._ensure_not_interrupted:getattr(continuation, 'interrupt_reason', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._ensure_not_interrupted:getattr(continuation, 'interrupted', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._finalize_accepted_contribution:getattr(continuation, 'finalization_only', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._finalize_accepted_contribution:getattr(outcome, 'projection_receipt', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._finalize_accepted_contribution:getattr(send_receipt, 'native', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_preflight:getattr(advice, 'breakdown', {})": {
-    "count": 3,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_preflight:getattr(advice, 'status', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_preflight:getattr(continuation, 'llm_round_index', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_preflight:getattr(self.state, 'pending_channel_turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(continuation, 'llm_round_index', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(getattr(memory, 'l1_store', None), 'turns', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2155,27 +1955,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(llm_runtime, 'agenerate', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(llm_runtime, 'last_endpoint_id', '')": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(llm_runtime, 'last_model_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(memory, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(outcome, 'preferred_endpoint_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:getattr(outcome, 'preferred_model_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2187,31 +1971,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_llm_request:inspect.signature(llm_runtime.agenerate)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(getattr(self._compaction_engine, 'policy', None), 'accepts_memory_candidates', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(memory_service, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(self._compaction_engine, 'policy', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(self.state, 'diagnostics', None)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(self.state, 'resident_execution_lifetime_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2239,47 +2003,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._history_submission_observer:getattr(memory, 'history_root', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._history_submission_observer:getattr(self.context, 'port_registry', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._install_left_replacement:getattr(root, 'left_generation', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._install_left_replacement:getattr(root, 'left_revision', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._install_left_replacement:getattr(session, 'frozen_message_ids', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._install_left_replacement:getattr(session, 'on_left_replaced', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._is_hard_budget_overflow:getattr(advice, 'breakdown', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._left_model_view_ids:getattr(continuity, 'source_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._left_model_view_ids:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._left_model_view_ids:getattr(memory_service, 'history_root', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._left_model_view_ids:getattr(memory_service, 'l1_store', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2295,14 +2023,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._left_view_seed:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._left_view_seed:getattr(memory_service, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._left_view_seed:getattr(turns, 'continuity', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2311,27 +2031,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._llm_runtime_endpoint_facts:getattr(llm_runtime, 'resolve_endpoint_facts', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._llm_runtime_endpoint_facts:getattr(request, 'metadata', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._llm_runtime_supports_streaming:getattr(llm_runtime, 'astream', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._llm_runtime_supports_streaming:getattr(llm_runtime, 'supports_streaming', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._llm_wait_status_schedule:getattr(self._config, 'llm_wait_status_seconds', (120.0, 300.0, 600.0, 1200.0))": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_exception:getattr(continuation, 'turn_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2340,10 +2040,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_exception:getattr(tool_call, 'name', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_result:getattr(continuation, 'turn_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2371,10 +2067,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_start:getattr(continuation, 'turn_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_start:getattr(tool_call, 'args', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2384,10 +2076,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor._log_tool_call_start:getattr(tool_call, 'name', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._maybe_echo_tool_result_async:getattr(continuation, 'delivery_binding', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2407,26 +2095,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(getattr(outcome, 'response', None), 'finish_reason', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(getattr(outcome, 'response', None), 'message', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(outcome, 'projection_receipt', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(outcome, 'response', None)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(outcome, 'tool_calls', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(receipt, 'applied', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2443,91 +2111,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._observe_turn_projection:getattr(self.state, 'diagnostics', None)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(chunk, 'semantic_span', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(llm_runtime, 'endpoint_projection_session', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(llm_runtime, 'prepare_generation_plan', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(memory_service, 'history_root', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(memory_service, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(plan, 'compact_required', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(root, 'left_generation', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(root, 'left_revision', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(self.context, 'port_registry', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(self.state, 'diagnostics', None)": {
-    "count": 3,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, '_active', None)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, '_owner_fence', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'binding', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'chunks', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'covered_message_ids', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'frozen_message_ids', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'has_materialized_content', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'history_left_revision', 0)": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'identity', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._prepare_turn_projection:getattr(session, 'reject_commit', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2555,14 +2139,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._rebase_projection_after_left_install:getattr(llm_runtime, 'endpoint_projection_session', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._rebase_projection_after_left_install:getattr(self.state, 'diagnostics', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._render_tool_result_content:getattr(result, 'context_delivery', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2583,10 +2159,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._resident_compaction_replay_request:getattr(memory_service, 'active_l1_turn', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._resident_compaction_replay_request:getattr(settled_turn, 'turn_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2603,15 +2175,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._resolve_llm_capabilities:getattr(continuation, 'preferred_llm_endpoint_id', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor._resolve_llm_capabilities_for_endpoint:getattr(llm_runtime, 'resolve_endpoint_facts', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._round_safe_for_compaction:getattr(memory_service, 'active_l1_turn', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2619,20 +2183,8 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor._upsert_l1_assistant_async:getattr(memory_service, 'stream_l1_assistant', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._upsert_l1_assistant_async:getattr(memory_service, 'upsert_l1_assistant', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(assembly_context, 'event', None)": {
     "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(continuation, 'llm_round_index', 0)": {
-    "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(getattr(assembly_context, 'event', None), 'event_id', '')": {
@@ -2651,22 +2203,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(memory_service, 'active_l1_turn', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(memory_service, 'append_l1_prompt_contexts', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(memory_service, 'l1_context_view', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(memory_service, 'project_continuity', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor.build_turn_prompt:getattr(metadata.get('memory_pack'), 'metadata', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2679,27 +2215,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.current_l1_result_ids:getattr(getattr(getattr(memory_service, 'l1_store', None), 'turns', None), 'turns', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.current_l1_result_ids:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.current_l1_result_ids:getattr(memory_service, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.post_commit_result:getattr(part, 'text', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.post_commit_result:getattr(record, 'committed_left_revision', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async.post_commit_result:getattr(self.state, 'diagnostics', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2719,18 +2239,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(continuation, 'preferred_llm_endpoint_id', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(continuation, 'preferred_llm_model_id', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(continuation, 'turn_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(execution_runtime, 'bind_result_history', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2739,15 +2247,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(memory_service, 'history_root', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(self.context, 'execution_runtime', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.compact_memory_async:getattr(self.state, 'diagnostics', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2756,30 +2256,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor.schedule_post_turn_commit_async:getattr(self.context.execution_runtime, 'result_snapshots', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:getattr(iterator, 'aclose', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:getattr(llm_runtime, 'astream', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:getattr(llm_runtime, 'last_endpoint_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:getattr(llm_runtime, 'last_model_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:getattr(llm_runtime, 'last_projection_receipt', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor.stream_llm_request_async:inspect.signature(stream)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -2963,22 +2439,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/execution/extensions.py:ExecutionSlot.install:getattr(previous, item.name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/extensions.py:ExecutionSlot.install:setattr(candidate, item.name, getattr(previous, item.name))": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/extensions.py:ExecutionSlot.uninstall:getattr(self._current, item.name)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/extensions.py:ExecutionSlot.uninstall:setattr(previous, item.name, getattr(self._current, item.name))": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/execution/file_capabilities.py:FileCapabilityMixin.path_delete:getattr(call.meta.get('execution_runtime'), 'result_snapshots', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3071,67 +2531,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result:getattr(raw, 'snapshot_refs', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'affordances', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'context_delivery', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'context_messages', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'effect_receipt', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'llm_text', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'recovery_hint', '')": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'snapshot_refs', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'status', RuntimeStatus.ERROR)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'structured', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:getattr(raw, 'text', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime._normalize_invocation_result_inner:hasattr(raw, attribute)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/execution/runtime.py:ExecutionRuntime._rejected_error_result:getattr(exc, 'recovery_hint', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime.bind_result_history:getattr(getattr(memory_service, 'l1_store', None), 'turns', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime.bind_result_history:getattr(memory_service, 'l1_store', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/execution/runtime.py:ExecutionRuntime.bind_result_history:hasattr(history, 'add_change_listener')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

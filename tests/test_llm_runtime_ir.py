@@ -8,6 +8,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from tests.llm_fakes import NonStreamingLLM
+from pal.core.turns import TurnContinuation
+from pal.core.turn_state import AgentTurnRuntimeState
 from unittest.mock import patch
 
 from pal.core.runtime_config import RuntimeConfig
@@ -194,8 +197,12 @@ class _StartedFailingShapeInvoker(ShapeEndpointInvoker):
 
 
 def _capture_turn_failure_signal(response: LLMResponseIR):
-    class _FailingRuntime:
-        async def agenerate(self, _request):
+    class _FailingRuntime(NonStreamingLLM):
+        projection_port = None
+        def supports_streaming(self, request=None):
+            return False
+
+        async def agenerate(self, _request, *, on_submitted=None):
             return LLMGenerationResult(response=response)
 
     runtime = _FailingRuntime()
@@ -210,9 +217,8 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
 
     executor = TurnExecutor(
         SimpleNamespace(require_port=lambda _name: runtime),
+        AgentTurnRuntimeState(),
         SimpleNamespace(),
-        SimpleNamespace(),
-        call_port_async=call_port,
         build_canonical_prompt=lambda *args, **kwargs: None,
         debug_log_prompt=lambda *args, **kwargs: None,
         debug_log_outcome=lambda *args, **kwargs: None,
@@ -223,7 +229,9 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
         should_enter_failure_flow_for_tool_result=lambda _result: False,
     )
     executor.build_turn_prompt = lambda *args, **kwargs: _request()
-    continuation = SimpleNamespace(
+    continuation = TurnContinuation(
+        program=iter(()),
+        correlation_id="turn-failure",
         budget_failure_feedback_text="",
         preferred_llm_endpoint_id="ep",
         preferred_llm_model_id="test-model",
@@ -678,7 +686,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             last_endpoint_id = "ep"
             last_model_id = "test-model"
 
-            async def astream(self, request):
+            async def astream(self, request, *, on_submitted=None):
                 _ = request
                 await asyncio.sleep(0.04)
                 yield LLMResponseUpdate(
@@ -838,3 +846,76 @@ def adjust_messages(messages):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_concurrent_generation_progress_is_scoped_to_each_call():
+    import threading
+
+    endpoint = _endpoint()
+    runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint,)), _Settings())
+    barrier = threading.Barrier(2)
+    shared_events = []
+    runtime.event_sink = shared_events.append
+
+    def generate(request, **options):
+        barrier.wait(timeout=5)
+        runtime._emit("test_progress", endpoint=endpoint, scope=request.logical_scope_id)
+        return LLMGenerationResult(response=LLMResponseIR(
+            message=LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR("done"),)),
+            finish_reason=LLMFinishReason.STOP,
+        ))
+
+    runtime.generate = generate
+    first, second = [], []
+
+    async def scenario():
+        await asyncio.gather(
+            runtime.agenerate(replace(_request(), logical_scope_id="first"), on_event=first.append),
+            runtime.agenerate(replace(_request(), logical_scope_id="second"), on_event=second.append),
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert [event["scope"] for event in first] == ["first"]
+    assert [event["scope"] for event in second] == ["second"]
+    assert shared_events == []
+    runtime._emit("after_calls", endpoint=endpoint)
+    assert [event["phase"] for event in shared_events] == ["after_calls"]
+
+
+def test_cancelled_generation_stops_progress_delivery():
+    import threading
+
+    endpoint = _endpoint()
+    runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint,)), _Settings())
+    release = threading.Event()
+    events = []
+
+    async def scenario():
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def generate(request, **options):
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=5)
+            runtime._emit("late_progress", endpoint=endpoint)
+            return LLMGenerationResult(response=LLMResponseIR(
+                message=LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR("done"),)),
+                finish_reason=LLMFinishReason.STOP,
+            ))
+
+        runtime.generate = generate
+        task = asyncio.create_task(runtime.agenerate(_request(), on_event=events.append))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            release.set()
+        await loop.shutdown_default_executor()
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert events == []

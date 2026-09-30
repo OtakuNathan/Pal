@@ -7,6 +7,7 @@ from typing import Any
 
 from pal.control.contracts import ControlRoute
 from pal.core.compaction_coordinator import CompactionTicket
+from pal.core.turn_state import AgentTurnRuntimeState
 from pal.foundation import utc_now
 
 
@@ -27,7 +28,7 @@ class ControlScopeState:
 
 
 @dataclass
-class CoreRuntimeState:
+class CoreRuntimeState(AgentTurnRuntimeState):
     active_turns: dict[str, Any] = field(default_factory=dict)
     completed_turns: dict[str, Any] = field(default_factory=dict)
     turn_tasks: dict[str, Any] = field(default_factory=dict)

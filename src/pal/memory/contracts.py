@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolResultIR
+from pal.shared.ports import PortKey
+from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -286,6 +288,22 @@ L3ProviderResolver = Callable[[str], L3ProviderPort]
 
 
 class MemoryServicePort(Protocol):
+    @property
+    def history(self) -> HistoryReadPort: ...
+
+    @property
+    def history_root(self) -> HistoryRootPort: ...
+
+    def tick_heat(self) -> None: ...
+
+    def left_transcripts(self) -> list[list[L1TranscriptMessage]]: ...
+
+    def settled_transcripts(self) -> list[list[L1TranscriptMessage]]: ...
+
+    def l2_entries(self) -> tuple[L2Entry, ...]: ...
+
+    def upsert_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = False) -> list[L2Entry]: ...
+
     def begin_l1_turn(
         self,
         turn_id: str,
@@ -400,3 +418,6 @@ class MemoryServicePort(Protocol):
 
     async def asoft_reset(self) -> None:
         ...
+
+
+MEMORY = PortKey[MemoryServicePort]("memory:memory", MemoryServicePort)

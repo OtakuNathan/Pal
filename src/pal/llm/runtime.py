@@ -6,8 +6,9 @@ import json
 import random
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -17,12 +18,14 @@ from pal.llm.contracts import (
     LLMPreflightAdvice,
     LLMPreflightRequest,
     LLMRuntimePort,
+    LLMProjectionPort,
     ThinkingChoice,
     ThinkingContract,
 )
 from pal.llm.credentials import LLMCredentialResolver, LLMCredentialUnavailableError
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.endpoint_spec import LLMEndpointSpec
+from pal.llm.request_contracts import LLMPreparedPlan, PreparedLLMRequest, LLMProgressEvent
 from pal.llm.ir import (
     GenerationPolicyIR,
     ImagePartIR,
@@ -77,6 +80,9 @@ from pal.shared.tool_protocol import ToolCallIR
 
 
 _DEFAULT_TIMEOUT_SECONDS = 600.0
+_CALL_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
+    "llm_call_event_sink", default=None,
+)
 _STRICT_ENDPOINT_PREFERRED_SOURCES = frozenset({"profile"})
 _FALLBACK_DISABLED_POLICIES = frozenset(
     {"disabled", "none", "off", "strict", "strict_preferred", "no_fallback"}
@@ -124,60 +130,6 @@ class LLMEndpointResponseError(LLMEndpointInvocationError):
 
 class LLMRequestPreparationError(LLMEndpointInvocationError):
     pass
-
-
-@dataclass(frozen=True)
-class PreparedLLMRequest:
-    endpoint: LLMEndpointModel
-    request: LLMRequestIR
-    estimated_input_tokens: int
-    target_input_budget: int
-
-    @property
-    def compact_required(self) -> bool:
-        return (
-            self.target_input_budget > 0
-            and self.estimated_input_tokens > self.target_input_budget
-        )
-
-
-@dataclass(frozen=True)
-class LLMPreparedPlan:
-    """One immutable prepared-generation plan (F1, review af51d74).
-
-    Derived BEFORE any projection encodes anything: the resolved endpoint
-    (first in the request's own preference/fallback order), the compiled
-    EFFECTIVE request (model hooks, effective thinking, output caps, cache
-    policy selection), the validated capability profile, and the strong
-    projection binding.  A live projection encodes ``effective_request``
-    and only THIS plan's endpoint may apply it; anything else must report
-    the projection unapplied (F2 receipt).
-    """
-
-    endpoint: LLMEndpointModel
-    prepared: PreparedLLMRequest
-    binding: EndpointBinding
-    capabilities: Mapping[str, Any]
-
-    @property
-    def effective_request(self) -> LLMRequestIR:
-        return self.prepared.request
-
-    @property
-    def endpoint_id(self) -> str:
-        return str(self.endpoint.endpoint_id)
-
-    @property
-    def model_id(self) -> str:
-        return str(self.endpoint.model_id)
-
-    @property
-    def wire_shape(self) -> str:
-        return str(self.endpoint.wire_shape)
-
-    @property
-    def compact_required(self) -> bool:
-        return self.prepared.compact_required
 
 
 @dataclass
@@ -276,7 +228,7 @@ def build_default_endpoint_invoker(
 
 
 @dataclass
-class LLMRuntime(LLMRuntimePort):
+class LLMRuntime:
     endpoint_resolver: EndpointResolver
     settings_repository: RuntimeSettingRepository
     endpoint_invoker: LLMEndpointInvokerPort | None = None
@@ -335,6 +287,18 @@ class LLMRuntime(LLMRuntimePort):
 
     def active_endpoint(self) -> LLMEndpointModel | None:
         return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+
+    @property
+    def projection_port(self) -> LLMProjectionPort:
+        return self
+
+    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
+        metadata = request.metadata if request is not None else {}
+        facts = self.resolve_endpoint_facts(
+            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+        )
+        return bool(facts.get("supports_streaming", True))
 
     def endpoint_projection_session(
         self,
@@ -416,7 +380,7 @@ class LLMRuntime(LLMRuntimePort):
             endpoint, selection=prepared.request.metadata.get("cache_policy_selection"))
         binding = self._projection_binding(endpoint, capabilities=capabilities)
         return LLMPreparedPlan(
-            endpoint=endpoint,
+            endpoint=prepared.endpoint,
             prepared=prepared,
             binding=binding,
             capabilities=capabilities,
@@ -1074,16 +1038,32 @@ class LLMRuntime(LLMRuntimePort):
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
         on_submitted: Callable[[RequestSubmission], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> LLMGenerationResult:
         loop = asyncio.get_running_loop()
         notify = (lambda receipt: loop.call_soon_threadsafe(on_submitted, receipt)) if on_submitted else None
-        return await asyncio.to_thread(
-            self.generate, request,
-            projection=projection, projection_binding=projection_binding,
-            projection_attempt_id=projection_attempt_id,
-            generation_plan=generation_plan,
-            on_submitted=notify,
-        )
+        active = True
+
+        def deliver_event(event: dict[str, Any]) -> None:
+            if active and on_event is not None:
+                on_event(event)
+
+        def run() -> LLMGenerationResult:
+            sink = (lambda event: loop.call_soon_threadsafe(deliver_event, event)) if on_event else None
+            token = _CALL_EVENT_SINK.set(sink)
+            try:
+                return self.generate(
+                    request, projection=projection, projection_binding=projection_binding,
+                    projection_attempt_id=projection_attempt_id,
+                    generation_plan=generation_plan, on_submitted=notify,
+                )
+            finally:
+                _CALL_EVENT_SINK.reset(token)
+
+        try:
+            return await asyncio.to_thread(run)
+        finally:
+            active = False
 
     def _iter_stream_updates(
         self,
@@ -1319,7 +1299,8 @@ class LLMRuntime(LLMRuntimePort):
         projection_attempt_id: str = "",
         generation_plan: "LLMPreparedPlan | None" = None,
         on_submitted: Callable[[RequestSubmission], None] | None = None,
-    ) -> AsyncIterator[LLMResponseUpdate]:
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AsyncGenerator[LLMResponseUpdate, None]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[object] = asyncio.Queue()
         done = object()
@@ -1337,6 +1318,9 @@ class LLMRuntime(LLMRuntimePort):
                 pass
 
         def worker() -> None:
+            token = _CALL_EVENT_SINK.set(
+                (lambda event: enqueue(LLMProgressEvent(event))) if on_event else None
+            )
             try:
                 for update in self._iter_stream_updates(
                     request,
@@ -1351,6 +1335,7 @@ class LLMRuntime(LLMRuntimePort):
             except BaseException as exc:  # noqa: BLE001
                 enqueue(exc)
             finally:
+                _CALL_EVENT_SINK.reset(token)
                 enqueue(done)
 
         task = asyncio.create_task(asyncio.to_thread(worker))
@@ -1382,6 +1367,10 @@ class LLMRuntime(LLMRuntimePort):
                 if isinstance(item, RequestSubmission):
                     if on_submitted is not None:
                         on_submitted(item)
+                    continue
+                if isinstance(item, LLMProgressEvent):
+                    if on_event is not None:
+                        on_event(item.payload)
                     continue
                 yield item  # type: ignore[misc]
         finally:
@@ -1620,7 +1609,7 @@ class LLMRuntime(LLMRuntimePort):
                 validate_native_for_send(message)
         target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)
         return PreparedLLMRequest(
-            endpoint=endpoint,
+            endpoint=LLMEndpointSpec.from_value(endpoint),
             request=prepared,
             estimated_input_tokens=_estimate_request_tokens(prepared),
             target_input_budget=target,
@@ -2003,8 +1992,9 @@ class LLMRuntime(LLMRuntimePort):
 
     def _emit(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
         event = {"phase": phase, "endpoint_id": endpoint.endpoint_id, "model_id": endpoint.model_id, **payload}
-        if callable(self.event_sink):
-            self.event_sink(dict(event))
+        sink = _CALL_EVENT_SINK.get() or self.event_sink
+        if sink is not None:
+            sink(dict(event))
 
     def _invoker(self) -> LLMEndpointInvokerPort:
         if self.endpoint_invoker is None:

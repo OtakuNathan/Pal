@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.llm_fakes import NonStreamingLLM
+
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
 import ast
@@ -277,7 +279,10 @@ def register_test_tool(runtime, tool) -> str:
     return canonical_path
 
 
-class ScriptedLLMRuntime:
+class ScriptedLLMRuntime(NonStreamingLLM):
+    def supports_streaming(self, request=None):
+        return True
+
     def __init__(self, outcomes: list[generation_result_from_values]) -> None:
         self.outcomes = outcomes
         self.requests = []
@@ -295,16 +300,16 @@ class ScriptedLLMRuntime:
     async def apreflight(self, request) -> LLMPreflightAdvice:
         return self.preflight(request)
 
-    def generate(self, request):
+    def generate(self, request, **options):
         self.requests.append(("generate", request))
         if self.outcomes:
             return self.outcomes.pop(0)
         return generation_result_from_values(text="done", tool_calls=[], finish_reason="stop")
 
-    async def agenerate(self, request):
+    async def agenerate(self, request, **options):
         return self.generate(request)
 
-    async def astream(self, request):
+    async def astream(self, request, **options):
         self.requests.append(("astream", request))
         if self.outcomes:
             outcome = self.outcomes.pop(0)
@@ -3780,7 +3785,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for message in request.messages
             if message.role.value == "tool"
         )
-        self.assertEqual(json.loads(tool_message.parts[0].content), {"bad": True})
+        self.assertIn("output_validation_failed", tool_message.parts[0].content)
+        self.assertIn("Tool output contract error", tool_message.parts[0].content)
         self.assertNotIn("memory recall", tool_message.parts[0].content)
 
     def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
@@ -3820,7 +3826,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("stopped the tool loop", outcome.final_reply.lower())
 
     def test_turn_runtime_truncates_large_tool_results_without_forcing_finalization(self) -> None:
-        class TinyBudgetLLMRuntime:
+        class TinyBudgetLLMRuntime(NonStreamingLLM):
             def __init__(self) -> None:
                 self.requests = []
                 self.generate_count = 0
@@ -3848,7 +3854,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 _ = preferred_endpoint_id
                 return 128
 
-            def generate(self, request):
+            def generate(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -3859,7 +3865,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def agenerate(self, request):
+            async def agenerate(self, request, **options):
                 self.requests.append(("agenerate", request))
                 if "compaction" not in str(
                     request.metadata.get("purpose") or ""
@@ -3916,7 +3922,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Output snapshot:", tool_message.text)
 
     def test_turn_runtime_preserves_delivered_tool_results_until_compaction(self) -> None:
-        class MultiToolLLMRuntime:
+        class MultiToolLLMRuntime(NonStreamingLLM):
             def __init__(self) -> None:
                 self.requests = []
                 self.generate_count = 0
@@ -3931,7 +3937,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def generate(self, request):
+            def generate(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -4058,7 +4064,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("FILE_NOT_FOUND", result.text)
 
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
-        class FallbackBudgetLLMRuntime:
+        class FallbackBudgetLLMRuntime(NonStreamingLLM):
             def __init__(self) -> None:
                 self.requests = []
                 self.generate_count = 0
@@ -4073,7 +4079,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def generate(self, request):
+            def generate(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -4088,7 +4094,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def agenerate(self, request):
+            async def agenerate(self, request, **options):
                 self.requests.append(("agenerate", request))
                 if "compaction" not in str(
                     request.metadata.get("purpose") or ""
