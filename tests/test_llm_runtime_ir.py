@@ -182,7 +182,7 @@ class _StartedFailingShapeInvoker(ShapeEndpointInvoker):
         self.wait_for_cancel = wait_for_cancel
         self.control = None
 
-    def invoke_updates(self, endpoint, request, *, timeout_seconds=180.0, stream_control=None):
+    def invoke_updates(self, endpoint, request, *, timeout_seconds=180.0, stream_control=None, projection=None, native_sink=None, submission_sink=None):
         _ = endpoint, request, timeout_seconds
         self.attempts += 1
         self.control = stream_control

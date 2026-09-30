@@ -11,6 +11,10 @@ never re-requested as a new resource.
 """
 from __future__ import annotations
 
+from tests.llm_fakes import NonStreamingLLM
+
+from tests.turn_fakes import continuation as make_continuation
+
 import asyncio
 import tempfile
 from pathlib import Path
@@ -58,7 +62,7 @@ def _compact_core(tmp: Path, engine_status: str = "compacted"):
         runtime_root=tmp, repository=ArtifactRepository(),
     )
     core.context.port_registry["memory:memory"] = service
-    core.context.port_registry["llm:llm"] = object()
+    core.context.port_registry["llm:llm"] = NonStreamingLLM()
     core.context.port_registry["artifact:artifact"] = manager
     core.turn_executor._compaction_engine = _BarrierEngine(status=engine_status)
     return core, service, manager
@@ -97,7 +101,7 @@ def test_r08_seed_referenced_artifact_survives_cleanup_and_restart():
                     message_id="u1",
                 )],
             ))
-            continuation = SimpleNamespace(
+            continuation = make_continuation(
                 turn_id="t-lease", waiting_effect_id=None,
                 interrupted=False, interrupt_reason="",
                 delivery_binding=None,

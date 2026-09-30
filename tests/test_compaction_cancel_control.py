@@ -18,6 +18,8 @@ eligibility boundary that the P6 work added to the gate/engine/executor:
 """
 from __future__ import annotations
 
+from tests.llm_fakes import NonStreamingLLM
+
 import asyncio
 import time
 from dataclasses import replace
@@ -54,7 +56,7 @@ def _build_core(tmp_path: Path):
     service = _memory_with_turns(2)
     engine = _BarrierEngine()
     core.context.port_registry["memory:memory"] = service
-    core.context.port_registry["llm:llm"] = object()
+    core.context.port_registry["llm:llm"] = NonStreamingLLM()
     core.turn_executor._compaction_engine = engine
     replies: list[str] = []
 

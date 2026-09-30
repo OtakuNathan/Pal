@@ -379,7 +379,7 @@ def test_a04_unknown_mutation_rejected_as_reconcile_required():
         core = PalCore()
         service = _memory_with_turns(1)
         core.context.port_registry["memory:memory"] = service
-        core.context.port_registry["llm:llm"] = object()
+        core.context.port_registry["llm:llm"] = NonStreamingLLM()
         # A mutation was dispatched but its effect ledger entry is unknown:
         # the call is COMPLETE yet no result ever closed it.
         call = new_tool_call(

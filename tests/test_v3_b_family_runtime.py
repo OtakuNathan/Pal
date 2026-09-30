@@ -22,6 +22,9 @@ is a network-side fake only (H01 harness pattern).
 
 from __future__ import annotations
 
+from pal.shared.ports import PortKey
+from tests.turn_fakes import continuation as make_continuation
+
 import asyncio
 import inspect
 import time
@@ -81,6 +84,7 @@ class _Ports:
         return self._ports.get(name)
 
     def require_port(self, name):
+        name = name.name if isinstance(name, PortKey) else name
         value = self._ports.get(name)
         if value is None:
             raise KeyError(name)
@@ -129,10 +133,13 @@ def _continuation(turn_id: str, **overrides):
         pending_compact_memory_candidate_batches=[],
     )
     fields.update(overrides)
-    return SimpleNamespace(**fields)
+    return make_continuation(**fields)
 
 
-class _ResidentNetwork:
+from tests.llm_fakes import NonStreamingLLM
+
+
+class _ResidentNetwork(NonStreamingLLM):
     """Fake provider: compaction summaries on demand, R growth as a hook."""
 
     def __init__(self, *, on_generate=None, generate_sleep=0.0,

@@ -26,6 +26,7 @@ class _RecordingPort:
     state_order: int
     events: list[str]
     schema_version: str = "1"
+    readable_schema_versions = ("1",)
 
     def snapshot_state(self):
         self.events.append(f"snapshot:{self.module_id}")
@@ -37,6 +38,9 @@ class _RecordingPort:
 
     def install_prepared_state(self, prepared):
         self.events.append(f"install:{self.module_id}:{prepared['value']}")
+
+    def finish_restore_state(self, ports):
+        pass
 
     def reset_state(self, reason):
         self.events.append(f"reset:{self.module_id}:{reason}")

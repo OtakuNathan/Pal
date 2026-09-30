@@ -9,6 +9,8 @@ response normalization, L1 accept.  Faked: the network frames only.
 """
 from __future__ import annotations
 
+from tests.turn_fakes import continuation as make_continuation, require_port as require_test_port
+
 import asyncio
 import json
 import tempfile
@@ -99,7 +101,7 @@ def _executor(memory, runtime):
 
     ports = {"memory:memory": memory, "llm:llm": runtime}
     return TurnExecutor(
-        SimpleNamespace(port_registry=ports, require_port=ports.__getitem__,
+        SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
                         execution_runtime=None),
         SimpleNamespace(diagnostics=[]), None,
          build_canonical_prompt=None,
@@ -244,7 +246,7 @@ class VerticalTraceTests(unittest.TestCase):
         # the real install, and the post-commit rebase.
         result = asyncio.run(ex.compact_memory_async(
             memory, target_input_budget=100_000, reserved_output_tokens=1024,
-            continuation=SimpleNamespace(turn_id="T")))
+            continuation=make_continuation(turn_id="T")))
         self.assertNotEqual(result.status, "no_benefit")
         self.assertTrue(result.success)
 

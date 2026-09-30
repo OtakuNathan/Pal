@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.memory.contracts import MEMORY
+
 from typing import Any
 
 from pal.shared import (
@@ -81,7 +83,7 @@ class ToolSurface:
             include("intro_module_memory_active_provider")
             include("op_memory_mgmt_set_active_provider")
             try:
-                memory_service = self.context.require_port("memory:memory")
+                memory_service = self.context.require_port(MEMORY)
                 active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
             except KeyError:
                 active_provider_id = ""

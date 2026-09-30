@@ -5,6 +5,8 @@ Ported from the 29a879f review package (pal_v3_n1_review_29a879f)
 draft spec tests (N1-R1..R4). Red run captured on 29a879f before fixes.
 """
 from __future__ import annotations
+
+from tests.turn_fakes import continuation as make_continuation
 import asyncio
 import unittest
 from dataclasses import replace
@@ -150,7 +152,7 @@ class SettlementOutcomeTests(unittest.TestCase):
                               new=staticmethod(fail_only_after_actual_commit)):
                 result = await ex.compact_memory_async(
                     memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                    continuation=SimpleNamespace(turn_id='T'))
+                    continuation=make_continuation(turn_id='T'))
             self.assertEqual(injected, [True])
             self.assertEqual(memory.history_root.last_run.phase.value, 'committed')
             self.assertIn('ACCEPTED_NEW_LEFT',
@@ -179,7 +181,7 @@ class SettlementOutcomeTests(unittest.TestCase):
             ex = executor(memory, WaitingLLM())
             task = asyncio.create_task(ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id='T')))
+                continuation=make_continuation(turn_id='T')))
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 old_root = memory.history_root
@@ -213,7 +215,7 @@ class SettlementOutcomeTests(unittest.TestCase):
             ex = executor(memory, BadLLM())
             result = await ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id='T'))
+                continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)
             self.assertEqual(memory.l1_store.turns.turns, before)
             self.assertIsNone(memory.history_root.active_run)

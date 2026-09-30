@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pal.llm.contracts import LLM_RUNTIME
+from pal.memory.contracts import MEMORY
+
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
@@ -166,7 +169,7 @@ class TurnExecutor:
             continuation,
             effect.assembly_context,
         )
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -327,7 +330,7 @@ class TurnExecutor:
                     "stream, tool protocol, or result commit is still open."
                 ),
             )
-        memory_service = self.context.require_port("memory:memory")
+        memory_service = self.context.require_port(MEMORY)
         # two_segment admission: the history owner IS the arbiter — one live
         # run per session (CompactLaneBusy), owner-side terminal arbitration,
         # and the minimal-seed guard already refuses re-compacting an
@@ -437,7 +440,7 @@ class TurnExecutor:
                 ),
             )
         continuation.llm_round_index = continuation.llm_round_index + 1
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -1270,7 +1273,7 @@ class TurnExecutor:
             metadata["active_l1_owns_primary_input"] = True
         if assembly_context.turn_kind != "failure":
             try:
-                memory_service = self.context.require_port("memory:memory")
+                memory_service = self.context.require_port(MEMORY)
             except KeyError:
                 memory_service = None
             if memory_service is not None and "memory_pack" not in metadata:

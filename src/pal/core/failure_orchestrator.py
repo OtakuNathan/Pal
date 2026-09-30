@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.memory.contracts import MEMORY
+
 from dataclasses import dataclass, replace
 import asyncio
 import json
@@ -332,7 +334,7 @@ class FailureOrchestrator:
 
     async def _persist_repair_resolution_async(self, record: RepairResolutionRecord) -> None:
         try:
-            memory_service = self.context.require_port("memory:memory")
+            memory_service = self.context.require_port(MEMORY)
         except KeyError:
             return
         active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()

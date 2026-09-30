@@ -4,7 +4,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Awaitable, Mapping, Protocol
+from typing import Any, Awaitable, Mapping, Protocol, Sequence
 
 
 RUNTIME_SNAPSHOT_SCHEMA_VERSION = "1"
@@ -14,6 +14,7 @@ class RuntimeStatePort(Protocol):
     module_id: str
     schema_version: str
     state_order: int
+    readable_schema_versions: tuple[str, ...]
 
     def snapshot_state(self) -> Mapping[str, Any] | Awaitable[Mapping[str, Any]]:
         ...
@@ -22,6 +23,9 @@ class RuntimeStatePort(Protocol):
         ...
 
     def install_prepared_state(self, prepared: Any) -> None | Awaitable[None]:
+        ...
+
+    def finish_restore_state(self, ports: Sequence[RuntimeStatePort]) -> None | Awaitable[None]:
         ...
 
     def reset_state(self, reason: str) -> None | Awaitable[None]:
@@ -101,7 +105,7 @@ class RuntimeSnapshotCoordinator:
         prepared: list[tuple[RuntimeStatePort, Any]] = []
         for port in ports:
             record = dict(modules[port.module_id])
-            readable_versions = getattr(port, "readable_schema_versions", (str(port.schema_version),))
+            readable_versions = port.readable_schema_versions
             if str(record.get("schema_version") or "") not in readable_versions:
                 raise ValueError(
                     f"runtime snapshot schema mismatch for {port.module_id}"
@@ -116,9 +120,7 @@ class RuntimeSnapshotCoordinator:
         for port, candidate in prepared:
             await _maybe_await(port.install_prepared_state(candidate))
         for port in ports:
-            finish = getattr(port, "finish_restore_state", None)
-            if callable(finish):
-                await _maybe_await(finish(ports))
+            await _maybe_await(port.finish_restore_state(ports))
 
     async def reset(self, reason: str) -> tuple[str, ...]:
         failures: list[str] = []

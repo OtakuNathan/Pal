@@ -14,6 +14,11 @@ Honest boundaries (recorded for acceptance_status):
 """
 from __future__ import annotations
 
+from tests.llm_fakes import NonStreamingLLM
+
+from tests.turn_fakes import continuation as make_continuation
+from pal.core.turn_state import AgentTurnRuntimeState
+
 import asyncio
 import json
 import unittest
@@ -67,19 +72,19 @@ class BunshinScopeGateTests(unittest.TestCase):
             service, turn_id, _ = _service_with_active()
             engine = _BarrierEngine()
             core.context.port_registry["memory:memory"] = service
-            core.context.port_registry["llm:llm"] = object()
+            core.context.port_registry["llm:llm"] = NonStreamingLLM()
             core.turn_executor._compaction_engine = engine
             # Bunshin shape: plain loop state without transition locks,
             # exactly as the worker runtime builds it.  v3 admission is
             # owner-side (history root); the executor claims no tickets.
-            core.turn_executor.state = SimpleNamespace(pending_channel_turns=None)
+            core.turn_executor.state = AgentTurnRuntimeState()
 
             effect = MemoryCompactEffect(
                 assembly_context=None,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
             )
-            continuation = SimpleNamespace(
+            continuation = make_continuation(
                 turn_id=turn_id, waiting_effect_id=None,
                 interrupted=False, interrupt_reason="",
             )
@@ -162,16 +167,16 @@ class BunshinCheckpointRecoveryTests(unittest.TestCase):
                 service, turn_id, _ = _service_with_active()
                 engine = _BarrierEngine()
                 core.context.port_registry["memory:memory"] = service
-                core.context.port_registry["llm:llm"] = object()
+                core.context.port_registry["llm:llm"] = NonStreamingLLM()
                 core.turn_executor._compaction_engine = engine
-                core.turn_executor.state = SimpleNamespace(pending_channel_turns=None)
+                core.turn_executor.state = AgentTurnRuntimeState()
                 carrier = CoreRuntimeState()
                 core.turn_executor._compaction_gate = CompactionGate(
                     carrier, transition_lock=carrier.channel_turn_transition_lock,
                 )
                 core.turn_executor._compaction_scope = f"bunshin:{identity['workflow_id']}"
                 task = asyncio.create_task(core.turn_executor.execute_turn_effect_async(
-                    SimpleNamespace(
+                    make_continuation(
                         turn_id=turn_id, waiting_effect_id=None,
                         interrupted=False, interrupt_reason="",
                     ),
@@ -234,7 +239,7 @@ class CancellationTests(unittest.TestCase):
             service, turn_id, _ = _service_with_active()
             engine = _BarrierEngine(status="compacted")
             core.context.port_registry["memory:memory"] = service
-            core.context.port_registry["llm:llm"] = object()
+            core.context.port_registry["llm:llm"] = NonStreamingLLM()
             core.turn_executor._compaction_engine = engine
             stamp_before = service.l1_source_stamp()
             effect = MemoryCompactEffect(
@@ -242,7 +247,7 @@ class CancellationTests(unittest.TestCase):
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
             )
-            continuation = SimpleNamespace(
+            continuation = make_continuation(
                 turn_id=turn_id, waiting_effect_id=None,
                 interrupted=False, interrupt_reason="",
             )

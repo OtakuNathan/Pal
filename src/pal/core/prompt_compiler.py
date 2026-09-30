@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.memory.contracts import MEMORY
+
 from typing import Any
 from dataclasses import replace
 from html import escape
@@ -859,7 +861,7 @@ class PromptCompiler:
         try:
             from pal.memory import MemoryPackRequest
 
-            memory_service = self.context.require_port("memory:memory")
+            memory_service = self.context.require_port(MEMORY)
             pack = memory_service.build_pack(
                 MemoryPackRequest(
                     turn_kind=assembly_context.turn_kind,

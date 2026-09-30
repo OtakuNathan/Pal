@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.turn_fakes import continuation as make_continuation
+
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
 import asyncio
@@ -213,7 +215,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             run_id="memory-run",
             metadata={},
         )
-        continuation = SimpleNamespace(
+        continuation = make_continuation(
             turn_id=turn_id,
             preferred_llm_endpoint_id=None,
             preferred_llm_model_id=None,
@@ -297,7 +299,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 policy=GenerationPolicyIR(max_output_tokens=256),
             ),
         )
-        continuation = SimpleNamespace(
+        continuation = make_continuation(
             turn_id=current_turn_id,
             preferred_llm_endpoint_id=None,
             preferred_llm_model_id=None,
@@ -368,7 +370,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         asyncio.run(
             executor.schedule_post_turn_commit_async(
-                SimpleNamespace(commit_payload=SimpleNamespace(turn_id=turn_id))
+                SimpleNamespace(commit_payload=make_continuation(turn_id=turn_id))
             )
         )
 
@@ -754,7 +756,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             runner._postprocess_bunshin_llm_round(
                 state,
                 EffectResult(status=RuntimeStatus.OK, payload=truncated),
-                continuation=SimpleNamespace(turn_id=turn_id),
+                continuation=make_continuation(turn_id=turn_id),
             )
         )
 
@@ -819,7 +821,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             runner._postprocess_bunshin_llm_round(
                 state,
                 EffectResult(status=RuntimeStatus.OK, payload=truncated),
-                continuation=SimpleNamespace(turn_id=turn_id),
+                continuation=make_continuation(turn_id=turn_id),
             )
         )
 

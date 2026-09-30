@@ -119,8 +119,14 @@ def test_completion_wakes_pal_once_when_idle_with_original_binding(failed, model
         register_with_core(core.context)
         core.context.port_registry['core:core'] = core
         messages = []
-        core.context.port_registry['memory:memory'] = SimpleNamespace(
-            begin_l1_turn=lambda turn, **kwargs: messages.append(kwargs['user_message']))
+        from pal.memory.service import MemoryService
+
+        class RecordingMemory(MemoryService):
+            def begin_l1_turn(self, turn_id, **kwargs):
+                messages.append(kwargs['user_message'])
+                return super().begin_l1_turn(turn_id, **kwargs)
+
+        core.context.port_registry['memory:memory'] = RecordingMemory()
         binding = TurnDeliveryBinding(EndpointConfig('tg', 'telegram', 'tg'),
                                       ResponseHandle('tg', {'chat_id': 123}), 'scope')
         core.state.active_turns['opening'] = SimpleNamespace(delivery_binding=binding)

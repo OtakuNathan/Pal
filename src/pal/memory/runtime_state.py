@@ -98,6 +98,9 @@ class MemoryRuntimeStatePort:
     readable_schema_versions = ("1", "2", "3", "4")
     state_order: int = 100
 
+    def finish_restore_state(self, ports) -> None:
+        """This owner has no deferred links after all prepared states install."""
+
     def snapshot_state(self) -> Mapping[str, Any]:
         return {
             "l1_turns": [

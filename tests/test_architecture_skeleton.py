@@ -3841,7 +3841,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None) -> dict[str, object]:
+            def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> dict[str, object]:
                 _ = preferred_endpoint_id
                 return {
                     "endpoint_id": "tiny-endpoint",
@@ -3850,7 +3850,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "max_output_tokens": 128,
                 }
 
-            def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
+            def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> int:
                 _ = preferred_endpoint_id
                 return 128
 

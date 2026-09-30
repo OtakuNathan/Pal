@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from pal.core import PalCore
+from pal.memory.service import MemoryService
+from tests.turn_fakes import continuation as make_continuation
 from pal.core.core_events import TURN_TOOL_RESULT_COMMITTED
 from pal.execution import register_with_core
 from pal.packages.notifications import PackageCompletionSource
@@ -22,13 +24,14 @@ def test_only_committed_terminal_result_in_owning_scope_consumes_event(notify_fi
         def append(*args):
             if delivery == 'failed':
                 raise RuntimeError('persist failed')
-        core.context.port_registry['memory:memory'] = SimpleNamespace(
-            begin_l1_turn=lambda *args, **kw: None, append_l1_tool_result=append)
+        memory = MemoryService()
+        memory.append_l1_tool_result = append
+        core.context.port_registry['memory:memory'] = memory
         def binding(scope):
             return TurnDeliveryBinding(EndpointConfig('tg', 'telegram', 'tg'),
                                        ResponseHandle('tg', {'chat_id': scope}), scope)
-        opening = SimpleNamespace(delivery_binding=binding('original'), turn_id='opening')
-        current = SimpleNamespace(delivery_binding=binding('other' if delivery == 'other_scope' else 'original'),
+        opening = make_continuation(delivery_binding=binding('original'), turn_id='opening')
+        current = make_continuation(delivery_binding=binding('other' if delivery == 'other_scope' else 'original'),
                                   turn_id='current')
         core.state.active_turns.update(opening=opening, current=current)
         source = PackageCompletionSource(core.context)

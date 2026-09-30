@@ -1,4 +1,6 @@
 """System observations are independent of delivery and plugin execution."""
+
+from tests.turn_fakes import continuation as make_continuation
 import asyncio
 from queue import Empty
 from types import SimpleNamespace
@@ -133,7 +135,7 @@ def test_tool_failure_is_observed_before_escalation():
             assert seen[-1][1]["call_id"] == "call-one"
             raise RuntimeError("stop after observing escalation boundary")
         executor._handle_failure_async = escalate
-        continuation = SimpleNamespace(turn_id="t", pending_tool_call_batch=[], finalization_only=False)
+        continuation = make_continuation(turn_id="t", pending_tool_call_batch=[], finalization_only=False)
         effect = ToolCallEffect(tool_call=new_tool_call(name="probe", args={}, call_id="call-one"))
         with pytest.raises(RuntimeError, match="escalation boundary"):
             await executor._handle_tool_call(effect, continuation)

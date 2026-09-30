@@ -88,7 +88,7 @@ class ExecutionRuntimeStatePort:
     def finish_restore_state(self, ports) -> None:
         self.runtime.result_snapshots.detach_histories()
         for port in ports:
-            if getattr(port, "module_id", "") == "memory":
+            if port.module_id == "memory":
                 self.runtime.bind_result_history(port.service)
         self.runtime.result_snapshots.finish_restore()
 

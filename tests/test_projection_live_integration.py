@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from pal.shared.ports import PortKey
+
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -140,6 +142,7 @@ class _Ports:
         return self._ports.get(name)
 
     def require_port(self, name):
+        name = name.name if isinstance(name, PortKey) else name
         return self._ports[name]
 
 

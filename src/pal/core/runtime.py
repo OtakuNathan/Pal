@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pal.llm.contracts import LLM_RUNTIME
+from pal.memory.contracts import MEMORY
+
 import asyncio
 import contextlib
 import inspect
@@ -1342,7 +1345,7 @@ class PalCore(MemoryMaintenanceMixin):
         )
 
     async def _handle_show_think_async(self, action: ControlAction) -> None:
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
         if callable(refresh):
             refresh()
@@ -1359,7 +1362,7 @@ class PalCore(MemoryMaintenanceMixin):
 
     async def _handle_set_think_async(self, action: ControlAction) -> None:
         requested = str(action.args.get("think_level") or "").strip()
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         setter = getattr(llm_runtime, "set_think_level", None)
         if not callable(setter):
             await self._complete_action_reply_async(action, "Think-level configuration is unavailable.")
@@ -1379,7 +1382,7 @@ class PalCore(MemoryMaintenanceMixin):
         )
 
     async def _handle_show_llm_fallback_async(self, action: ControlAction) -> None:
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         getter = getattr(llm_runtime, "llm_endpoint_fallback_enabled", None)
         enabled = bool(getter()) if callable(getter) else False
         state = "on" if enabled else "off"
@@ -1394,7 +1397,7 @@ class PalCore(MemoryMaintenanceMixin):
 
     async def _handle_set_llm_fallback_async(self, action: ControlAction) -> None:
         enabled = bool(action.args.get("enabled"))
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         setter = getattr(llm_runtime, "set_llm_endpoint_fallback", None)
         if not callable(setter):
             await self._complete_action_reply_async(action, "Endpoint fallback switch is unavailable.")
@@ -1413,7 +1416,7 @@ class PalCore(MemoryMaintenanceMixin):
         )
 
     async def _handle_show_model_async(self, action: ControlAction) -> None:
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         self._refresh_llm_runtime_settings(llm_runtime)
         endpoints = self._llm_model_endpoints(llm_runtime)
         active_endpoint_id = self._effective_llm_endpoint_id(llm_runtime, endpoints)
@@ -1426,7 +1429,7 @@ class PalCore(MemoryMaintenanceMixin):
         if not requested:
             await self._complete_action_reply_async(action, "Use /model <endpoint_id>.")
             return
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         self._refresh_llm_runtime_settings(llm_runtime)
         endpoints = self._llm_model_endpoints(llm_runtime)
         endpoint = next(
@@ -1483,7 +1486,7 @@ class PalCore(MemoryMaintenanceMixin):
         # toward — the new endpoint (X07).
         async with self.state.channel_turn_transition_lock:
             self._compaction_gate().cancel_all(reason="llm_endpoint_refresh")
-        llm_runtime = self.context.require_port("llm:llm")
+        llm_runtime = self.context.require_port(LLM_RUNTIME)
         refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
         if callable(refresh):
             payload = refresh()
@@ -1693,7 +1696,7 @@ class PalCore(MemoryMaintenanceMixin):
         # and is never fake-cancelled (X03); a run whose parent turn was
         # interrupted loses commit eligibility before its summary returns
         # (X01); an install that already won stays (X02).
-        memory_service = self.context.require_port("memory:memory")
+        memory_service = self.context.require_port(MEMORY)
         verdict = memory_service.interrupt_compaction_for_turn(active_turn_id)
         if verdict == "cancelled" and not interrupted:
             message = "Cancelled the running context compaction."
@@ -1800,7 +1803,7 @@ class PalCore(MemoryMaintenanceMixin):
             ):
                 await coordinator.reset("soft_reset")
             else:
-                memory_service = self.context.require_port("memory:memory")
+                memory_service = self.context.require_port(MEMORY)
                 soft_reset = getattr(memory_service, "asoft_reset", None)
                 if callable(soft_reset):
                     await soft_reset()
@@ -1811,7 +1814,7 @@ class PalCore(MemoryMaintenanceMixin):
             # F6 (review af51d74): the LLM runtime's hosted projection
             # lineages must not outlive the history authority they were
             # frozen from — retire them with the rolled incarnation.
-            llm_runtime = self.context.require_port("llm:llm")
+            llm_runtime = self.context.require_port(LLM_RUNTIME)
             retire = getattr(llm_runtime, "retire_projection_sessions", None)
             if callable(retire):
                 retire()
@@ -1891,7 +1894,7 @@ class PalCore(MemoryMaintenanceMixin):
                     )
             else:
                 await self.cache_warm_deadline.clear_for_compaction()
-            memory_service = self.context.require_port("memory:memory")
+            memory_service = self.context.require_port(MEMORY)
             l1_items = list(
                 memory_service.settled_transcripts() if memory_service is not None else ()
                 or ()
@@ -1954,7 +1957,7 @@ class PalCore(MemoryMaintenanceMixin):
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:
             source_ref = f"compact_{uuid4().hex[:12]}"
-            delivery = self.context.require_port("memory:memory").stage_memory_proposal(
+            delivery = self.context.require_port(MEMORY).stage_memory_proposal(
                 {
                     "source_kind": "pal_compact",
                     "source_ref": source_ref,
@@ -2321,7 +2324,7 @@ class PalCore(MemoryMaintenanceMixin):
             if not candidates:
                 continue
             source_ref = batch.get("candidate_batch_id") or "compact_" + content_hash({"turn": continuation.turn_id, "index": index, "batch": batch})[:24]
-            delivery = self.context.require_port("memory:memory").stage_memory_proposal(
+            delivery = self.context.require_port(MEMORY).stage_memory_proposal(
                 {
                     "source_kind": str(batch.get("source_kind") or "pal_compact"),
                     "source_ref": source_ref,

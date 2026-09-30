@@ -143,8 +143,9 @@ class RebaseKeeperTests(unittest.TestCase):
         ex = make_executor(memory, SimpleNamespace())
         history = SimpleNamespace(
             left_messages=lambda: (assistant('NEW SEED', 'seed'),),
-            right_messages=lambda: right, left_revision=4)
-        hosted = SimpleNamespace(endpoint_projection_session=lambda scope: s)
+            right_messages=lambda: right, left_generation=4)
+        hosted = SimpleNamespace(projection_port=SimpleNamespace(
+            endpoint_projection_session=lambda scope, *, rebind: s))
         ex._rebase_projection_after_left_install(hosted, 'review:resident', history)
         self.assertIn('R', s.native_by_attempt,
                       'real executor helper treated all old chunks as replaced L')

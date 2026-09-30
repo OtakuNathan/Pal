@@ -20,6 +20,10 @@ Honest scope notes (delivery limitations):
 
 from __future__ import annotations
 
+from pal.shared.ports import PortKey
+
+from tests.turn_fakes import continuation as make_continuation
+
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -69,7 +73,10 @@ def _settled(mark: str) -> list[L1TranscriptMessage]:
     ]
 
 
-class _FakeNetwork:
+from tests.llm_fakes import NonStreamingLLM
+
+
+class _FakeNetwork(NonStreamingLLM):
     def __init__(self, host: str) -> None:
         self.requests: list = []
         self._host = host
@@ -98,7 +105,8 @@ class _Ports:
     def get(self, name: str):
         return self._ports.get(name)
 
-    def require_port(self, name: str):
+    def require_port(self, name):
+        name = name.name if isinstance(name, PortKey) else name
         value = self._ports.get(name)
         if value is None:
             raise KeyError(name)
@@ -164,7 +172,7 @@ class H01CombinationMatrixTests(unittest.TestCase):
         network = _FakeNetwork(host)
         ports = _Ports(service, network)
         executor = _executor(host, ports)
-        continuation = SimpleNamespace(turn_id=f"{host}-task")
+        continuation = make_continuation(turn_id=f"{host}-task")
         assembly = SimpleNamespace(
             metadata={"prompt_cache_scope_id": f"{host}:h01"},
             work_order_id=f"{host}-order" if host == "bunshin" else "",

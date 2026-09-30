@@ -10,6 +10,8 @@ source builder (W21).
 """
 from __future__ import annotations
 
+from tests.turn_fakes import continuation as make_continuation
+
 import asyncio
 import json
 import unittest
@@ -84,7 +86,7 @@ def _memory_with_left_and_right():
 def _compact(ex, memory, *, continuation_turn="T"):
     return asyncio.run(ex.compact_memory_async(
         memory, target_input_budget=100_000, reserved_output_tokens=1024,
-        continuation=SimpleNamespace(turn_id=continuation_turn),
+        continuation=make_continuation(turn_id=continuation_turn),
     ))
 
 

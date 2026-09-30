@@ -10,7 +10,11 @@ class ChecklistRuntimeStatePort:
     service: ChecklistService
     module_id: str = "checklist"
     schema_version: str = "1"
+    readable_schema_versions = ("1",)
     state_order: int = 150
+
+    def finish_restore_state(self, ports) -> None:
+        """This owner has no deferred links after all prepared states install."""
 
     def snapshot_state(self) -> Mapping[str, Any]:
         snapshot = self.service.show()

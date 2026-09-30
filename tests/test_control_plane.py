@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.llm_fakes import NonStreamingLLM
+
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
 import asyncio
@@ -142,7 +144,7 @@ class _FakeEndpointResolver:
 
 
 @dataclass
-class _FakeLLMRuntime:
+class _FakeLLMRuntime(NonStreamingLLM):
     settings_repository: _FakeSettingsRepository
     think_level: str = "balanced"
     endpoint_resolver: _FakeEndpointResolver = field(default_factory=_FakeEndpointResolver)
@@ -844,7 +846,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_turn_prompt_falls_back_to_event_when_l1_begin_fails(self) -> None:
-        class BrokenMemory:
+        class BrokenMemory(MemoryService):
             def begin_l1_turn(self, *args, **kwargs):
                 raise RuntimeError("storage unavailable")
 

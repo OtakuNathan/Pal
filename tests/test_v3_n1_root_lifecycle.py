@@ -9,6 +9,8 @@ logs_n1_prefix_red.txt in the commit message for the captured run).
 """
 from __future__ import annotations
 
+from tests.turn_fakes import continuation as make_continuation, require_port as require_test_port
+
 import asyncio
 import gc
 import time
@@ -60,7 +62,7 @@ def small_root() -> HistoryRoot:
 def executor(memory: MemoryService, llm) -> TurnExecutor:
     ports = {'memory:memory': memory, 'llm:llm': llm}
     return TurnExecutor(
-        SimpleNamespace(port_registry=ports, require_port=ports.__getitem__,
+        SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
                         execution_runtime=None),
         SimpleNamespace(diagnostics=[]), None,
          build_canonical_prompt=None,
@@ -220,7 +222,7 @@ class ExecutorFailureTests(unittest.TestCase):
             ex = executor(memory, InvalidLLM())
             result = await ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id='T'))
+                continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)
             self.assertIsNone(memory.history_root.active_run,
                               'engine returned failure but the owner is still '
@@ -244,7 +246,7 @@ class ExecutorFailureTests(unittest.TestCase):
             ex = executor(memory, WaitingLLM())
             task = asyncio.create_task(ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id='T')))
+                continuation=make_continuation(turn_id='T')))
             try:
                 await asyncio.wait_for(started.wait(), timeout=3)
                 task.cancel()
@@ -272,7 +274,7 @@ class ExecutorFailureTests(unittest.TestCase):
             ports = {'memory:memory': memory, 'llm:llm': HangingLLM()}
             ex = TurnExecutor(
                 SimpleNamespace(port_registry=ports,
-                                require_port=ports.__getitem__,
+                                require_port=lambda key: require_test_port(ports, key),
                                 execution_runtime=None),
                 SimpleNamespace(diagnostics=[]), None,
                  build_canonical_prompt=None,
@@ -288,7 +290,7 @@ class ExecutorFailureTests(unittest.TestCase):
             )
             result = await ex.compact_memory_async(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id='T'))
+                continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)
             self.assertIsNone(memory.history_root.active_run,
                               'deadline expiry left the owner run open')

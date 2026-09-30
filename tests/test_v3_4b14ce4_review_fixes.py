@@ -29,6 +29,8 @@ compact.  Faked: network frames only.
 """
 from __future__ import annotations
 
+from tests.turn_fakes import continuation as make_continuation
+
 import asyncio
 import json
 import tempfile
@@ -367,7 +369,7 @@ class BootstrapCoverageTests(unittest.TestCase):
                 restored,
                 target_input_budget=100_000,
                 reserved_output_tokens=1024,
-                continuation=SimpleNamespace(turn_id="T"),
+                continuation=make_continuation(turn_id="T"),
             ))
             self.assertTrue(compacted.success, compacted.failures)
             self.assertEqual(restored.history_root.left_generation,
