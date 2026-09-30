@@ -99,239 +99,231 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._build_bunshin_retry_note:getattr(outcome, 'finish_reason', '')": {
+  "src/pal/bunshin/runner_components/adapters.py:_BunshinOutputPort.queue_reply:getattr(text, 'text', text)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._close_execution_work:getattr(bundle, 'execution_runtime', None)": {
+  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.build_continuation.build_commit_payload:getattr(state.channel_envelope.event, 'event_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._close_execution_work:getattr(getattr(bundle, 'execution_runtime', None), 'close_role_work', None)": {
+  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.build_continuation:getattr(outcome, 'text', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_allowed_tool:getattr(execution_runtime, 'allowed_capabilities', None)": {
+  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.build_continuation:getattr(state.channel_envelope.event, 'event_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_allowed_tool:getattr(execution_runtime, 'resolve_capability_address', None)": {
+  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.run_agent_loop:getattr(settled, 'state', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_bunshin_agent_effect:getattr(outcome, 'finish_reason', '')": {
+  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.run_agent_loop:getattr(state.execution_runtime, 'begin_tool_result_turn', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_bunshin_agent_effect:getattr(outcome, 'tool_calls', ())": {
+  "src/pal/bunshin/runner_components/invocation.py:Invocation.close_execution_work:getattr(bundle, 'execution_runtime', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_bunshin_agent_effect:getattr(result.payload, 'summary', '')": {
+  "src/pal/bunshin/runner_components/invocation.py:Invocation.close_execution_work:getattr(getattr(bundle, 'execution_runtime', None), 'close_role_work', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._execute_bunshin_tool_with_observation:getattr(state.execution_runtime, 'advance_tool_result_clock', None)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.build_bunshin_retry_note:getattr(outcome, 'finish_reason', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._persist_agent_session_checkpoint:getattr(continuation, 'opening_event', None)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.execute_bunshin_agent_effect:getattr(outcome, 'finish_reason', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._persist_agent_session_checkpoint:getattr(getattr(continuation, 'opening_event', None), 'event_id', '')": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.execute_bunshin_agent_effect:getattr(outcome, 'tool_calls', ())": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._persist_agent_session_checkpoint:getattr(state, 'output_length_recovery_count', 0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.execute_bunshin_agent_effect:getattr(result.payload, 'summary', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._persist_agent_session_checkpoint:getattr(state, 'pending_output_length_recovery_note', '')": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(message, 'message_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._persist_agent_session_checkpoint:getattr(state.memory_candidate_sink, 'records', ())": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'cache_write_input_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(message, 'message_id', '')": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'cached_input_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'cache_write_input_tokens', 0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'cost', 0.0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'cached_input_tokens', 0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'finish_reason', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'cost', 0.0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'input_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'finish_reason', '')": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'output_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'input_tokens', 0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'reasoning_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'output_tokens', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'reasoning_tokens', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'response', None)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'response', None)": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'text', '')": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'text', '')": {
     "count": 5,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'tool_calls', [])": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'tool_calls', [])": {
     "count": 3,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'uncached_input_tokens', 0)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'uncached_input_tokens', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(outcome, 'usage_reported', False)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(outcome, 'usage_reported', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._postprocess_bunshin_llm_round:getattr(response, 'message', None)": {
+  "src/pal/bunshin/runner_components/llm_rounds.py:LlmRounds.postprocess_bunshin_llm_round:getattr(response, 'message', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._run_agent_loop.build_commit_payload:getattr(state.channel_envelope.event, 'event_id', '')": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'cache_policy_snapshot', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._run_agent_loop:getattr(outcome, 'text', '')": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'refresh_runtime_settings', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._run_agent_loop:getattr(settled, 'state', '')": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'thinking_levels_snapshot', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._run_agent_loop:getattr(state.channel_envelope.event, 'event_id', '')": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_cap', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner._run_agent_loop:getattr(state.execution_runtime, 'begin_tool_result_turn', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_factor', 0.05)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner.run:getattr(bundle, 'memory_generation_id', '')": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_min', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:BunshinRunner.run:getattr(bundle, 'memory_service', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(config, 'default_max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_BunshinOutputPort.queue_reply:getattr(text, 'text', text)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(config, 'fallback_max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'cache_policy_snapshot', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_max_output_tokens_from_context_window:getattr(llm_runtime, 'config', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'refresh_runtime_settings', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_resolve_bunshin_max_output_tokens:getattr(config, 'fallback_max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_bunshin_turn_settings_snapshot:getattr(llm_runtime, 'thinking_levels_snapshot', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_resolve_bunshin_max_output_tokens:getattr(llm_runtime, 'config', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(execution_runtime, 'build_llm_tool_contracts', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_runtime_endpoint_facts:getattr(llm_runtime, 'resolve_endpoint_facts', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(execution_runtime, 'registry_generation', None)": {
+  "src/pal/bunshin/runner_components/llm_settings.py:_runtime_max_output_tokens:getattr(llm_runtime, 'resolve_max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(generation, 'direct_aliases', None)": {
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(execution_runtime, 'build_llm_tool_contracts', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(generation, 'indirect_aliases', None)": {
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(execution_runtime, 'registry_generation', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(getattr(record, 'execution', None), 'effect_kind', None)": {
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(generation, 'direct_aliases', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(generation, 'indirect_aliases', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(getattr(record, 'execution', None), 'effect_kind', None)": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_llm_tools_for_allowed:getattr(record, 'execution', None)": {
+  "src/pal/bunshin/runner_components/prompt_values.py:_llm_tools_for_allowed:getattr(record, 'execution', None)": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_cap', None)": {
+  "src/pal/bunshin/runner_components/result_values.py:_memory_candidates_from_sink:getattr(memory_candidate_sink, 'records', [])": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_factor', 0.05)": {
+  "src/pal/bunshin/runner_components/runtime_build.py:close_role_runtime:getattr(handle, 'shutdown_async', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(config, 'context_margin_min', None)": {
+  "src/pal/bunshin/runner_components/runtime_build.py:close_role_runtime:getattr(handle, 'shutdown_sync', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(config, 'default_max_output_tokens', None)": {
+  "src/pal/bunshin/runner_components/runtime_build.py:close_role_runtime:getattr(llm_runtime, 'close', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(config, 'fallback_max_output_tokens', None)": {
+  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(continuation, 'opening_event', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_max_output_tokens_from_context_window:getattr(llm_runtime, 'config', None)": {
+  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(getattr(continuation, 'opening_event', None), 'event_id', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_memory_candidates_from_sink:getattr(memory_candidate_sink, 'records', [])": {
+  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state, 'output_length_recovery_count', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_resolve_bunshin_max_output_tokens:getattr(config, 'fallback_max_output_tokens', None)": {
+  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state, 'pending_output_length_recovery_note', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_resolve_bunshin_max_output_tokens:getattr(llm_runtime, 'config', None)": {
+  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state.memory_candidate_sink, 'records', ())": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_runtime_endpoint_facts:getattr(llm_runtime, 'resolve_endpoint_facts', None)": {
+  "src/pal/bunshin/runner_components/tool_execution.py:ToolExecution.execute_allowed_tool:getattr(execution_runtime, 'allowed_capabilities', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:_runtime_max_output_tokens:getattr(llm_runtime, 'resolve_max_output_tokens', None)": {
+  "src/pal/bunshin/runner_components/tool_execution.py:ToolExecution.execute_allowed_tool:getattr(execution_runtime, 'resolve_capability_address', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner.py:build_slim_bunshin_runtime.close:getattr(handle, 'shutdown_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:build_slim_bunshin_runtime.close:getattr(handle, 'shutdown_sync', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner.py:build_slim_bunshin_runtime.close:getattr(llm_runtime, 'close', None)": {
+  "src/pal/bunshin/runner_components/tool_observation.py:ToolObservation.execute_bunshin_tool_with_observation:getattr(state.execution_runtime, 'advance_tool_result_clock', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -515,19 +507,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:SemanticOrchestrator._materialize_plan_revision_status:getattr(revision, 'updated_at', '')": {
+  "src/pal/bunshin/v2/semantic_orchestration/human_review.py:HumanReview.materialize_plan_revision_status:getattr(revision, 'updated_at', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:SemanticOrchestrator._runner_for_recovered_effect:getattr(self, route.handler)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:SemanticOrchestrator._uses_git_skeleton:getattr(workflow, 'payload', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/v2/semantic_orchestration/orchestrator.py:SemanticOrchestrator.execute_semantic_effect:getattr(self, route.handler)": {
+  "src/pal/bunshin/v2/semantic_orchestration/workflow_facts.py:WorkflowFacts.uses_git_skeleton:getattr(workflow, 'payload', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

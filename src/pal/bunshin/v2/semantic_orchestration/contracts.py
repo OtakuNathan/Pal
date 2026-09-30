@@ -9,7 +9,6 @@ from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleMode
 class SemanticEffectRoute:
     """Declarative bridge from one durable effect to a role handler."""
 
-    handler: str
     role: OrchestrationRole | None = None
     modes: frozenset[RoleMode] = frozenset()
     background: bool = False

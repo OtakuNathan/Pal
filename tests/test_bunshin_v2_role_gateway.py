@@ -81,7 +81,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             },
             artifact_type="RolePromptPackArtifact",
         )
-        self.service.repository.dispatch(
+        self.service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="workflow-router",
@@ -91,7 +91,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 expected_version=0,
             )
         )
-        self.service.repository.dispatch(
+        self.service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="workflow-router",
@@ -106,7 +106,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 },
             )
         )
-        self.service.repository.ensure_role_session(
+        self.service.repository.role_sessions.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -118,7 +118,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             scope_kind="module",
             subject_key="router",
         )
-        assignment = self.service.repository.create_role_assignment(
+        assignment = self.service.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="router-cycle-1",
                 session_id="session-router",
@@ -137,23 +137,23 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
         )
         self.assignment_id = assignment["assignment_id"]
-        attempt = self.service.repository.claim_role_assignment(self.assignment_id)
+        attempt = self.service.repository.role_assignments.claim_role_assignment(self.assignment_id)
         self.attempt_id = attempt["attempt_id"]
         self.lease_resource = f"assignment:{self.assignment_id}"
-        lease = self.service.repository.claim_lease(
+        lease = self.service.repository.leases.claim_lease(
             self.lease_resource,
             self.attempt_id,
             ttl_seconds=120,
         )
         self.fencing_token = lease.fencing_token
-        self.service.repository.start_role_attempt(
+        self.service.repository.role_attempts.start_role_attempt(
             assignment_id=self.assignment_id,
             attempt_id_value=self.attempt_id,
             lease_resource_key=self.lease_resource,
             fencing_token=self.fencing_token,
             prompt_pack_ref=self.prompt_ref.to_dict(),
         )
-        self.access_token = self.service.repository.issue_role_attempt_access_token(
+        self.access_token = self.service.repository.role_access.issue_role_attempt_access_token(
             assignment_id=self.assignment_id,
             attempt_id_value=self.attempt_id,
             fencing_token=self.fencing_token,
@@ -252,7 +252,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         self.assertTrue(receipt["submitted"])
         self.assertTrue(receipt["submission_artifact_ref"]["sha256"])
         self.assertTrue(receipt["submission_payload_hash"])
-        assignment = self.service.repository.read_role_assignment(self.assignment_id)
+        assignment = self.service.repository.role_assignments.read_role_assignment(self.assignment_id)
         self.assertEqual(assignment["state"], "result_recorded")
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
         status = self.call("submission_status")
@@ -263,7 +263,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
     def test_gateway_reconciles_draft_cas_race_after_canonical_receipt(self) -> None:
         first = self.call("draft_read", context=self.context, seed={"checks": []})
         self.assertEqual(first["snapshot"]["version"], 0)
-        original = self.service.repository.record_role_submission
+        original = self.service.repository.role_submissions.record_role_submission
 
         def record_then_race(**kwargs):
             receipt = original(**kwargs)
@@ -280,7 +280,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
             return receipt
 
-        self.service.repository.record_role_submission = record_then_race
+        self.service.repository.role_submissions.record_role_submission = record_then_race
         receipt = self.call(
             "draft_submit",
             context=self.context,
@@ -342,7 +342,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             check=True,
         ).stdout.strip()
         node_id = "node-router-verification"
-        self.service.repository.dispatch(
+        self.service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="workflow-router",
@@ -366,7 +366,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
         )
         session_id = "session-router-verification"
-        self.service.repository.ensure_role_session(
+        self.service.repository.role_sessions.ensure_role_session(
             session_id=session_id,
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -378,7 +378,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             scope_kind="module",
             subject_key="router",
         )
-        assignment = self.service.repository.create_role_assignment(
+        assignment = self.service.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="router-verification-cycle-1",
                 session_id=session_id,
@@ -397,10 +397,10 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
         )
         assignment_id = str(assignment["assignment_id"])
-        attempt = self.service.repository.claim_role_assignment(assignment_id)
+        attempt = self.service.repository.role_assignments.claim_role_assignment(assignment_id)
         attempt_id = str(attempt["attempt_id"])
         lease_resource = f"assignment:{assignment_id}"
-        fence = self.service.repository.claim_lease(
+        fence = self.service.repository.leases.claim_lease(
             lease_resource,
             attempt_id,
             ttl_seconds=120,
@@ -417,14 +417,14 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             },
             artifact_type="RolePromptPackArtifact",
         )
-        self.service.repository.start_role_attempt(
+        self.service.repository.role_attempts.start_role_attempt(
             assignment_id=assignment_id,
             attempt_id_value=attempt_id,
             lease_resource_key=lease_resource,
             fencing_token=fence,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
-        token = self.service.repository.issue_role_attempt_access_token(
+        token = self.service.repository.role_access.issue_role_attempt_access_token(
             assignment_id=assignment_id,
             attempt_id_value=attempt_id,
             fencing_token=fence,
@@ -471,7 +471,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 },
             )
 
-        rejected_assignment = self.service.repository.read_role_assignment(
+        rejected_assignment = self.service.repository.role_assignments.read_role_assignment(
             assignment_id
         )
         self.assertEqual(rejected_assignment["state"], "running")
@@ -494,7 +494,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             },
         )
         self.assertTrue(receipt["submitted"])
-        accepted_assignment = self.service.repository.read_role_assignment(
+        accepted_assignment = self.service.repository.role_assignments.read_role_assignment(
             assignment_id
         )
         self.assertEqual(accepted_assignment["state"], "result_recorded")
@@ -573,7 +573,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 submission=submission,
             )
         self.assertEqual(
-            self.service.repository.read_role_assignment(assignment)["state"],
+            self.service.repository.role_assignments.read_role_assignment(assignment)["state"],
             "running",
         )
         self.assertEqual(
@@ -615,7 +615,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 submission=submission,
             )
         self.assertEqual(
-            self.service.repository.read_role_assignment(assignment)["state"],
+            self.service.repository.role_assignments.read_role_assignment(assignment)["state"],
             "running",
         )
         self.assertEqual(
@@ -754,13 +754,13 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             graph=graph,
         )
         self.assertEqual(
-            self.service.repository.read_graph_generation(
+            self.service.repository.cycles.read_graph_generation(
                 graph_id="workflow-router"
             ).generation,
             1,
         )
         self.assertEqual(
-            self.service.repository.read_role_assignment(
+            self.service.repository.role_assignments.read_role_assignment(
                 assignment
             )["state"],
             "result_recorded",
@@ -1046,7 +1046,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             artifact_type="WorkspaceSnapshotArtifact",
         )
         architecture_revision_id = "architecture-router-revision-2"
-        self.service.repository.dispatch(
+        self.service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="workflow-router",
@@ -1064,7 +1064,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
         )
         session_id = "session-architect"
-        self.service.repository.ensure_role_session(
+        self.service.repository.role_sessions.ensure_role_session(
             session_id=session_id,
             workflow_id="workflow-router",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -1076,7 +1076,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             scope_kind=AggregateType.ARCHITECTURE_REVISION.value,
             subject_key=architecture_revision_id,
         )
-        assignment = self.service.repository.create_role_assignment(
+        assignment = self.service.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="architecture-cycle-1",
                 session_id=session_id,
@@ -1095,12 +1095,12 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             )
         )
         assignment_id = str(assignment["assignment_id"])
-        attempt = self.service.repository.claim_role_assignment(
+        attempt = self.service.repository.role_assignments.claim_role_assignment(
             assignment_id
         )
         attempt_id = str(attempt["attempt_id"])
         resource = f"assignment:{assignment_id}"
-        fence = self.service.repository.claim_lease(
+        fence = self.service.repository.leases.claim_lease(
             resource,
             attempt_id,
             ttl_seconds=120,
@@ -1133,14 +1133,14 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             },
             artifact_type="RolePromptPackArtifact",
         )
-        self.service.repository.start_role_attempt(
+        self.service.repository.role_attempts.start_role_attempt(
             assignment_id=assignment_id,
             attempt_id_value=attempt_id,
             lease_resource_key=resource,
             fencing_token=fence,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
-        token = self.service.repository.issue_role_attempt_access_token(
+        token = self.service.repository.role_access.issue_role_attempt_access_token(
             assignment_id=assignment_id,
             attempt_id_value=attempt_id,
             fencing_token=fence,

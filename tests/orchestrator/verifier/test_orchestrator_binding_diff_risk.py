@@ -21,10 +21,8 @@ import unittest
 from pathlib import Path
 
 from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.semantic_orchestration.orchestrator import (
-    SemanticOrchestrator,
-    _refresh_ephemeral_role_reference_binds,
-)
+from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.v2.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
 from pal.bunshin.v2.service import BunshinV2WorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
@@ -87,7 +85,7 @@ class NoDeclaredInputsKeepsLegacyBehaviorTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["status"], "created")
-        workflow = self.service.repository.read_snapshot(
+        workflow = self.service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW, "wf-plain"
         )
         self.assertIsNotNone(workflow)
@@ -101,7 +99,7 @@ class NoDeclaredInputsKeepsLegacyBehaviorTests(unittest.TestCase):
         )
         workspace = self.runtime_root / "plain-ws"
         workspace.mkdir()
-        entries = self.orchestrator._bind_role_attempt_inputs(
+        entries = self.orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
             workflow=workflow,
             request={},
             workspace={"repo_path": str(workspace)},

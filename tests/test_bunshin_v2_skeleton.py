@@ -73,7 +73,7 @@ class SoftwareContractAdapterTests(unittest.TestCase):
         repository = BunshinV2Repository(self.runtime_root)
         artifacts = ContentAddressedArtifactStore(
             self.runtime_root,
-            repository,
+            repository.artifacts,
         )
         self.skeleton = GitBackedSkeletonService(self.runtime_root, artifacts)
         self.requirements_ref = TaskLedgerService(

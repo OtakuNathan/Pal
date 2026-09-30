@@ -30,3 +30,13 @@ def connector_conformance(lsp: AsyncLspConnector, mcp: AsyncStdioMcpConnector, t
     lsp_port: LspConnectorPort = lsp
     mcp_port: McpConnector = mcp
     turn_port: TurnIOPort = turn_io
+
+
+from pal.bunshin.v2.storage.connection_contracts import DatabasePort
+from pal.bunshin.v2.storage.database import BunshinDatabase
+from pal.bunshin.v2.storage.transaction_session import TransactionSession
+
+
+def bunshin_storage_conformance(database: BunshinDatabase, transaction: TransactionSession) -> None:
+    standalone: DatabasePort = database
+    bound: DatabasePort = transaction

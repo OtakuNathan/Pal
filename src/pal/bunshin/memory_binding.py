@@ -12,7 +12,7 @@ def workflow_memory_binding(runtime_root, repository, workflow_id):
     from pal.memory.storage import MemoryStorage
     from pal.bunshin.v2.contracts import AggregateType
     storage = MemoryStorage(runtime_root)
-    created = storage.catalog_path.exists() and repository.read_snapshot(AggregateType.WORKFLOW, workflow_id) is None
+    created = storage.catalog_path.exists() and repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id) is None
     if created:
         storage.pin(workflow_id)
     try:
@@ -20,7 +20,7 @@ def workflow_memory_binding(runtime_root, repository, workflow_id):
     except BaseException:
         # A lost dispatch acknowledgement may still mean a committed workflow.
         # Drop only a reservation that never acquired a durable logical owner.
-        if created and repository.read_snapshot(AggregateType.WORKFLOW, workflow_id) is None:
+        if created and repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id) is None:
             with storage.connection(write=True) as connection:
                 connection.execute("DELETE FROM workflow_pins WHERE workflow_id=?", (workflow_id,))
         raise

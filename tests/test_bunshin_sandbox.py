@@ -30,14 +30,11 @@ from pal.bunshin.ipc import (
     BunshinRoleGatewayClient,
 )
 from pal.bunshin.llm_transport import ManagerProxyTransport
-from pal.bunshin.runner import (
-    BunshinRunner,
-    BunshinRuntimeBundle,
-    _bunshin_temperature,
-    _llm_tools_for_allowed,
-    _resolve_bunshin_max_output_tokens,
-    build_slim_bunshin_runtime,
-)
+from pal.bunshin.runner import BunshinRunner
+from pal.bunshin.runner_components.models import BunshinRuntimeBundle
+from pal.bunshin.runner_components.llm_settings import _bunshin_temperature, _resolve_bunshin_max_output_tokens
+from pal.bunshin.runner_components.prompt_values import _llm_tools_for_allowed
+from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
 from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
 from pal.bunshin.git_shim import GIT_TRAP_EXIT_CODE, _RoleGatewayClient, main as git_shim_main
 from pal.bunshin.user_interaction import BunshinUserInteractionPort
@@ -1702,7 +1699,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     runtime_state_coordinator=RuntimeSnapshotCoordinator(registry),
                 ),
             )
-            result = await runner._execute_allowed_tool(
+            result = await runner.components.tool_execution.execute_allowed_tool(
                 FakeExecution(),
                 new_tool_call(name="op_exec_shell", args={"cmd": "cat README.md"}, call_id="call_shell"),
             )
@@ -1760,7 +1757,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 ),
             )
 
-            result = await runner._execute_allowed_tool(
+            result = await runner.components.tool_execution.execute_allowed_tool(
                 AliasExecution(),
                 new_tool_call(
                     name="read_file",
@@ -1793,10 +1790,10 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             read_decision=lambda _timeout: None,  # type: ignore[arg-type]
         )
 
-        direct = runner._tool_call_with_bunshin_defaults(
+        direct = runner.components.tool_execution.tool_call_with_bunshin_defaults(
             new_tool_call(name="op_lsp_definition", args={"file": "src/main.cpp", "line": 1, "character": 2})
         )
-        nested = runner._tool_call_with_bunshin_defaults(
+        nested = runner.components.tool_execution.tool_call_with_bunshin_defaults(
             new_tool_call(
                 name="op_tool_call",
                 args={
@@ -1805,13 +1802,13 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 },
             )
         )
-        status = runner._tool_call_with_bunshin_defaults(
+        status = runner.components.tool_execution.tool_call_with_bunshin_defaults(
             new_tool_call(name="op_lsp_status", args={})
         )
-        shell = runner._tool_call_with_bunshin_defaults(
+        shell = runner.components.tool_execution.tool_call_with_bunshin_defaults(
             new_tool_call(name="op_exec_shell", args={"cmd": "pwd"})
         )
-        explicit_shell = runner._tool_call_with_bunshin_defaults(
+        explicit_shell = runner.components.tool_execution.tool_call_with_bunshin_defaults(
             new_tool_call(
                 name="op_exec_shell",
                 args={"cmd": "pwd", "cwd": str(workspace / "src")},

@@ -186,7 +186,7 @@ def start_request(**overrides: Any) -> dict[str, Any]:
 
 
 def read_workflow(environment: SimpleNamespace, workflow_id: str) -> Any:
-    return environment.service.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    return environment.service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
 
 
 def test_declared_inputs_are_captured_and_recorded_before_dispatch(
@@ -234,11 +234,11 @@ def test_declared_inputs_are_captured_and_recorded_before_dispatch(
             (Path(environment.repo) / entry["repo_path"]).read_bytes()
         ).hexdigest()
         assert entry["content_sha256"] == expected
-        assert environment.service.repository.artifact_is_durable(entry["content_ref"]["sha256"])
+        assert environment.service.repository.artifacts.artifact_is_durable(entry["content_ref"]["sha256"])
 
     request = environment.service.artifacts.read_json(dict(workflow.payload["request_ref"]))
     assert request["input_binding_ref"] == recorded
-    artifact_record = environment.service.repository.read_artifact_record(recorded["sha256"])
+    artifact_record = environment.service.repository.artifacts.read_artifact_record(recorded["sha256"])
     assert artifact_record is not None
     assert artifact_record["artifact_type"] == INPUT_BINDING_MANIFEST_ARTIFACT
 
@@ -280,7 +280,7 @@ def test_invalid_declaration_fails_closed_before_workflow_creation(
     assert isinstance(excinfo.value, ValueError)
     assert "spec" in str(excinfo.value)
     assert read_workflow(environment, "wf-bound") is None
-    assert not environment.service.repository.search_workflows(
+    assert not environment.service.repository.search.search_workflows(
         actor_id="pal", task_id="task-bound", include_terminal=True, limit=10
     )
 
@@ -299,7 +299,7 @@ def test_capture_failure_fails_closed_before_workflow_creation(
         )
     assert "spec" in str(excinfo.value)
     assert read_workflow(environment, "wf-bound") is None
-    assert not environment.service.repository.search_workflows(
+    assert not environment.service.repository.search.search_workflows(
         actor_id="pal", task_id="task-bound", include_terminal=True, limit=10
     )
 
@@ -329,4 +329,4 @@ def test_declared_inputs_without_workspace_repository_fail_closed(
         )
     assert "task workspace repository" in str(excinfo.value)
     assert double.capture_calls == []
-    assert service.repository.read_snapshot(AggregateType.WORKFLOW, "wf-bound") is None
+    assert service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf-bound") is None

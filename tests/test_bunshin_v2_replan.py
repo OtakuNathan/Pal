@@ -25,7 +25,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_replan_"))
         self.service = BunshinV2WorkflowService(self.runtime_root)
         self.repository = self.service.repository
-        self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository)
+        self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.processor = BunshinV2OutboxProcessor(self.service)
         self.workflow_id = "wf_replan"
         self.epoch_id = "epoch_replan"
@@ -77,7 +77,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "LINK_EXECUTION_EPOCH",
             {"execution_epoch_id": self.epoch_id},
         )
-        self.repository.store_plan_cycle(
+        self.repository.cycles.store_plan_cycle(
             workflow_id=self.workflow_id,
             cycle=PlanCycle(
                 cycle_id=f"{self.workflow_id}:plan",
@@ -106,17 +106,17 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._request_epoch_replan(self._node_effect("node_a", "finding-a"))
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze"))
 
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_COLLECTING")
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_b").state,
+            self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "node_b").state,
             "REVIEW_SNAPSHOTTING",
         )
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_c").state,
+            self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "node_c").state,
             "STALE",
         )
-        projection = self.repository.read_workflow_projection(self.workflow_id)
+        projection = self.repository.queries.read_workflow_projection(self.workflow_id)
         self.assertEqual(projection["current_phase"], "replan_collecting")
         self.assertEqual(projection["active_worker_id"], "reviewer-b")
         self.assertFalse(self._architecture_revisions())
@@ -130,7 +130,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._request_epoch_replan(self._node_effect("node_b", "finding-b"))
         self.processor._reconcile_replan_collections(self.workflow_id)
 
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
         batch = self.artifacts.read_json(epoch.payload["replan_finding_batch_ref"])
         self.assertEqual(
@@ -153,7 +153,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._request_epoch_replan(self._node_effect("node_a", "finding-a-replay"))
         self.processor._request_epoch_replan(self._node_effect("node_b", "finding-b-replay"))
         self.assertEqual(len(self._architecture_revisions()), 1)
-        projection = self.repository.read_workflow_projection(self.workflow_id)
+        projection = self.repository.queries.read_workflow_projection(self.workflow_id)
         self.assertEqual(projection["active_aggregate_type"], "architecture_revision")
         self.assertEqual(projection["active_aggregate_id"], revisions[0].aggregate_id)
 
@@ -164,7 +164,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
             {"successor_execution_epoch_id": "epoch_successor"},
         )
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,
+            self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,
             "SUPERSEDED",
         )
 
@@ -181,7 +181,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze"))
         self.processor._reconcile_replan_collections(self.workflow_id)
         self.assertEqual(
-            self.repository.read_snapshot(
+            self.repository.snapshots.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
                 self.epoch_id,
             ).state,
@@ -192,14 +192,14 @@ class BunshinV2ReplanTests(unittest.TestCase):
         reconcile_control_requests(self.repository, self.workflow_id)
 
         self.assertEqual(
-            self.repository.read_snapshot(
+            self.repository.snapshots.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
                 self.epoch_id,
             ).state,
             "PAUSED",
         )
         self.assertEqual(
-            self.repository.read_snapshot(
+            self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 self.workflow_id,
             ).state,
@@ -349,7 +349,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._request_epoch_replan(self._node_effect("node_b", "second"))
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-same"))
 
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         batch = self.artifacts.read_json(epoch.payload["replan_finding_batch_ref"])
         self.assertEqual(len(batch["finding_groups"]), 1)
         self.assertEqual(len(batch["finding_groups"][0]["repair_bill_refs"]), 2)
@@ -367,7 +367,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         )
         self.processor._request_epoch_replan(self._node_effect("node_a", "first"))
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-recovery"))
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
 
         for index, finding in enumerate((first, second), start=1):
@@ -386,7 +386,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         recovered = BunshinV2Recovery(self.service)._recover_duplicate_replans()
 
         self.assertEqual(recovered, [self.epoch_id])
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_COLLECTING")
         self.assertEqual(len(epoch.payload["pending_replan_findings"]), 2)
         self.assertEqual(
@@ -413,7 +413,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
             )
 
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-requirements"))
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
         self.assertEqual(epoch.payload["requirements_ref"], self.requirements_ref.to_dict())
         batch = self.artifacts.read_json(epoch.payload["replan_finding_batch_ref"])
@@ -431,7 +431,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.processor._request_epoch_replan(self._node_effect("node_a", "first"))
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-first"))
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,
+            self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,
             "REPLAN_REQUIRED",
         )
 
@@ -445,7 +445,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         )
         self.processor._request_epoch_replan(self._node_effect("node_late", "late"))
 
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "TRIAGE_REQUIRED")
         self.assertEqual(epoch.payload["blocker"]["kind"], "late_replan_finding")
 
@@ -545,8 +545,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
         action_type: str,
         payload: dict | None = None,
     ):
-        snapshot = self.repository.read_snapshot(aggregate_type, aggregate_id)
-        return self.repository.dispatch(
+        snapshot = self.repository.snapshots.read_snapshot(aggregate_type, aggregate_id)
+        return self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type=action_type,
                 workflow_id=self.workflow_id,
@@ -576,7 +576,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
     def _architecture_revisions(self):
         return [
             item
-            for item in self.repository.list_workflow_snapshots(self.workflow_id)
+            for item in self.repository.queries.list_workflow_snapshots(self.workflow_id)
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
         ]
 

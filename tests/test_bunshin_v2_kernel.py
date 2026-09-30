@@ -32,7 +32,7 @@ from pal.bunshin.v2.contracts import (
     TaskState,
 )
 from pal.bunshin.v2.recovery import BunshinV2Recovery
-from pal.bunshin.v2.repository import _active_projection_snapshot
+from pal.bunshin.v2.storage.serialization import _active_projection_snapshot
 from pal.bunshin.v2.sessions import (
     architecture_reviewer_session_id,
     architect_session_id,
@@ -306,10 +306,10 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_status_"))
         self.addCleanup(shutil.rmtree, root, True)
         repository = BunshinV2Repository(root)
-        store = ContentAddressedArtifactStore(root, repository)
+        store = ContentAddressedArtifactStore(root, repository.artifacts)
         prompt_ref = store.put_json({"prompt": "bounded"}, artifact_type="RolePromptPackArtifact")
-        lease = repository.claim_lease("architecture:arch-status:requirements", "inv-status", ttl_seconds=60)
-        repository.record_role_invocation(
+        lease = repository.leases.claim_lease("architecture:arch-status:requirements", "inv-status", ttl_seconds=60)
+        repository.role_invocations.record_role_invocation(
             invocation_id="inv-status",
             workflow_id="wf-status",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -324,13 +324,13 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
             prompt_pack_ref=prompt_ref.to_dict(),
         )
 
-        repository.finish_role_invocation(
+        repository.role_invocations.finish_role_invocation(
             invocation_id="inv-status",
             fencing_token=lease.fencing_token,
             status="completed",
         )
 
-        with repository._connect() as connection:
+        with repository.database.read_connection() as connection:
             row = connection.execute(
                 "SELECT status FROM bunshin_v2_role_invocations WHERE invocation_id = 'inv-status'"
             ).fetchone()
@@ -340,8 +340,8 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="pal_v2_role_session_v28_"))
         self.addCleanup(shutil.rmtree, root, True)
         repository = BunshinV2Repository(root)
-        artifacts = ContentAddressedArtifactStore(root, repository)
-        repository.ensure_role_session(
+        artifacts = ContentAddressedArtifactStore(root, repository.artifacts)
+        repository.role_sessions.ensure_role_session(
             session_id="inv-session-v28",
             workflow_id="wf-session-v28",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -353,7 +353,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
             scope_kind="architecture_cycle",
             subject_key="arch-session-v28",
         )
-        lease = repository.claim_lease(
+        lease = repository.leases.claim_lease(
             "architecture:arch-session-v28:architect",
             "inv-session-v28",
             ttl_seconds=60,
@@ -362,7 +362,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
             {"prompt": "initial"},
             artifact_type="RolePromptPackArtifact",
         )
-        repository.record_role_invocation(
+        repository.role_invocations.record_role_invocation(
             invocation_id="inv-session-v28",
             workflow_id="wf-session-v28",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -404,16 +404,16 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
             expected_logical_coroutine_id="inv-session-v28",
             current_fencing_token=lease.fencing_token,
         )
-        repository.suspend_role_invocation(
+        repository.role_invocations.suspend_role_invocation(
             invocation_id="inv-session-v28",
             fencing_token=lease.fencing_token,
         )
-        invocation = repository.read_role_invocation("inv-session-v28")
+        invocation = repository.role_invocations.read_role_invocation("inv-session-v28")
         self.assertEqual(invocation["status"], "suspended")
         self.assertNotIn("continuation_ref", invocation)
 
         worker = SemanticOrchestrator(BunshinV2WorkflowService(root))
-        restore_path, output_path = worker._prepare_agent_session_attempt(
+        restore_path, output_path = worker.components.role_checkpoints.prepare_agent_session_attempt(
             session_id="inv-session-v28",
             attempt_id="attempt-v28",
         )
@@ -2054,7 +2054,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_"))
         self.repository = BunshinV2Repository(self.runtime_root)
-        self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository)
+        self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
@@ -2072,14 +2072,14 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
 
     def test_dispatch_is_atomic_and_idempotent(self) -> None:
-        first = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
-        duplicate = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
+        first = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
+        duplicate = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
         self.assertFalse(first.duplicate)
         self.assertTrue(duplicate.duplicate)
         self.assertEqual(first.snapshot.version, 1)
         self.assertEqual(first.events[0].event_id, duplicate.events[0].event_id)
         self.assertEqual(first.outbox_effect_ids, duplicate.outbox_effect_ids)
-        projection = self.repository.read_workflow_projection("wf_1")
+        projection = self.repository.queries.read_workflow_projection("wf_1")
         self.assertEqual(projection["current_phase"], "created")
         self.assertEqual(projection["liveness"], "outbox")
 
@@ -2144,11 +2144,11 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.assertEqual(active.state, "HUMAN_REVIEW")
 
     def test_outbox_effect_carries_the_state_and_owner_that_created_it(self) -> None:
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             self.action("CREATE_WORKFLOW", version=0, key="causal-context")
         )
 
-        claimed = self.repository.claim_outbox("outbox-worker", limit=1)
+        claimed = self.repository.outbox_claims.claim_outbox("outbox-worker", limit=1)
         self.assertEqual(claimed[0]["effect_id"], result.outbox_effect_ids[0])
         causal = claimed[0]["payload"]["_causal_context"]
         self.assertEqual(causal["aggregate_version"], 1)
@@ -2160,31 +2160,30 @@ class BunshinV2PersistenceTests(unittest.TestCase):
     def test_aggregate_and_cycle_projection_rollback_as_one_transaction(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "crash before commit"):
             with self.repository.transaction() as connection:
-                self.repository.dispatch(
+                (connection or self.repository).transitions.dispatch(
                     self.action(
                         "CREATE_WORKFLOW",
                         version=0,
                         key="atomic-cycle-create",
                     ),
-                    _connection=connection,
                 )
                 WorkflowCoordinator(self.repository).ensure_plan_cycle(
                     workflow_id="wf_1",
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
                 raise RuntimeError("crash before commit")
 
         self.assertIsNone(
-            self.repository.read_snapshot(AggregateType.WORKFLOW, "wf_1")
+            self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_1")
         )
         self.assertIsNone(
-            self.repository.read_plan_cycle(workflow_id="wf_1")
+            self.repository.cycles.read_plan_cycle(workflow_id="wf_1")
         )
 
     def test_bare_queued_state_without_outbox_is_orphaned(self) -> None:
-        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="queued-create"))
-        self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="queued-start"))
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="queued-create"))
+        self.repository.transitions.dispatch(self.action("START_WORKFLOW", version=1, key="queued-start"))
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="wf_1",
@@ -2195,21 +2194,21 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 idempotency_key="queued-architecture",
             )
         )
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_1",),
             )
-        self.repository.rebuild_workflow_projections()
+        self.repository.projections.rebuild_workflow_projections()
 
-        projection = self.repository.read_workflow_projection("wf_1")
+        projection = self.repository.queries.read_workflow_projection("wf_1")
         self.assertEqual(projection["current_phase"], "architecture")
         self.assertEqual(projection["liveness"], "orphaned")
 
     def test_durable_role_assignment_is_a_liveness_source(self) -> None:
-        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="worker-create"))
-        self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="worker-start"))
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="worker-create"))
+        self.repository.transitions.dispatch(self.action("START_WORKFLOW", version=1, key="worker-start"))
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="wf_1",
@@ -2220,7 +2219,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 idempotency_key="worker-architecture",
             )
         )
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id="session-worker",
             workflow_id="wf_1",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -2232,7 +2231,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             scope_kind="architecture_cycle",
             subject_key="arch_worker",
         )
-        self.repository.create_role_assignment(
+        self.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="worker-liveness",
                 session_id="session-worker",
@@ -2250,45 +2249,45 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 submission_kind="contract",
             )
         )
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_1",),
             )
-        self.repository.rebuild_workflow_projections()
+        self.repository.projections.rebuild_workflow_projections()
 
-        projection = self.repository.read_workflow_projection("wf_1")
+        projection = self.repository.queries.read_workflow_projection("wf_1")
         self.assertEqual(projection["liveness"], "role_assignment")
 
     def test_idempotency_key_cannot_hide_a_different_request(self) -> None:
-        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="same"))
+        self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="same"))
         with self.assertRaises(ValueError):
-            self.repository.dispatch(self.action("CREATE_WORKFLOW", version=None, key="same", payload={"different": True}))
+            self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=None, key="same", payload={"different": True}))
 
     def test_idempotent_action_replay_includes_cas_version_in_request_identity(self) -> None:
-        first = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
-        replay = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
+        first = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
+        replay = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
         self.assertTrue(replay.duplicate)
         self.assertEqual(replay.snapshot.version, first.snapshot.version)
         with self.assertRaisesRegex(ValueError, "different action request"):
-            self.repository.dispatch(self.action("CREATE_WORKFLOW", version=99, key="replay"))
+            self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=99, key="replay"))
 
     def test_outbox_receipt_prevents_duplicate_completion(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
-        claimed = self.repository.claim_outbox("outbox_worker", limit=1)
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))
+        claimed = self.repository.outbox_claims.claim_outbox("outbox_worker", limit=1)
         self.assertEqual(claimed[0]["effect_id"], result.outbox_effect_ids[0])
-        self.assertTrue(self.repository.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
-        self.assertFalse(self.repository.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
-        self.assertEqual(self.repository.claim_outbox("other_worker", limit=10), ())
-        attempts = self.repository.list_effect_attempts(claimed[0]["effect_id"])
+        self.assertTrue(self.repository.outbox_results.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
+        self.assertFalse(self.repository.outbox_results.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
+        self.assertEqual(self.repository.outbox_claims.claim_outbox("other_worker", limit=10), ())
+        attempts = self.repository.outbox_claims.list_effect_attempts(claimed[0]["effect_id"])
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["status"], "completed")
         self.assertEqual(attempts[0]["worker_id"], "outbox_worker")
 
     def test_failed_effect_and_triage_transition_rollback_together(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-failure"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-failure"))
         effect_id = result.outbox_effect_ids[0]
-        self.repository.claim_outbox("outbox_worker", limit=1)
+        self.repository.outbox_claims.claim_outbox("outbox_worker", limit=1)
         invalid_triage = self.action(
             "NOT_A_REAL_ACTION",
             version=None,
@@ -2296,67 +2295,67 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
 
         with self.assertRaises(UnknownTransitionError):
-            self.repository.fail_outbox_effect(
+            self.repository.outbox_results.fail_outbox_effect(
                 effect_id,
                 worker_id="outbox_worker",
                 error="permanent failure",
                 triage_action=invalid_triage,
             )
 
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.row_factory = sqlite3.Row
             effect = connection.execute(
                 "SELECT status, locked_by, last_error FROM bunshin_v2_outbox WHERE effect_id = ?",
                 (effect_id,),
             ).fetchone()
         self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "outbox_worker", "last_error": ""})
-        self.assertEqual(self.repository.read_snapshot(AggregateType.WORKFLOW, "wf_1").state, "CREATED")
+        self.assertEqual(self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_1").state, "CREATED")
 
     def test_deferred_outbox_effect_returns_to_queue_without_spending_attempt(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer"))
         effect_id = result.outbox_effect_ids[0]
-        claimed = self.repository.claim_outbox("draining_manager", limit=1)
+        claimed = self.repository.outbox_claims.claim_outbox("draining_manager", limit=1)
         self.assertEqual(claimed[0]["attempt_count"], 1)
 
-        self.repository.defer_outbox_effect(
+        self.repository.outbox_results.defer_outbox_effect(
             effect_id,
             worker_id="draining_manager",
             reason="manager restart safe point",
         )
 
-        replay = self.repository.claim_outbox("fresh_manager", limit=1)
+        replay = self.repository.outbox_claims.claim_outbox("fresh_manager", limit=1)
         self.assertEqual(replay[0]["effect_id"], effect_id)
         self.assertEqual(replay[0]["attempt_count"], 1)
 
     def test_deferring_reclaimed_inflight_effect_does_not_erase_prior_attempt(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-replay"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-replay"))
         effect_id = result.outbox_effect_ids[0]
-        self.repository.claim_outbox("crashed_manager", limit=1)
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        self.repository.outbox_claims.claim_outbox("crashed_manager", limit=1)
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET locked_until = '2000-01-01T00:00:00+00:00' WHERE effect_id = ?",
                 (effect_id,),
             )
-        reclaimed = self.repository.claim_outbox("draining_manager", limit=1)
+        reclaimed = self.repository.outbox_claims.claim_outbox("draining_manager", limit=1)
         self.assertFalse(reclaimed[0]["claim_incremented_attempt"])
 
-        self.repository.defer_outbox_effect(
+        self.repository.outbox_results.defer_outbox_effect(
             effect_id,
             worker_id="draining_manager",
             reason="manager restart safe point",
             attempt_was_incremented=False,
         )
 
-        replay = self.repository.claim_outbox("fresh_manager", limit=1)
+        replay = self.repository.outbox_claims.claim_outbox("fresh_manager", limit=1)
         self.assertEqual(replay[0]["attempt_count"], 2)
 
     def test_expired_final_outbox_attempt_is_reclaimed_without_consuming_another_attempt(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="crash-window"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="crash-window"))
         effect_id = result.outbox_effect_ids[0]
-        first_claim = self.repository.claim_outbox("crashed_worker", limit=1)
+        first_claim = self.repository.outbox_claims.claim_outbox("crashed_worker", limit=1)
         self.assertEqual(first_claim[0]["attempt_count"], 1)
 
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 """
                 UPDATE bunshin_v2_outbox
@@ -2366,12 +2365,12 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 (effect_id,),
             )
 
-        replay = self.repository.claim_outbox("recovery_worker", limit=1)
+        replay = self.repository.outbox_claims.claim_outbox("recovery_worker", limit=1)
         self.assertEqual(len(replay), 1)
         self.assertEqual(replay[0]["effect_id"], effect_id)
         self.assertEqual(replay[0]["attempt_count"], 1)
         self.assertEqual(
-            self.repository.retry_outbox_effect(
+            self.repository.outbox_results.retry_outbox_effect(
                 effect_id,
                 worker_id="recovery_worker",
                 error="replayed attempt failed",
@@ -2379,18 +2378,18 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             ),
             "failed",
         )
-        self.assertEqual(self.repository.claim_outbox("third_worker", limit=1), ())
-        attempts = self.repository.list_effect_attempts(effect_id)
+        self.assertEqual(self.repository.outbox_claims.claim_outbox("third_worker", limit=1), ())
+        attempts = self.repository.outbox_claims.list_effect_attempts(effect_id)
         self.assertEqual(
             [(item["worker_id"], item["status"]) for item in attempts],
             [("crashed_worker", "lost"), ("recovery_worker", "failed")],
         )
 
     def test_exhausted_retry_and_triage_transition_rollback_together(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-retry"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-retry"))
         effect_id = result.outbox_effect_ids[0]
-        self.repository.claim_outbox("retry_worker", limit=1)
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        self.repository.outbox_claims.claim_outbox("retry_worker", limit=1)
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET max_attempts = 1 WHERE effect_id = ?",
                 (effect_id,),
@@ -2402,7 +2401,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
 
         with self.assertRaises(UnknownTransitionError):
-            self.repository.retry_outbox_effect(
+            self.repository.outbox_results.retry_outbox_effect(
                 effect_id,
                 worker_id="retry_worker",
                 error="terminal retry failure",
@@ -2410,7 +2409,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 triage_action=invalid_triage,
             )
 
-        with sqlite3.connect(str(self.repository.db_path)) as connection:
+        with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.row_factory = sqlite3.Row
             effect = connection.execute(
                 "SELECT status, locked_by, last_error FROM bunshin_v2_outbox WHERE effect_id = ?",
@@ -2419,36 +2418,36 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "retry_worker", "last_error": ""})
 
     def test_deferred_effect_records_claim_history_without_spending_retry_budget(self) -> None:
-        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-history"))
+        result = self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-history"))
         effect_id = result.outbox_effect_ids[0]
-        first = self.repository.claim_outbox("draining-manager", limit=1)[0]
-        self.repository.defer_outbox_effect(
+        first = self.repository.outbox_claims.claim_outbox("draining-manager", limit=1)[0]
+        self.repository.outbox_results.defer_outbox_effect(
             effect_id,
             worker_id="draining-manager",
             reason="shutdown safe point",
             attempt_was_incremented=first["claim_incremented_attempt"],
         )
-        second = self.repository.claim_outbox("new-manager", limit=1)[0]
+        second = self.repository.outbox_claims.claim_outbox("new-manager", limit=1)[0]
         self.assertEqual(second["attempt_count"], 1)
-        attempts = self.repository.list_effect_attempts(effect_id)
+        attempts = self.repository.outbox_claims.list_effect_attempts(effect_id)
         self.assertEqual(
             [(item["worker_id"], item["status"]) for item in attempts],
             [("draining-manager", "deferred"), ("new-manager", "running")],
         )
 
     def test_worker_timing_metrics_are_persisted_in_workflow_status_projection(self) -> None:
-        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="metrics-create"))
-        self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="metrics-start"))
+        self.repository.transitions.dispatch(self.action("CREATE_WORKFLOW", version=0, key="metrics-create"))
+        self.repository.transitions.dispatch(self.action("START_WORKFLOW", version=1, key="metrics-start"))
         prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="RolePromptPackArtifact")
         response = self.artifacts.put_json({"response": "test"}, artifact_type="RoleTerminalArtifact")
         summary = self.artifacts.put_json({"tools": []}, artifact_type="RoleToolSummaryArtifact")
-        lease = self.repository.claim_lease(
+        lease = self.repository.leases.claim_lease(
             "worker:metrics",
             "inv_metrics",
             ttl_seconds=60,
             metadata={"workflow_id": "wf_1"},
         )
-        self.repository.record_role_invocation(
+        self.repository.role_invocations.record_role_invocation(
             invocation_id="inv_metrics",
             workflow_id="wf_1",
             aggregate_type=AggregateType.WORKFLOW,
@@ -2462,7 +2461,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
-        self.repository.record_role_turn(
+        self.repository.role_events.record_role_turn(
             invocation_id="inv_metrics",
             fencing_token=lease.fencing_token,
             turn_index=1,
@@ -2477,7 +2476,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             wall_latency_ms=180,
         )
 
-        metrics = self.repository.read_workflow_projection("wf_1")["metrics"]
+        metrics = self.repository.queries.read_workflow_projection("wf_1")["metrics"]
         self.assertEqual(metrics["llm_time_ms"], 120)
         self.assertEqual(metrics["tool_time_ms"], 35)
         self.assertEqual(metrics["worker_time_ms"], 180)
@@ -2488,8 +2487,8 @@ class BunshinV2PersistenceTests(unittest.TestCase):
 
     def test_worker_progress_events_advance_durable_round_ledger(self) -> None:
         prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="RolePromptPackArtifact")
-        lease = self.repository.claim_lease("worker:events", "inv_events", ttl_seconds=60)
-        self.repository.record_role_invocation(
+        lease = self.repository.leases.claim_lease("worker:events", "inv_events", ttl_seconds=60)
+        self.repository.role_invocations.record_role_invocation(
             invocation_id="inv_events",
             workflow_id="wf_1",
             aggregate_type=AggregateType.WORKFLOW,
@@ -2503,7 +2502,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
-        self.repository.record_worker_event(
+        self.repository.role_events.record_worker_event(
             {
                 "invocation_id": "inv_events",
                 "event_kind": "progress",
@@ -2511,7 +2510,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 "payload": {"phase": "llm_round_completed", "round": 7, "tool_call_count": 19},
             }
         )
-        with self.repository._connect() as connection:
+        with self.repository.database.read_connection() as connection:
             invocation = connection.execute(
                 "SELECT last_completed_turn FROM bunshin_v2_role_invocations WHERE invocation_id = 'inv_events'"
             ).fetchone()
@@ -2523,7 +2522,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
 
     def test_role_checklist_progress_reads_current_attempt_durable_cursor(self) -> None:
         now = "2026-08-10T12:55:08+00:00"
-        self.repository.ensure_schema()
+        self.repository.database.ensure_schema()
         items = {
             "items": [
                 {
@@ -2540,7 +2539,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 },
             ]
         }
-        with self.repository._transaction() as connection:
+        with self.repository.database.write_connection() as connection:
             connection.execute(
                 """
                 INSERT INTO bunshin_v2_role_sessions(
@@ -2591,7 +2590,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
                 (AUTHORING_CONTRACT_VERSION, json.dumps(items), now, now),
             )
 
-        progress = self.repository.read_role_checklist_progress("inv-checklist")
+        progress = self.repository.queries.read_role_checklist_progress("inv-checklist")
 
         self.assertIsNotNone(progress)
         self.assertTrue(progress["activity_observed"])
@@ -2622,14 +2621,14 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
 
     def test_lease_fencing_rejects_zombie_worker(self) -> None:
-        first = self.repository.claim_lease("worktree:node_1", "worker_1", ttl_seconds=60)
+        first = self.repository.leases.claim_lease("worktree:node_1", "worker_1", ttl_seconds=60)
         with self.assertRaises(LeaseConflict):
-            self.repository.claim_lease("worktree:node_1", "worker_2", ttl_seconds=60)
-        self.repository.release_lease(first.resource_key, first.owner_id, first.fencing_token)
-        second = self.repository.claim_lease("worktree:node_1", "worker_2", ttl_seconds=60)
+            self.repository.leases.claim_lease("worktree:node_1", "worker_2", ttl_seconds=60)
+        self.repository.leases.release_lease(first.resource_key, first.owner_id, first.fencing_token)
+        second = self.repository.leases.claim_lease("worktree:node_1", "worker_2", ttl_seconds=60)
         self.assertGreater(second.fencing_token, first.fencing_token)
         with self.assertRaises(StaleFencingToken):
-            self.repository.assert_fencing_token(first.resource_key, first.owner_id, first.fencing_token)
+            self.repository.leases.assert_fencing_token(first.resource_key, first.owner_id, first.fencing_token)
 
     def test_artifact_is_published_before_action_can_reference_it(self) -> None:
         ref = self.artifacts.put_json(
@@ -2641,12 +2640,12 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             },
             artifact_type="TaskLedgerArtifact",
         )
-        self.assertTrue(self.repository.artifact_is_durable(ref.sha256))
+        self.assertTrue(self.repository.artifacts.artifact_is_durable(ref.sha256))
         self.assertEqual(self.artifacts.read_json(ref)["original"]["objective"], "do the thing")
 
         missing = {**ref.to_dict(), "sha256": "0" * 64}
         with self.assertRaises(ValueError):
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 self.action(
                     "CREATE_WORKFLOW",
                     version=0,
@@ -2670,7 +2669,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             artifact_type="TestManifestArtifact",
             child_refs=((requirements.sha256, "requirements"),),
         )
-        self.assertTrue(self.repository.artifact_is_durable(manifest.sha256))
+        self.assertTrue(self.repository.artifacts.artifact_is_durable(manifest.sha256))
         with self.assertRaises(ValueError):
             self.artifacts.put_json(
                 {"requirements_ref": "sha256:" + "1" * 64},
@@ -2686,7 +2685,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.assertEqual(self.artifacts.read_json(gates), [])
 
     def test_startup_recovery_clears_expired_lease_without_process_authority(self) -> None:
-        first = self.repository.claim_lease(
+        first = self.repository.leases.claim_lease(
             "worktree:recover",
             "dead_worker",
             ttl_seconds=1,
@@ -2695,7 +2694,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         time.sleep(1.05)
         result = BunshinV2Recovery(BunshinV2WorkflowService(self.runtime_root)).recover()
         self.assertIn("worktree:recover", result["recovered_leases"])
-        second = self.repository.claim_lease("worktree:recover", "new_worker", ttl_seconds=60)
+        second = self.repository.leases.claim_lease("worktree:recover", "new_worker", ttl_seconds=60)
         self.assertGreater(second.fencing_token, first.fencing_token)
 
 if __name__ == "__main__":

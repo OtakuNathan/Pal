@@ -56,7 +56,7 @@ class ArtifactCandidateInputExclusionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_input_exclusion_"))
         self.repository = BunshinV2Repository(self.root)
-        self.store = ContentAddressedArtifactStore(self.root, self.repository)
+        self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.adapter = ArtifactBundleAdapter(self.root, self.store)
         # Capture the authoritative objects the adapter module bound at
         # import time before any test substitutes the predicate.

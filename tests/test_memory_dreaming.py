@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.runner_components.results import Results
+
 import json
 import tempfile
 import unittest
@@ -306,7 +308,8 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(llm.calls), 1)
 
     async def test_worker_runtime_restarts_with_its_workflow_generation(self):
-        from pal.bunshin.runner import BunshinRunner, build_slim_bunshin_runtime
+        from pal.bunshin.runner import BunshinRunner
+        from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
         self.storage.pin("workflow")
         result, _ = await self.run_dream()
         self.assertEqual(result["status"], "completed", result)
@@ -322,7 +325,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 owner = SimpleNamespace(_memory_generation_id=bundle.memory_generation_id,
                     _result_memory_service=bundle.memory_service, memory_candidates=[], blocked_kind="",
                     _short_summary=lambda text: text, _artifact_payload=lambda: {})
-                payload = BunshinRunner._terminal_payload(owner, "completed", "Done")
+                payload = Results.terminal_payload(owner, "completed", "Done")
                 self.assertEqual(payload["memory_generation_id"], self.head)
                 self.assertIn(self.refs[0], payload["memory_refs"])
             finally:

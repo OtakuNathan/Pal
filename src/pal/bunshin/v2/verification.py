@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
-import sqlite3
+from pal.bunshin.v2.unit_of_work import BunshinUnitOfWork
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -345,7 +345,7 @@ class VerificationService:
         role_submission_payload_hash: str = "",
         accepted_candidate_ref: ArtifactRef | None = None,
         accepted_candidate_digest: str = "",
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> DispatchResult:
         if bool(accepted_candidate_ref) != bool(accepted_candidate_digest):
             raise ValueError(
@@ -467,7 +467,7 @@ class VerificationService:
                     "failure_history": history,
                     "defect_kind": defect_kind.value,
                 }
-        return self.repository.dispatch(
+        return (unit_of_work or self.repository).transitions.dispatch(
             ActionEnvelope(
                 action_type=action_type,
                 workflow_id=node.workflow_id,
@@ -480,7 +480,6 @@ class VerificationService:
             ),
             role_assignment_id=role_assignment_id,
             role_submission_payload_hash=role_submission_payload_hash,
-            _connection=_connection,
         )
 
 
@@ -500,7 +499,7 @@ class DefectPropagationService:
     ) -> tuple[str, ...]:
         if reopen_action not in {"REOPEN_DEPENDENCY", "REOPEN_VERIFICATION"}:
             raise ValueError(f"unsupported defect reopen action: {reopen_action}")
-        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
         nodes = {
             item.aggregate_id: item
             for item in snapshots
@@ -511,7 +510,7 @@ class DefectPropagationService:
         if dependency is None:
             raise ValueError("dependency node does not exist in epoch")
         if dependency.state == "ACCEPTED":
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 _node_action(
                     dependency,
                     reopen_action,
@@ -521,7 +520,7 @@ class DefectPropagationService:
             )
         affected = _transitive_dependents(dependency_node_id, nodes)
         for node_id in sorted(affected):
-            node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            node = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
             if node is None or node.state in {"STALE", "CANCELLED"}:
                 continue
             payload = {"stale_reason_ref": repair_bill_ref.to_dict(), "stale_dependency_node_id": dependency_node_id}
@@ -530,7 +529,7 @@ class DefectPropagationService:
                 if node.state in {"BLOCKED_BY_DEPS", "QUEUED", "REVIEW_BLOCKED_BY_DEPS", "REVIEW_QUEUED", "REPAIR_QUEUED", "ACCEPTED", "CANCELLED"}
                 else "REQUEST_STALE"
             )
-            self.repository.dispatch(_node_action(node, action_type, actor, payload))
+            self.repository.transitions.dispatch(_node_action(node, action_type, actor, payload))
         return tuple(sorted(affected))
 
 

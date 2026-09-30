@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.runner_components.session_memory import SessionMemory
+
 from tests.turn_fakes import continuation as make_continuation
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
@@ -43,13 +45,10 @@ from pal.bunshin.checkpoint import (
     open_agent_session_checkpoint,
     seal_agent_session_checkpoint,
 )
-from pal.bunshin.runner import (
-    BunshinAgentLoopState,
-    BunshinLLMRetryableError,
-    BunshinRunner,
-    _bunshin_llm_request_metadata,
-    _bunshin_prompt_context,
-)
+from pal.bunshin.runner_components.models import BunshinAgentLoopState, BunshinLLMRetryableError
+from pal.bunshin.runner import BunshinRunner
+from pal.bunshin.runner_components.llm_settings import _bunshin_llm_request_metadata
+from pal.bunshin.runner_components.prompt_values import _bunshin_prompt_context
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import (
@@ -98,14 +97,14 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         return service, provider
 
     def test_bunshin_registers_the_main_memory_prompt_provider(self) -> None:
-        providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+        providers = self._runner().components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
 
         memory_providers = [provider for provider in providers if isinstance(provider, MemoryPromptFragmentProvider)]
         self.assertEqual(len(memory_providers), 1)
         self.assertTrue(memory_providers[0].include_l1_recent_context)
 
     def test_bunshin_preserves_shared_tool_guidance_authority(self) -> None:
-        providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+        providers = self._runner().components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
         prompt_provider = next(
             provider for provider in providers if isinstance(provider, BunshinPromptFragmentProvider)
         )
@@ -129,7 +128,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("suggested next tool only when", routing.content)
 
     def test_bunshin_puts_shared_tool_efficiency_before_every_role_contract(self) -> None:
-        providers = self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+        providers = self._runner().components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
         prompt_provider = next(
             provider for provider in providers if isinstance(provider, BunshinPromptFragmentProvider)
         )
@@ -406,7 +405,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             ),
         )
 
-        BunshinRunner._abort_stale_l1_turns(
+        SessionMemory.abort_stale_l1_turns(
             service,
             active_turn_id=active_turn_id,
         )
@@ -474,7 +473,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         rendered = "\n".join(
             fragment.content
-            for prompt_provider in self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+            for prompt_provider in self._runner().components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
             for fragment in prompt_provider.build_prompt_fragments(context)
         )
 
@@ -552,7 +551,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         fragments = [
             fragment
-            for prompt_provider in self._runner()._build_bunshin_prompt_fragment_registry().list_for_prompt()
+            for prompt_provider in self._runner().components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
             for fragment in prompt_provider.build_prompt_fragments(context)
         ]
         recalled = [fragment for fragment in fragments if fragment.title == "Recalled memories"]
@@ -565,7 +564,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
     def test_pending_memory_candidates_are_not_rendered_as_recalled_memory(self) -> None:
         service, _provider = self._memory_service()
         runner = self._runner()
-        candidate_sink = runner._runner_memory_candidate_sink()
+        candidate_sink = runner.components.memory_results.runner_memory_candidate_sink()
         candidate_sink.records.append(
             {
                 "document_id": "case:pending",
@@ -587,7 +586,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         rendered = "\n".join(
             fragment.content
-            for prompt_provider in runner._build_bunshin_prompt_fragment_registry().list_for_prompt()
+            for prompt_provider in runner.components.agent_runtime.build_bunshin_prompt_fragment_registry().list_for_prompt()
             for fragment in prompt_provider.build_prompt_fragments(context)
         )
 
@@ -605,7 +604,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
 
         compact_required = asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
@@ -620,10 +619,10 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             LLMFinishReason.COMPACT_REQUIRED,
         )
         self.assertEqual(state.llm_round_count, 4)
-        self.assertEqual(runner.blocked_summary, "")
+        self.assertEqual(runner.components.status.blocked_summary, "")
 
         asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
@@ -637,7 +636,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(state.llm_round_count, 3)
 
         asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
@@ -650,9 +649,9 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(state.llm_round_count, 2)
 
-        runner.blocked_summary = ""
+        runner.components.status.blocked_summary = ""
         asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
@@ -677,7 +676,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             events.append(event)
 
         runner = self._runner()
-        runner.write_event = capture_event
+        runner.components.reporter.write_event = capture_event
         service, _provider = self._memory_service()
         state = BunshinAgentLoopState(
             execution_runtime=SimpleNamespace(),
@@ -688,7 +687,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
 
         asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
@@ -753,7 +752,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
 
         asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(status=RuntimeStatus.OK, payload=truncated),
                 continuation=make_continuation(turn_id=turn_id),
@@ -771,14 +770,14 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("bounded action", state.pending_output_length_recovery_note)
         self.assertIn(
             "complete tool calls",
-            runner._build_bunshin_retry_note(
+            runner.components.llm_rounds.build_bunshin_retry_note(
                 truncated,
                 [SimpleNamespace()],
                 retry_count=2,
                 state=state,
             ),
         )
-        self.assertEqual(runner.blocked_summary, "")
+        self.assertEqual(runner.components.status.blocked_summary, "")
 
     def test_truncated_round_with_committed_tool_item_is_kept_for_execution(self) -> None:
         runner = self._runner()
@@ -818,7 +817,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            runner._postprocess_bunshin_llm_round(
+            runner.components.llm_rounds.postprocess_bunshin_llm_round(
                 state,
                 EffectResult(status=RuntimeStatus.OK, payload=truncated),
                 continuation=make_continuation(turn_id=turn_id),
@@ -844,7 +843,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         with self.assertRaises(BunshinLLMRetryableError):
             asyncio.run(
-                runner._postprocess_bunshin_llm_round(
+                runner.components.llm_rounds.postprocess_bunshin_llm_round(
                     state,
                     EffectResult(
                         status=RuntimeStatus.OK,
@@ -855,7 +854,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                     ),
                 )
             )
-        self.assertEqual(runner.blocked_summary, "")
+        self.assertEqual(runner.components.status.blocked_summary, "")
         self.assertEqual(state.llm_round_count, 0)
 
     def test_closed_checkpoint_reopens_a_distinct_active_l1_turn(self) -> None:
@@ -864,7 +863,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         service.begin_l1_turn("run:invocation:input", user_text="work")
         service.settle_l1_turn("run:invocation:input")
 
-        recovered = runner._resume_or_reopen_l1_turn(
+        recovered = runner.components.session_memory.resume_or_reopen_l1_turn(
             service,
             run_id="run",
             active_input_id="input",
@@ -882,7 +881,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         stale_id = "run:invocation:assignment-old"
         service.begin_l1_turn(stale_id, user_text="workspace=/attempts/fence-1")
 
-        selected = runner._resume_or_reopen_l1_turn(
+        selected = runner.components.session_memory.resume_or_reopen_l1_turn(
             service,
             run_id="run",
             active_input_id="assignment-new",
@@ -890,7 +889,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             fencing_token=4,
             reuse_active=False,
         )
-        runner._abort_stale_l1_turns(
+        runner.components.session_memory.abort_stale_l1_turns(
             service,
             active_turn_id=selected,
         )
@@ -910,7 +909,7 @@ class BunshinProposalCapabilityTests(unittest.IsolatedAsyncioTestCase):
             ["op_bunshin_memory_candidate_write"], workspace={"invocation_id": "proposal-test"}, memory_candidate_sink=sink)
         contracts = runtime.build_llm_tool_contracts()
         self.assertTrue(any(item["function"]["name"] == "propose_memories" for item in contracts))
-        from pal.bunshin.runner import _memory_candidates_from_sink
+        from pal.bunshin.runner_components.result_values import _memory_candidates_from_sink
         candidate = {"kind": "fact", "title": "explicit", "summary": "  exact\n",
                      "source_excerpt": "source", "topics": ["api"]}
         result = await runtime.execute_tool_async(new_tool_call(name="propose_memories",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from pal.bunshin.v2.unit_of_work import BunshinUnitOfWork
 from dataclasses import dataclass, replace
 from typing import Iterable
 
@@ -60,11 +60,10 @@ class WorkflowCoordinator:
         *,
         workflow_id: str,
         generation: int = 1,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
-        cycle = self.repository.read_plan_cycle(
+        cycle = (unit_of_work or self.repository).cycles.read_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if cycle is not None:
             return cycle
@@ -72,10 +71,9 @@ class WorkflowCoordinator:
             cycle_id=f"{workflow_id}:plan",
             generation=generation,
         )
-        self.repository.store_plan_cycle(
+        (unit_of_work or self.repository).cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=cycle,
-            _connection=_connection,
         )
         return cycle
 
@@ -87,11 +85,11 @@ class WorkflowCoordinator:
         assignment: CycleAssignment | None = None,
         product_ref: str = "",
         verdict: CycleVerdict | None = None,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         cycle = self.ensure_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         updated = cycle.transition(
             action,
@@ -99,10 +97,9 @@ class WorkflowCoordinator:
             product_ref=product_ref,
             verdict=verdict,
         )
-        self.repository.store_plan_cycle(
+        (unit_of_work or self.repository).cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=updated,
-            _connection=_connection,
         )
         return updated
 
@@ -110,11 +107,11 @@ class WorkflowCoordinator:
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         cycle = self.ensure_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         if cycle.state == PlanCycleState.HUMAN_REVIEW:
             updated = cycle.transition(CycleAction.HUMAN_EDITED)
@@ -134,10 +131,9 @@ class WorkflowCoordinator:
             raise RuntimeError(
                 "a new plan revision requires a quiescent accepted or repair cycle"
             )
-        self.repository.store_plan_cycle(
+        (unit_of_work or self.repository).cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=updated,
-            _connection=_connection,
         )
         return updated
 
@@ -148,11 +144,11 @@ class WorkflowCoordinator:
         slot: CycleSlot,
         kind: AssignmentKind,
         input_fingerprint: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         cycle = self.ensure_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         running_state = (
             PlanCycleState.PRODUCING
@@ -186,7 +182,7 @@ class WorkflowCoordinator:
                 generation=cycle.generation,
                 input_fingerprint=input_fingerprint,
             ),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def submit_plan_product(
@@ -194,11 +190,11 @@ class WorkflowCoordinator:
         *,
         workflow_id: str,
         product_ref: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         cycle = self.ensure_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         if (
             cycle.state in {
@@ -214,19 +210,19 @@ class WorkflowCoordinator:
             workflow_id=workflow_id,
             action=CycleAction.PRODUCER_SUBMITTED,
             product_ref=product_ref,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def reject_plan_product(
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         return self.transition_plan(
             workflow_id=workflow_id,
             action=CycleAction.PRODUCER_REJECTED,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def submit_plan_verdict(
@@ -235,11 +231,11 @@ class WorkflowCoordinator:
         workflow_id: str,
         accepted: bool,
         finding_refs: Iterable[str] = (),
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle:
         cycle = self.ensure_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         finding_refs_tuple = tuple(finding_refs)
         if (
@@ -269,13 +265,13 @@ class WorkflowCoordinator:
                 generation=cycle.generation,
                 finding_refs=finding_refs_tuple,
             ),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         if accepted:
             updated = self.transition_plan(
                 workflow_id=workflow_id,
                 action=CycleAction.REQUEST_HUMAN_REVIEW,
-                _connection=_connection,
+                unit_of_work=unit_of_work,
             )
         return updated
 
@@ -288,46 +284,41 @@ class WorkflowCoordinator:
         if graph.graph_id != workflow_id:
             raise ValueError("GraphIR identity must equal its workflow identity")
         with self.repository.transaction() as connection:
-            existing_graph = self.repository.read_graph_generation(
+            existing_graph = (connection or self.repository).cycles.read_graph_generation(
                 graph_id=graph.graph_id,
                 generation=graph.generation,
-                _connection=connection,
             )
             if existing_graph is not None:
                 if existing_graph != graph:
                     raise ValueError(
                         "GraphIR generation identity is already bound to other content"
                     )
-                existing_execution = self.repository.read_graph_execution(
+                existing_execution = (connection or self.repository).cycles.read_graph_execution(
                     workflow_id=workflow_id,
                     generation=graph.generation,
-                    _connection=connection,
                 )
                 if existing_execution is not None:
                     return InstalledGraph(execution=existing_execution, diff=None)
             previous_graph = (
-                self.repository.read_graph_generation(
+                (connection or self.repository).cycles.read_graph_generation(
                     graph_id=graph.graph_id,
                     generation=graph.generation - 1,
-                    _connection=connection,
                 )
                 if graph.generation > 1
                 else None
             )
             previous_execution = (
-                self.repository.read_graph_execution(
+                (connection or self.repository).cycles.read_graph_execution(
                     workflow_id=workflow_id,
                     generation=graph.generation - 1,
-                    _connection=connection,
                 )
                 if previous_graph is not None
                 else None
             )
-            self.repository.store_graph_generation(
+            (connection or self.repository).cycles.store_graph_generation(
                 workflow_id=workflow_id,
                 graph=graph,
                 status="running",
-                _connection=connection,
             )
             if previous_graph is None:
                 execution = GraphExecution.start(graph)
@@ -343,10 +334,9 @@ class WorkflowCoordinator:
                     graph,
                     diff,
                 )
-            self.repository.store_graph_execution(
+            (connection or self.repository).cycles.store_graph_execution(
                 workflow_id=workflow_id,
                 execution=execution,
-                _connection=connection,
             )
         return InstalledGraph(execution=execution, diff=diff)
 
@@ -355,12 +345,11 @@ class WorkflowCoordinator:
         *,
         workflow_id: str,
         generation: int | None = None,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> GraphExecution:
-        execution = self.repository.read_graph_execution(
+        execution = (unit_of_work or self.repository).cycles.read_graph_execution(
             workflow_id=workflow_id,
             generation=generation,
-            _connection=_connection,
         )
         if execution is None:
             raise RuntimeError("workflow has no installed GraphExecution")
@@ -410,11 +399,11 @@ class WorkflowCoordinator:
         slot: CycleSlot,
         kind: AssignmentKind,
         input_fingerprint: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> NodeCycle:
         execution = self.execution(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         cycle = execution.cycles[node_name]
         running_state = (
@@ -451,7 +440,7 @@ class WorkflowCoordinator:
             workflow_id,
             execution,
             cycle.transition(action, assignment=assignment),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def producer_submitted(
@@ -460,11 +449,11 @@ class WorkflowCoordinator:
         workflow_id: str,
         node_name: str,
         product_ref: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> NodeCycle:
         execution = self.execution(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         cycle = execution.cycles[node_name]
         if (
@@ -483,7 +472,7 @@ class WorkflowCoordinator:
                 CycleAction.PRODUCER_SUBMITTED,
                 product_ref=product_ref,
             ),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def accept_null_node(
@@ -493,13 +482,13 @@ class WorkflowCoordinator:
         node_name: str,
         product_ref: str,
         input_fingerprint: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> NodeCycle:
         """Mechanically close a null producer/checker pair in one write."""
 
         execution = self.execution(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         cycle = execution.cycles[node_name]
         if cycle.state == NodeCycleState.ACCEPTED:
@@ -552,7 +541,7 @@ class WorkflowCoordinator:
             workflow_id,
             execution,
             cycle,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def checker_verdict(
@@ -565,11 +554,11 @@ class WorkflowCoordinator:
         finding_class: FindingClass | None = None,
         dependency_node: str = "",
         accepted_product_ref: str = "",
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> FindingRoute | None:
         execution = self.execution(
             workflow_id=workflow_id,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
         cycle = execution.cycles[node_name]
         finding_refs_tuple = tuple(finding_refs)
@@ -599,10 +588,9 @@ class WorkflowCoordinator:
             dependency_node=dependency_node,
             accepted_product_ref=accepted_product_ref,
         )
-        self.repository.store_graph_execution(
+        (unit_of_work or self.repository).cycles.store_graph_execution(
             workflow_id=workflow_id,
             execution=updated,
-            _connection=_connection,
         )
         return route
 
@@ -611,11 +599,10 @@ class WorkflowCoordinator:
         *,
         workflow_id: str,
         node_name: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> NodeCycle | None:
-        execution = self.repository.read_graph_execution(
+        execution = (unit_of_work or self.repository).cycles.read_graph_execution(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if execution is None or node_name not in execution.cycles:
             return None
@@ -626,28 +613,26 @@ class WorkflowCoordinator:
             workflow_id,
             execution,
             cycle.transition(CycleAction.REQUIRE_TRIAGE),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def require_plan_triage(
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> PlanCycle | None:
-        cycle = self.repository.read_plan_cycle(
+        cycle = (unit_of_work or self.repository).cycles.read_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if cycle is None:
             return None
         if cycle.state == PlanCycleState.TRIAGE_REQUIRED:
             return cycle
         updated = cycle.transition(CycleAction.REQUIRE_TRIAGE)
-        self.repository.store_plan_cycle(
+        (unit_of_work or self.repository).cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=updated,
-            _connection=_connection,
         )
         return updated
 
@@ -663,40 +648,40 @@ class WorkflowCoordinator:
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        self._control_plan(workflow_id, CycleAction.REQUEST_PAUSE, _connection=_connection)
-        self._control_graph(workflow_id, CycleAction.REQUEST_PAUSE, _connection=_connection)
+        self._control_plan(workflow_id, CycleAction.REQUEST_PAUSE, unit_of_work=unit_of_work)
+        self._control_graph(workflow_id, CycleAction.REQUEST_PAUSE, unit_of_work=unit_of_work)
 
     def request_workflow_cancel(
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        self._control_plan(workflow_id, CycleAction.REQUEST_CANCEL, _connection=_connection)
-        self._control_graph(workflow_id, CycleAction.REQUEST_CANCEL, _connection=_connection)
+        self._control_plan(workflow_id, CycleAction.REQUEST_CANCEL, unit_of_work=unit_of_work)
+        self._control_graph(workflow_id, CycleAction.REQUEST_CANCEL, unit_of_work=unit_of_work)
 
     def resume_workflow(
         self,
         *,
         workflow_id: str,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        self._control_plan(workflow_id, CycleAction.RESUME, _connection=_connection)
-        self._control_graph(workflow_id, CycleAction.RESUME, _connection=_connection)
+        self._control_plan(workflow_id, CycleAction.RESUME, unit_of_work=unit_of_work)
+        self._control_graph(workflow_id, CycleAction.RESUME, unit_of_work=unit_of_work)
 
     def confirm_plan_control(
         self,
         *,
         workflow_id: str,
         cancel: bool,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
         self._control_plan(
             workflow_id,
             CycleAction.CANCELLED if cancel else CycleAction.PAUSED,
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     def confirm_node_control(
@@ -705,11 +690,10 @@ class WorkflowCoordinator:
         workflow_id: str,
         node_name: str,
         cancel: bool,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        execution = self.repository.read_graph_execution(
+        execution = (unit_of_work or self.repository).cycles.read_graph_execution(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if execution is None or node_name not in execution.cycles:
             return
@@ -728,14 +712,13 @@ class WorkflowCoordinator:
                 cycle = cycle.transition(CycleAction.REQUEST_CANCEL)
             else:
                 return
-        self.repository.store_graph_execution(
+        (unit_of_work or self.repository).cycles.store_graph_execution(
             workflow_id=workflow_id,
             execution=execution.with_cycle(
                 cycle.transition(
                     CycleAction.CANCELLED if cancel else CycleAction.PAUSED
                 )
             ),
-            _connection=_connection,
         )
 
     def resolve_triage(
@@ -744,30 +727,28 @@ class WorkflowCoordinator:
         workflow_id: str,
         node_name: str = "",
         plan: bool = False,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
         if plan:
             self._control_plan(
                 workflow_id,
                 CycleAction.RESOLVE_TRIAGE,
-                _connection=_connection,
+                unit_of_work=unit_of_work,
             )
             return
-        execution = self.repository.read_graph_execution(
+        execution = (unit_of_work or self.repository).cycles.read_graph_execution(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if execution is None or node_name not in execution.cycles:
             return
         cycle = execution.cycles[node_name]
         if cycle.state != NodeCycleState.TRIAGE_REQUIRED:
             return
-        self.repository.store_graph_execution(
+        (unit_of_work or self.repository).cycles.store_graph_execution(
             workflow_id=workflow_id,
             execution=execution.with_cycle(
                 cycle.transition(CycleAction.RESOLVE_TRIAGE)
             ),
-            _connection=_connection,
         )
 
     def _control_plan(
@@ -775,11 +756,10 @@ class WorkflowCoordinator:
         workflow_id: str,
         action: CycleAction,
         *,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        cycle = self.repository.read_plan_cycle(
+        cycle = (unit_of_work or self.repository).cycles.read_plan_cycle(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if cycle is None:
             return
@@ -828,10 +808,9 @@ class WorkflowCoordinator:
             cycle = cycle.transition(action)
         else:
             raise ValueError(f"unsupported plan control action: {action.value}")
-        self.repository.store_plan_cycle(
+        (unit_of_work or self.repository).cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=cycle,
-            _connection=_connection,
         )
 
     def _control_graph(
@@ -839,11 +818,10 @@ class WorkflowCoordinator:
         workflow_id: str,
         action: CycleAction,
         *,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        execution = self.repository.read_graph_execution(
+        execution = (unit_of_work or self.repository).cycles.read_graph_execution(
             workflow_id=workflow_id,
-            _connection=_connection,
         )
         if execution is None:
             return
@@ -884,7 +862,7 @@ class WorkflowCoordinator:
             cycles[name] = updated
             changed = True
         if changed:
-            self.repository.store_graph_execution(
+            (unit_of_work or self.repository).cycles.store_graph_execution(
                 workflow_id=workflow_id,
                 execution=replace(
                     execution,
@@ -895,7 +873,6 @@ class WorkflowCoordinator:
                         else execution.state
                     ),
                 ),
-                _connection=_connection,
             )
 
     def _store_cycle(
@@ -904,13 +881,12 @@ class WorkflowCoordinator:
         execution: GraphExecution,
         cycle: NodeCycle,
         *,
-        _connection: sqlite3.Connection | None = None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> NodeCycle:
         updated = execution.with_cycle(cycle)
-        self.repository.store_graph_execution(
+        (unit_of_work or self.repository).cycles.store_graph_execution(
             workflow_id=workflow_id,
             execution=updated,
-            _connection=_connection,
         )
         return updated.cycles[cycle.node_name]
 

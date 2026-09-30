@@ -26,7 +26,7 @@ from pal.bunshin.v2.adapters import prepare_v2_role_workspace, prepare_v2_worksp
 from pal.bunshin.v2.contract_runtime import ContractArtifactAccess
 from pal.bunshin.v2.catalog import BunshinV2Catalog
 from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.execution import ExecutionCompiler
+from pal.bunshin.v2.epoch_compilation import ExecutionCompiler
 from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
 from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.v2.graph_protocol import RoleBinding
@@ -43,10 +43,8 @@ from pal.bunshin.v2.semantic_orchestration import (
     apply_v2_research_capability_policy,
     apply_v2_role_capability_policy,
 )
-from pal.bunshin.v2.semantic_orchestration.orchestrator import (
-    SemanticOrchestrator,
-    _role_mode_profile_payload,
-)
+from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.v2.semantic_orchestration.role_inputs import _role_mode_profile_payload
 from pal.shared import BunshinInvocationPack, RuntimeStatus
 from tests.capability_fixture import mount_test_capability
 from pal.shared import ToolExecutionResult
@@ -56,7 +54,7 @@ class BunshinV2FamilyBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_family_"))
         self.repository = BunshinV2Repository(self.root)
-        self.store = ContentAddressedArtifactStore(self.root, self.repository)
+        self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -1778,7 +1776,7 @@ workspace_policy: {}
             epoch_id="nutrition-epoch",
             manifest_ref=manifest,
         )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["checkin"])
+        node = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["checkin"])
         self.assertEqual(node.payload["execution_adapter"], "artifact_bundle.v2")
         self.assertEqual(node.payload["node_kind"], "unit")
         self.assertTrue(Path(node.payload["workspace_path"]).is_dir())
@@ -1829,11 +1827,11 @@ workspace_policy: {}
             BunshinV2OutboxProcessor(service).process_once(limit=1)
         )
         self.assertEqual(bootstrap["failed"], 0)
-        for effect in service.repository.claim_outbox(
+        for effect in service.repository.outbox_claims.claim_outbox(
             "nutritionist-e2e-bootstrap",
             limit=100,
         ):
-            service.repository.complete_outbox_effect(
+            service.repository.outbox_results.complete_outbox_effect(
                 str(effect["effect_id"]),
                 worker_id="nutritionist-e2e-bootstrap",
             )
@@ -1932,7 +1930,7 @@ workspace_policy: {}
         for _ in range(20):
             result = asyncio.run(processor.process_once(limit=20))
             self.assertEqual(result["failed"], 0)
-            workflow = service.repository.read_snapshot(
+            workflow = service.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 "nutritionist-e2e-workflow",
             )
@@ -1944,7 +1942,7 @@ workspace_policy: {}
 
         nodes = {
             item.aggregate_id: item
-            for item in service.repository.list_workflow_snapshots(
+            for item in service.repository.queries.list_workflow_snapshots(
                 "nutritionist-e2e-workflow"
             )
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
@@ -1954,7 +1952,7 @@ workspace_policy: {}
         self.assertTrue(
             all(bool(item.payload.get("null_execution")) for item in nodes.values())
         )
-        epoch = service.repository.read_snapshot(
+        epoch = service.repository.snapshots.read_snapshot(
             AggregateType.EXECUTION_EPOCH,
             compilation.epoch_id,
         )

@@ -18,7 +18,7 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_artifact_adapter_"))
         self.repository = BunshinV2Repository(self.root)
-        self.store = ContentAddressedArtifactStore(self.root, self.repository)
+        self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.adapter = ArtifactBundleAdapter(self.root, self.store)
 
     def tearDown(self) -> None:

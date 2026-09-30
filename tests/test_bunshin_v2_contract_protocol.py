@@ -530,10 +530,10 @@ class WorkItemProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal-work-items-"))
         self.repository = BunshinV2Repository(self.root)
-        self.repository.ensure_schema()
+        self.repository.database.ensure_schema()
         self.invocation_id = "inv_contract_author"
         self.resource = "architecture:revision:author"
-        lease = self.repository.claim_lease(
+        lease = self.repository.leases.claim_lease(
             self.resource,
             self.invocation_id,
             ttl_seconds=120,
@@ -738,7 +738,7 @@ class WorkItemProtocolTests(unittest.TestCase):
     def _reviewer_workspace(self) -> dict[str, object]:
         invocation = "inv_contract_reviewer"
         resource = "architecture:revision:review"
-        lease = self.repository.claim_lease(
+        lease = self.repository.leases.claim_lease(
             resource,
             invocation,
             ttl_seconds=120,

@@ -200,7 +200,7 @@ def start_request(**overrides: Any) -> dict[str, Any]:
 
 
 def read_workflow(environment: SimpleNamespace, workflow_id: str) -> Any:
-    return environment.service.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    return environment.service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
 
 
 @pytest.mark.parametrize("stage", ["declaration", "capture"])
@@ -242,7 +242,7 @@ def test_binding_failure_publishes_no_workflow_artifacts(
     assert "WorkflowRequestArtifact" not in published
     assert INPUT_BINDING_MANIFEST_ARTIFACT not in published
     assert read_workflow(environment, "wf-bound") is None
-    assert not service.repository.search_workflows(
+    assert not service.repository.search.search_workflows(
         actor_id="pal", task_id="task-bound", include_terminal=True, limit=10
     )
 
@@ -304,7 +304,7 @@ def test_recorded_binding_ref_addresses_one_durable_manifest(
     assert recorded["artifact_type"] == INPUT_BINDING_MANIFEST_ARTIFACT
     assert recorded["schema_version"] == INPUT_BINDING_SCHEMA_VERSION
 
-    artifact_record = environment.service.repository.read_artifact_record(recorded["sha256"])
+    artifact_record = environment.service.repository.artifacts.read_artifact_record(recorded["sha256"])
     assert artifact_record is not None
     assert artifact_record["artifact_type"] == INPUT_BINDING_MANIFEST_ARTIFACT
     assert artifact_record["durable"] is True
@@ -321,5 +321,5 @@ def test_recorded_binding_ref_addresses_one_durable_manifest(
         source_bytes = (Path(environment.repo) / entry["repo_path"]).read_bytes()
         assert entry["content_sha256"] == hashlib.sha256(source_bytes).hexdigest()
         assert entry["byte_size"] == len(source_bytes)
-        assert environment.service.repository.artifact_is_durable(entry["content_ref"]["sha256"])
+        assert environment.service.repository.artifacts.artifact_is_durable(entry["content_ref"]["sha256"])
         assert environment.service.artifacts.read_bytes(dict(entry["content_ref"])) == source_bytes

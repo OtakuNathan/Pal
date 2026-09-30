@@ -103,7 +103,7 @@ class RoleAssignmentGateway:
         return self.service.repository
 
     def authorize(self, access_token: str) -> dict[str, Any]:
-        return self.repository.authenticate_role_attempt(access_token)
+        return self.repository.role_access.authenticate_role_attempt(access_token)
 
     def call(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(params or {})
@@ -112,7 +112,7 @@ class RoleAssignmentGateway:
             return self._submission_status(authenticated)
         if method == "harness_state_read":
             assignment = dict(authenticated["assignment"])
-            attempt = self.repository.read_role_attempt(
+            attempt = self.repository.role_attempts.read_role_attempt(
                 str(authenticated["attempt_id"])
             )
             if attempt is None:
@@ -124,7 +124,7 @@ class RoleAssignmentGateway:
             return {
                 "harness_id": harness_id,
                 "harness_generation": harness_generation,
-                "state": self.repository.read_role_harness_continuation(
+                "state": self.repository.role_attempts.read_role_harness_continuation(
                     session_id=str(assignment["session_id"]),
                     harness_id=harness_id,
                     harness_generation=harness_generation,
@@ -132,7 +132,7 @@ class RoleAssignmentGateway:
             }
         if method == "harness_state_write":
             assignment = dict(authenticated["assignment"])
-            state = self.repository.write_role_attempt_harness_state(
+            state = self.repository.role_attempts.write_role_attempt_harness_state(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(authenticated["attempt_id"]),
                 fencing_token=int(authenticated["fencing_token"]),
@@ -232,7 +232,7 @@ class RoleAssignmentGateway:
         self,
         authenticated: Mapping[str, Any],
     ) -> dict[str, Any]:
-        assignment = self.repository.read_role_assignment(
+        assignment = self.repository.role_assignments.read_role_assignment(
             str(dict(authenticated["assignment"])["assignment_id"])
         )
         if assignment is None:
@@ -342,7 +342,7 @@ class RoleAssignmentGateway:
             },
         )
         payload_hash = stable_hash(payload)
-        self.repository.record_role_submission(
+        self.repository.role_submissions.record_role_submission(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=str(authenticated["attempt_id"]),
             fencing_token=int(authenticated["fencing_token"]),
@@ -414,7 +414,7 @@ class RoleAssignmentGateway:
 
         if str(assignment.get("aggregate_type") or "") != AggregateType.DAG_NODE_RUN.value:
             return
-        node = self.repository.read_snapshot(
+        node = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             str(assignment.get("aggregate_id") or ""),
         )
@@ -504,7 +504,7 @@ class RoleAssignmentGateway:
 
         assignment = dict(authenticated["assignment"])
         binding_sha = str(assignment.get("family_binding_sha") or "").strip()
-        binding_record = self.repository.read_artifact_record(binding_sha)
+        binding_record = self.repository.artifacts.read_artifact_record(binding_sha)
         if binding_record is None:
             raise ValueError("pinned FamilyBindingArtifact is unavailable")
         if str(binding_record.get("artifact_type") or "") != "FamilyBindingArtifact":
@@ -561,7 +561,7 @@ class RoleAssignmentGateway:
             family_execution_adapter(binding.get("execution_adapter"))
             == SOFTWARE_GIT_ADAPTER
         ):
-            revision = self.repository.read_snapshot(
+            revision = self.repository.snapshots.read_snapshot(
                 AggregateType.ARCHITECTURE_REVISION,
                 str(assignment["aggregate_id"]),
             )
@@ -622,7 +622,7 @@ class RoleAssignmentGateway:
         # revisions must not consume GraphIR generations.  Compile the
         # candidate against the next append-only GraphIR slot; installation
         # still performs the transactional gap/identity check.
-        previous_graph = self.repository.read_graph_generation(
+        previous_graph = self.repository.cycles.read_graph_generation(
             graph_id=str(assignment["workflow_id"]),
         )
         graph_generation = (
@@ -688,7 +688,7 @@ class RoleAssignmentGateway:
         self,
         authenticated: Mapping[str, Any],
     ) -> dict[str, Any]:
-        attempt = self.repository.read_role_attempt(
+        attempt = self.repository.role_attempts.read_role_attempt(
             str(authenticated["attempt_id"])
         )
         prompt_ref = dict((attempt or {}).get("prompt_pack_ref") or {})
@@ -741,7 +741,7 @@ class RoleAssignmentGateway:
             reason = policy.reason or "the command is not classified as read-only"
             raise ValueError(f"only classified read-only Git commands are allowed: {reason}")
 
-        attempt = self.repository.read_role_attempt(str(authenticated["attempt_id"]))
+        attempt = self.repository.role_attempts.read_role_attempt(str(authenticated["attempt_id"]))
         prompt_ref = dict((attempt or {}).get("prompt_pack_ref") or {})
         if not prompt_ref.get("sha256"):
             raise ValueError("role prompt pack is unavailable for Git scope validation")

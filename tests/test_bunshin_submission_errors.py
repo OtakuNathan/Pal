@@ -101,7 +101,7 @@ def test_pinned_manager_state_error_is_not_content_validation():
     from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
 
     gateway = RoleAssignmentGateway(Mock())
-    gateway.service.repository.read_artifact_record.return_value = None
+    gateway.service.repository.artifacts.read_artifact_record.return_value = None
     with pytest.raises(ValueError) as caught:
         gateway._compile_architect_submission(
             {'assignment': {'family_binding_sha': 'missing'}},

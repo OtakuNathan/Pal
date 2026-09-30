@@ -528,8 +528,8 @@ def _artifact_store(workspace: Mapping[str, Any]) -> Any:
     if gateway is not None:
         return RoleGatewayArtifactStore(gateway)
     repository = BunshinV2Repository(root)
-    repository.ensure_schema()
-    return ContentAddressedArtifactStore(root, repository)
+    repository.database.ensure_schema()
+    return ContentAddressedArtifactStore(root, repository.artifacts)
 
 
 def _runtime_root(workspace: Mapping[str, Any]) -> Path:

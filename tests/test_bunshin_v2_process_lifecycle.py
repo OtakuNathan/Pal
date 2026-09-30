@@ -15,7 +15,7 @@ from unittest.mock import patch
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.v2.contracts import LeaseConflict
 from pal.bunshin.v2.coroutine_runtime import CoroutineRunSemaphore
-from pal.bunshin.v2.execution import WorkspaceLockRegistry
+from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.v2.process_lifecycle import RoleProcessShell, WorkerProcessOwner
 from pal.shared import BunshinInvocationPack
 
@@ -228,7 +228,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             process=process,
         )
         self.manager.runs[state.run_id] = state
-        self.manager.v2_service.repository.record_worker_event = lambda _event: None
+        self.manager.v2_service.repository.role_events.record_worker_event = lambda _event: None
         self.manager.events.queue_event = lambda _event: None
 
         await self.manager._publish_v2_worker_event(
@@ -252,7 +252,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_event_history_is_written_only_for_logged_role_run(self) -> None:
         recorded: list[dict[str, object]] = []
-        self.manager.v2_service.repository.record_worker_event = (
+        self.manager.v2_service.repository.role_events.record_worker_event = (
             lambda event: recorded.append(dict(event))
         )
         self.manager.events.queue_event = lambda _event: None
@@ -294,7 +294,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         recorded: list[dict[str, object]] = []
-        self.manager.v2_service.repository.record_worker_event = (
+        self.manager.v2_service.repository.role_events.record_worker_event = (
             lambda event: recorded.append(dict(event))
         )
         self.manager.events.queue_event = lambda _event: None
@@ -343,7 +343,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             process=process,
         )
         self.manager.runs[state.run_id] = state
-        self.manager.v2_service.repository.record_worker_event = lambda _event: None
+        self.manager.v2_service.repository.role_events.record_worker_event = lambda _event: None
         self.manager.events.queue_event = lambda _event: None
 
         self.manager._unregister_v2_broker_run(state.run_id, True)
@@ -361,15 +361,16 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_leader_returncode_does_not_make_owned_worker_reusable(self) -> None:
         orchestrator = self.manager.v2_semantic_orchestrator
-        orchestrator._process_owners["inv-owned"] = SimpleNamespace(
+        orchestrator.processes.register(SimpleNamespace(
+            invocation_id="inv-owned", run_id="run-owned",
             process=SimpleNamespace(returncode=0)
-        )
-        orchestrator.repository.assert_fencing_token = (
+        ))
+        orchestrator.repository.leases.assert_fencing_token = (
             lambda _resource, _owner, _token: None
         )
 
         with self.assertRaisesRegex(LeaseConflict, "already active"):
-            await orchestrator._reuse_or_retire_effect_lease(
+            await orchestrator.components.role_leases.reuse_or_retire_effect_lease(
                 resource_key="node:owned:writer",
                 owner_id="inv-owned",
                 fencing_token=1,

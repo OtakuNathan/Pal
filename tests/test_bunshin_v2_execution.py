@@ -20,21 +20,14 @@ from pal.bunshin.v2.adapters import (
     ArtifactBundleAdapter,
 )
 from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateVersionConflict, StaleFencingToken
-from pal.bunshin.v2.execution import (
-    CandidateSnapshotService,
-    DagScheduler,
-    DependencyIntegrationConflict,
-    ExecutionCompiler,
-    NodeRunJournal,
-    UnitWorkViewBuilder,
-    WorkspaceLockRegistry,
-    prepare_node_dependency_baseline,
-    prepare_node_verification_baseline,
-    format_workspace_process_holders,
-    workspace_process_holders,
-    workspace_content_fingerprint,
-    _validate_skeleton_candidate_paths,
-)
+from pal.bunshin.v2.candidate_snapshots import CandidateSnapshotService, _validate_skeleton_candidate_paths
+from pal.bunshin.v2.dag_scheduling import DagScheduler
+from pal.bunshin.v2.execution_models import DependencyIntegrationConflict, NodeRunJournal
+from pal.bunshin.v2.epoch_compilation import ExecutionCompiler
+from pal.bunshin.v2.work_views import UnitWorkViewBuilder
+from pal.bunshin.v2.dependency_baselines import prepare_node_dependency_baseline, prepare_node_verification_baseline
+from pal.bunshin.v2.execution_values import workspace_content_fingerprint
+from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry, format_workspace_process_holders, workspace_process_holders
 from pal.bunshin.v2.task_ledger import TaskLedgerService
 from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
 from pal.bunshin.v2.graph_protocol import RoleBinding
@@ -185,7 +178,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_exec_"))
         self.repository = BunshinV2Repository(self.runtime_root)
-        self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository)
+        self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.contracts = ContractArtifactAccess(self.store, self.repository)
 
     def tearDown(self) -> None:
@@ -297,13 +290,13 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         )
 
     def _bind_workflow(self, workflow_id: str, *, profile: str = "generic") -> None:
-        if self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id) is not None:
+        if self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id) is not None:
             return
         family_binding_ref = BunshinV2Catalog(
             self.runtime_root,
             self.store,
         ).publish_family_binding(profile)
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id=workflow_id,
@@ -330,7 +323,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         self._bind_workflow(workflow_id)
         artifact = dict(self.store.read_json(manifest_ref))
         contract = dict(artifact["contract"])
-        latest_graph = self.repository.read_graph_generation(
+        latest_graph = self.repository.cycles.read_graph_generation(
             graph_id=workflow_id
         )
         graph = GraphCompiler().compile(
@@ -389,7 +382,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_family_strategy",
             manifest_ref=misleading_schema,
         )
-        module = self.repository.read_snapshot(
+        module = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             compilation.unit_node_ids["a"],
         )
@@ -911,7 +904,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_topological_merge",
             manifest_ref=reordered,
         )
-        sink = self.repository.read_snapshot(
+        sink = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN, compilation.sink_node_id
         )
         assert sink is not None
@@ -942,12 +935,12 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
             source_epoch_id=first.epoch_id,
         )
-        first_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids["a"])
-        second_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids["a"])
+        first_a = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids["a"])
+        second_a = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids["a"])
         self.assertEqual(first_a.payload["environment_fingerprint"], second_a.payload["environment_fingerprint"])
         for unit_id in ("a", "b"):
-            source = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids[unit_id])
-            reused = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids[unit_id])
+            source = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids[unit_id])
+            reused = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids[unit_id])
             self.assertEqual(reused.state, "ACCEPTED")
             self.assertEqual(reused.payload["candidate_digest"], source.payload["candidate_digest"])
             self.assertEqual(reused.payload["carried_forward_from_epoch_id"], first.epoch_id)
@@ -975,7 +968,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             source_epoch_id=first.epoch_id,
         )
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, third.unit_node_ids["a"]).state,
+            self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, third.unit_node_ids["a"]).state,
             "BLOCKED_BY_DEPS",
         )
 
@@ -1068,11 +1061,11 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             source_epoch_id=first.epoch_id,
         )
 
-        carried_a = self.repository.read_snapshot(
+        carried_a = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             replanned.unit_node_ids["a"],
         )
-        stale_b = self.repository.read_snapshot(
+        stale_b = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             replanned.unit_node_ids["b"],
         )
@@ -1095,7 +1088,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_view",
             manifest_ref=manifest,
         )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
+        node = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
         view_ref = UnitWorkViewBuilder(self.contracts).build(node)
         view = self.store.read_json(view_ref)
         self.assertNotIn("evidence", view)
@@ -1109,7 +1102,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         )
         self.assertEqual(view["context"]["constraints"], [])
 
-        consumer = self.repository.read_snapshot(
+        consumer = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             compilation.unit_node_ids["b"],
         )
@@ -1219,7 +1212,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_sink_view",
             manifest_ref=manifest,
         )
-        sink = self.repository.read_snapshot(
+        sink = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             compilation.sink_node_id,
         )
@@ -1242,14 +1235,14 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         )
 
     def test_journal_is_mutable_but_lease_fenced(self) -> None:
-        lease = self.repository.claim_lease("node:journal", "worker_journal", ttl_seconds=60)
+        lease = self.repository.leases.claim_lease("node:journal", "worker_journal", ttl_seconds=60)
         journal = NodeRunJournal(
             current_micro_plan=("write failing test", "implement"),
             files_inspected=("src/a/api.h",),
             last_safe_point="test written",
         )
         self.assertNotIn("tests_run", journal.to_dict())
-        generation = self.repository.update_node_journal(
+        generation = self.repository.role_events.update_node_journal(
             node_run_id="node_journal",
             workflow_id="wf_journal",
             lease_resource_key=lease.resource_key,
@@ -1260,7 +1253,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         )
         self.assertEqual(generation, 1)
         with self.assertRaises(AggregateVersionConflict):
-            self.repository.update_node_journal(
+            self.repository.role_events.update_node_journal(
                 node_run_id="node_journal",
                 workflow_id="wf_journal",
                 lease_resource_key=lease.resource_key,
@@ -1269,9 +1262,9 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                 expected_generation=0,
                 journal=journal.to_dict(),
             )
-        self.repository.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
+        self.repository.leases.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
         with self.assertRaises(StaleFencingToken):
-            self.repository.update_node_journal(
+            self.repository.role_events.update_node_journal(
                 node_run_id="node_journal",
                 workflow_id="wf_journal",
                 lease_resource_key=lease.resource_key,
@@ -1295,7 +1288,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         (worktree / "src" / "a.txt").write_text("candidate\n", encoding="utf-8")
 
         contract = self.store.put_json({"unit_id": "candidate"}, artifact_type="UnitContractArtifact")
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_candidate",
@@ -1312,7 +1305,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             )
         )
 
-        lease = self.repository.claim_lease("worktree:node_candidate", "worker_candidate", ttl_seconds=60)
+        lease = self.repository.leases.claim_lease("worktree:node_candidate", "worker_candidate", ttl_seconds=60)
         locks = WorkspaceLockRegistry()
         workspace_fingerprint = _lock_candidate_workspace(
             locks,
@@ -1371,7 +1364,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             artifact_type="ArchitectureSkeletonModuleContractArtifact",
         )
         node_id = "node_cumulative_candidate"
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_cumulative_candidate",
@@ -1387,7 +1380,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                 },
             )
         )
-        lease = self.repository.claim_lease(
+        lease = self.repository.leases.claim_lease(
             f"worktree:{node_id}", "worker_cumulative", ttl_seconds=60
         )
         locks = WorkspaceLockRegistry()
@@ -1461,7 +1454,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
         base_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
         (worktree / "outside.txt").write_text("not owned\n", encoding="utf-8")
         contract = self.store.put_json({"unit_id": "reject"}, artifact_type="UnitContractArtifact")
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_reject_candidate",
@@ -1477,7 +1470,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                 },
             )
         )
-        lease = self.repository.claim_lease("worktree:node_reject_candidate", "worker_reject", ttl_seconds=60)
+        lease = self.repository.leases.claim_lease("worktree:node_reject_candidate", "worker_reject", ttl_seconds=60)
         locks = WorkspaceLockRegistry()
         service = CandidateSnapshotService(self.repository, self.store, locks)
 
@@ -1550,7 +1543,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                 contract = self.store.put_json(
                     {"module_name": name}, artifact_type="ArchitectureSkeletonModuleContractArtifact"
                 )
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="CREATE_NODE_RUN",
                         workflow_id="wf_skeleton_candidate",
@@ -1566,7 +1559,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                         },
                     )
                 )
-                lease = self.repository.claim_lease(f"worktree:{node_id}", f"worker_{index}", ttl_seconds=60)
+                lease = self.repository.leases.claim_lease(f"worktree:{node_id}", f"worker_{index}", ttl_seconds=60)
                 locks = WorkspaceLockRegistry()
                 workspace_fingerprint = _lock_candidate_workspace(
                     locks,
@@ -1600,7 +1593,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
                 self.assertFalse(locks.is_held(node_id))
 
     def _accept_node(self, node_id: str) -> None:
-        initial = self.repository.read_snapshot(
+        initial = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             node_id,
         )
@@ -1618,7 +1611,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             input_fingerprint=f"{node_id}:producer",
         )
         dummy = self.store.put_json({"node_id": node_id}, artifact_type="TestArtifact")
-        initial = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        initial = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         worktree = Path(str(initial.payload["workspace_path"]))
         unit_id = str(initial.payload.get("unit_id") or "module")
         candidate_path = worktree / "src" / unit_id / "candidate.txt"
@@ -1708,8 +1701,8 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             ("REVIEW_PASSED", {"verification_artifact_ref": dummy.to_dict()}),
         ]
         for action_type, payload in sequence:
-            snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-            self.repository.dispatch(
+            snapshot = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=snapshot.workflow_id,

@@ -44,70 +44,74 @@ def test_ledger_content_not_version_or_call_count_drives_progress(tmp_path):
         {"kind": "task", "summary": "resolve finding: f1", "status": "pending"}
     ]}
     with patch("pal.bunshin.v2.work_items.read_work_items", return_value=ledger):
-        before = runner._completion_gate_progress_marker()
+        before = runner.components.completion.completion_gate_progress_marker()
         ledger["version"] = 2
         ledger["items"][0]["item_id"] = "new-bookkeeping-id"
-        runner._observed_tool_call_count = 200
-        assert runner._completion_gate_progress_marker() == before
+        runner.components.tool_session.observed_tool_call_count = 200
+        assert runner.components.completion.completion_gate_progress_marker() == before
         ledger["items"][0]["status"] = "completed"
-        completed = runner._completion_gate_progress_marker()
+        completed = runner.components.completion.completion_gate_progress_marker()
         assert completed != before
         ledger["items"].append({"kind": "finding", "status": "completed",
                                 "summary": "Missing handoff", "finding": {"priority": "p1"}})
-        finding = runner._completion_gate_progress_marker()
+        finding = runner.components.completion.completion_gate_progress_marker()
         assert finding != completed
         ledger["items"][-1]["finding"]["priority"] = "p2"
-        assert runner._completion_gate_progress_marker() != finding
+        assert runner.components.completion.completion_gate_progress_marker() != finding
 
 
 def test_same_path_changed_content_counts_but_touch_does_not(tmp_path):
     runner = runner_at(tmp_path)
     output = tmp_path / "architect.yaml"
-    before = runner._completion_gate_progress_marker()
+    before = runner.components.completion.completion_gate_progress_marker()
     output.write_text("first")
-    created = runner._completion_gate_progress_marker()
+    created = runner.components.completion.completion_gate_progress_marker()
     assert created != before
     output.touch()
-    assert runner._completion_gate_progress_marker() == created
+    assert runner.components.completion.completion_gate_progress_marker() == created
     output.write_text("other")
-    assert runner._completion_gate_progress_marker() != created
+    assert runner.components.completion.completion_gate_progress_marker() != created
     output.unlink()
-    assert runner._completion_gate_progress_marker() == before
+    assert runner.components.completion.completion_gate_progress_marker() == before
 
 
 def test_registered_staged_artifact_content_is_observed(tmp_path):
     runner = runner_at(tmp_path)
     path = tmp_path / "stage.json"
     path.write_text("first")
-    runner.produced_artifacts.append({"stage_path": str(path), "path": str(tmp_path / "final.json")})
-    before = runner._completion_gate_progress_marker()
+    runner.components.artifacts.produced_artifacts.append({"stage_path": str(path), "path": str(tmp_path / "final.json")})
+    before = runner.components.completion.completion_gate_progress_marker()
     path.write_text("other")
-    assert runner._completion_gate_progress_marker() != before
+    assert runner.components.completion.completion_gate_progress_marker() != before
 
 
 def test_unavailable_ledger_does_not_masquerade_as_stagnation(tmp_path):
     runner = runner_at(tmp_path, bound=True)
     with patch("pal.bunshin.v2.work_items.read_work_items", side_effect=RuntimeError("gateway unavailable")):
         with pytest.raises(RuntimeError, match="gateway unavailable"):
-            runner._completion_gate_progress_marker()
+            runner.components.completion.completion_gate_progress_marker()
 
 
 def test_read_only_activity_cannot_keep_missing_submission_alive(tmp_path):
     class ReadingRunner(BunshinRunner):
         calls = 0
 
-        async def _run_agent_loop(self, bundle, *, forced_retry_note=""):
+        async def run_agent_loop(self, bundle, *, forced_retry_note=""):
             self.calls += 1
-            self._observed_tool_call_count += 5
+            self.components.tool_session.observed_tool_call_count += 5
             return "done"
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.components.agent_session.run_agent_loop = self.run_agent_loop
 
     base = runner_at(tmp_path)
     base.pack.workspace["output_policy"] = {"primary_artifact": "expected.json"}
     runner = ReadingRunner(runtime_root=tmp_path, pack=base.pack,
                            bunshin_id="test", run_id="test", write_event=noop, read_decision=noop)
-    asyncio.run(runner._run_v2_invocation(None))
+    asyncio.run(runner.components.invocation.run_v2_invocation(None))
     assert runner.calls == 2
-    assert runner.blocked_kind == "completion_gate_stalled"
+    assert runner.components.status.blocked_kind == "completion_gate_stalled"
 
 
 def test_checklist_progress_allows_another_completion_attempt(tmp_path):
@@ -118,17 +122,21 @@ def test_checklist_progress_allows_another_completion_attempt(tmp_path):
     class RepairingRunner(BunshinRunner):
         calls = 0
 
-        async def _run_agent_loop(self, bundle, *, forced_retry_note=""):
+        async def run_agent_loop(self, bundle, *, forced_retry_note=""):
             self.calls += 1
             if self.calls == 2:
                 ledger["items"][0]["status"] = "completed"
             return "done"
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.components.agent_session.run_agent_loop = self.run_agent_loop
 
     base = runner_at(tmp_path, bound=True)
     base.pack.workspace["output_policy"] = {"primary_artifact": "expected.json"}
     runner = RepairingRunner(runtime_root=tmp_path, pack=base.pack,
                             bunshin_id="test", run_id="test", write_event=noop, read_decision=noop)
     with patch("pal.bunshin.v2.work_items.read_work_items", return_value=ledger):
-        asyncio.run(runner._run_v2_invocation(None))
+        asyncio.run(runner.components.invocation.run_v2_invocation(None))
     assert runner.calls == 3
-    assert runner.blocked_kind == "completion_gate_stalled"
+    assert runner.components.status.blocked_kind == "completion_gate_stalled"

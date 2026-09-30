@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin.compact import BunshinCompactionPolicy
-from pal.bunshin.runner import _BunshinLLMRuntimeAdapter
+from pal.bunshin.runner_components.adapters import _BunshinLLMRuntimeAdapter
 from pal.core.compaction import CompactionClockKind, CompactionEngine, CompactionSnapshot
 from pal.core.continuity_compaction import COMPACTION_SCHEMA_CONTINUITY_V1, CONTINUITY_FIELDS
 from pal.core.pal_compaction import PalCompactionPolicy
@@ -142,7 +142,7 @@ def test_bunshin_anchor_retention_and_adapter_are_scope_isolated_and_bounded():
         coordinator.plan(request, context, OpenAIResponseCodec().encode(request, context))
     base = SimpleNamespace(prompt_cache_eligible_anchor_request=coordinator.eligible_anchor_request,
                            prompt_cache_confirmed_anchor_request=coordinator.confirmed_anchor_request)
-    adapter = _BunshinLLMRuntimeAdapter(None, base, None)
+    adapter = _BunshinLLMRuntimeAdapter(None, None, base, None)
     for scope, request in requests.items():
         anchor = adapter.prompt_cache_eligible_anchor_request(logical_scope_id=scope)
         assert anchor["request"] == replace(request, messages=request.messages[:-1])

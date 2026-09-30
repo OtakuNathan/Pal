@@ -6,7 +6,7 @@ from typing import Any
 
 from pal.lsp.ipc import LspManagerClient
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.execution import workspace_process_holders
+from pal.bunshin.v2.workspace_resources import workspace_process_holders
 from pal.bunshin.v2.orchestration import reconcile_control_requests
 from pal.bunshin.v2.replan import architecture_revision_finding_value
 from pal.bunshin.v2.service import BunshinV2WorkflowService
@@ -23,7 +23,7 @@ class BunshinV2Recovery:
     def recover(self) -> dict[str, Any]:
         recovered_leases: list[str] = []
         triaged: list[str] = []
-        for lease in self.repository.expired_leases():
+        for lease in self.repository.leases.expired_leases():
             metadata = dict(lease.get("metadata") or {})
             worktree = Path(str(metadata.get("workspace_path") or "")) if metadata.get("workspace_path") else None
             if worktree is not None:
@@ -37,7 +37,7 @@ class BunshinV2Recovery:
             holders = workspace_process_holders(worktree) if worktree is not None else ()
             clean_worktree = not holders
             if clean_worktree:
-                if self.repository.clear_expired_lease(
+                if self.repository.leases.clear_expired_lease(
                     str(lease["resource_key"]),
                     int(lease["fencing_token"]),
                 ):
@@ -47,8 +47,8 @@ class BunshinV2Recovery:
             aggregate_id = str(metadata.get("aggregate_id") or "")
             if aggregate_type_text and aggregate_id:
                 aggregate_type = AggregateType(aggregate_type_text)
-                snapshot = self.repository.read_snapshot(aggregate_type, aggregate_id)
-                if snapshot is not None and "ENTER_TRIAGE" in self.repository.engine.legal_actions(aggregate_type, snapshot.state):
+                snapshot = self.repository.snapshots.read_snapshot(aggregate_type, aggregate_id)
+                if snapshot is not None and "ENTER_TRIAGE" in self.repository.transitions.legal_actions(aggregate_type, snapshot.state):
                     failure_ref = self.service.artifacts.put_json(
                         {
                             "reason": "expired worker still has observable workspace holders",
@@ -59,7 +59,7 @@ class BunshinV2Recovery:
                         },
                         artifact_type="RecoveryFailureArtifact",
                     )
-                    self.repository.dispatch(
+                    self.repository.transitions.dispatch(
                         ActionEnvelope(
                             action_type="ENTER_TRIAGE",
                             workflow_id=snapshot.workflow_id,
@@ -78,10 +78,10 @@ class BunshinV2Recovery:
         reconciled_replans = self._recover_duplicate_replans()
         reconciled_replans.extend(self._resume_replan_collections())
         reconciled_controls: list[str] = []
-        for workflow_id in self.repository.workflow_ids():
-            before = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        for workflow_id in self.repository.queries.workflow_ids():
+            before = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
             reconcile_control_requests(self.repository, workflow_id)
-            after = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+            after = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
             if before is not None and after is not None and after.version != before.version:
                 reconciled_controls.append(workflow_id)
             triaged.extend(
@@ -91,17 +91,17 @@ class BunshinV2Recovery:
                     actor="bunshin-v2-recovery",
                 )
             )
-        rebuilt = self.repository.rebuild_workflow_projections()
-        orphaned = self.repository.orphaned_workflow_ids()
+        rebuilt = self.repository.projections.rebuild_workflow_projections()
+        orphaned = self.repository.queries.orphaned_workflow_ids()
         for workflow_id in orphaned:
-            projection = self.repository.read_workflow_projection(workflow_id) or {}
+            projection = self.repository.queries.read_workflow_projection(workflow_id) or {}
             aggregate_type_text = str(projection.get("active_aggregate_type") or AggregateType.WORKFLOW.value)
             aggregate_id = str(projection.get("active_aggregate_id") or workflow_id)
             aggregate_type = AggregateType(aggregate_type_text)
-            snapshot = self.repository.read_snapshot(aggregate_type, aggregate_id)
-            if snapshot is None or "ENTER_TRIAGE" not in self.repository.engine.legal_actions(aggregate_type, snapshot.state):
+            snapshot = self.repository.snapshots.read_snapshot(aggregate_type, aggregate_id)
+            if snapshot is None or "ENTER_TRIAGE" not in self.repository.transitions.legal_actions(aggregate_type, snapshot.state):
                 continue
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="ENTER_TRIAGE",
                     workflow_id=workflow_id,
@@ -126,8 +126,8 @@ class BunshinV2Recovery:
     def _recover_duplicate_replans(self) -> list[str]:
         reconciled: list[str] = []
         terminal_revision_states = {"ACCEPTED", "REJECTED", "SUPERSEDED", "CANCELLED"}
-        for workflow_id in self.repository.workflow_ids():
-            snapshots = list(self.repository.list_workflow_snapshots(workflow_id))
+        for workflow_id in self.repository.queries.workflow_ids():
+            snapshots = list(self.repository.queries.list_workflow_snapshots(workflow_id))
             revisions = [
                 item
                 for item in snapshots
@@ -147,8 +147,8 @@ class BunshinV2Recovery:
                 if len(active) <= 1:
                     continue
                 if any(item.state == "ACCEPTED" for item in group):
-                    epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-                    if epoch is not None and "ENTER_TRIAGE" in self.repository.engine.legal_actions(
+                    epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+                    if epoch is not None and "ENTER_TRIAGE" in self.repository.transitions.legal_actions(
                         AggregateType.EXECUTION_EPOCH,
                         epoch.state,
                     ):
@@ -162,7 +162,7 @@ class BunshinV2Recovery:
                             },
                             artifact_type="DuplicateAcceptedReplanArtifact",
                         )
-                        self.repository.dispatch(
+                        self.repository.transitions.dispatch(
                             ActionEnvelope(
                                 action_type="ENTER_TRIAGE",
                                 workflow_id=workflow_id,
@@ -182,16 +182,16 @@ class BunshinV2Recovery:
                 if not finding_entries:
                     continue
                 for revision in active:
-                    self.repository.expire_human_decisions_for_revision(
+                    self.repository.human_decisions.expire_human_decisions_for_revision(
                         workflow_id=workflow_id,
                         architecture_revision_id=revision.aggregate_id,
                     )
-                    if "REQUEST_CANCEL" not in self.repository.engine.legal_actions(
+                    if "REQUEST_CANCEL" not in self.repository.transitions.legal_actions(
                         AggregateType.ARCHITECTURE_REVISION,
                         revision.state,
                     ):
                         continue
-                    self.repository.dispatch(
+                    self.repository.transitions.dispatch(
                         ActionEnvelope(
                             action_type="REQUEST_CANCEL",
                             workflow_id=workflow_id,
@@ -202,10 +202,10 @@ class BunshinV2Recovery:
                             idempotency_key=f"recover-duplicate-replan:{revision.aggregate_id}:{revision.version}",
                         )
                     )
-                epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+                epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
                 if epoch is None or epoch.state != "REPLAN_REQUIRED":
                     continue
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="REOPEN_REPLAN_COLLECTION",
                         workflow_id=workflow_id,
@@ -222,14 +222,14 @@ class BunshinV2Recovery:
 
     def _resume_replan_collections(self) -> list[str]:
         resumed: list[str] = []
-        for workflow_id in self.repository.workflow_ids():
-            for snapshot in self.repository.list_workflow_snapshots(workflow_id):
+        for workflow_id in self.repository.queries.workflow_ids():
+            for snapshot in self.repository.queries.list_workflow_snapshots(workflow_id):
                 if (
                     snapshot.aggregate_type != AggregateType.EXECUTION_EPOCH
                     or snapshot.state != "REPLAN_COLLECTING"
                 ):
                     continue
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="RECONCILE_REPLAN_COLLECTION",
                         workflow_id=workflow_id,
@@ -250,7 +250,7 @@ class BunshinV2Recovery:
             if not isinstance(finding_value, dict) or not finding_value.get("sha256"):
                 continue
             finding_ref = dict(finding_value)
-            record = self.repository.read_artifact_record(str(finding_ref["sha256"]))
+            record = self.repository.artifacts.read_artifact_record(str(finding_ref["sha256"]))
             refs = [finding_ref]
             if record and str(record.get("artifact_type") or "") == "ArchitectureFindingBatchArtifact":
                 payload = dict(self.service.artifacts.read_json(finding_ref))

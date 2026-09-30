@@ -140,7 +140,7 @@ class BoundInputDeliveryHarness(unittest.TestCase):
         return self.service.start_workflow(_start_request("task-bound", references))
 
     def workflow_snapshot(self, workflow_id: str) -> AggregateSnapshot:
-        snapshot = self.service.repository.read_snapshot(
+        snapshot = self.service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW, workflow_id
         )
         self.assertIsNotNone(snapshot)
@@ -171,7 +171,7 @@ class BoundInputDeliveryHarness(unittest.TestCase):
             workflow.aggregate_id,
             {"execution_adapter": ARTIFACT_BUNDLE_ADAPTER},
         )
-        return orchestrator._bind_role_attempt_inputs(
+        return orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
             workflow=workflow,
             request={},
             workspace={"repo_path": str(workspace)},
@@ -194,7 +194,7 @@ class BoundInputDeliveryHarness(unittest.TestCase):
             workflow.aggregate_id,
             {"execution_adapter": "software_git.v2"},
         )
-        return orchestrator._bind_role_attempt_inputs(
+        return orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
             workflow=workflow,
             request={},
             workspace={"repo_path": str(repo_root), "workspace_binding": "canonical"},
@@ -234,7 +234,7 @@ class GeneralFamilyHappyPathTests(BoundInputDeliveryHarness):
             ).hexdigest()
             self.assertEqual(record.content_sha256, expected)
             self.assertTrue(
-                self.service.repository.artifact_is_durable(record.content_ref.sha256)
+                self.service.repository.artifacts.artifact_is_durable(record.content_ref.sha256)
             )
 
         # The same immutable ref is carried by the durable request artifact.
@@ -317,12 +317,12 @@ class MissingOrEscapingInputFailsClosedTests(BoundInputDeliveryHarness):
         self.assertIsInstance(caught.exception, ValueError)
         self.assertIn(needle, str(caught.exception))
         self.assertIsNone(
-            self.service.repository.read_snapshot(
+            self.service.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW, "wf-task-bound"
             )
         )
         self.assertFalse(
-            self.service.repository.search_workflows(
+            self.service.repository.search.search_workflows(
                 actor_id="pal", task_id="task-bound", include_terminal=True, limit=10
             )
         )
@@ -417,7 +417,7 @@ class RecoveryRematerializesIdenticalInputsTests(BoundInputDeliveryHarness):
         # immutable manifest recorded before the restart.
         restarted = BunshinV2WorkflowService(self.runtime_root)
         replacement = SemanticOrchestrator(restarted)
-        workflow_after = restarted.repository.read_snapshot(
+        workflow_after = restarted.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW, "wf-task-bound"
         )
         self.assertEqual(

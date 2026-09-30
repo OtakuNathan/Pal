@@ -974,7 +974,7 @@ class GraphExecutionTests(unittest.TestCase):
                 )
                 for name, cycle in execution.cycles.items()
             }
-            coordinator.repository.store_graph_execution(
+            coordinator.repository.cycles.store_graph_execution(
                 workflow_id=source.graph_id,
                 execution=replace(
                     execution,
@@ -1021,7 +1021,7 @@ class GraphExecutionTests(unittest.TestCase):
                 )
                 for name, cycle in execution.cycles.items()
             }
-            coordinator.repository.store_graph_execution(
+            coordinator.repository.cycles.store_graph_execution(
                 workflow_id=source.graph_id,
                 execution=replace(
                     execution,
@@ -1062,11 +1062,11 @@ class GraphExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             repository = BunshinV2Repository(Path(root))
             graph = self._graph()
-            repository.store_graph_generation(
+            repository.cycles.store_graph_generation(
                 workflow_id="workflow-framepipe",
                 graph=graph,
             )
-            restored = repository.read_graph_generation(
+            restored = repository.cycles.read_graph_generation(
                 graph_id=graph.graph_id,
             )
             self.assertEqual(restored, graph)
@@ -1074,12 +1074,12 @@ class GraphExecutionTests(unittest.TestCase):
                 GraphExecution.start(graph),
                 repair_barriers={"delivery": ("decoder",)},
             )
-            repository.store_graph_execution(
+            repository.cycles.store_graph_execution(
                 workflow_id="workflow-framepipe",
                 execution=execution,
             )
             self.assertEqual(
-                repository.read_graph_execution(
+                repository.cycles.read_graph_execution(
                     workflow_id="workflow-framepipe"
                 ),
                 execution,
@@ -1092,7 +1092,7 @@ class GraphExecutionTests(unittest.TestCase):
             graph = self._graph()
 
             with patch.object(
-                repository,
+                type(repository.cycles),
                 "store_graph_execution",
                 side_effect=RuntimeError("crash before execution projection"),
             ):
@@ -1103,13 +1103,13 @@ class GraphExecutionTests(unittest.TestCase):
                     )
 
             self.assertIsNone(
-                repository.read_graph_generation(
+                repository.cycles.read_graph_generation(
                     graph_id=graph.graph_id,
                     generation=graph.generation,
                 )
             )
             self.assertIsNone(
-                repository.read_graph_execution(
+                repository.cycles.read_graph_execution(
                     workflow_id=graph.graph_id,
                     generation=graph.generation,
                 )
@@ -1453,7 +1453,7 @@ class GraphExecutionTests(unittest.TestCase):
                 graph=graph,
             )
             self.repository = coordinator.repository
-            self.repository.store_graph_execution(
+            self.repository.cycles.store_graph_execution(
                 workflow_id=graph.graph_id,
                 execution=replace(
                     installed.execution,
@@ -1509,7 +1509,7 @@ class GraphExecutionTests(unittest.TestCase):
                     ),
                 ]
 
-            repository.list_workflow_snapshots = lambda _workflow_id: snapshots(
+            repository.queries.list_workflow_snapshots = lambda _workflow_id: snapshots(
                 "PAUSED"
             )
             reconcile_control_requests(repository, graph.graph_id)
@@ -1519,7 +1519,7 @@ class GraphExecutionTests(unittest.TestCase):
                 NodeCycleState.PAUSED,
             )
 
-            repository.list_workflow_snapshots = lambda _workflow_id: snapshots(
+            repository.queries.list_workflow_snapshots = lambda _workflow_id: snapshots(
                 "ACTIVE"
             )
             reconcile_control_requests(repository, graph.graph_id)

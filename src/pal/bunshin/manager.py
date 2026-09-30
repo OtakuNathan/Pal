@@ -387,8 +387,8 @@ class BunshinManager:
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
         self.v2_service = BunshinV2WorkflowService(Path(self.runtime_root))
         try:
-            self.v2_service.repository.reconcile_terminal_role_runtime()
-            self.v2_service.repository.reconcile_role_session_checkpoints()
+            self.v2_service.repository.role_maintenance.reconcile_terminal_role_runtime()
+            self.v2_service.repository.role_maintenance.reconcile_role_session_checkpoints()
         except Exception:
             # Reconciliation is a leak repair, never a reason to make the
             # Manager unavailable. Durable state remains authoritative and a
@@ -682,7 +682,7 @@ class BunshinManager:
             self._v2_wake_event.set()
             return result
         if method == "v2_rebind_task_delivery":
-            result = self.v2_service.repository.rebind_task_delivery(
+            result = self.v2_service.repository.delivery_bindings.rebind_task_delivery(
                 task_id=str(params.get("task_id") or ""),
                 binding=dict(params.get("binding") or {}),
             )
@@ -695,7 +695,7 @@ class BunshinManager:
             return result
         if method == "v2_ack_task_delivery":
             return {
-                "acknowledged": self.v2_service.repository.acknowledge_task_delivery(
+                "acknowledged": self.v2_service.repository.deliveries.acknowledge_task_delivery(
                     str(params.get("delivery_id") or "")
                 )
             }
@@ -704,21 +704,21 @@ class BunshinManager:
         if method == "v2_list_task_delivery_parts":
             return {
                 "parts": list(
-                    self.v2_service.repository.delivered_task_delivery_parts(
+                    self.v2_service.repository.deliveries.delivered_task_delivery_parts(
                         str(params.get("delivery_id") or "")
                     )
                 )
             }
         if method == "v2_ack_task_delivery_part":
             return {
-                "acknowledged": self.v2_service.repository.acknowledge_task_delivery_part(
+                "acknowledged": self.v2_service.repository.deliveries.acknowledge_task_delivery_part(
                     str(params.get("delivery_id") or ""),
                     str(params.get("part_key") or ""),
                 )
             }
         if method == "v2_defer_task_delivery":
             return {
-                "deferred": self.v2_service.repository.defer_task_delivery(
+                "deferred": self.v2_service.repository.deliveries.defer_task_delivery(
                     str(params.get("delivery_id") or ""),
                     error=str(params.get("error") or ""),
                 )
@@ -942,7 +942,7 @@ class BunshinManager:
                 dependencies = {}
                 if str(binding.get("aggregate_type") or "") == AggregateType.DAG_NODE_RUN.value:
                     dependencies = {"node_run_id": str(binding.get("aggregate_id") or "")}
-                    node = self.v2_service.repository.read_snapshot(
+                    node = self.v2_service.repository.snapshots.read_snapshot(
                         AggregateType.DAG_NODE_RUN, str(binding.get("aggregate_id") or ""))
                     if node is not None:
                         dependencies = {"node_run_id": node.aggregate_id,
@@ -1004,7 +1004,7 @@ class BunshinManager:
             else bool(self.prompt_log_enabled)
         )
         if debug_enabled:
-            self.v2_service.repository.record_worker_event(item)
+            self.v2_service.repository.role_events.record_worker_event(item)
         elif (
             kind == "progress"
             and str(event_payload.get("phase") or "")
@@ -1014,7 +1014,7 @@ class BunshinManager:
             # prompt logging. Persist only the non-content round fields when
             # debug history is disabled so batching metrics remain available
             # without retaining prompts, previews, tool arguments, or routes.
-            self.v2_service.repository.record_worker_event(
+            self.v2_service.repository.role_events.record_worker_event(
                 {
                     **item,
                     "payload": {
@@ -1050,7 +1050,7 @@ class BunshinManager:
         if not isinstance(dependency, dict):
             return False
         repository = self.v2_service.repository
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, str(source.get("workflow_id") or ""))
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, str(source.get("workflow_id") or ""))
         if workflow is None or str(workflow.payload.get("task_id") or "") != str(source.get("task_id") or ""):
             return False
         epoch_id = str(dependency.get("epoch_id") or "")
@@ -1058,7 +1058,7 @@ class BunshinManager:
             return False
         node_id = str(dependency.get("node_run_id") or "")
         if node_id:
-            node = repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            node = repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
             if node is None or node.workflow_id != workflow.aggregate_id or node.state in {"STALE", "SUPERSEDED", "CANCELLED"}:
                 return False
             if epoch_id and str(node.payload.get("epoch_id") or "") != epoch_id:
@@ -1075,7 +1075,7 @@ class BunshinManager:
     ) -> None:
         item = dict(event)
         workflow_id = str(item.get("workflow_id") or "")
-        workflow = self.v2_service.repository.read_snapshot(
+        workflow = self.v2_service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             workflow_id,
         )
@@ -1088,7 +1088,7 @@ class BunshinManager:
             )
             return
         item["task_id"] = task_id
-        row = self.v2_service.repository.enqueue_task_delivery(
+        row = self.v2_service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id=workflow_id,
             event_kind=str(item.get("event_kind") or ""),
@@ -1100,7 +1100,7 @@ class BunshinManager:
     def _pending_task_delivery_events(self) -> list[dict[str, Any]]:
         return [
             _delivery_event_from_row(row)
-            for row in self.v2_service.repository.list_pending_task_deliveries(limit=200)
+            for row in self.v2_service.repository.deliveries.list_pending_task_deliveries(limit=200)
         ]
 
     def _replay_waiting_task_deliveries(
@@ -1111,7 +1111,7 @@ class BunshinManager:
     ) -> None:
         candidates: set[tuple[str, str]] = {
             (workflow_id, "architecture_review_pending")
-            for workflow_id in self.v2_service.repository.pending_human_review_workflows(
+            for workflow_id in self.v2_service.repository.delivery_bindings.pending_human_review_workflows(
                 task_id
             )
         }
@@ -1120,7 +1120,7 @@ class BunshinManager:
                 continue
             binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
             workflow_id = str(binding.get("workflow_id") or "")
-            workflow = self.v2_service.repository.read_snapshot(
+            workflow = self.v2_service.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 workflow_id,
             )
@@ -1131,14 +1131,14 @@ class BunshinManager:
             if state.pending_approval:
                 candidates.add((workflow_id, "approval_requested"))
         for workflow_id, event_kind in sorted(candidates):
-            source = self.v2_service.repository.latest_task_delivery(
+            source = self.v2_service.repository.deliveries.latest_task_delivery(
                 task_id=task_id,
                 workflow_id=workflow_id,
                 event_kind=event_kind,
             )
             if source is None or str(source.get("status") or "") == "pending":
                 continue
-            replay = self.v2_service.repository.replay_task_delivery(
+            replay = self.v2_service.repository.deliveries.replay_task_delivery(
                 delivery_id=str(source["delivery_id"]),
                 dedup_key=(
                     f"rebind-replay:{task_id}:{binding_version}:"
@@ -1723,7 +1723,7 @@ class BunshinManager:
 
     async def _host_tool_runtime_bundle(self) -> Any:
         if self._host_tool_bundle is None:
-            from pal.bunshin.runner import build_slim_bunshin_runtime
+            from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
 
             self._host_tool_bundle = await asyncio.to_thread(
                 build_slim_bunshin_runtime,
@@ -1812,7 +1812,7 @@ class BunshinManager:
             "llm_usage_unreported_count": usage_unreported,
             "llm_usage": self._llm_usage_ledger.snapshot(),
             "event_subscriber_count": len(self.event_subscribers),
-            "bunshin_db_path": str(self.v2_service.repository.db_path),
+            "bunshin_db_path": str(self.v2_service.repository.database.db_path),
             "log_sink": current_service_log_sink_description(),
             "catalog_generation": str(self.catalog.snapshot()["generation"]),
             "harness_generation": (
@@ -1839,7 +1839,7 @@ class BunshinManager:
         """Set the debug policy snapshot used by future role processes."""
 
         self.prompt_log_enabled = bool(params.get("enabled"))
-        self.v2_semantic_orchestrator.prompt_log_enabled = self.prompt_log_enabled
+        self.v2_semantic_orchestrator.set_prompt_log_enabled(self.prompt_log_enabled)
         return {"ok": True, "enabled": self.prompt_log_enabled}
 
     def request_shutdown(

@@ -341,9 +341,7 @@ class BunshinManagerProvider:
         if not delivery_id:
             return item
         task_id = str(item.get("task_id") or "")
-        binding_row = BunshinV2WorkflowService(
-            self.runtime_root
-        ).repository.read_task_delivery(task_id)
+        binding_row = BunshinV2WorkflowService(self.runtime_root).repository.delivery_bindings.read_task_delivery(task_id)
         binding = dict((binding_row or {}).get("current") or {})
         route = self._live_route_for_binding(binding)
         if route is None:

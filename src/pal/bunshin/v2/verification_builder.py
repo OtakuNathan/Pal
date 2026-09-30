@@ -860,7 +860,7 @@ def _submit(
         runtime_root = Path(str(workspace["runtime_root"]))
         submission_store = ContentAddressedArtifactStore(
             runtime_root,
-            BunshinV2Repository(runtime_root),
+            BunshinV2Repository(runtime_root).artifacts,
         )
         local_submission_ref = submission_store.put_json(
             output,

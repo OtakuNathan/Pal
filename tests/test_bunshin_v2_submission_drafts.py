@@ -20,7 +20,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal-v2-draft-"))
         self.repository = BunshinV2Repository(self.root)
-        self.repository.ensure_schema()
+        self.repository.database.ensure_schema()
         self.resource = "node:node_1:writer"
         self.invocation = "inv_worker_1"
 
@@ -37,7 +37,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
         )
 
     def claim(self) -> int:
-        return self.repository.claim_lease(
+        return self.repository.leases.claim_lease(
             self.resource,
             self.invocation,
             ttl_seconds=60,
@@ -93,7 +93,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             return payload, {"updated": True}
 
         store.mutate(first, operation_key="call-1", request={}, reducer=reducer)
-        self.repository.release_lease(self.resource, self.invocation, first_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, first_token)
         second_token = self.claim()
 
         inherited = store.read(self.context(token=second_token))
@@ -109,7 +109,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
         )
         self.assertEqual(inherited.source_draft_key, first.draft_key)
 
-        self.repository.release_lease(self.resource, self.invocation, second_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, second_token)
         third_token = self.claim()
         changed = store.read(
             self.context(token=third_token, fingerprint="input-b"),
@@ -136,10 +136,10 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 {"recorded": True},
             ),
         )
-        self.repository.release_lease(self.resource, self.invocation, first_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, first_token)
         replacement_resource = "node:node_1:replacement"
         replacement_invocation = "inv_worker_2"
-        replacement_lease = self.repository.claim_lease(
+        replacement_lease = self.repository.leases.claim_lease(
             replacement_resource,
             replacement_invocation,
             ttl_seconds=60,
@@ -195,7 +195,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 {"recorded": True},
             ),
         )
-        self.repository.release_lease(self.resource, self.invocation, first_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, first_token)
         second_token = self.claim()
         second = SubmissionDraftContext(
             workflow_id="wf_1",
@@ -229,7 +229,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 reducer=lambda payload: (payload, {}),
             )
 
-        self.repository.release_lease(self.resource, self.invocation, first_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, first_token)
         self.claim()
         with self.assertRaisesRegex(ValueError, "stale fencing token"):
             store.read(stale)
@@ -248,7 +248,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 "input_fingerprint": first.input_fingerprint,
             },
         }
-        artifact_store = ContentAddressedArtifactStore(self.root, self.repository)
+        artifact_store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         submission_ref = artifact_store.put_json(
             submission,
             artifact_type="VerifierRoleSubmissionArtifact",
@@ -268,7 +268,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             submission_payload_hash=payload_hash,
         )
 
-        self.repository.release_lease(self.resource, self.invocation, first_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, first_token)
         second_token = self.claim()
         receipt = store.latest_submitted(
             workflow_id=first.workflow_id,
@@ -297,7 +297,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 input_fingerprint="changed-input",
             )
         )
-        self.repository.release_lease(self.resource, self.invocation, second_token)
+        self.repository.leases.release_lease(self.resource, self.invocation, second_token)
 
     def test_workspace_binding_requires_explicit_authoring_contract_version(self) -> None:
         binding = {

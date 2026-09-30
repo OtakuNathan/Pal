@@ -124,7 +124,7 @@ class _Clock:
 
 def _executor(host: str, ports: _Ports) -> TurnExecutor:
     if host == "bunshin":
-        from pal.bunshin.runner import BunshinCompactionPolicy
+        from pal.bunshin.compact import BunshinCompactionPolicy
 
         policy = BunshinCompactionPolicy()
     else:

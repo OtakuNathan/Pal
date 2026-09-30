@@ -30,10 +30,10 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-role-protocol-"))
         self.repository = BunshinV2Repository(self.runtime_root)
-        self.repository.ensure_schema()
+        self.repository.database.ensure_schema()
         self.artifacts = ContentAddressedArtifactStore(
             self.runtime_root,
-            self.repository,
+            self.repository.artifacts,
         )
         self.input_ref = self.artifacts.put_json(
             {"module": "router"},
@@ -47,7 +47,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             {"status": "candidate_ready"},
             artifact_type="CandidateRoleSubmissionArtifact",
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="workflow-router",
@@ -57,7 +57,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=0,
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id="workflow-router",
@@ -67,7 +67,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=1,
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="workflow-router",
@@ -82,7 +82,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 },
             )
         )
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -120,7 +120,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}", encoding="utf-8")
 
-        retired = self.repository.reconcile_role_session_checkpoints()
+        retired = self.repository.role_maintenance.reconcile_role_session_checkpoints()
 
         self.assertEqual(retired, ("orphan-session",))
         self.assertTrue(store.current_path("session-router").is_file())
@@ -145,7 +145,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             path.mkdir(parents=True, exist_ok=True)
             (path / "scratch.txt").write_text("derived", encoding="utf-8")
 
-        retired = self.repository.reconcile_terminal_role_runtime()
+        retired = self.repository.role_maintenance.reconcile_terminal_role_runtime()
 
         self.assertEqual(
             set(retired),
@@ -160,7 +160,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
     def test_architecture_reviewer_cannot_retire_before_cycle_is_terminal(self) -> None:
         revision_id = "arch-reviewer-root"
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="workflow-router",
@@ -179,7 +179,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             revision_id,
             {"architecture_cycle_id": revision_id},
         )
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id=session_id,
             workflow_id="workflow-router",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -196,22 +196,22 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             ValueError,
             "architecture role session cannot complete while its correction cycle is open",
         ):
-            self.repository.complete_role_session(session_id)
+            self.repository.role_sessions.complete_role_session(session_id)
 
         self.assertEqual(
-            self.repository.read_role_session(session_id)["status"],
+            self.repository.role_sessions.read_role_session(session_id)["status"],
             RoleSessionState.ACTIVE.value,
         )
 
     def start_attempt(self, assignment_id: str) -> tuple[dict, int]:
-        attempt = self.repository.claim_role_assignment(assignment_id)
-        lease = self.repository.claim_lease(
+        attempt = self.repository.role_assignments.claim_role_assignment(assignment_id)
+        lease = self.repository.leases.claim_lease(
             f"assignment:{assignment_id}",
             attempt["attempt_id"],
             ttl_seconds=120,
             metadata={"workflow_id": "workflow-router"},
         )
-        started = self.repository.start_role_attempt(
+        started = self.repository.role_attempts.start_role_attempt(
             assignment_id=assignment_id,
             attempt_id_value=attempt["attempt_id"],
             lease_resource_key=f"assignment:{assignment_id}",
@@ -221,8 +221,8 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         return started, lease.fencing_token
 
     def test_assignment_submission_is_durable_and_idempotent(self) -> None:
-        first = self.repository.create_role_assignment(self.request())
-        replay = self.repository.create_role_assignment(self.request())
+        first = self.repository.role_assignments.create_role_assignment(self.request())
+        replay = self.repository.role_assignments.create_role_assignment(self.request())
         self.assertEqual(replay["assignment_id"], first["assignment_id"])
 
         attempt, fencing_token = self.start_attempt(first["assignment_id"])
@@ -231,7 +231,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             "payload": {"producer_report_ref": self.submission_ref.to_dict()},
         }
         payload_hash = stable_hash({"status": "candidate_ready"})
-        receipt = self.repository.record_role_submission(
+        receipt = self.repository.role_submissions.record_role_submission(
             assignment_id=first["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -239,7 +239,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             payload_hash=payload_hash,
             settlement_action=action,
         )
-        replayed = self.repository.record_role_submission(
+        replayed = self.repository.role_submissions.record_role_submission(
             assignment_id=first["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -249,19 +249,19 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
         self.assertEqual(replayed.to_dict(), receipt.to_dict())
 
-        settled = self.repository.settle_role_assignment(
+        settled = self.repository.role_submissions.settle_role_assignment(
             assignment_id=first["assignment_id"],
             submission_payload_hash=payload_hash,
         )
         self.assertEqual(settled["state"], "settled")
-        completed = self.repository.read_latest_completed_role_harness_attempt(
+        completed = self.repository.role_attempts.read_latest_completed_role_harness_attempt(
             session_id="session-router",
             harness_id="pal",
         )
         self.assertIsNotNone(completed)
         self.assertEqual(completed["attempt_id"], attempt["attempt_id"])
         self.assertEqual(
-            self.repository.settle_role_assignment(
+            self.repository.role_submissions.settle_role_assignment(
                 assignment_id=first["assignment_id"],
                 submission_payload_hash=payload_hash,
             )["state"],
@@ -269,9 +269,9 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
     def test_submission_does_not_require_input_read_receipts(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        receipt = self.repository.record_role_submission(
+        receipt = self.repository.role_submissions.record_role_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -282,34 +282,34 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(receipt.assignment_id, assignment["assignment_id"])
 
     def test_retry_creates_a_new_attempt_without_replacing_the_session(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         first, _fencing_token = self.start_attempt(assignment["assignment_id"])
-        failed = self.repository.queue_role_attempt_retry(
+        failed = self.repository.role_retries.queue_role_attempt_retry(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=first["attempt_id"],
             error_kind="process_lost",
             error_text="runner exited before submission",
         )
         self.assertEqual(failed["state"], "retry_queued")
-        second = self.repository.claim_role_assignment(assignment["assignment_id"])
+        second = self.repository.role_assignments.claim_role_assignment(assignment["assignment_id"])
         self.assertNotEqual(second["attempt_id"], first["attempt_id"])
         self.assertEqual(second["attempt_index"], 2)
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["session_id"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["session_id"],
             "session-router",
         )
 
     def test_claim_pins_the_harness_that_actually_runs_the_session(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
 
-        attempt = self.repository.claim_role_assignment(
+        attempt = self.repository.role_assignments.claim_role_assignment(
             assignment["assignment_id"],
             harness_id="pal",
             harness_generation="registry-generation-2",
         )
 
         self.assertEqual(attempt["harness_id"], "pal")
-        session = self.repository.read_role_session("session-router")
+        session = self.repository.role_sessions.read_role_session("session-router")
         self.assertIsNotNone(session)
         self.assertEqual(session["preferred_harness_id"], "pal")
         self.assertEqual(
@@ -367,7 +367,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
     def test_module_verifier_session_suspends_until_module_or_workflow_terminal(self) -> None:
         session_id = "session-router-candidate-a"
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id=session_id,
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -395,10 +395,10 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             execution_spec={"effect_type": "run_verifier_role"},
             submission_kind="verification",
         )
-        assignment = self.repository.create_role_assignment(request)
+        assignment = self.repository.role_assignments.create_role_assignment(request)
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
         payload_hash = stable_hash({"verdict": "FAIL"})
-        self.repository.record_role_submission(
+        self.repository.role_submissions.record_role_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -408,24 +408,24 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "non-terminal assignment"):
-            self.repository.complete_role_session(session_id)
+            self.repository.role_sessions.complete_role_session(session_id)
 
-        self.repository.settle_role_assignment(
+        self.repository.role_submissions.settle_role_assignment(
             assignment_id=assignment["assignment_id"],
             submission_payload_hash=payload_hash,
         )
         with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
-            self.repository.complete_role_session(session_id)
+            self.repository.role_sessions.complete_role_session(session_id)
         self.assertEqual(
-            self.repository.read_role_session(session_id)["status"],
+            self.repository.role_sessions.read_role_session(session_id)["status"],
             RoleSessionState.SUSPENDED.value,
         )
-        workflow = self.repository.read_snapshot(
+        workflow = self.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             "workflow-router",
         )
         assert workflow is not None
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="MARK_COMPLETED",
                 workflow_id="workflow-router",
@@ -441,19 +441,19 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         workspace_dir = runtime / "role-workspaces" / role_run_id(session_id)
         invocation_dir.mkdir(parents=True)
         workspace_dir.mkdir(parents=True)
-        completed_sessions = self.repository.complete_workflow_role_sessions(
+        completed_sessions = self.repository.role_maintenance.complete_workflow_role_sessions(
             "workflow-router"
         )
         self.assertIn(session_id, completed_sessions)
         self.assertEqual(
-            self.repository.read_role_session(session_id)["status"],
+            self.repository.role_sessions.read_role_session(session_id)["status"],
             RoleSessionState.COMPLETED.value,
         )
         self.assertFalse(invocation_dir.exists())
         self.assertFalse(workspace_dir.exists())
 
     def test_deleted_module_can_retire_its_logical_session(self) -> None:
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_EXECUTION_EPOCH",
                 workflow_id="workflow-router",
@@ -467,7 +467,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 },
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_EXECUTION",
                 workflow_id="workflow-router",
@@ -477,7 +477,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=1,
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="workflow-router",
@@ -494,18 +494,18 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            self.repository.complete_role_session(
+            self.repository.role_sessions.complete_role_session(
                 "session-router",
                 status="cancelled",
             )
         )
         self.assertEqual(
-            self.repository.read_role_session("session-router")["status"],
+            self.repository.role_sessions.read_role_session("session-router")["status"],
             RoleSessionState.CANCELLED.value,
         )
 
     def test_role_session_scope_is_immutable(self) -> None:
-        session = self.repository.ensure_role_session(
+        session = self.repository.role_sessions.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -520,7 +520,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(session["scope_kind"], "module")
         self.assertEqual(session["subject_key"], "router")
         with self.assertRaisesRegex(ValueError, "identity is immutable"):
-            self.repository.ensure_role_session(
+            self.repository.role_sessions.ensure_role_session(
                 session_id="session-router",
                 workflow_id="workflow-router",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -534,7 +534,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             )
 
     def test_failure_result_and_parent_triage_settle_atomically(self) -> None:
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="workflow-router",
@@ -545,7 +545,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 payload={"accepted_dependency_node_ids": []},
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_PRODUCING",
                 workflow_id="workflow-router",
@@ -560,7 +560,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 },
             )
         )
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, _fencing_token = self.start_attempt(assignment["assignment_id"])
         failure_payload = {
             "kind": "role_assignment_failed",
@@ -570,7 +570,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             failure_payload,
             artifact_type="RoleAssignmentFailureArtifact",
         )
-        receipt = self.repository.record_role_failure_result(
+        receipt = self.repository.role_retries.record_role_failure_result(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             error_kind="worker_process_failed",
@@ -580,14 +580,14 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             settlement_action={"action_type": "ROLE_FAILED"},
         )
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "result_recorded",
         )
         self.assertIsNone(
-            self.repository.read_lease(f"assignment:{assignment['assignment_id']}")
+            self.repository.leases.read_lease(f"assignment:{assignment['assignment_id']}")
         )
 
-        outcome = self.repository.dispatch(
+        outcome = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ROLE_FAILED",
                 workflow_id="workflow-router",
@@ -610,17 +610,17 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
         self.assertEqual(outcome.snapshot.state, "TRIAGE_REQUIRED")
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "settled",
         )
         self.assertEqual(
-            self.repository.read_role_attempt(attempt["attempt_id"])["status"],
+            self.repository.role_attempts.read_role_attempt(attempt["attempt_id"])["status"],
             "failed",
         )
         with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
-            self.repository.complete_role_session("session-router")
+            self.repository.role_sessions.complete_role_session("session-router")
 
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEST_CANCEL",
                 workflow_id="workflow-router",
@@ -630,7 +630,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=4,
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CANCEL_CONFIRMED",
                 workflow_id="workflow-router",
@@ -640,7 +640,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=5,
             )
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REJECT_WORKFLOW",
                 workflow_id="workflow-router",
@@ -651,13 +651,13 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            self.repository.complete_role_session(
+            self.repository.role_sessions.complete_role_session(
                 "session-router",
                 status="cancelled",
             )
         )
         self.assertEqual(
-            self.repository.read_role_session("session-router")["status"],
+            self.repository.role_sessions.read_role_session("session-router")["status"],
             "cancelled",
         )
 
@@ -686,11 +686,11 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 },
             ),
         ):
-            self.repository.dispatch(action)
-        assignment = self.repository.create_role_assignment(self.request())
+            self.repository.transitions.dispatch(action)
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
         payload_hash = stable_hash({"status": "candidate_ready"})
-        self.repository.record_role_submission(
+        self.repository.role_submissions.record_role_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -698,42 +698,40 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             payload_hash=payload_hash,
             settlement_action={"action_type": "SUBMIT_CANDIDATE"},
         )
-        self.repository.settle_role_assignment(
+        self.repository.role_submissions.settle_role_assignment(
             assignment_id=assignment["assignment_id"],
             submission_payload_hash=payload_hash,
         )
 
-        result = SemanticOrchestrator(
-            BunshinV2WorkflowService(self.runtime_root)
-        )._settle_background_role_failure(
+        result = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
             {
                 "effect_type": "run_implementation_role",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-router",
             },
-            self.repository.read_role_assignment(assignment["assignment_id"]),
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"]),
             RuntimeError("submission could not be applied"),
             exhausted=True,
         )
 
         self.assertEqual(result["status"], "triage_required")
         self.assertEqual(
-            self.repository.read_snapshot(
+            self.repository.snapshots.read_snapshot(
                 AggregateType.DAG_NODE_RUN,
                 "node-router",
             ).state,
             "TRIAGE_REQUIRED",
         )
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "settled",
         )
 
-        triaged = self.repository.read_snapshot(
+        triaged = self.repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             "node-router",
         )
-        resumed = self.repository.dispatch(
+        resumed = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="RESOLVE_TRIAGE",
                 workflow_id="workflow-router",
@@ -745,7 +743,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             )
         ).snapshot
         self.assertEqual(resumed.state, "QUEUED")
-        producing = self.repository.dispatch(
+        producing = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_PRODUCING",
                 workflow_id="workflow-router",
@@ -762,22 +760,20 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         ).snapshot
         self.assertEqual(producing.state, "PRODUCING")
 
-        replayed = SemanticOrchestrator(
-            BunshinV2WorkflowService(self.runtime_root)
-        )._settle_background_role_failure(
+        replayed = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
             {
                 "effect_type": "run_implementation_role",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-router",
             },
-            self.repository.read_role_assignment(assignment["assignment_id"]),
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"]),
             RuntimeError("submission still cannot be applied"),
             exhausted=True,
         )
 
         self.assertEqual(replayed["status"], "triage_required")
         self.assertEqual(
-            self.repository.read_snapshot(
+            self.repository.snapshots.read_snapshot(
                 AggregateType.DAG_NODE_RUN,
                 "node-router",
             ).state,
@@ -785,7 +781,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
     def test_assignment_key_cannot_be_reused_for_different_inputs(self) -> None:
-        self.repository.create_role_assignment(self.request())
+        self.repository.role_assignments.create_role_assignment(self.request())
         changed = RoleAssignmentRequest(
             **{
                 **self.request().to_payload(),
@@ -795,11 +791,11 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "different inputs"):
-            self.repository.create_role_assignment(changed)
+            self.repository.role_assignments.create_role_assignment(changed)
 
     def test_session_cannot_cross_aggregate_ownership(self) -> None:
         with self.assertRaisesRegex(ValueError, "identity is immutable"):
-            self.repository.ensure_role_session(
+            self.repository.role_sessions.ensure_role_session(
                 session_id="session-router",
                 workflow_id="workflow-router",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -818,19 +814,19 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "outside its workflow"):
-            self.repository.create_role_assignment(request)
+            self.repository.role_assignments.create_role_assignment(request)
 
     def test_produce_and_repair_are_modes_of_one_implementation_session(self) -> None:
-        produce = self.repository.create_role_assignment(
+        produce = self.repository.role_assignments.create_role_assignment(
             self.request(key="router-produce")
         )
-        self.repository.cancel_role_assignments(
+        self.repository.role_cancellation.cancel_role_assignments(
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router",
             reason="produce assignment settled before repair",
         )
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -842,7 +838,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             scope_kind="module",
             subject_key="router",
         )
-        repair = self.repository.create_role_assignment(
+        repair = self.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 **{
                     **self.request(key="router-repair").to_payload(),
@@ -852,12 +848,12 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
         self.assertEqual(produce["session_id"], repair["session_id"])
         self.assertEqual(
-            self.repository.read_role_session("session-router")["role"],
+            self.repository.role_sessions.read_role_session("session-router")["role"],
             "implementation",
         )
 
     def test_stale_node_preserves_its_role_session_for_requeue(self) -> None:
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="workflow-router",
@@ -868,10 +864,10 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 payload={"accepted_dependency_node_ids": []},
             )
         )
-        assignment = self.repository.create_role_assignment(
+        assignment = self.repository.role_assignments.create_role_assignment(
             self.request(key="router-before-stale")
         )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="MARK_STALE",
                 workflow_id="workflow-router",
@@ -882,7 +878,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 payload={"stale_reason_ref": self.input_ref.to_dict()},
             )
         )
-        effects = self.repository.claim_outbox("stale-test", limit=10)
+        effects = self.repository.outbox_claims.claim_outbox("stale-test", limit=10)
         stale_effect = next(
             effect
             for effect in effects
@@ -895,17 +891,17 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "cancelled",
         )
         self.assertEqual(
-            self.repository.read_role_session("session-router")["status"],
+            self.repository.role_sessions.read_role_session("session-router")["status"],
             "suspended",
         )
         with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
-            self.repository.complete_role_session("session-router")
+            self.repository.role_sessions.complete_role_session("session-router")
 
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEUE_STALE",
                 workflow_id="workflow-router",
@@ -920,35 +916,35 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 },
             )
         )
-        resumed = self.repository.create_role_assignment(
+        resumed = self.repository.role_assignments.create_role_assignment(
             self.request(key="router-after-stale")
         )
         self.assertEqual(resumed["session_id"], "session-router")
 
     def test_attempt_access_token_is_scoped_and_fenced(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        token = self.repository.issue_role_attempt_access_token(
+        token = self.repository.role_access.issue_role_attempt_access_token(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
         )
-        authenticated = self.repository.authenticate_role_attempt(token)
+        authenticated = self.repository.role_access.authenticate_role_attempt(token)
         self.assertEqual(authenticated["assignment"]["assignment_id"], assignment["assignment_id"])
         self.assertEqual(authenticated["attempt_id"], attempt["attempt_id"])
         with self.assertRaisesRegex(ValueError, "invalid"):
-            self.repository.authenticate_role_attempt("not-the-token")
+            self.repository.role_access.authenticate_role_attempt("not-the-token")
 
     def test_aggregate_control_cancels_assignment_without_resurrection(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        token = self.repository.issue_role_attempt_access_token(
+        token = self.repository.role_access.issue_role_attempt_access_token(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
         )
 
-        cancelled = self.repository.cancel_role_assignments(
+        cancelled = self.repository.role_cancellation.cancel_role_assignments(
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router",
@@ -958,16 +954,16 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(len(cancelled), 1)
         self.assertEqual(cancelled[0]["state"], "cancelled")
         self.assertEqual(
-            self.repository.read_role_attempt(attempt["attempt_id"])["status"],
+            self.repository.role_attempts.read_role_attempt(attempt["attempt_id"])["status"],
             "cancelled",
         )
         self.assertIsNone(
-            self.repository.read_lease(f"assignment:{assignment['assignment_id']}")
+            self.repository.leases.read_lease(f"assignment:{assignment['assignment_id']}")
         )
         with self.assertRaisesRegex(ValueError, "invalid"):
-            self.repository.authenticate_role_attempt(token)
+            self.repository.role_access.authenticate_role_attempt(token)
 
-        repeated_failure = self.repository.queue_role_attempt_retry(
+        repeated_failure = self.repository.role_retries.queue_role_attempt_retry(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             error_kind="worker_process_failed",
@@ -976,9 +972,9 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(repeated_failure["state"], "cancelled")
 
     def test_aggregate_control_settles_an_already_recorded_result(self) -> None:
-        assignment = self.repository.create_role_assignment(self.request())
+        assignment = self.repository.role_assignments.create_role_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        self.repository.record_role_submission(
+        self.repository.role_submissions.record_role_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=fencing_token,
@@ -987,7 +983,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             settlement_action={"action_type": "SUBMIT_CANDIDATE"},
         )
 
-        settled = self.repository.cancel_role_assignments(
+        settled = self.repository.role_cancellation.cancel_role_assignments(
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router",
@@ -996,11 +992,11 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
         self.assertEqual(settled[0]["state"], "settled")
         self.assertEqual(
-            self.repository.read_role_attempt(attempt["attempt_id"])["status"],
+            self.repository.role_attempts.read_role_attempt(attempt["attempt_id"])["status"],
             "completed",
         )
         self.assertEqual(
-            self.repository.read_role_session("session-router")["status"],
+            self.repository.role_sessions.read_role_session("session-router")["status"],
             "suspended",
         )
         self.assertEqual(
@@ -1009,16 +1005,16 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
 
     def test_role_session_rejects_a_second_open_assignment(self) -> None:
-        preserved = self.repository.create_role_assignment(self.request(key="preserved"))
+        preserved = self.repository.role_assignments.create_role_assignment(self.request(key="preserved"))
         with self.assertRaisesRegex(ValueError, "already has an open assignment"):
-            self.repository.create_role_assignment(self.request(key="other"))
+            self.repository.role_assignments.create_role_assignment(self.request(key="other"))
         self.assertEqual(
-            self.repository.read_role_assignment(preserved["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(preserved["assignment_id"])["state"],
             "queued",
         )
 
     def test_business_action_and_submission_settlement_commit_atomically(self) -> None:
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="workflow-settlement",
@@ -1028,7 +1024,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 expected_version=0,
             )
         )
-        self.repository.ensure_role_session(
+        self.repository.role_sessions.ensure_role_session(
             session_id="session-settlement",
             workflow_id="workflow-settlement",
             aggregate_type=AggregateType.WORKFLOW,
@@ -1040,7 +1036,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             scope_kind=AggregateType.WORKFLOW.value,
             subject_key="workflow-settlement",
         )
-        assignment = self.repository.create_role_assignment(
+        assignment = self.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="atomic-settlement",
                 session_id="session-settlement",
@@ -1058,14 +1054,14 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
                 submission_kind="candidate",
             )
         )
-        attempt = self.repository.claim_role_assignment(assignment["assignment_id"])
-        lease = self.repository.claim_lease(
+        attempt = self.repository.role_assignments.claim_role_assignment(assignment["assignment_id"])
+        lease = self.repository.leases.claim_lease(
             f"assignment:{assignment['assignment_id']}",
             attempt["attempt_id"],
             ttl_seconds=120,
             metadata={"workflow_id": "workflow-settlement"},
         )
-        self.repository.start_role_attempt(
+        self.repository.role_attempts.start_role_attempt(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             lease_resource_key=f"assignment:{assignment['assignment_id']}",
@@ -1073,7 +1069,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             prompt_pack_ref=self.prompt_ref.to_dict(),
         )
         payload_hash = stable_hash({"status": "candidate_ready"})
-        self.repository.record_role_submission(
+        self.repository.role_submissions.record_role_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=lease.fencing_token,
@@ -1091,12 +1087,12 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             idempotency_key="start-from-worker",
         )
 
-        self.repository.dispatch(action)
+        self.repository.transitions.dispatch(action)
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "result_recorded",
         )
-        replay = self.repository.dispatch(
+        replay = self.repository.transitions.dispatch(
             action,
             role_assignment_id=assignment["assignment_id"],
             role_submission_payload_hash=payload_hash,
@@ -1104,7 +1100,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
         self.assertTrue(replay.duplicate)
         self.assertEqual(
-            self.repository.read_role_assignment(assignment["assignment_id"])["state"],
+            self.repository.role_assignments.read_role_assignment(assignment["assignment_id"])["state"],
             "settled",
         )
 

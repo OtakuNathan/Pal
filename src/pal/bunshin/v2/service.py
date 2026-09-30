@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.bunshin.v2.workflow_request_values import _normalize_workspace as _normalize_workspace
+from pal.bunshin.v2.workflow_request_values import _normalize_references as _normalize_references
+from pal.bunshin.v2.workflow_request_values import _normalize_skill_refs as _normalize_skill_refs
+from pal.bunshin.v2.workflow_request_values import _file_uri_path as _file_uri_path
+
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -77,7 +82,7 @@ class BunshinV2WorkflowService:
 
     def __post_init__(self) -> None:
         self.repository = BunshinV2Repository(Path(self.runtime_root))
-        self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository)
+        self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository.artifacts)
         self.contracts = ContractArtifactAccess(self.artifacts, self.repository)
         self.catalog = BunshinV2Catalog(Path(self.runtime_root), self.artifacts)
         self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
@@ -131,12 +136,12 @@ class BunshinV2WorkflowService:
         )
         delivery_binding = data.get("delivery_binding")
         result = (
-            self.repository.dispatch_task_with_delivery(
+            self.repository.transitions.dispatch_task_with_delivery(
                 create_action,
                 binding=dict(delivery_binding),
             )
             if isinstance(delivery_binding, Mapping) and delivery_binding
-            else self.repository.dispatch(create_action)
+            else self.repository.transitions.dispatch(create_action)
         )
         return {
             "status": "created",
@@ -178,7 +183,7 @@ class BunshinV2WorkflowService:
 
     def search_tasks(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
-        tasks = self.repository.search_tasks(
+        tasks = self.repository.search.search_tasks(
             query=str(data.get("query") or ""),
             task_id=str(data.get("task_id") or ""),
             family_id=str(data.get("family_id") or ""),
@@ -191,7 +196,7 @@ class BunshinV2WorkflowService:
     def search_task_ledger(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         actor = str(data.get("actor") or "pal")
-        tasks = self.repository.search_tasks(
+        tasks = self.repository.search.search_tasks(
             query=str(data.get("query") or ""),
             family_id=str(data.get("family_id") or ""),
             owner=actor,
@@ -200,7 +205,7 @@ class BunshinV2WorkflowService:
         )
         items: list[dict[str, Any]] = []
         for task in tasks:
-            workflows = self.repository.search_workflows(
+            workflows = self.repository.search.search_workflows(
                 actor_id=actor,
                 task_id=str(task["task_id"]),
                 include_terminal=True,
@@ -208,7 +213,7 @@ class BunshinV2WorkflowService:
             )
             workflow_items: list[dict[str, Any]] = []
             for workflow in workflows:
-                projection = self.repository.read_workflow_projection(str(workflow["workflow_id"])) or {}
+                projection = self.repository.queries.read_workflow_projection(str(workflow["workflow_id"])) or {}
                 workflow_items.append(
                     {
                         "name": str(workflow.get("workflow_name") or workflow.get("task_title") or ""),
@@ -238,7 +243,7 @@ class BunshinV2WorkflowService:
     def update_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         task_id = str(data.get("task_id") or "").strip()
-        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError(f"active task not found: {task_id}")
         if data.get("profile") and str(data["profile"]) != str(task.payload.get("primary_profile_id") or ""):
@@ -269,7 +274,7 @@ class BunshinV2WorkflowService:
             actor=str(data.get("actor") or "pal"),
             parent_ref=previous_ref,
         )
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="UPDATE_TASK_CONTEXT",
                 workflow_id="",
@@ -293,12 +298,12 @@ class BunshinV2WorkflowService:
     def archive_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         task_id = str(data.get("task_id") or "").strip()
-        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError(f"active task not found: {task_id}")
-        if self.repository.has_nonterminal_workflows_for_task(task_id):
+        if self.repository.queries.has_nonterminal_workflows_for_task(task_id):
             raise ValueError("task has nonterminal workflows")
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ARCHIVE_TASK",
                 workflow_id="",
@@ -343,17 +348,17 @@ class BunshinV2WorkflowService:
                     "one-click start_workflow requires delivery_binding"
                 )
             task_id = self._create_or_reuse_task_for_workflow(data)
-        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError("start_workflow requires an active task_id")
-        existing_delivery = self.repository.read_task_delivery(task_id)
+        existing_delivery = self.repository.delivery_bindings.read_task_delivery(task_id)
         if existing_delivery is None:
-            self.repository.bind_task_delivery(
+            self.repository.delivery_bindings.bind_task_delivery(
                 task_id=task_id,
                 binding=delivery_binding,
             )
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
-        active_for_task = self.repository.search_workflows(
+        active_for_task = self.repository.search.search_workflows(
             actor_id=actor,
             task_id=task_id,
             include_terminal=False,
@@ -419,7 +424,7 @@ class BunshinV2WorkflowService:
                 )
             requirements_ref = architecture_requirements_ref
         if requirements_ref:
-            record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
+            record = self.repository.artifacts.read_artifact_record(str(requirements_ref.get("sha256") or ""))
             if record is None or str(record.get("artifact_type") or "") != TASK_LEDGER_ARTIFACT:
                 raise ValueError(
                     "task truth must reference a durable TaskLedgerArtifact"
@@ -490,7 +495,7 @@ class BunshinV2WorkflowService:
         )
         from pal.bunshin.memory_binding import workflow_memory_binding
         with workflow_memory_binding(self.runtime_root, self.repository, workflow_id):
-            result = self.repository.dispatch(
+            result = self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="CREATE_WORKFLOW",
                     workflow_id=workflow_id,
@@ -515,7 +520,7 @@ class BunshinV2WorkflowService:
                     },
                 )
             )
-        task_rows = self.repository.search_tasks(
+        task_rows = self.repository.search.search_tasks(
             task_id=task_id,
             include_archived=True,
             limit=1,
@@ -589,7 +594,7 @@ class BunshinV2WorkflowService:
         if not workspace:
             raise ValueError("one-click start_workflow requires workspace when task_id is omitted")
         workspace_key = _workspace_key(workspace)
-        candidates = self.repository.search_tasks(
+        candidates = self.repository.search.search_tasks(
             query="",
             family_id=family_id,
             include_archived=False,
@@ -700,7 +705,7 @@ class BunshinV2WorkflowService:
             )
         public_name = str(data.get("name") or "").strip()
         if public_name:
-            self.repository.bind_artifact_alias(
+            self.repository.artifact_aliases.bind_artifact_alias(
                 actor_id=str(data.get("actor") or "pal"),
                 alias=public_name,
                 artifact_sha256=ref.sha256,
@@ -717,7 +722,7 @@ class BunshinV2WorkflowService:
         if not query:
             return ""
         candidates = list(
-            self.repository.search_tasks(
+            self.repository.search.search_tasks(
                 query=query,
                 owner=actor,
                 include_archived=False,
@@ -750,7 +755,7 @@ class BunshinV2WorkflowService:
         if query:
             task_id = self.resolve_task_selector(selector=query, actor=actor)
         else:
-            active_tasks = self.repository.search_tasks(
+            active_tasks = self.repository.search.search_tasks(
                 owner=actor,
                 include_archived=False,
                 limit=2,
@@ -763,7 +768,7 @@ class BunshinV2WorkflowService:
             detail = f" matching {query!r}" if query else ""
             raise ValueError(f"No active Bunshin Task{detail}.")
 
-        workflows = self.repository.search_workflows(
+        workflows = self.repository.search.search_workflows(
             actor_id=actor,
             task_id=task_id,
             include_terminal=True,
@@ -784,7 +789,7 @@ class BunshinV2WorkflowService:
         return task_id, workflow_id
 
     def resolve_artifact_name(self, *, name: str, actor: str) -> dict[str, Any]:
-        record = self.repository.resolve_artifact_alias(
+        record = self.repository.artifact_aliases.resolve_artifact_alias(
             actor_id=actor,
             alias=str(name or "").strip(),
         )
@@ -796,10 +801,10 @@ class BunshinV2WorkflowService:
         normalized_view = str(view or "status").strip().lower()
         if normalized_view not in {"status", "human_review"}:
             raise ValueError("workflow status view must be status or human_review")
-        projection = self.repository.read_workflow_projection(workflow_id)
+        projection = self.repository.queries.read_workflow_projection(workflow_id)
         if projection is None:
             return {"status": "not_found", "workflow_id": workflow_id}
-        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
         active_id = str(projection.get("active_aggregate_id") or "")
         active = next((item for item in snapshots if item.aggregate_id == active_id), None)
         workflow_state = str(projection["workflow_state"])
@@ -809,19 +814,19 @@ class BunshinV2WorkflowService:
             _public_triage_candidate(item)
             for item in triage_candidates
         ]
-        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         workflow_name = ""
         if workflow is not None:
             workflow_name = str(workflow.payload.get("workflow_name") or "")
             task_id = str(workflow.payload.get("task_id") or "")
-            tasks = self.repository.search_tasks(task_id=task_id, include_archived=True, limit=1) if task_id else ()
+            tasks = self.repository.search.search_tasks(task_id=task_id, include_archived=True, limit=1) if task_id else ()
             if not workflow_name:
                 workflow_name = str(tasks[0].get("title") or "") if tasks else ""
         waiting_for_user = bool(projection["waiting_for_user"])
         active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
-        invocation = self.repository.read_role_invocation(active_worker) if active_worker else None
+        invocation = self.repository.role_invocations.read_role_invocation(active_worker) if active_worker else None
         role_progress = (
-            self.repository.read_role_checklist_progress(active_worker)
+            self.repository.queries.read_role_checklist_progress(active_worker)
             if active_worker
             else None
         )
@@ -834,7 +839,7 @@ class BunshinV2WorkflowService:
             ),
             None,
         )
-        latest_event = self.repository.read_latest_workflow_event(workflow_id)
+        latest_event = self.repository.queries.read_latest_workflow_event(workflow_id)
         result = {
             "status": "ok",
             "workflow_id": workflow_id,
@@ -885,7 +890,7 @@ class BunshinV2WorkflowService:
         }
         result_ref = dict((workflow.payload if workflow is not None else {}).get("result_artifact_ref") or {})
         if result_ref.get("sha256"):
-            record = self.repository.read_artifact_record(str(result_ref["sha256"]))
+            record = self.repository.artifacts.read_artifact_record(str(result_ref["sha256"]))
             if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
                 result["delivery"] = dict(self.artifacts.read_json(result_ref))
         if normalized_view == "human_review":
@@ -901,7 +906,7 @@ class BunshinV2WorkflowService:
         workflow_id: str = "",
         view: str = "status",
     ) -> dict[str, Any]:
-        tasks = self.repository.search_tasks(
+        tasks = self.repository.search.search_tasks(
             task_id=str(task_id),
             include_archived=True,
             limit=1,
@@ -934,7 +939,7 @@ class BunshinV2WorkflowService:
         workflow_id: str,
         workflow: AggregateSnapshot | None,
     ) -> list[dict[str, Any]]:
-        nodes = list(self.repository.list_workflow_node_projections(workflow_id))
+        nodes = list(self.repository.queries.list_workflow_node_projections(workflow_id))
         if not nodes:
             return []
         current_epoch = str(
@@ -958,7 +963,7 @@ class BunshinV2WorkflowService:
             str(item.get("node_run_id") or ""): str(item.get("unit_id") or "")
             for item in nodes
         }
-        invocations = self.repository.list_workflow_role_invocations(workflow_id)
+        invocations = self.repository.queries.list_workflow_role_invocations(workflow_id)
         latest_roles: dict[tuple[str, str], dict[str, Any]] = {}
         for invocation in invocations:
             key = (
@@ -1004,7 +1009,7 @@ class BunshinV2WorkflowService:
         card_ref = dict(revision.payload.get("human_review_card_ref") or {})
         if not card_ref:
             card_ref = dict(
-                self.repository.read_latest_effect_result_artifact(
+                self.repository.artifacts.read_latest_effect_result_artifact(
                     workflow_id=revision.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision.aggregate_id,
@@ -1014,7 +1019,7 @@ class BunshinV2WorkflowService:
             )
         card: dict[str, Any] = {}
         if card_ref:
-            record = self.repository.read_artifact_record(str(card_ref.get("sha256") or ""))
+            record = self.repository.artifacts.read_artifact_record(str(card_ref.get("sha256") or ""))
             if record and str(record.get("artifact_type") or "") == "HumanReviewCardArtifact":
                 candidate = dict(self.artifacts.read_json(card_ref))
                 if human_review_card_is_current(
@@ -1044,7 +1049,7 @@ class BunshinV2WorkflowService:
         """Compile the complete current human-review document once."""
 
         manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
-        record = self.repository.read_artifact_record(
+        record = self.repository.artifacts.read_artifact_record(
             str(manifest_ref.get("sha256") or "")
         )
         if not record or str(record.get("artifact_type") or "") != CONTRACT_ARTIFACT:
@@ -1101,7 +1106,7 @@ class BunshinV2WorkflowService:
         workflow = self._workflow_snapshot(workflow_id)
         coordinator = WorkflowCoordinator(self.repository)
         with self.repository.transaction() as connection:
-            result = self.repository.dispatch(
+            result = (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_types[normalized],
                     workflow_id=workflow_id,
@@ -1113,17 +1118,16 @@ class BunshinV2WorkflowService:
                     idempotency_key=f"control:{workflow_id}:{workflow.version}:{normalized}",
                     payload={"reason": reason},
                 ),
-                _connection=connection,
             )
             if normalized == "pause":
                 coordinator.request_workflow_pause(
                     workflow_id=workflow_id,
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
             else:
                 coordinator.request_workflow_cancel(
                     workflow_id=workflow_id,
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
         return {"status": "accepted", "workflow_id": workflow_id, "state": result.snapshot.state}
 
@@ -1139,7 +1143,7 @@ class BunshinV2WorkflowService:
         if not summary:
             raise ValueError("execution restart requires a non-empty reason")
         workflow = self._workflow_snapshot(workflow_id)
-        if "REQUEST_EXECUTION_RESTART" not in self.repository.engine.legal_actions(
+        if "REQUEST_EXECUTION_RESTART" not in self.repository.transitions.legal_actions(
             AggregateType.WORKFLOW,
             workflow.state,
         ):
@@ -1167,7 +1171,7 @@ class BunshinV2WorkflowService:
             "operation": "review_then_execute",
             "reuse_candidates": False,
         }
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEST_EXECUTION_RESTART",
                 workflow_id=workflow_id,
@@ -1200,7 +1204,7 @@ class BunshinV2WorkflowService:
         workflow = self._workflow_snapshot(workflow_id)
         if workflow.state == "PAUSED":
             with self.repository.transaction() as connection:
-                result = self.repository.dispatch(
+                result = (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="RESUME",
                         workflow_id=workflow_id,
@@ -1211,11 +1215,10 @@ class BunshinV2WorkflowService:
                         expected_version=workflow.version,
                         idempotency_key=f"resume:{workflow_id}:{workflow.version}",
                     ),
-                    _connection=connection,
                 )
                 WorkflowCoordinator(self.repository).resume_workflow(
                     workflow_id=workflow_id,
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
             return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
         self.triage_orphaned_work_aggregates(
@@ -1236,7 +1239,7 @@ class BunshinV2WorkflowService:
             "status": "not_resumable",
             "workflow_id": workflow_id,
             "state": workflow.state,
-            "next_legal_actions": list(self.repository.engine.legal_actions(AggregateType.WORKFLOW, workflow.state)),
+            "next_legal_actions": list(self.repository.transitions.legal_actions(AggregateType.WORKFLOW, workflow.state)),
         }
 
     def resolve_triage(
@@ -1288,7 +1291,7 @@ class BunshinV2WorkflowService:
             )
         coordinator = WorkflowCoordinator(self.repository)
         with self.repository.transaction() as connection:
-            result = self.repository.dispatch(
+            result = (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="RESOLVE_TRIAGE",
                     workflow_id=workflow_id,
@@ -1300,13 +1303,12 @@ class BunshinV2WorkflowService:
                     idempotency_key=f"manual-resolve-triage:{selected.aggregate_id}:{selected.version}",
                     payload=resolution_payload,
                 ),
-                _connection=connection,
             )
             if selected.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
                 coordinator.resolve_triage(
                     workflow_id=workflow_id,
                     plan=True,
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
             elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
                 coordinator.resolve_triage(
@@ -1316,7 +1318,7 @@ class BunshinV2WorkflowService:
                         or selected.payload.get("unit_id")
                         or ""
                     ),
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
         return {
             "status": "triage_resolved",
@@ -1327,7 +1329,7 @@ class BunshinV2WorkflowService:
         }
 
     def _triage_candidates(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
-        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
         workflow = next(
             (
                 item
@@ -1337,7 +1339,7 @@ class BunshinV2WorkflowService:
             ),
             None,
         )
-        projection = self.repository.read_workflow_projection(workflow_id) or {}
+        projection = self.repository.queries.read_workflow_projection(workflow_id) or {}
         active_lineage_ids = _active_workflow_lineage_ids(
             workflow,
             snapshots,
@@ -1354,7 +1356,7 @@ class BunshinV2WorkflowService:
                         or item.aggregate_id in active_lineage_ids
                     )
                     and "RESOLVE_TRIAGE"
-                    in self.repository.engine.legal_actions(item.aggregate_type, item.state)
+                    in self.repository.transitions.legal_actions(item.aggregate_type, item.state)
                 ),
                 key=lambda item: (_triage_subject(item).casefold(), item.aggregate_type.value),
             )
@@ -1370,7 +1372,7 @@ class BunshinV2WorkflowService:
         """Move worker-owned aggregates with no durable executor into triage."""
 
         normalized: list[dict[str, str]] = []
-        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
         workflow = next(
             (
                 item
@@ -1380,7 +1382,7 @@ class BunshinV2WorkflowService:
             ),
             None,
         )
-        projection = self.repository.read_workflow_projection(workflow_id) or {}
+        projection = self.repository.queries.read_workflow_projection(workflow_id) or {}
         active_lineage_ids = _active_workflow_lineage_ids(
             workflow,
             snapshots,
@@ -1392,21 +1394,21 @@ class BunshinV2WorkflowService:
             required_states = LIVENESS_REQUIRED_STATES.get(item.aggregate_type, frozenset())
             if item.state not in required_states:
                 continue
-            if self.repository.aggregate_liveness_sources(
+            if self.repository.queries.aggregate_liveness_sources(
                 workflow_id=workflow_id,
                 aggregate_type=item.aggregate_type,
                 aggregate_id=item.aggregate_id,
                 lease_resource_key=str(item.payload.get("lease_resource_key") or ""),
             ):
                 continue
-            if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+            if "ENTER_TRIAGE" not in self.repository.transitions.legal_actions(
                 item.aggregate_type,
                 item.state,
             ):
                 continue
             coordinator = WorkflowCoordinator(self.repository)
             with self.repository.transaction() as connection:
-                result = self.repository.dispatch(
+                result = (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="ENTER_TRIAGE",
                         workflow_id=workflow_id,
@@ -1429,12 +1431,11 @@ class BunshinV2WorkflowService:
                             }
                         },
                     ),
-                    _connection=connection,
                 )
                 if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
                     coordinator.require_plan_triage(
                         workflow_id=workflow_id,
-                        _connection=connection,
+                        unit_of_work=connection,
                     )
                 elif item.aggregate_type == AggregateType.DAG_NODE_RUN:
                     coordinator.require_node_triage(
@@ -1444,7 +1445,7 @@ class BunshinV2WorkflowService:
                             or item.payload.get("unit_id")
                             or ""
                         ),
-                        _connection=connection,
+                        unit_of_work=connection,
                     )
             normalized.append(
                 {
@@ -1467,22 +1468,22 @@ class BunshinV2WorkflowService:
             raise ValueError("edit_instruction is valid only for decision=edit")
         token = str(data.get("decision_token") or "")
         if not token:
-            token = self.repository.reissue_human_decision_token(
+            token = self.repository.human_decisions.reissue_human_decision_token(
                 workflow_id=str(data.get("workflow_id") or ""),
                 actor_id=str(data.get("actor") or ""),
             )
-        token_record = self.repository.inspect_human_decision_token(token)
+        token_record = self.repository.human_decisions.inspect_human_decision_token(token)
         if token_record is None:
             raise ValueError("unknown human decision token")
         if str(token_record.get("status") or "") != "issued":
             raise ValueError("human decision token is stale or already consumed")
         revision_id = str(token_record["architecture_revision_id"])
         workflow_id = str(token_record["workflow_id"])
-        revision = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+        revision = self.repository.snapshots.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
         if revision is None:
             raise ValueError("architecture revision does not exist")
         manifest_sha = str(token_record["manifest_sha"])
-        record = self.repository.read_artifact_record(manifest_sha)
+        record = self.repository.artifacts.read_artifact_record(manifest_sha)
         if record is None:
             raise ValueError("human decision artifact does not exist")
         action_types = {"accept": "HUMAN_ACCEPT", "edit": "HUMAN_EDIT", "reject": "HUMAN_REJECT"}
@@ -1505,7 +1506,7 @@ class BunshinV2WorkflowService:
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
         with self.repository.transaction() as connection:
-            result = self.repository.dispatch(
+            result = (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_types[decision],
                     workflow_id=workflow_id,
@@ -1517,7 +1518,6 @@ class BunshinV2WorkflowService:
                     idempotency_key=f"human-decision:{token}",
                     payload=payload,
                 ),
-                _connection=connection,
             )
             WorkflowCoordinator(self.repository).transition_plan(
                 workflow_id=workflow_id,
@@ -1528,7 +1528,7 @@ class BunshinV2WorkflowService:
                     if decision == "edit"
                     else CycleAction.HUMAN_REJECTED
                 ),
-                _connection=connection,
+                unit_of_work=connection,
             )
         return {
             "status": "accepted",
@@ -1549,7 +1549,7 @@ class BunshinV2WorkflowService:
             raise ValueError(
                 "architect clarification requires workflow, revision, worker, and clarification ids"
             )
-        revision = self.repository.read_snapshot(
+        revision = self.repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             revision_id,
         )
@@ -1604,7 +1604,7 @@ class BunshinV2WorkflowService:
                 or []
             )
         )
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="TASK_REVISION_APPENDED",
                 workflow_id=workflow_id,
@@ -1634,7 +1634,7 @@ class BunshinV2WorkflowService:
         workflow = self._workflow_snapshot(workflow_id)
         if workflow.state not in {"COMPLETED", "REJECTED", "CANCELLED"}:
             raise ValueError("only terminal V2 workflows can be archived")
-        result = self.repository.dispatch(
+        result = self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ARCHIVE",
                 workflow_id=workflow_id,
@@ -1649,7 +1649,7 @@ class BunshinV2WorkflowService:
         return {"status": "archived", "workflow_id": workflow_id, "state": result.snapshot.state}
 
     def _workflow_snapshot(self, workflow_id: str) -> AggregateSnapshot:
-        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         if workflow is None:
             raise ValueError(f"workflow not found: {workflow_id}")
         return workflow
@@ -1658,7 +1658,7 @@ class BunshinV2WorkflowService:
         self,
         workflow: AggregateSnapshot,
     ) -> AggregateSnapshot:
-        snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
         accepted = tuple(
             item
             for item in snapshots
@@ -1675,7 +1675,7 @@ class BunshinV2WorkflowService:
             return preferred
         epoch_id = str(workflow.payload.get("execution_epoch_id") or "")
         epoch = (
-            self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
             if epoch_id
             else None
         )
@@ -1708,7 +1708,7 @@ class BunshinV2WorkflowService:
         trusted_required: bool,
         family_binding_ref: Mapping[str, Any],
     ) -> None:
-        record = self.repository.read_artifact_record(str(artifact_ref.get("sha256") or ""))
+        record = self.repository.artifacts.read_artifact_record(str(artifact_ref.get("sha256") or ""))
         if record is None or not record.get("durable"):
             raise ValueError("external artifact is not durable")
         if trusted_required and not bool(dict(record.get("metadata") or {}).get("trusted_internal_source")):
@@ -1760,7 +1760,7 @@ class BunshinV2WorkflowService:
         )
         validate_contract_payload(contract, definition=definition)
         requirements_ref = dict(artifact.get("requirements_ref") or {})
-        requirements_record = self.repository.read_artifact_record(
+        requirements_record = self.repository.artifacts.read_artifact_record(
             str(requirements_ref.get("sha256") or "")
         )
         if requirements_record is None or not requirements_record.get("durable"):
@@ -1772,7 +1772,7 @@ class BunshinV2WorkflowService:
             == SOFTWARE_GIT_ADAPTER
         ):
             bundle_ref = dict(artifact.get("git_bundle_ref") or {})
-            bundle_record = self.repository.read_artifact_record(
+            bundle_record = self.repository.artifacts.read_artifact_record(
                 str(bundle_ref.get("sha256") or "")
             )
             if bundle_record is None or not bundle_record.get("durable"):
@@ -1803,7 +1803,7 @@ class BunshinV2WorkflowService:
                 )
 
     def _workflow_uses_git_strategy(self, workflow_id: str) -> bool:
-        workflow = self.repository.read_snapshot(
+        workflow = self.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             workflow_id,
         )
@@ -1875,66 +1875,12 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
         raise ValueError("workflow task_spec_file must be a non-empty path string")
 
 
-def _normalize_skill_refs(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("workflow skill_refs must be an array")
-    result: list[str] = []
-    seen: set[str] = set()
-    for raw in value:
-        skill_id = str(raw or "").strip()
-        if not skill_id:
-            continue
-        if skill_id in seen:
-            continue
-        seen.add(skill_id)
-        result.append(skill_id)
-    return result
 
 
-def _normalize_workspace(value: Any) -> dict[str, Any]:
-    workspace = dict(value or {}) if isinstance(value, Mapping) else {}
-    if not str(workspace.get("repo_path") or "").strip():
-        alias = str(workspace.get("repo_root") or workspace.get("root") or workspace.get("path") or "").strip()
-        if alias:
-            workspace["repo_path"] = str(Path(_file_uri_path(alias)).expanduser())
-    elif workspace.get("repo_path"):
-        workspace["repo_path"] = str(Path(_file_uri_path(str(workspace["repo_path"]))).expanduser())
-    if workspace.get("repo_path") and not workspace.get("kind"):
-        workspace["kind"] = "existing_repo"
-    if not str(workspace.get("project_name") or "").strip():
-        workspace["project_name"] = inferred_project_name(workspace)
-    return workspace
 
 
-def _normalize_references(value: Any) -> list[dict[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("workflow references must be an array")
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(value, start=1):
-        item = dict(raw) if isinstance(raw, Mapping) else {"path": str(raw)}
-        path = str(item.get("path") or item.get("root") or item.get("uri") or "").strip()
-        if not path:
-            continue
-        normalized = str(Path(_file_uri_path(path)).expanduser())
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        item["path"] = normalized
-        item.setdefault("name", Path(normalized.rstrip("/")).name or f"reference_{index}")
-        if not item.get("description") and item.get("note"):
-            item["description"] = str(item["note"])
-        result.append(item)
-    return result
 
 
-def _file_uri_path(value: str) -> str:
-    text = str(value or "").strip()
-    return text.removeprefix("file://") if text.startswith("file://") else text
 
 
 def _artifact_ref_mapping(value: Any) -> dict[str, Any]:

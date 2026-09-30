@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.runner_components.session_memory import SessionMemory
+
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
 import asyncio
@@ -36,7 +38,7 @@ from pal.bunshin.v2.capabilities import (
 from pal.bunshin.v2.ask_question import ASK_QUESTION_CAPABILITY
 from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.bunshin.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
-from pal.bunshin.v2.execution import WorkspaceProcessHolder
+from pal.bunshin.v2.workspace_resources import WorkspaceProcessHolder
 from pal.bunshin.v2.cycle_protocol import (
     AssignmentKind,
     CycleSlot,
@@ -58,34 +60,15 @@ from pal.bunshin.v2.sessions import (
     coder_session_id,
     module_verifier_session_id,
 )
-from pal.bunshin.v2.semantic_orchestration.orchestrator import (
-    SemanticOrchestrator,
-    _charged_role_failure_attempt_count,
-    _assignment_input_fingerprint,
-    _assignment_role_input_refs,
-    _architect_authoring_locations,
-    _contract_submit_idempotency_key,
-    _bind_architecture_edit_instruction_for_review,
-    _bind_role_attempt_sandbox,
-    _candidate_tree_fingerprint,
-    _durable_workspace_preparation,
-    _refresh_ephemeral_role_reference_binds,
-    _workspace_tooling_from_work_view,
-    _named_json_output,
-    _prepare_role_workspace_before_environment,
-    _implementation_action_idempotency_key,
-    _raise_if_workspace_held,
-    _role_uses_bound_durable_workspace,
-    _semantic_role_input_refs,
-    _skeleton_architecture_review_view,
-    _stable_architecture_preflight_finding,
-    _contract_architect_instruction,
-    _recorded_role_metrics,
-    _worker_event_timing,
-    _workflow_skill_injections,
-    apply_v2_revision_scope_capability_policy,
-    apply_v2_role_capability_policy,
-)
+from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.v2.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count, _assignment_input_fingerprint, _contract_submit_idempotency_key, _implementation_action_idempotency_key
+from pal.bunshin.v2.semantic_orchestration.role_inputs import _assignment_role_input_refs, _candidate_tree_fingerprint, _durable_workspace_preparation, _role_uses_bound_durable_workspace, _semantic_role_input_refs
+from pal.bunshin.v2.semantic_orchestration.architecture_instructions import _architect_authoring_locations, _skeleton_architecture_review_view, _stable_architecture_preflight_finding, _contract_architect_instruction
+from pal.bunshin.v2.semantic_orchestration.review_results import _bind_architecture_edit_instruction_for_review
+from pal.bunshin.v2.semantic_orchestration.role_environment import _bind_role_attempt_sandbox, _refresh_ephemeral_role_reference_binds, _workspace_tooling_from_work_view, _prepare_role_workspace_before_environment, _workflow_skill_injections
+from pal.bunshin.v2.semantic_orchestration.worker_results import _named_json_output, _recorded_role_metrics, _worker_event_timing
+from pal.bunshin.v2.semantic_orchestration.workspace_safety import _raise_if_workspace_held
+from pal.bunshin.v2.semantic_orchestration.role_policy import apply_v2_revision_scope_capability_policy, apply_v2_role_capability_policy
 from pal.bunshin.v2.role_protocol import (
     RoleAssignmentRequest,
     RoleAssignmentState,
@@ -108,7 +91,8 @@ from pal.bunshin.v2.contracts import (
 )
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.prompt_adapter import BunshinPromptFragmentProvider, render_bunshin_task_prompt
-from pal.bunshin.runner import BunshinAgentLoopState, BunshinRunner, BunshinRuntimeBundle
+from pal.bunshin.runner_components.models import BunshinAgentLoopState, BunshinRuntimeBundle
+from pal.bunshin.runner import BunshinRunner
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -159,7 +143,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         service = BunshinV2WorkflowService(
             Path(tempfile.mkdtemp(prefix="pal-v2-general-session-"))
         )
-        session = service.repository.ensure_role_session(
+        session = service.repository.role_sessions.ensure_role_session(
             session_id="inv-general-architect",
             workflow_id="wf-general",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -210,7 +194,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         )
 
         with patch(
-            "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+            "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
             return_value=(manager_lock,),
         ):
             _raise_if_workspace_held(
@@ -245,7 +229,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         }
         for label, holder in unexpected_holders.items():
             with self.subTest(label=label), patch(
-                "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+                "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
                 return_value=(holder,),
             ):
                 with self.assertRaisesRegex(RuntimeError, "workspace is held"):
@@ -258,9 +242,9 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
     def test_durable_receipt_replay_does_not_record_a_fake_role_turn(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(Path(tempfile.mkdtemp())))
         recorded: list[dict[str, object]] = []
-        worker.repository.record_role_turn = lambda **kwargs: recorded.append(kwargs)
+        worker.repository.role_events.record_role_turn = lambda **kwargs: recorded.append(kwargs)
 
-        worker._record_role_turn(
+        worker.components.role_reports.record_role_turn(
             terminal={"payload": {"durable_receipt_replay": True}},
             invocation_id="inv-replay",
             fencing_token=2,
@@ -281,7 +265,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
             artifact_type="RoleSubmissionArtifact",
         )
 
-        terminal = worker._terminal_from_assignment_receipt(
+        terminal = worker.components.role_checkpoints.terminal_from_assignment_receipt(
             {
                 "assignment_id": "assignment-fresh-receipt",
                 "submission_artifact_ref": ref.to_dict(),
@@ -299,7 +283,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
 
         self.assertFalse(terminal["payload"]["durable_receipt_replay"])
         self.assertEqual(terminal["payload"]["session_turn_index"], 3)
-        replay = worker._terminal_from_assignment_receipt(
+        replay = worker.components.role_checkpoints.terminal_from_assignment_receipt(
             {
                 "assignment_id": "assignment-fresh-receipt",
                 "submission_artifact_ref": ref.to_dict(),
@@ -540,7 +524,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
             )
             state = {"value": "QUIESCING"}
             calls: list[str] = []
-            worker._effect_snapshot = lambda _effect: SimpleNamespace(
+            worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
                 state=state["value"]
             )
 
@@ -552,16 +536,16 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
                 calls.append("snapshot")
                 return {"status": "snapshotted"}
 
-            worker._quiesce_node = quiesce
-            worker._snapshot_implementation_result = snapshot
+            worker.components.implementation_snapshot.quiesce_node = quiesce
+            worker.components.implementation_snapshot.snapshot_implementation_result = snapshot
 
             self.assertEqual(
-                (await worker._resume_node({}))["status"],
+                (await worker.components.node_control.resume_node({}))["status"],
                 "quiesced",
             )
             state["value"] = "SNAPSHOTTING"
             self.assertEqual(
-                (await worker._resume_node({}))["status"],
+                (await worker.components.node_control.resume_node({}))["status"],
                 "snapshotted",
             )
             self.assertEqual(calls, ["quiesce", "snapshot"])
@@ -576,8 +560,8 @@ class _ControlSemanticEffects:
     async def execute_semantic_effect(self, effect):
         if effect.get("effect_type") == "pause_role":
             aggregate_type = AggregateType(str(effect["aggregate_type"]))
-            snapshot = self.service.repository.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
-            self.service.repository.dispatch(
+            snapshot = self.service.repository.snapshots.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
+            self.service.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="PAUSE_CONFIRMED",
                     workflow_id=snapshot.workflow_id,
@@ -620,6 +604,8 @@ class _DeferredSemanticEffects:
 
 
 class _FakeRuntimeBundle:
+    memory_generation_id = ""
+    memory_service = None
     async def close(self) -> None:
         return None
 
@@ -633,21 +619,25 @@ async def _noop_read_decision(_timeout=None):
 
 
 class _SingleInvocationRunner(BunshinRunner):
-    async def _run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
+    async def run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
         _ = bundle, forced_retry_note
         return "done"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.components.agent_session.run_agent_loop = self.run_agent_loop
 
 
 class _CompletionGateRunner(BunshinRunner):
     retry_notes: list[str]
 
-    async def _run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
+    async def run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
         _ = bundle
         if not hasattr(self, "retry_notes"):
             self.retry_notes = []
         self.retry_notes.append(forced_retry_note)
         if len(self.retry_notes) == 2:
-            self.produced_artifacts.append(
+            self.components.artifacts.produced_artifacts.append(
                 {
                     "role": "primary",
                     "relative_path": "coder_report.json",
@@ -656,14 +646,22 @@ class _CompletionGateRunner(BunshinRunner):
             )
         return "done"
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.components.agent_session.run_agent_loop = self.run_agent_loop
+
 
 class _StalledCompletionGateRunner(BunshinRunner):
     agent_calls: int = 0
 
-    async def _run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
+    async def run_agent_loop(self, bundle, *, forced_retry_note: str = "") -> str:
         _ = bundle, forced_retry_note
         self.agent_calls += 1
         return "already completed"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.components.agent_session.run_agent_loop = self.run_agent_loop
 
 
 class BunshinV2PublicSurfaceTests(unittest.TestCase):
@@ -806,7 +804,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         aggregate_id: str,
         module_name: str = "router",
     ) -> None:
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id=workflow_id,
@@ -816,7 +814,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 expected_version=0,
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type=(
                     "CREATE_NODE_RUN"
@@ -1048,17 +1046,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             }
 
             async def runner(value):
-                worker._signal_assignment_ready(value, "assignment-background")
+                worker.background.signal_ready(value, "assignment-background")
                 await release.wait()
                 return {"status": "completed"}
 
-            result = await worker._launch_background_worker(effect, runner)
+            result = await worker.components.effect_dispatch.launch_background_worker(effect, runner)
 
             self.assertEqual(result["status"], "assignment_started")
             self.assertEqual(result["provider_request_id"], "assignment-background")
             self.assertEqual(worker.active_background_count, 1)
             release.set()
-            await asyncio.gather(*tuple(worker._background_workers.values()))
+            await asyncio.gather(*tuple(worker.background.tasks()))
             await asyncio.sleep(0)
             self.assertEqual(worker.active_background_count, 0)
 
@@ -1066,7 +1064,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_reusable_assignment_matches_semantic_inputs_across_worktrees(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "accepted-review-assignment",
                 "workflow_id": "workflow-review",
@@ -1087,7 +1085,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-review",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
             aggregate_id="architecture-review",
@@ -1115,7 +1113,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
             artifact_type="ModuleWorkViewArtifact",
         )
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "submitted-candidate-assignment",
                 "workflow_id": "workflow-router",
@@ -1134,7 +1132,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="node-router",
@@ -1169,7 +1167,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
             artifact_type="ModuleWorkViewArtifact",
         )
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "stale-candidate-assignment",
                 "workflow_id": "workflow-router",
@@ -1188,7 +1186,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="node-router",
@@ -1212,11 +1210,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
             artifact_type="RolePromptPackArtifact",
         )
-        worker.repository.read_role_attempt = lambda _attempt_id: {
+        worker.repository.role_attempts.read_role_attempt = lambda _attempt_id: {
             "prompt_pack_ref": prompt_ref.to_dict()
         }
 
-        resolved = worker._durable_assignment_prompt_ref(
+        resolved = worker.components.role_checkpoints.durable_assignment_prompt_ref(
             {"active_attempt_id": "attempt-with-receipt"}
         )
 
@@ -1224,7 +1222,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_verifier_assignment_is_not_reused_across_verification_environments(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "old-verification-assignment",
                 "workflow_id": "workflow-verification",
@@ -1244,7 +1242,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-verification",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="drawing-node",
@@ -1261,7 +1259,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_architecture_reviewer_assignment_is_not_reused_across_review_generations(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "old-review-generation",
                 "workflow_id": "workflow-review-generation",
@@ -1280,7 +1278,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-review-generation",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
             aggregate_id="architecture-review-generation",
@@ -1295,7 +1293,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_failure_artifact_is_never_reused_as_role_submission(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker.repository.list_role_assignments = lambda **_kwargs: (
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "failed-producer-assignment",
                 "workflow_id": "workflow-producer",
@@ -1315,7 +1313,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_role_assignment(
+        reusable = worker.components.assignment_identity.reusable_role_assignment(
             workflow_id="workflow-producer",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="node-producer",
@@ -1340,12 +1338,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             }
 
             async def first_runner(value):
-                worker._signal_assignment_ready(value, "assignment-slot-one")
+                worker.background.signal_ready(value, "assignment-slot-one")
                 await release.wait()
                 return {"status": "completed"}
 
-            await worker._launch_background_worker(first_effect, first_runner)
-            await worker._launch_background_worker(
+            await worker.components.effect_dispatch.launch_background_worker(first_effect, first_runner)
+            await worker.components.effect_dispatch.launch_background_worker(
                 {
                     "effect_id": "effect-slot-two",
                     "effect_key": "effect-key-slot-two",
@@ -1355,7 +1353,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual(worker.active_background_count, 2)
             self.assertEqual(worker.active_process_count, 0)
             release.set()
-            await asyncio.gather(*tuple(worker._background_workers.values()))
+            await asyncio.gather(*tuple(worker.background.tasks()))
 
         asyncio.run(scenario())
 
@@ -1368,7 +1366,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 self.fail("runner must not start while the supervisor is stopping")
 
             with self.assertRaisesRegex(DeferredEffectError, "durable assignment"):
-                await worker._background_worker_loop(
+                await worker.components.assignment_execution.background_worker_loop(
                     {
                         "effect_id": "effect-before-assignment",
                         "effect_key": "effect-key-before-assignment",
@@ -1399,12 +1397,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     "status": "triage_required",
                 }
 
-            worker._settle_background_startup_failure = settle  # type: ignore[method-assign]
+            worker.components.assignment_failures.settle_background_startup_failure = settle  # type: ignore[method-assign]
 
             async def runner(_effect):
                 raise ValueError("profile binding failed")
 
-            result = await worker._background_worker_loop(effect, runner)
+            result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(result["status"], "triage_required")
             self.assertEqual(settled, ["triage"])
@@ -1424,12 +1422,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         dispatch_attempts = 0
         triaged: list[str] = []
         released: list[str] = []
-        worker._effect_snapshot = lambda _effect: snapshot
-        worker.repository.engine.legal_actions = lambda *_args: {"ROLE_FAILED"}
+        worker.components.effect_reads.effect_snapshot = lambda _effect: snapshot
+        worker.repository.transitions.legal_actions = lambda *_args: {"ROLE_FAILED"}
         worker.service.artifacts.put_json = lambda payload, **_kwargs: SimpleNamespace(
             to_dict=lambda: {"sha256": "startup-failure-ref", "payload": payload}
         )
-        worker.repository.transaction = lambda: contextlib.nullcontext("connection")
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
         def dispatch(action, **_kwargs):
             nonlocal dispatch_attempts
             dispatch_attempts += 1
@@ -1437,11 +1435,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 raise AggregateVersionConflict("concurrent aggregate update")
             actions.append(action)
 
-        worker.repository.dispatch = dispatch
-        worker._require_cycle_triage = lambda _snapshot, **_kwargs: triaged.append(
+        worker.repository.transitions.dispatch = dispatch
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
+        worker.components.assignment_failures.require_cycle_triage = lambda _snapshot, **_kwargs: triaged.append(
             _snapshot.aggregate_id
         )
-        worker._release_background_business_lease = lambda effect: released.append(
+        worker.components.role_leases.release_background_business_lease = lambda effect: released.append(
             str(effect["effect_key"])
         )
         effect = {
@@ -1450,7 +1449,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             "effect_type": "admit_architect_role",
         }
 
-        result = worker._settle_background_startup_failure(
+        result = worker.components.assignment_failures.settle_background_startup_failure(
             effect,
             ValueError("profile binding failed"),
         )
@@ -1473,8 +1472,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_post_settlement_telemetry_failure_does_not_reopen_business_work(self) -> None:
         async def scenario() -> None:
             worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-            worker._assignment_ids_by_effect["effect-key-settled"] = "assignment-settled"
-            worker.repository.read_role_assignment = lambda _assignment_id: {
+            worker.background.bind('effect-key-settled', 'assignment-settled')
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
             }
@@ -1482,7 +1481,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             async def failed_after_settlement(_effect):
                 raise RuntimeError("metrics sink unavailable")
 
-            result = await worker._background_worker_loop(
+            result = await worker.components.assignment_execution.background_worker_loop(
                 {
                     "effect_id": "effect-settled",
                     "effect_key": "effect-key-settled",
@@ -1496,12 +1495,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_settled_receipt_is_replayed_while_aggregate_awaits_business_action(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+        worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
             SimpleNamespace(state="PRODUCING")
         )
-        worker.repository.list_role_assignments = lambda **_kwargs: ()
+        worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: ()
 
-        disposition = worker._role_assignment_disposition(
+        disposition = worker.components.assignment_identity.role_assignment_disposition(
             {"effect_type": "run_implementation_role"},
             {
                 "assignment_id": "assignment-settled",
@@ -1526,8 +1525,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "effect_key": "effect-key-settled-reconcile",
                 "effect_type": "run_implementation_role",
             }
-            worker._assignment_ids_by_effect[effect["effect_key"]] = "assignment-settled"
-            worker.repository.read_role_assignment = lambda _assignment_id: {
+            worker.background.bind(effect['effect_key'], 'assignment-settled')
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
                 "workflow_id": "workflow-reconcile",
@@ -1538,11 +1537,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "submission_kind": "candidate",
                 "input_refs": {},
             }
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
-            worker.repository.list_role_assignments = lambda **_kwargs: ()
-            worker.repository.list_role_attempts = lambda _assignment_id: []
+            worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.role_attempts.list_role_attempts = lambda _assignment_id: []
             calls = 0
 
             async def runner(_effect):
@@ -1555,8 +1554,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
-                result = await worker._background_worker_loop(effect, runner)
+            with patch("asyncio.sleep", new=no_wait):
+                result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 2)
             self.assertEqual(result["status"], "completed")
@@ -1571,7 +1570,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "effect_key": "effect-key-settled-failure",
                 "effect_type": "run_implementation_role",
             }
-            worker._assignment_ids_by_effect[effect["effect_key"]] = "assignment-settled"
+            worker.background.bind(effect['effect_key'], 'assignment-settled')
             assignment = {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
@@ -1583,14 +1582,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "submission_kind": "candidate",
                 "input_refs": {},
             }
-            worker.repository.read_role_assignment = lambda _assignment_id: dict(assignment)
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: dict(assignment)
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
-            worker.repository.list_role_assignments = lambda **_kwargs: ()
-            worker.repository.list_role_attempts = lambda _assignment_id: []
+            worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.role_attempts.list_role_attempts = lambda _assignment_id: []
             routed: list[dict[str, object]] = []
-            worker._settle_background_role_failure = (
+            worker.components.assignment_failures.settle_background_role_failure = (
                 lambda received_effect, received_assignment, error, *, exhausted: (
                     routed.append(
                         {
@@ -1613,8 +1612,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
-                result = await worker._background_worker_loop(effect, runner)
+            with patch("asyncio.sleep", new=no_wait):
+                result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 3)
             self.assertEqual(result["status"], "triage_required")
@@ -1632,9 +1631,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "effect_type": "run_reviewer_role",
                 "role_mode": "architecture",
             }
-            worker._assignment_ids_by_effect[effect["effect_key"]] = (
-                "assignment-durable-lock"
-            )
+            worker.background.bind(effect['effect_key'], 'assignment-durable-lock')
             assignment = {
                 "assignment_id": "assignment-durable-lock",
                 "state": RoleAssignmentState.RESULT_RECORDED.value,
@@ -1651,17 +1648,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
                 "submission_payload_hash": "b" * 64,
             }
-            worker.repository.read_role_assignment = lambda _assignment_id: dict(
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: dict(
                 assignment
             )
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="REVIEWING")
             )
-            worker.repository.list_role_assignments = lambda **_kwargs: ()
-            worker.repository.list_role_attempts = lambda _assignment_id: [
+            worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.role_attempts.list_role_attempts = lambda _assignment_id: [
                 {"attempt_id": "attempt-durable-lock"}
             ]
-            worker._settle_background_role_failure = lambda *_args, **_kwargs: self.fail(
+            worker.components.assignment_failures.settle_background_role_failure = lambda *_args, **_kwargs: self.fail(
                 "a durable submission must not be converted into role failure"
             )
             calls = 0
@@ -1675,10 +1672,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 return None
 
             with patch(
-                "pal.bunshin.v2.semantic_orchestration.orchestrator.asyncio.sleep",
+                "asyncio.sleep",
                 new=no_wait,
             ):
-                result = await worker._background_worker_loop(effect, runner)
+                result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 3)
             self.assertEqual(result["status"], "reconciliation_deferred")
@@ -1695,22 +1692,20 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "effect_id": "effect-reconcile",
                 "effect_key": "effect-key-reconcile",
             }
-            worker._assignment_ids_by_effect["effect-key-reconcile"] = (
-                "assignment-reconcile"
-            )
+            worker.background.bind('effect-key-reconcile', 'assignment-reconcile')
             assignment_state = {"value": "result_recorded"}
             calls = 0
 
-            worker.repository.read_role_assignment = lambda _assignment_id: {
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-reconcile",
                 "state": assignment_state["value"],
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-reconcile",
             }
-            worker.repository.list_role_attempts = lambda _assignment_id: [
+            worker.repository.role_attempts.list_role_attempts = lambda _assignment_id: [
                 {"attempt_id": "attempt-reconcile"}
             ]
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
 
@@ -1725,8 +1720,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
-                result = await worker._background_worker_loop(effect, runner)
+            with patch("asyncio.sleep", new=no_wait):
+                result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 2)
             self.assertEqual(result["status"], "completed")
@@ -1766,17 +1761,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     "error_kind": "manager_restart",
                 },
             ]
-            worker._assignment_ids_by_effect[effect["effect_key"]] = assignment[
-                "assignment_id"
-            ]
-            worker.repository.read_role_assignment = lambda _assignment_id: dict(
+            worker.background.bind(effect['effect_key'], assignment['assignment_id'])
+            worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: dict(
                 assignment
             )
-            worker.repository.list_role_assignments = lambda **_kwargs: ()
-            worker.repository.list_role_attempts = lambda _assignment_id: tuple(
+            worker.repository.role_assignments.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.role_attempts.list_role_attempts = lambda _assignment_id: tuple(
                 dict(item) for item in attempts
             )
-            worker._release_background_business_lease = lambda _effect: None
+            worker.components.role_leases.release_background_business_lease = lambda _effect: None
 
             def queue_retry(current, *, error_kind, error_text):
                 del current, error_text
@@ -1784,7 +1777,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 assignment["state"] = RoleAssignmentState.RETRY_QUEUED.value
                 return dict(assignment)
 
-            worker._queue_active_assignment_retry = queue_retry
+            worker.components.assignment_retries.queue_active_assignment_retry = queue_retry
             settled: dict[str, object] = {}
 
             def settle(_effect, _assignment, _error, *, exhausted):
@@ -1792,7 +1785,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 settled["charged"] = _charged_role_failure_attempt_count(attempts)
                 return {"status": "triage_required"}
 
-            worker._settle_background_role_failure = settle
+            worker.components.assignment_failures.settle_background_role_failure = settle
             calls = 0
 
             async def runner(_effect):
@@ -1816,10 +1809,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 return None
 
             with patch(
-                "pal.bunshin.v2.semantic_orchestration.orchestrator.asyncio.sleep",
+                "asyncio.sleep",
                 new=no_wait,
             ):
-                result = await worker._background_worker_loop(effect, runner)
+                result = await worker.components.assignment_execution.background_worker_loop(effect, runner)
 
             self.assertEqual(result["status"], "triage_required")
             self.assertEqual(calls, 3)
@@ -1837,7 +1830,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-recovery",
             )
-            service.repository.ensure_role_session(
+            service.repository.role_sessions.ensure_role_session(
                 session_id="session-recovery",
                 workflow_id="workflow-recovery",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -1849,7 +1842,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 scope_kind="module",
                 subject_key="router",
             )
-            assignment = service.repository.create_role_assignment(
+            assignment = service.repository.role_assignments.create_role_assignment(
                 RoleAssignmentRequest(
                     assignment_key="recovery-assignment",
                     session_id="session-recovery",
@@ -1877,7 +1870,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             worker = SemanticOrchestrator(service)
             started = asyncio.Event()
             release = asyncio.Event()
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
 
@@ -1886,17 +1879,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 await release.wait()
                 return {"status": "completed"}
 
-            worker._runner_for_recovered_effect = lambda _effect: recovered_runner
+            worker.components.assignment_recovery.runner_for_recovered_effect = lambda _effect, _handlers: recovered_runner
             count = await worker.recover_background_assignments()
             await asyncio.wait_for(started.wait(), timeout=1.0)
 
             self.assertEqual(count, 1)
             self.assertEqual(
-                worker._assignment_ids_by_effect["effect-key-recovery"],
+                worker.background.assignment_id('effect-key-recovery'),
                 assignment["assignment_id"],
             )
             release.set()
-            await asyncio.gather(*tuple(worker._background_workers.values()))
+            await asyncio.gather(*tuple(worker.background.tasks()))
 
         asyncio.run(scenario())
 
@@ -1909,7 +1902,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-recovery-owner",
             )
-            service.repository.ensure_role_session(
+            service.repository.role_sessions.ensure_role_session(
                 session_id="session-recovery-owner",
                 workflow_id="workflow-recovery-owner",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -1923,7 +1916,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
 
             def create_assignment(key: str, fingerprint: str) -> dict:
-                return service.repository.create_role_assignment(
+                return service.repository.role_assignments.create_role_assignment(
                     RoleAssignmentRequest(
                         assignment_key=key,
                         session_id="session-recovery-owner",
@@ -1950,7 +1943,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 )
 
             stale = create_assignment("stale-recovery-owner", "old-input")
-            service.repository.cancel_role_assignments(
+            service.repository.role_cancellation.cancel_role_assignments(
                 workflow_id="workflow-recovery-owner",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-recovery-owner",
@@ -1958,9 +1951,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
             current = create_assignment("current-recovery-owner", "new-input")
             worker = SemanticOrchestrator(service)
-            worker._assignment_ids_by_effect["effect-key-recovery-owner"] = str(
-                current["assignment_id"]
-            )
+            worker.background.bind('effect-key-recovery-owner', str(current['assignment_id']))
             release = asyncio.Event()
 
             async def active_worker() -> dict[str, str]:
@@ -1968,19 +1959,19 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 return {"status": "completed"}
 
             task = asyncio.create_task(active_worker())
-            worker._background_workers["effect-key-recovery-owner"] = task
-            worker._runner_for_recovered_effect = lambda _effect: active_worker
+            worker.background.track('effect-key-recovery-owner', task)
+            worker.components.assignment_recovery.runner_for_recovered_effect = lambda _effect, _handlers: active_worker
 
             count = await worker.recover_background_assignments()
 
             self.assertEqual(count, 0)
             self.assertFalse(task.done())
             self.assertEqual(
-                worker._assignment_ids_by_effect["effect-key-recovery-owner"],
+                worker.background.assignment_id('effect-key-recovery-owner'),
                 current["assignment_id"],
             )
             self.assertEqual(
-                service.repository.read_role_assignment(stale["assignment_id"])["state"],
+                service.repository.role_assignments.read_role_assignment(stale["assignment_id"])["state"],
                 RoleAssignmentState.CANCELLED.value,
             )
             release.set()
@@ -1996,7 +1987,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-expired-reuse",
         )
-        service.repository.ensure_role_session(
+        service.repository.role_sessions.ensure_role_session(
             session_id="session-expired-reuse",
             workflow_id="workflow-expired-reuse",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -2008,7 +1999,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             scope_kind="module",
             subject_key="router",
         )
-        assignment = service.repository.create_role_assignment(
+        assignment = service.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="expired-reuse-assignment",
                 session_id="session-expired-reuse",
@@ -2033,9 +2024,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 submission_kind="candidate",
             )
         )
-        attempt = service.repository.claim_role_assignment(str(assignment["assignment_id"]))
+        attempt = service.repository.role_assignments.claim_role_assignment(str(assignment["assignment_id"]))
         lease_resource = f"assignment:{assignment['assignment_id']}"
-        lease = service.repository.claim_lease(
+        lease = service.repository.leases.claim_lease(
             lease_resource,
             str(attempt["attempt_id"]),
             ttl_seconds=120,
@@ -2044,29 +2035,27 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"stable": "original durable prompt"},
             artifact_type="RolePromptPackArtifact",
         )
-        service.repository.start_role_attempt(
+        service.repository.role_attempts.start_role_attempt(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=str(attempt["attempt_id"]),
             lease_resource_key=lease_resource,
             fencing_token=lease.fencing_token,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
-        service.repository.release_lease(
+        service.repository.leases.release_lease(
             lease_resource,
             str(attempt["attempt_id"]),
             lease.fencing_token,
         )
         worker = SemanticOrchestrator(service)
-        worker._assignment_ids_by_effect["effect-key-expired-reuse"] = str(
-            assignment["assignment_id"]
-        )
+        worker.background.bind('effect-key-expired-reuse', str(assignment['assignment_id']))
         snapshot = SimpleNamespace(
             workflow_id="workflow-expired-reuse",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-expired-reuse",
         )
 
-        recovered = worker._retry_assignment_for_effect(
+        recovered = worker.components.assignment_retries.retry_assignment_for_effect(
             {"effect_key": "effect-key-expired-reuse"},
             snapshot=snapshot,
             role="implementation",
@@ -2077,14 +2066,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertIsNotNone(recovered)
         self.assertEqual(recovered["assignment_id"], assignment["assignment_id"])
         self.assertEqual(recovered["state"], RoleAssignmentState.RUNNING.value)
-        retryable = worker._queue_active_assignment_retry(
+        retryable = worker.components.assignment_retries.queue_active_assignment_retry(
             recovered,
             error_kind="attempt_lease_expired",
             error_text="test recovery",
         )
         self.assertEqual(retryable["state"], RoleAssignmentState.RETRY_QUEUED.value)
         self.assertEqual(
-            worker._durable_assignment_prompt_ref(retryable),
+            worker.components.role_checkpoints.durable_assignment_prompt_ref(retryable),
             prompt_ref,
         )
 
@@ -2096,7 +2085,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-effect-recovery",
         )
-        service.repository.ensure_role_session(
+        service.repository.role_sessions.ensure_role_session(
             session_id="session-effect-recovery",
             workflow_id="workflow-effect-recovery",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -2108,7 +2097,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             scope_kind="module",
             subject_key="router",
         )
-        assignment = service.repository.create_role_assignment(
+        assignment = service.repository.role_assignments.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="effect-recovery-assignment",
                 session_id="session-effect-recovery",
@@ -2140,7 +2129,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             aggregate_id="node-effect-recovery",
         )
 
-        recovered = worker._retry_assignment_for_effect(
+        recovered = worker.components.assignment_retries.retry_assignment_for_effect(
             {"effect_key": "effect-after-restart"},
             snapshot=snapshot,
             role="implementation",
@@ -2151,7 +2140,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertIsNotNone(recovered)
         self.assertEqual(recovered["assignment_id"], assignment["assignment_id"])
         self.assertEqual(
-            worker._assignment_ids_by_effect["effect-after-restart"],
+            worker.background.assignment_id('effect-after-restart'),
             assignment["assignment_id"],
         )
 
@@ -2163,7 +2152,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-explicit-settlement",
         )
-        service.repository.ensure_role_session(
+        service.repository.role_sessions.ensure_role_session(
             session_id="session-explicit-settlement",
             workflow_id="workflow-explicit-settlement",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -2177,7 +2166,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         def create_assignment(key: str, fingerprint: str) -> dict:
-            return service.repository.create_role_assignment(
+            return service.repository.role_assignments.create_role_assignment(
                 RoleAssignmentRequest(
                     assignment_key=key,
                     session_id="session-explicit-settlement",
@@ -2204,16 +2193,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
 
         stale = create_assignment("stale-explicit-settlement", "old-input")
-        service.repository.cancel_role_assignments(
+        service.repository.role_cancellation.cancel_role_assignments(
             workflow_id="workflow-explicit-settlement",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-explicit-settlement",
             reason="superseded before the next logical assignment",
         )
         completed = create_assignment("completed-explicit-settlement", "new-input")
-        attempt = service.repository.claim_role_assignment(str(completed["assignment_id"]))
+        attempt = service.repository.role_assignments.claim_role_assignment(str(completed["assignment_id"]))
         lease_resource = f"assignment:{completed['assignment_id']}"
-        lease = service.repository.claim_lease(
+        lease = service.repository.leases.claim_lease(
             lease_resource,
             str(attempt["attempt_id"]),
             ttl_seconds=120,
@@ -2222,7 +2211,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"role": "implementation"},
             artifact_type="RolePromptPackArtifact",
         )
-        service.repository.start_role_attempt(
+        service.repository.role_attempts.start_role_attempt(
             assignment_id=str(completed["assignment_id"]),
             attempt_id_value=str(attempt["attempt_id"]),
             lease_resource_key=lease_resource,
@@ -2234,7 +2223,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             submission,
             artifact_type="CandidateRoleSubmissionArtifact",
         )
-        service.repository.record_role_submission(
+        service.repository.role_submissions.record_role_submission(
             assignment_id=str(completed["assignment_id"]),
             attempt_id_value=str(attempt["attempt_id"]),
             fencing_token=lease.fencing_token,
@@ -2243,18 +2232,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             settlement_action={"action_type": "SUBMIT_CANDIDATE"},
         )
         worker = SemanticOrchestrator(service)
-        worker._assignment_ids_by_effect["effect-key-explicit-settlement"] = str(
-            stale["assignment_id"]
-        )
-        terminal = worker._terminal_from_assignment_receipt(
-            service.repository.read_role_assignment(completed["assignment_id"]),
+        worker.background.bind('effect-key-explicit-settlement', str(stale['assignment_id']))
+        terminal = worker.components.role_checkpoints.terminal_from_assignment_receipt(
+            service.repository.role_assignments.read_role_assignment(completed["assignment_id"]),
             primary_artifact_name="candidate.json",
             summary="candidate ready",
         )
 
-        settlement = worker._role_submission_settlement(
+        settlement = worker.components.assignment_identity.role_submission_settlement(
             {"effect_key": "effect-key-explicit-settlement"},
-            assignment_id=worker._terminal_role_assignment_id(terminal),
+            assignment_id=worker.components.assignment_identity.terminal_role_assignment_id(terminal),
         )
 
         self.assertEqual(settlement["role_assignment_id"], completed["assignment_id"])
@@ -2272,7 +2259,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id="architecture-live-recovery",
             )
-            service.repository.ensure_role_session(
+            service.repository.role_sessions.ensure_role_session(
                 session_id="session-live-recovery",
                 workflow_id="workflow-live-recovery",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -2284,7 +2271,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 scope_kind="architecture_cycle",
                 subject_key="architecture-live-recovery",
             )
-            assignment = service.repository.create_role_assignment(
+            assignment = service.repository.role_assignments.create_role_assignment(
                 RoleAssignmentRequest(
                     assignment_key="live-recovery-assignment",
                     session_id="session-live-recovery",
@@ -2309,11 +2296,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     submission_kind="architecture_review",
                 )
             )
-            attempt = service.repository.claim_role_assignment(
+            attempt = service.repository.role_assignments.claim_role_assignment(
                 str(assignment["assignment_id"])
             )
             lease_resource = f"assignment:{assignment['assignment_id']}"
-            lease = service.repository.claim_lease(
+            lease = service.repository.leases.claim_lease(
                 lease_resource,
                 str(attempt["attempt_id"]),
                 ttl_seconds=120,
@@ -2322,7 +2309,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 {"role": "reviewer", "mode": "architecture"},
                 artifact_type="RolePromptPackArtifact",
             )
-            service.repository.start_role_attempt(
+            service.repository.role_attempts.start_role_attempt(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 lease_resource_key=lease_resource,
@@ -2333,7 +2320,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 {"verdict": "PASS"},
                 artifact_type="ArchitectureReviewRoleSubmissionArtifact",
             )
-            service.repository.record_role_submission(
+            service.repository.role_submissions.record_role_submission(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 fencing_token=lease.fencing_token,
@@ -2346,7 +2333,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
             worker = SemanticOrchestrator(service)
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="REVIEWING")
             )
 
@@ -2355,7 +2342,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual(count, 0)
             self.assertEqual(worker.active_background_count, 0)
             self.assertEqual(
-                service.repository.read_role_assignment(assignment["assignment_id"])[
+                service.repository.role_assignments.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "result_recorded",
@@ -2372,7 +2359,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-paused",
             )
-            service.repository.ensure_role_session(
+            service.repository.role_sessions.ensure_role_session(
                 session_id="session-paused",
                 workflow_id="workflow-paused",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -2384,7 +2371,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 scope_kind="module",
                 subject_key="router",
             )
-            assignment = service.repository.create_role_assignment(
+            assignment = service.repository.role_assignments.create_role_assignment(
                 RoleAssignmentRequest(
                     assignment_key="paused-assignment",
                     session_id="session-paused",
@@ -2410,7 +2397,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 )
             )
             worker = SemanticOrchestrator(service)
-            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+            worker.repository.snapshots.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PAUSED")
             )
 
@@ -2418,7 +2405,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
             self.assertEqual(count, 0)
             self.assertEqual(
-                service.repository.read_role_assignment(assignment["assignment_id"])[
+                service.repository.role_assignments.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "cancelled",
@@ -2445,7 +2432,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id="architecture-duplicate-review",
             )
-            service.repository.ensure_role_session(
+            service.repository.role_sessions.ensure_role_session(
                 session_id="session-duplicate-review",
                 workflow_id="workflow-duplicate-review",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -2457,7 +2444,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 scope_kind="architecture_cycle",
                 subject_key="architecture-duplicate-review",
             )
-            assignment = service.repository.create_role_assignment(
+            assignment = service.repository.role_assignments.create_role_assignment(
                 RoleAssignmentRequest(
                     assignment_key="duplicate-review-assignment",
                     session_id="session-duplicate-review",
@@ -2486,7 +2473,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 )
             )
             worker = SemanticOrchestrator(service)
-            worker._reusable_role_assignment = lambda **_kwargs: {
+            worker.components.assignment_identity.reusable_role_assignment = lambda **_kwargs: {
                 "assignment_id": "accepted-review-assignment"
             }
 
@@ -2494,7 +2481,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
             self.assertEqual(count, 0)
             self.assertEqual(
-                service.repository.read_role_assignment(assignment["assignment_id"])[
+                service.repository.role_assignments.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "cancelled",
@@ -2542,11 +2529,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         processor._effect_snapshot = lambda _effect: previous
         completed: list[str] = []
-        processor.repository.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
+        processor.repository.role_sessions.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
             invocation_id
         ) or True
         actions: list[ActionEnvelope] = []
-        processor.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor.repository.transaction = lambda: contextlib.nullcontext(processor.repository)
         processor._link_workflow = lambda *_args, **_kwargs: None
 
         with patch(
@@ -2557,7 +2545,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(completed, [])
         begin_revision.assert_called_once()
         self.assertEqual(begin_revision.call_args.kwargs["workflow_id"], "wf-edit")
-        self.assertIsNotNone(begin_revision.call_args.kwargs["_connection"])
+        self.assertIsNotNone(begin_revision.call_args.kwargs["unit_of_work"])
         self.assertEqual([action.action_type for action in actions], ["CREATE_ARCHITECTURE_REVISION"])
         self.assertEqual(actions[0].payload["parent_revision_id"], previous.aggregate_id)
         self.assertEqual(
@@ -2583,14 +2571,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             updated_at="2026-08-10T05:00:00+00:00",
             payload={"architecture_manifest_ref": manifest_ref.to_dict()},
         )
-        worker._effect_snapshot = lambda _effect: revision
+        worker.components.effect_reads.effect_snapshot = lambda _effect: revision
 
         with patch(
-            "pal.bunshin.v2.semantic_orchestration.orchestrator."
-            "PlanRevisionProjectionStore.update_status",
+            'pal.bunshin.v2.projections.PlanRevisionProjectionStore.update_status',
             return_value=self.runtime_root / "plans" / "revision-human-resolution",
         ):
-            result = worker._materialize_plan_revision_status(
+            result = worker.components.human_review.materialize_plan_revision_status(
                 {"status": "accepted"}
             )
 
@@ -2637,9 +2624,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             payload={"active_replan_revision_id": previous.aggregate_id},
         )
         processor._effect_snapshot = lambda _effect: previous
-        processor.repository.read_snapshot = lambda *_args, **_kwargs: epoch
+        processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: epoch
         actions: list[ActionEnvelope] = []
-        processor.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor.repository.transaction = lambda: contextlib.nullcontext(processor.repository)
         linked: list[dict[str, str]] = []
         processor._link_workflow = (
             lambda _workflow_id, _action_type, payload, *_args, **_kwargs: linked.append(
@@ -2691,8 +2679,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             updated_at="2026-01-01T00:00:00+00:00",
         )
         actions: list[ActionEnvelope] = []
-        processor.repository.dispatch = lambda action, **_kwargs: actions.append(action)
-        processor.repository.complete_workflow_role_sessions = lambda *_args, **_kwargs: None
+        processor.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        processor.repository.transaction = lambda: contextlib.nullcontext(processor.repository)
+        processor.repository.role_maintenance.complete_workflow_role_sessions = lambda *_args, **_kwargs: None
 
         completed = AggregateSnapshot(
             aggregate_type=workflow.aggregate_type,
@@ -2707,7 +2696,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             created_at=workflow.created_at,
             updated_at=workflow.updated_at,
         )
-        processor.repository.read_snapshot = lambda *_args, **_kwargs: completed
+        processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: completed
 
         processor._publish_terminal_workflow_if_any(workflow.workflow_id)
 
@@ -2760,7 +2749,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             artifact_type="DeliveryReceiptArtifact",
             schema_version="3",
         )
-        canonical_record = service.repository.read_artifact_record(patch_ref.sha256)
+        canonical_record = service.repository.artifacts.read_artifact_record(patch_ref.sha256)
         assert canonical_record is not None
         published: list[dict[str, object]] = []
         processor = BunshinV2OutboxProcessor(
@@ -2778,7 +2767,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
-        processor.repository.read_snapshot = lambda *_args, **_kwargs: workflow
+        processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: workflow
 
         processor._publish_terminal_workflow_if_any(workflow.workflow_id)
 
@@ -2838,7 +2827,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
-        processor.repository.read_snapshot = lambda *_args, **_kwargs: workflow
+        processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: workflow
 
         with self.assertRaisesRegex(IOError, "does not match its receipt"):
             processor._publish_terminal_workflow_if_any(workflow.workflow_id)
@@ -2916,12 +2905,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     ]
                 ),
             )
-            first.produced_artifacts.append(
+            first.components.artifacts.produced_artifacts.append(
                 {"path": "/tmp/primary.json", "role": "primary"}
             )
-            first.review_tool_evidence_refs.append({"kind": "test", "ok": True})
-            first.web_research_usage.update({"total": 2, "search_web": 2})
-            first._manager_submission_receipt_observed = True
+            first.components.review_evidence.review_tool_evidence_refs.append({"kind": "test", "ok": True})
+            first.components.research_budget.web_research_usage.update({"total": 2, "search_web": 2})
+            first.components.completion.manager_submission_receipt_observed = True
             continuation = SimpleNamespace(
                 pending_tool_call_batch=[],
                 pending_tool_results=[],
@@ -2929,7 +2918,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 preferred_llm_endpoint_id="glm",
                 preferred_llm_model_id="glm-5.2",
             )
-            await first._persist_agent_session_checkpoint(
+            await first.components.session_checkpoints.persist_agent_session_checkpoint(
                 bundle,
                 state,
                 continuation,
@@ -2965,7 +2954,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 write_event=lambda _event: None,
                 read_decision=lambda: None,
             )
-            restored = second._load_agent_session_checkpoint(
+            restored = second.components.session_checkpoints.load_agent_session_checkpoint(
                 second_pack.workspace,
                 session_id="inv-session-checkpoint",
                 bundle=bundle,
@@ -2982,22 +2971,22 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "primary",
             )
             restored_sink = SimpleNamespace(records=[])
-            second._restore_invocation_checkpoint_state(
+            second.components.session_checkpoints.restore_invocation_checkpoint_state(
                 coroutine_state,
                 active_response_key="effect-1",
                 memory_candidate_sink=restored_sink,
             )
-            self.assertEqual(second.web_research_usage["search_web"], 2)
+            self.assertEqual(second.components.research_budget.web_research_usage["search_web"], 2)
             self.assertEqual(restored_sink.records[0]["document_id"], "case:1")
-            self.assertTrue(second._manager_submission_receipt_observed)
+            self.assertTrue(second.components.completion.manager_submission_receipt_observed)
 
-            second._restore_invocation_checkpoint_state(
+            second.components.session_checkpoints.restore_invocation_checkpoint_state(
                 coroutine_state,
                 active_response_key="effect-2",
                 memory_candidate_sink=restored_sink,
             )
-            self.assertEqual(second.produced_artifacts, [])
-            self.assertEqual(second.web_research_usage, {})
+            self.assertEqual(second.components.artifacts.produced_artifacts, [])
+            self.assertEqual(second.components.research_budget.web_research_usage, {})
             self.assertEqual(restored_sink.records, [])
             self.assertIn(
                 "inspected the boundary",
@@ -3036,8 +3025,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             "pal.bunshin.v2.work_items.render_work_item_context",
             side_effect=["pending: implement", "completed: implement"],
         ) as render:
-            self.assertEqual(runner._render_durable_role_context(), "pending: implement")
-            self.assertEqual(runner._render_durable_role_context(), "completed: implement")
+            self.assertEqual(runner.components.prompt_context.render_durable_role_context(), "pending: implement")
+            self.assertEqual(runner.components.prompt_context.render_durable_role_context(), "completed: implement")
         self.assertEqual(render.call_count, 2)
 
     def test_runner_reloads_latest_architect_checklist_for_each_prompt_assembly(
@@ -3066,11 +3055,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             side_effect=["phase 1", "phase 2"],
         ) as render:
             self.assertEqual(
-                runner._render_durable_role_context(),
+                runner.components.prompt_context.render_durable_role_context(),
                 "phase 1",
             )
             self.assertEqual(
-                runner._render_durable_role_context(),
+                runner.components.prompt_context.render_durable_role_context(),
                 "phase 2",
             )
         self.assertEqual(render.call_count, 2)
@@ -3095,10 +3084,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             read_decision=read_control,
         )
 
-        asyncio.run(runner._raise_if_cancel_requested())
-        self.assertFalse(runner._cancel_requested)
+        asyncio.run(runner.components.control.raise_if_cancel_requested())
+        self.assertFalse(runner.components.control.cancel_requested)
         self.assertFalse(
-            runner._continuation_is_restart_safe(
+            runner.components.session_checkpoints.continuation_is_restart_safe(
                 SimpleNamespace(
                     pending_tool_call_batch=[object()],
                     pending_tool_results=[],
@@ -3106,7 +3095,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            runner._continuation_is_restart_safe(
+            runner.components.session_checkpoints.continuation_is_restart_safe(
                 SimpleNamespace(
                     pending_tool_call_batch=[],
                     pending_tool_results=[],
@@ -3129,7 +3118,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             ),
         )
         self.assertFalse(
-            runner._continuation_is_restart_safe(
+            runner.components.session_checkpoints.continuation_is_restart_safe(
                 SimpleNamespace(
                     pending_tool_call_batch=[],
                     pending_tool_results=[],
@@ -3138,7 +3127,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(Exception, "reload at safe point"):
-            asyncio.run(runner._raise_if_restart_requested())
+            asyncio.run(runner.components.control.raise_if_restart_requested())
 
     def test_runner_keys_new_session_inputs_by_assignment_not_repeated_text(self) -> None:
         restored = {
@@ -3147,14 +3136,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            BunshinRunner._new_session_response_message(
+            SessionMemory.new_session_response_message(
                 restored,
                 response_key="assignment-produce",
                 response_text="implement the bound module",
             ),
             "",
         )
-        repair = BunshinRunner._new_session_response_message(
+        repair = SessionMemory.new_session_response_message(
             restored,
             response_key="assignment-repair-1",
             response_text=(
@@ -3169,7 +3158,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertIn("reference:repair_bill", repair)
         self.assertIn("/pal/references/repair_bill-1.json", repair)
 
-        repeated_instruction_new_bill = BunshinRunner._new_session_response_message(
+        repeated_instruction_new_bill = SessionMemory.new_session_response_message(
             {
                 **restored,
                 "response_keys": ["assignment-produce", "assignment-repair-1"],
@@ -3188,7 +3177,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             repeated_instruction_new_bill,
         )
         self.assertEqual(
-            BunshinRunner._new_session_response_message(
+            SessionMemory.new_session_response_message(
                 restored,
                 response_key="",
                 response_text="The user selected the bounded compatibility option.",
@@ -3218,12 +3207,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             "submission_kind": "candidate",
             "state": RoleAssignmentState.RETRY_QUEUED.value,
         }
-        processor._assignment_ids_by_effect["effect-router"] = "asg-router"
-        processor.repository.read_role_assignment = lambda assignment_id: (
+        processor.background.bind('effect-router', 'asg-router')
+        processor.repository.role_assignments.read_role_assignment = lambda assignment_id: (
             dict(assignment) if assignment_id == "asg-router" else None
         )
 
-        selected = processor._retry_assignment_for_effect(
+        selected = processor.components.assignment_retries.retry_assignment_for_effect(
             {"effect_key": "effect-router"},
             snapshot=snapshot,
             role="implementation",
@@ -3279,7 +3268,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             if method == "v2_start_workflow":
                 return provider.service.start_workflow(request)
             if method == "v2_rebind_task_delivery":
-                return provider.service.repository.rebind_task_delivery(
+                return provider.service.repository.delivery_bindings.rebind_task_delivery(
                     task_id=str(request.get("task_id") or ""),
                     binding=dict(request.get("binding") or {}),
                 )
@@ -3316,14 +3305,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             write_event=lambda _event: None,
             read_decision=lambda: None,
         )
-        runner.produced_artifacts = [
+        runner.components.artifacts.produced_artifacts = [
             {"role": "supporting", "relative_path": "requirements.json", "path": "/tmp/requirements.json"}
         ]
-        self.assertFalse(runner._completion_evidence_present())
-        runner.produced_artifacts.append(
+        self.assertFalse(runner.components.completion.completion_evidence_present())
+        runner.components.artifacts.produced_artifacts.append(
             {"role": "primary", "relative_path": "expected.json", "path": "/tmp/expected.json"}
         )
-        self.assertTrue(runner._completion_evidence_present())
+        self.assertTrue(runner.components.completion.completion_evidence_present())
 
     def test_runner_keeps_same_invocation_alive_until_primary_submit_succeeds(self) -> None:
         pack = BunshinInvocationPack(
@@ -3339,7 +3328,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             read_decision=_noop_read_decision,
         )
 
-        result = asyncio.run(runner._run_v2_invocation(_FakeRuntimeBundle()))
+        result = asyncio.run(runner.components.invocation.run_v2_invocation(_FakeRuntimeBundle()))
 
         self.assertEqual(result, 0)
         self.assertEqual(len(runner.retry_notes), 2)
@@ -3360,7 +3349,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             write_event=_noop_write_event,
             read_decision=_noop_read_decision,
         )
-        runner.produced_artifacts.append(
+        runner.components.artifacts.produced_artifacts.append(
             {
                 "role": "primary",
                 "relative_path": "verification_plan.json",
@@ -3373,7 +3362,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             memory_candidate_sink=SimpleNamespace(),
         )
 
-        result = runner._preflight_bunshin_llm_round(state)
+        result = runner.components.llm_rounds.preflight_bunshin_llm_round(state)
 
         self.assertIsNotNone(result)
         self.assertEqual(result.payload.finish_reason, LLMFinishReason.STOP)
@@ -3393,7 +3382,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             write_event=_noop_write_event,
             read_decision=_noop_read_decision,
         )
-        runner.produced_artifacts.append(
+        runner.components.artifacts.produced_artifacts.append(
             {
                 "role": "primary",
                 "relative_path": "coder_report.json",
@@ -3406,12 +3395,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             memory_candidate_sink=SimpleNamespace(),
         )
 
-        with patch.object(runner, "_manager_submission_receipt_present", return_value=False):
-            self.assertIsNone(runner._preflight_bunshin_llm_round(state))
+        with patch.object(runner.components.completion, 'manager_submission_receipt_present', return_value=False):
+            self.assertIsNone(runner.components.llm_rounds.preflight_bunshin_llm_round(state))
         self.assertEqual(state.llm_round_count, 1)
 
-        with patch.object(runner, "_manager_submission_receipt_present", return_value=True):
-            result = runner._preflight_bunshin_llm_round(state)
+        with patch.object(runner.components.completion, 'manager_submission_receipt_present', return_value=True):
+            result = runner.components.llm_rounds.preflight_bunshin_llm_round(state)
         self.assertIsNotNone(result)
         self.assertEqual(result.payload.finish_reason, LLMFinishReason.STOP)
 
@@ -3429,12 +3418,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             read_decision=_noop_read_decision,
         )
 
-        result = asyncio.run(runner._run_v2_invocation(_FakeRuntimeBundle()))
+        result = asyncio.run(runner.components.invocation.run_v2_invocation(_FakeRuntimeBundle()))
 
         self.assertEqual(result, 0)
         self.assertEqual(runner.agent_calls, 2)
-        self.assertEqual(runner.blocked_kind, "completion_gate_stalled")
-        self.assertIn("made no checklist, finding, or artifact content progress", runner.blocked_summary)
+        self.assertEqual(runner.components.status.blocked_kind, "completion_gate_stalled")
+        self.assertIn("made no checklist, finding, or artifact content progress", runner.components.status.blocked_summary)
 
     def test_snapshot_rejection_becomes_the_latest_architect_instruction(self) -> None:
         instruction = _contract_architect_instruction(
@@ -3482,7 +3471,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_architecture_stage_resolves_snapshot_before_profile(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+        worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
             workflow_id="wf-order", payload={}
         )
 
@@ -3490,44 +3479,44 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual((workflow_id, role), ("wf-order", "architect"))
             raise RuntimeError("profile-resolved-after-snapshot")
 
-        worker._profile_for_role = stop_after_profile
+        worker.components.workflow_facts.profile_for_role = stop_after_profile
         with self.assertRaisesRegex(RuntimeError, "profile-resolved-after-snapshot"):
-            asyncio.run(worker._run_architecture_stage({"payload": {"stage": "architect"}}))
+            asyncio.run(worker.components.architecture_stage.run_architecture_stage({"payload": {"stage": "architect"}}))
 
     def test_resume_does_not_reclaim_a_live_architecture_stage(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+        worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-live",
             state="ARCHITECT_RUNNING",
         )
-        worker.repository.read_lease = lambda _key: {
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": "inv-live",
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
         }
 
-        result = asyncio.run(worker._resume_aggregate({"payload": {}}))
+        result = asyncio.run(worker.components.aggregate_control.resume_aggregate({"payload": {}}))
 
         self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
     def test_architecture_enqueue_does_not_reclaim_a_live_stage(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
-        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+        worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
             workflow_id="wf-live",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-live",
             state="ARCHITECT_RUNNING",
             payload={},
         )
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
-        worker.repository.read_lease = lambda _key: {
+        worker.components.workflow_facts.profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.repository.snapshots.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": "inv-live",
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
         }
 
         result = asyncio.run(
-            worker._run_architecture_stage(
+            worker.components.architecture_stage.run_architecture_stage(
                 {
                     "effect_id": "eff-duplicate",
                     "effect_key": "architecture:duplicate",
@@ -3548,20 +3537,21 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             version=1,
             payload={},
         )
-        worker._effect_snapshot = lambda _effect: revision
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
-        worker._architecture_stage_prompt = lambda *_args: ("normalize", {})
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=3)
-        worker.repository.release_lease = lambda *_args, **_kwargs: None
-        worker.repository.engine.legal_actions = lambda *_args: ()
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
+        worker.components.effect_reads.effect_snapshot = lambda _effect: revision
+        worker.components.workflow_facts.profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.components.architecture_stage.architecture_stage_prompt = lambda *_args: ("normalize", {})
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=3)
+        worker.repository.leases.release_lease = lambda *_args, **_kwargs: None
+        worker.repository.transitions.legal_actions = lambda *_args: ()
+        worker.repository.snapshots.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
         dispatched: list[str] = []
 
         def capture_dispatch(action, **_kwargs):
             dispatched.append(action.action_type)
             return SimpleNamespace(snapshot=revision)
 
-        worker.repository.dispatch = capture_dispatch
+        worker.repository.transitions.dispatch = capture_dispatch
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
 
         async def capture_scope(**kwargs):
             self.assertEqual(
@@ -3572,10 +3562,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertTrue(kwargs["prepare_workspace"])
             raise RuntimeError("architect-scope-captured")
 
-        worker._run_profile = capture_scope
+        worker.components.attempt_execution.run_profile = capture_scope
         with self.assertRaisesRegex(RuntimeError, "architect-scope-captured"):
             asyncio.run(
-                worker._run_architecture_stage(
+                worker.components.architecture_stage.run_architecture_stage(
                     {
                         "effect_id": "eff-requirements-scope",
                         "effect_key": "event:0",
@@ -3594,8 +3584,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             claims.append(owner_id)
             return SimpleNamespace(fencing_token=len(claims))
 
-        worker.repository.claim_lease = claim
-        worker.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.leases.claim_lease = claim
+        worker.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
         snapshots = iter(
             (
                 SimpleNamespace(
@@ -3614,15 +3605,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 ),
             )
         )
-        worker._effect_snapshot = lambda _effect: next(snapshots)
+        worker.components.effect_reads.effect_snapshot = lambda _effect: next(snapshots)
 
-        with patch.object(worker, "_start_graph_cycle_assignment"):
-            worker._admit_node_worker(
+        with patch.object(worker.components.node_admission, 'start_graph_cycle_assignment'):
+            worker.components.node_admission.admit_node_worker(
                 {"effect_key": "producer"},
                 action_type="START_PRODUCING",
                 activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
             )
-            worker._admit_node_worker(
+            worker.components.node_admission.admit_node_worker(
                 {"effect_key": "repair"},
                 action_type="START_REPAIR",
                 activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
@@ -3641,8 +3632,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             claims.append(owner_id)
             return SimpleNamespace(fencing_token=len(claims))
 
-        worker.repository.claim_lease = claim
-        worker.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.leases.claim_lease = claim
+        worker.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
         snapshots = iter(
             (
                 SimpleNamespace(
@@ -3669,15 +3661,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 ),
             )
         )
-        worker._effect_snapshot = lambda _effect: next(snapshots)
+        worker.components.effect_reads.effect_snapshot = lambda _effect: next(snapshots)
 
-        with patch.object(worker, "_start_graph_cycle_assignment"):
-            worker._admit_node_worker(
+        with patch.object(worker.components.node_admission, 'start_graph_cycle_assignment'):
+            worker.components.node_admission.admit_node_worker(
                 {"effect_key": "review-first"},
                 action_type="START_REVIEW",
                 activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
             )
-            worker._admit_node_worker(
+            worker.components.node_admission.admit_node_worker(
                 {"effect_key": "review-after-repair"},
                 action_type="START_REVIEW",
                 activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
@@ -3713,17 +3705,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         processor._effect_snapshot = lambda _effect: workflow
         completed: list[tuple[str, str]] = []
-        processor.repository.complete_workflow_role_sessions = (
+        processor.repository.role_maintenance.complete_workflow_role_sessions = (
             lambda workflow_id, *, status="completed": completed.append(
                 (workflow_id, status)
             )
             or ()
         )
         reconciled: list[str] = []
-        processor.repository.reconcile_role_session_checkpoints = (
+        processor.repository.role_maintenance.reconcile_role_session_checkpoints = (
             lambda: reconciled.append("checkpoints") or ()
         )
-        processor.repository.reconcile_role_runtime_spool = (
+        processor.repository.role_maintenance.reconcile_role_runtime_spool = (
             lambda: reconciled.append("spool") or ()
         )
         processor._terminal_repository_layout = lambda _workflow: {}
@@ -3756,10 +3748,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         processor._effect_snapshot = lambda _effect: node
         completed: list[str] = []
-        processor.repository.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
+        processor.repository.role_sessions.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
             invocation_id
         ) or True
-        processor.repository.list_workflow_snapshots = lambda _workflow_id: []
+        processor.repository.queries.list_workflow_snapshots = lambda _workflow_id: []
 
         with patch("pal.bunshin.v2.orchestration.DagScheduler.schedule_ready_nodes"):
             processor._node_accepted({"effect_key": "node-pass"})
@@ -3786,15 +3778,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "execution_adapter": "artifact_bundle",
             },
         )
-        worker.repository.assert_fencing_token = lambda *_args: (_ for _ in ()).throw(StaleFencingToken("expired"))
-        worker.repository.read_lease = lambda _key: {
+        worker.repository.leases.assert_fencing_token = lambda *_args: (_ for _ in ()).throw(StaleFencingToken("expired"))
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": "",
             "fencing_token": 1,
             "expires_at": "2026-01-01T00:00:00+00:00",
             "metadata": {},
         }
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=2)
-        worker._workspace_fingerprint = lambda *_args: "stable-tree"
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=2)
+        worker.components.workflow_facts.workspace_fingerprint = lambda *_args: "stable-tree"
         captured: list[ActionEnvelope] = []
 
         def dispatch(action):
@@ -3806,10 +3798,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
             return SimpleNamespace(snapshot=rebound)
 
-        worker.repository.dispatch = dispatch
-        with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders", return_value=()):
+        worker.repository.transitions.dispatch = dispatch
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
+        with patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
-                worker._ensure_node_effect_lease(
+                worker.components.role_leases.ensure_node_effect_lease(
                     node,
                     action_type="REBIND_SNAPSHOTTER",
                     activation=RoleActivation(
@@ -3820,8 +3813,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertEqual(captured[0].action_type, "REBIND_SNAPSHOTTER")
         self.assertEqual(rebound.payload["fencing_token"], 2)
-        self.assertTrue(worker._worktree_locks.is_held("node-rebind"))
-        worker._worktree_locks.release("node-rebind")
+        self.assertTrue(worker.workspace_locks.is_held("node-rebind"))
+        worker.workspace_locks.release("node-rebind")
 
     def test_failed_effect_rebind_releases_only_the_newly_claimed_lease(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
@@ -3844,33 +3837,34 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "execution_adapter": "artifact_bundle",
             },
         )
-        worker.repository.assert_fencing_token = lambda *_args: (_ for _ in ()).throw(
+        worker.repository.leases.assert_fencing_token = lambda *_args: (_ for _ in ()).throw(
             StaleFencingToken("expired")
         )
-        worker.repository.read_lease = lambda _key: {
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": "",
             "fencing_token": 1,
             "expires_at": "2026-01-01T00:00:00+00:00",
             "metadata": {},
         }
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(
             fencing_token=2
         )
         released: list[tuple[str, str, int]] = []
-        worker.repository.release_lease = lambda resource, owner, token: released.append(
+        worker.repository.leases.release_lease = lambda resource, owner, token: released.append(
             (resource, owner, token)
         )
-        worker.repository.dispatch = lambda _action: (_ for _ in ()).throw(
+        worker.repository.transitions.dispatch = lambda _action: (_ for _ in ()).throw(
             RuntimeError("rebind dispatch failed")
         )
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
 
         with patch(
-            "pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders",
+            "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
             return_value=(),
         ):
             with self.assertRaisesRegex(RuntimeError, "rebind dispatch failed"):
                 asyncio.run(
-                    worker._ensure_node_effect_lease(
+                    worker.components.role_leases.ensure_node_effect_lease(
                         node,
                         action_type="REBIND_SNAPSHOTTER",
                         activation=RoleActivation(
@@ -3898,14 +3892,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "execution_adapter": "software_git.v2",
             },
         )
-        worker._effect_snapshot = lambda _effect: node
+        worker.components.effect_reads.effect_snapshot = lambda _effect: node
         released: list[tuple[str, str, int]] = []
-        worker.repository.read_lease = lambda _resource: {
+        worker.repository.leases.read_lease = lambda _resource: {
             "owner_id": "inv-old-coder",
             "fencing_token": 7,
             "metadata": {"aggregate_id": node.aggregate_id},
         }
-        worker.repository.release_lease = (
+        worker.repository.leases.release_lease = (
             lambda resource, owner, token: released.append((resource, owner, token))
         )
 
@@ -3948,14 +3942,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "fencing_token": 9,
             },
         )
-        worker._effect_snapshot = lambda _effect: node
+        worker.components.effect_reads.effect_snapshot = lambda _effect: node
         stopped: list[str] = []
 
         async def stop_current(_effect, *, cancel, confirm=True):
             stopped.append(node.payload["active_worker_id"])
             return {}
 
-        worker._stop_node_worker = stop_current
+        worker.components.node_control.stop_node_worker = stop_current
         result = asyncio.run(
             worker.execute_semantic_effect(
                 {
@@ -4001,19 +3995,19 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "execution_adapter": "artifact_bundle",
             },
         )
-        worker.repository.assert_fencing_token = lambda *_args: None
-        worker.repository.read_lease = lambda _key: {
+        worker.repository.leases.assert_fencing_token = lambda *_args: None
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": coder_session_id("wf-live-snapshot", "router"),
             "fencing_token": 3,
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
             "metadata": {},
         }
-        worker.repository.renew_lease = lambda *_args, **_kwargs: None
-        worker._workspace_fingerprint = lambda *_args: "stable-tree"
+        worker.repository.leases.renew_lease = lambda *_args, **_kwargs: None
+        worker.components.workflow_facts.workspace_fingerprint = lambda *_args: "stable-tree"
 
-        with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders", return_value=()):
+        with patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
-                worker._ensure_node_effect_lease(
+                worker.components.role_leases.ensure_node_effect_lease(
                     node,
                     action_type="REBIND_SNAPSHOTTER",
                     activation=RoleActivation(
@@ -4023,24 +4017,24 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
 
         self.assertIs(rebound, node)
-        self.assertTrue(worker._worktree_locks.is_held("node-live-snapshot"))
-        worker._worktree_locks.release("node-live-snapshot")
+        self.assertTrue(worker.workspace_locks.is_held("node-live-snapshot"))
+        worker.workspace_locks.release("node-live-snapshot")
 
     def test_fresh_effect_lease_is_renewed_before_worker_spawn(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
         renewals: list[tuple[str, str, int, int]] = []
-        worker.repository.assert_fencing_token = lambda *_args: None
-        worker.repository.read_lease = lambda _key: {
+        worker.repository.leases.assert_fencing_token = lambda *_args: None
+        worker.repository.leases.read_lease = lambda _key: {
             "owner_id": "inv-fresh",
             "fencing_token": 4,
             "metadata": {},
         }
-        worker.repository.renew_lease = lambda resource, owner, token, *, ttl_seconds: renewals.append(
+        worker.repository.leases.renew_lease = lambda resource, owner, token, *, ttl_seconds: renewals.append(
             (resource, owner, token, ttl_seconds)
         )
 
         reused = asyncio.run(
-            worker._reuse_or_retire_effect_lease(
+            worker.components.role_leases.reuse_or_retire_effect_lease(
                 resource_key="node:review:fresh",
                 owner_id="inv-fresh",
                 fencing_token=4,
@@ -4081,15 +4075,15 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
             "metadata": {"process_group_id": 99999999},
         }
-        worker.repository.assert_fencing_token = lambda *_args: None
-        worker.repository.read_lease = lambda _key: dict(lease)
+        worker.repository.leases.assert_fencing_token = lambda *_args: None
+        worker.repository.leases.read_lease = lambda _key: dict(lease)
         renewals: list[tuple[str, str, int, int]] = []
-        worker.repository.renew_lease = lambda resource, owner, token, *, ttl_seconds: renewals.append(
+        worker.repository.leases.renew_lease = lambda resource, owner, token, *, ttl_seconds: renewals.append(
             (resource, owner, token, ttl_seconds)
         )
 
         rebound = asyncio.run(
-            worker._ensure_node_effect_lease(
+            worker.components.role_leases.ensure_node_effect_lease(
                 node,
                 action_type="REBIND_REVIEWER",
                 activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
@@ -4136,26 +4130,27 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             holder_checks.append(bool(released))
             return ()
 
-        worker._effect_snapshot = lambda _effect: revision
-        worker._ensure_architecture_effect_lease = ensure_effect_lease  # type: ignore[method-assign]
-        worker._release_managed_lsp_workspace = release_lsp  # type: ignore[method-assign]
-        worker.repository.assert_fencing_token = lambda *_args: None
-        worker.repository.read_lease = lambda _key: {"metadata": {}}
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(version=4)
+        worker.components.effect_reads.effect_snapshot = lambda _effect: revision
+        worker.components.role_leases.ensure_architecture_effect_lease = ensure_effect_lease  # type: ignore[method-assign]
+        worker.components.role_cleanup.release_managed_lsp_workspace = release_lsp  # type: ignore[method-assign]
+        worker.repository.leases.assert_fencing_token = lambda *_args: None
+        worker.repository.leases.read_lease = lambda _key: {"metadata": {}}
+        worker.repository.snapshots.read_snapshot = lambda *_args: SimpleNamespace(version=4)
         actions: list[ActionEnvelope] = []
-        worker.repository.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.transitions.dispatch = lambda action, **_kwargs: actions.append(action)
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
 
         with (
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_process_holders", side_effect=holders),
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workspace_content_fingerprint", return_value="tree"),
+            patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", side_effect=holders),
+            patch("pal.bunshin.v2.execution_values.workspace_content_fingerprint", return_value="tree"),
         ):
-            asyncio.run(worker._quiesce_architect_role({"effect_key": "quiesce-lsp"}))
+            asyncio.run(worker.components.architecture_snapshot.quiesce_architect_role({"effect_key": "quiesce-lsp"}))
 
         self.assertEqual(released, [workspace])
         self.assertTrue(holder_checks)
         self.assertTrue(all(holder_checks))
         self.assertEqual(actions[0].action_type, "ARCHITECT_QUIESCED")
-        worker._worktree_locks.release(revision.aggregate_id)
+        worker.workspace_locks.release(revision.aggregate_id)
 
     def test_paused_architecture_stage_does_not_restart_worker(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
@@ -4168,13 +4163,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             payload={},
         )
         workflow = SimpleNamespace(state="PAUSED")
-        worker._effect_snapshot = lambda _effect: revision
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
-        worker.repository.read_snapshot = lambda *_args: workflow
-        worker.repository.claim_lease = lambda *_args, **_kwargs: self.fail("paused effect claimed a lease")
+        worker.components.effect_reads.effect_snapshot = lambda _effect: revision
+        worker.components.workflow_facts.profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.repository.snapshots.read_snapshot = lambda *_args: workflow
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: self.fail("paused effect claimed a lease")
 
         result = asyncio.run(
-            worker._run_architecture_stage(
+            worker.components.architecture_stage.run_architecture_stage(
                 {
                     "effect_id": "eff-paused-stage",
                     "effect_key": "event:0",
@@ -4321,8 +4316,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         running = SimpleNamespace(**{**revision.__dict__, "state": "ARCHITECT_RUNNING", "version": 2})
         workflow = SimpleNamespace(payload={"request_ref": {}}, state="ACTIVE")
-        worker._architecture_worker_suppressed = lambda *_args, **_kwargs: False
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.components.workflow_facts.architecture_worker_suppressed = lambda *_args, **_kwargs: False
+        worker.components.workflow_facts.profile_for_role = lambda *_args: "software_engineering.v2_architect"
         worker.service.skeleton.provision_architecture_workspace = lambda **_kwargs: ArchitectureWorkspace(
             worktree=architecture_worktree,
             common_git_dir=self.runtime_root / "project.git",
@@ -4332,26 +4327,27 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             source_fingerprint="source",
             workspace_snapshot_ref=workspace_snapshot_ref,
         )
-        worker.repository.read_snapshot = lambda aggregate_type, _aggregate_id: (
+        worker.repository.snapshots.read_snapshot = lambda aggregate_type, _aggregate_id: (
             workflow if aggregate_type == AggregateType.WORKFLOW else running
         )
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=7)
-        worker.repository.engine.legal_actions = lambda *_args: {"START_ARCHITECT"}
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=7)
+        worker.repository.transitions.legal_actions = lambda *_args: {"START_ARCHITECT"}
         actions: list[ActionEnvelope] = []
 
         def dispatch(action: ActionEnvelope, **_settlement):
             actions.append(action)
             return SimpleNamespace(snapshot=running)
 
-        worker.repository.dispatch = dispatch
-        worker.repository.read_role_assignment = lambda _assignment_id: {
+        worker.repository.transitions.dispatch = dispatch
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
+        worker.repository.role_assignments.read_role_assignment = lambda _assignment_id: {
             "assignment_id": "assignment-lease-handoff",
             "state": RoleAssignmentState.RESULT_RECORDED.value,
             "submission_payload_hash": "lease-handoff-payload",
         }
-        worker.repository.record_role_turn = lambda **_kwargs: None
+        worker.repository.role_events.record_role_turn = lambda **_kwargs: None
         released: list[tuple[object, ...]] = []
-        worker.repository.release_lease = lambda *args: released.append(args)
+        worker.repository.leases.release_lease = lambda *args: released.append(args)
         async def run_profile(**_kwargs):
             return (
                 {
@@ -4370,13 +4366,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 terminal_ref,
             )
 
-        worker._run_profile = run_profile
-        with patch(
-            "pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
+        worker.components.attempt_execution.run_profile = run_profile
+        with patch.object(worker.requests, "read",
             return_value={"workspace": {"kind": "existing_repo"}, "references": []},
         ):
             result = asyncio.run(
-                worker._run_skeleton_architecture_stage(
+                worker.components.architecture_authoring.run_skeleton_architecture_stage(
                     {"effect_id": "eff-handoff", "effect_key": "event:0"}, revision
                 )
             )
@@ -4413,8 +4408,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             payload={"requirements_ref": requirements_ref.to_dict()},
         )
         running = SimpleNamespace(**{**revision.__dict__, "state": "ARCHITECT_RUNNING", "version": 2})
-        worker._architecture_worker_suppressed = lambda *_args, **_kwargs: False
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
+        worker.components.workflow_facts.architecture_worker_suppressed = lambda *_args, **_kwargs: False
+        worker.components.workflow_facts.profile_for_role = lambda *_args: "software_engineering.v2_architect"
         worker.service.skeleton.provision_architecture_workspace = lambda **_kwargs: ArchitectureWorkspace(
             worktree=worktree,
             common_git_dir=self.runtime_root / "failed.git",
@@ -4424,30 +4419,30 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             source_fingerprint="source",
             workspace_snapshot_ref=snapshot_ref,
         )
-        worker.repository.read_snapshot = lambda aggregate_type, _aggregate_id: (
+        worker.repository.snapshots.read_snapshot = lambda aggregate_type, _aggregate_id: (
             SimpleNamespace(payload={}, state="ACTIVE")
             if aggregate_type == AggregateType.WORKFLOW
             else running
         )
-        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=9)
-        worker.repository.engine.legal_actions = lambda *_args: {"START_ARCHITECT"}
-        worker.repository.dispatch = lambda _action, **_kwargs: SimpleNamespace(
+        worker.repository.leases.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=9)
+        worker.repository.transitions.legal_actions = lambda *_args: {"START_ARCHITECT"}
+        worker.repository.transitions.dispatch = lambda _action, **_kwargs: SimpleNamespace(
             snapshot=running
         )
+        worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
         released: list[tuple[object, ...]] = []
-        worker.repository.release_lease = lambda *args: released.append(args)
+        worker.repository.leases.release_lease = lambda *args: released.append(args)
 
         async def fail_profile(**_kwargs):
             raise RuntimeError("architect failed")
 
-        worker._run_profile = fail_profile
-        with patch(
-            "pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
+        worker.components.attempt_execution.run_profile = fail_profile
+        with patch.object(worker.requests, "read",
             return_value={"workspace": {"kind": "existing_repo"}, "references": []},
         ):
             with self.assertRaisesRegex(RuntimeError, "architect failed"):
                 asyncio.run(
-                    worker._run_skeleton_architecture_stage(
+                    worker.components.architecture_authoring.run_skeleton_architecture_stage(
                         {"effect_id": "eff-failure", "effect_key": "event:0"}, revision
                     )
                 )
@@ -4513,10 +4508,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "research_mode": "local_only",
             },
         )
-        worker.repository.read_snapshot = lambda *_args: workflow
+        worker.repository.snapshots.read_snapshot = lambda *_args: workflow
 
-        with patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"references": []}):
-            instruction, refs = worker._architecture_stage_prompt("architect", revision)
+        with patch.object(worker.requests, "read", return_value={"references": []}):
+            instruction, refs = worker.components.architecture_stage.architecture_stage_prompt("architect", revision)
 
         self.assertIn("revision_scope", refs)
         self.assertNotIn("base_global_constraints", refs)
@@ -4588,7 +4583,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
         worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
         leased_invocation_id = "inv_scheduler_owned"
-        scheduler_lease = worker.repository.claim_lease(
+        scheduler_lease = worker.repository.leases.claim_lease(
             "architecture:arch-lease-owner:architect",
             leased_invocation_id,
             ttl_seconds=120,
@@ -4607,8 +4602,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             captured["invocation_id"] = str(kwargs["invocation_id"])
             raise RuntimeError("stop-after-invocation-record")
 
-        acquire_process_slot = worker._role_supervisor.acquire_process_slot
-        claim_role_assignment = worker.repository.claim_role_assignment
+        acquire_process_slot = worker.supervisor.acquire_process_slot
+        claim_role_assignment = worker.repository.role_assignments.claim_role_assignment
 
         async def capture_process_slot(run_id: str):
             admission_events.append("process_permit")
@@ -4618,12 +4613,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             admission_events.append("attempt")
             return claim_role_assignment(*args, **kwargs)
 
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
+        worker.repository.snapshots.read_snapshot = lambda *_args: SimpleNamespace(
             payload={
                 "family_binding_ref": {"sha256": "binding"},
             }
         )
-        worker.repository.record_role_invocation = capture_invocation
+        worker.repository.role_invocations.record_role_invocation = capture_invocation
         snapshot = SimpleNamespace(
             workflow_id="wf-lease-owner",
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -4688,34 +4683,34 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         }
         with (
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
+            patch.object(worker.requests, "read", return_value={"workspace": {"kind": "new_project"}}),
             patch.object(
                 worker.service.artifacts,
                 "read_json",
                 return_value=binding,
             ),
             patch.object(
-                worker._role_supervisor,
+                worker.supervisor,
                 "acquire_process_slot",
                 capture_process_slot,
             ),
             patch.object(
-                worker.repository,
+                worker.repository.role_assignments,
                 "claim_role_assignment",
                 capture_attempt,
             ),
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.resolve_pinned_bunshin_pack", lambda pack, **_kwargs: pack),
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
-            patch("pal.bunshin.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
+            patch("pal.bunshin.profiles.resolve_pinned_bunshin_pack", lambda pack, **_kwargs: pack),
+            patch("pal.bunshin.v2.semantic_orchestration.role_policy.apply_v2_role_capability_policy", identity),
+            patch("pal.bunshin.v2.semantic_orchestration.role_policy.apply_v2_research_capability_policy", identity),
+            patch("pal.bunshin.turns.sanitize_runner_session_pack", identity),
             patch(
-                "pal.bunshin.v2.semantic_orchestration.orchestrator.with_bunshin_sandbox_metadata",
+                "pal.bunshin.v2.semantic_orchestration.role_environment.with_bunshin_sandbox_metadata",
                 capture_sandbox_pack,
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "stop-after-invocation-record"):
                 asyncio.run(
-                    worker._run_profile(
+                    worker.components.attempt_execution.run_profile(
                         effect={"effect_id": "eff-lease-owner", "effect_key": "event:0"},
                         snapshot=snapshot,
                         invocation_id=leased_invocation_id,
@@ -4736,7 +4731,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(admission_events[:2], ["process_permit", "attempt"])
         self.assertEqual(worker.active_process_count, 0)
         self.assertEqual(captured["control_route"], {})
-        assignments = worker.repository.list_role_assignments(
+        assignments = worker.repository.role_assignments.list_role_assignments(
             workflow_id="wf-lease-owner"
         )
         self.assertEqual(len(assignments), 1)
@@ -5035,8 +5030,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(started.status, RuntimeStatus.OK)
-        workflow_id = provider.service.repository.workflow_ids()[0]
-        workflow = provider.service.repository.read_snapshot(
+        workflow_id = provider.service.repository.queries.workflow_ids()[0]
+        workflow = provider.service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             workflow_id,
         )
@@ -5167,11 +5162,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         with patch.object(
-            worker,
-            "_durable_session_skill_injections",
+            worker.components.role_checkpoints,
+            'durable_session_skill_injections',
             return_value=[reminder],
         ):
-            resolved = worker._role_session_skill_injections(
+            resolved = worker.components.role_checkpoints.role_session_skill_injections(
                 request={"skill_refs": ["manager.manual"]},
                 workflow_id="workflow",
                 session_id="coder-session",
@@ -5256,9 +5251,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(started.status, RuntimeStatus.OK)
         service = provider.service
-        workflow_id = service.repository.workflow_ids()[0]
+        workflow_id = service.repository.queries.workflow_ids()[0]
         now = "2026-07-30T12:00:00+00:00"
-        with sqlite3.connect(service.repository.db_path) as connection:
+        with sqlite3.connect(service.repository.database.db_path) as connection:
             for node_id, module, state, dependencies, worker in (
                 ("node-a", "parser", "CANDIDATE_READY", [], "inv-coder"),
                 ("node-b", "runtime", "VERIFYING", ["node-a"], "inv-verifier"),
@@ -5354,7 +5349,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(first.status, RuntimeStatus.OK)
         self.assertEqual(second.status, RuntimeStatus.INVALID)
         self.assertIn("Task already has an active workflow", second.llm_text)
-        self.assertEqual(len(provider.service.repository.workflow_ids()), 1)
+        self.assertEqual(len(provider.service.repository.queries.workflow_ids()), 1)
 
     def test_one_click_start_validates_before_creating_its_task(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
@@ -5388,7 +5383,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            service.repository.search_tasks(include_archived=True, limit=10),
+            service.repository.search.search_tasks(include_archived=True, limit=10),
             (),
         )
 
@@ -5445,7 +5440,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             selector="鸿蒙字体渲染验证",
             actor="nathan",
         )
-        original_delivery = provider.service.repository.read_task_delivery(task_id)
+        original_delivery = provider.service.repository.delivery_bindings.read_task_delivery(task_id)
         self.assertEqual(original_delivery["current"]["channel_id"], "socket_test")
         self.assertEqual(original_delivery["binding_version"], 1)
 
@@ -5463,14 +5458,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
         )
         self.assertEqual(rebound_result.status, RuntimeStatus.OK)
-        rebound_delivery = provider.service.repository.read_task_delivery(task_id)
+        rebound_delivery = provider.service.repository.delivery_bindings.read_task_delivery(task_id)
         self.assertEqual(rebound_delivery["current"]["channel_id"], "telegram_main")
         self.assertEqual(rebound_delivery["binding_version"], 2)
 
-        workflow_id = provider.service.repository.search_workflows(
+        workflow_id = provider.service.repository.search.search_workflows(
             actor_id="nathan", task_id=task_id, include_terminal=True
         )[0]["workflow_id"]
-        workflow = provider.service.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        workflow = provider.service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         self.assertIsNotNone(workflow)
         provider.service.update_task(
             {
@@ -5506,12 +5501,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "actor": "nathan",
             },
         )
-        before = service.repository.read_snapshot(
+        before = service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             "wf_delivery_rebind_state",
         )
 
-        rebound = service.repository.rebind_task_delivery(
+        rebound = service.repository.delivery_bindings.rebind_task_delivery(
             task_id=task_id,
             binding={
                 "channel_id": "telegram_main",
@@ -5520,7 +5515,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "control_scope_key": "telegram:telegram_main:42",
             },
         )
-        after = service.repository.read_snapshot(
+        after = service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             "wf_delivery_rebind_state",
         )
@@ -5549,13 +5544,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
 
         self.assertIsNone(
-            service.repository.read_snapshot(
+            service.repository.snapshots.read_snapshot(
                 AggregateType.TASK,
                 "task_atomic_delivery",
             )
         )
         self.assertIsNone(
-            service.repository.read_task_delivery("task_atomic_delivery")
+            service.repository.delivery_bindings.read_task_delivery("task_atomic_delivery")
         )
 
         creation = {
@@ -5576,7 +5571,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         }
         service.create_task(creation)
-        service.repository.rebind_task_delivery(
+        service.repository.delivery_bindings.rebind_task_delivery(
             task_id="task_atomic_delivery",
             binding={
                 "channel_id": "telegram_main",
@@ -5585,14 +5580,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             },
         )
         service.create_task(creation)
-        rebound = service.repository.read_task_delivery("task_atomic_delivery")
+        rebound = service.repository.delivery_bindings.read_task_delivery("task_atomic_delivery")
         self.assertEqual(rebound["origin"]["channel_id"], "socket_test")
         self.assertEqual(rebound["current"]["channel_id"], "telegram_main")
 
     def test_dead_task_channel_waits_durably_then_falls_back_to_live_recovery_socket(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "durable-socket-fallback")
-        service.repository.bind_task_delivery(
+        service.repository.delivery_bindings.bind_task_delivery(
             task_id=task_id,
             binding={
                 "channel_id": "telegram_dead",
@@ -5601,7 +5596,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "control_scope_key": "telegram:telegram_dead:42",
             },
         )
-        delivery = service.repository.enqueue_task_delivery(
+        delivery = service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id="",
             event_kind="terminal",
@@ -5610,25 +5605,25 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            service.repository.delivered_task_delivery_parts(
+            service.repository.deliveries.delivered_task_delivery_parts(
                 delivery["delivery_id"]
             ),
             (),
         )
         self.assertTrue(
-            service.repository.acknowledge_task_delivery_part(
+            service.repository.deliveries.acknowledge_task_delivery_part(
                 delivery["delivery_id"],
                 "attachment:0",
             )
         )
         self.assertTrue(
-            service.repository.acknowledge_task_delivery_part(
+            service.repository.deliveries.acknowledge_task_delivery_part(
                 delivery["delivery_id"],
                 "attachment:0",
             )
         )
         self.assertEqual(
-            service.repository.delivered_task_delivery_parts(
+            service.repository.deliveries.delivered_task_delivery_parts(
                 delivery["delivery_id"]
             ),
             ("attachment:0",),
@@ -5683,7 +5678,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertIsNone(provider._prepare_delivery_event(event))
         self.assertEqual(
-            service.repository.list_pending_task_deliveries()[0]["status"],
+            service.repository.deliveries.list_pending_task_deliveries()[0]["status"],
             "pending",
         )
 
@@ -5718,13 +5713,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_task_fts_migration_indexes_existing_projection_rows(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
         self._create_task(service, "existing-ledger-entry")
-        with sqlite3.connect(service.repository.db_path) as connection:
+        with sqlite3.connect(service.repository.database.db_path) as connection:
             connection.execute("DELETE FROM bunshin_v2_tasks_fts")
             connection.execute(
                 "DELETE FROM bunshin_v2_schema_meta WHERE schema_key = 'task_fts_index_version'"
             )
 
-        service.repository.ensure_schema()
+        service.repository.database.ensure_schema()
 
         result = service.search_tasks({"query": "existing-ledger-entry", "owner": "nathan"})
         self.assertEqual(result["count"], 1)
@@ -5877,8 +5872,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "source_channel": "socket:test",
             }
         )
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
-        repository.dispatch(
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id=workflow.workflow_id,
@@ -5889,7 +5884,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="restart-source:start",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="IMPORT_ARCHITECTURE_REVISION",
                 workflow_id="wf_restart_source",
@@ -5901,8 +5896,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_manifest_ref": manifest_ref},
             )
         )
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
-        repository.dispatch(
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_ARCHITECTURE_REVISION",
                 workflow_id=workflow.workflow_id,
@@ -5914,7 +5909,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_revision_id": "arch_restart_source"},
             )
         )
-        revision = repository.read_snapshot(
+        revision = repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_restart_source",
         )
@@ -5922,7 +5917,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"verdict": "PASS", "findings": []},
             artifact_type="ArchitectureReviewArtifact",
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_ARCHITECTURE_REVIEW",
                 workflow_id=revision.workflow_id,
@@ -5934,14 +5929,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"fencing_token": 1},
             )
         )
-        revision = repository.read_snapshot(revision.aggregate_type, revision.aggregate_id)
-        decision_token = repository.issue_human_decision_token(
+        revision = repository.snapshots.read_snapshot(revision.aggregate_type, revision.aggregate_id)
+        decision_token = repository.human_decisions.issue_human_decision_token(
             workflow_id=revision.workflow_id,
             architecture_revision_id=revision.aggregate_id,
             manifest_sha=str(manifest_ref["sha256"]),
             actor_id="nathan",
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ARCHITECTURE_REVIEW_PASSED",
                 workflow_id=revision.workflow_id,
@@ -5956,8 +5951,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        revision = repository.read_snapshot(revision.aggregate_type, revision.aggregate_id)
-        repository.dispatch(
+        revision = repository.snapshots.read_snapshot(revision.aggregate_type, revision.aggregate_id)
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="HUMAN_ACCEPT",
                 workflow_id=revision.workflow_id,
@@ -5973,7 +5968,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_restart_source",),
@@ -5991,7 +5986,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             semantic_effects=_NoopSemanticEffects(),
         )
         asyncio.run(processor.process_once(limit=10))
-        source = repository.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
+        source = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
         self.assertEqual(source.state, "RESTARTING")
 
         with (
@@ -6006,26 +6001,26 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         validate.assert_called_once()
         publish_family_binding.assert_not_called()
 
-        source = repository.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
+        source = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
         replacement_id = str(source.payload["replacement_workflow_id"])
-        replacement = repository.read_snapshot(AggregateType.WORKFLOW, replacement_id)
+        replacement = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, replacement_id)
         replacement_request = service.artifacts.read_json(replacement.payload["request_ref"])
         self.assertEqual(source.state, "CANCELLED")
         self.assertEqual(replacement.state, "CREATED")
         self.assertEqual(replacement.payload["task_id"], task_id)
-        task = repository.read_snapshot(AggregateType.TASK, task_id)
+        task = repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
         self.assertEqual(replacement.payload["family_binding_ref"], task.payload["family_binding_ref"])
         self.assertEqual(replacement_request["operation"], "review_then_execute")
         self.assertEqual(replacement_request["input_artifact_ref"], manifest_ref)
         self.assertNotIn("reuse_candidates", replacement_request)
-        delivery = repository.read_task_delivery(task_id)
+        delivery = repository.delivery_bindings.read_task_delivery(task_id)
         self.assertEqual(delivery["current"]["channel_id"], "socket_test")
         self.assertEqual(delivery["binding_version"], 1)
         asyncio.run(processor.process_once(limit=10))
         asyncio.run(processor.process_once(limit=10))
         replacement_revision = next(
             item
-            for item in repository.list_workflow_snapshots(replacement_id)
+            for item in repository.queries.list_workflow_snapshots(replacement_id)
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
         )
         self.assertEqual(
@@ -6046,7 +6041,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"requirements_ref": requirements_ref},
             artifact_type="TestManifestArtifact",
         ).to_dict()
-        created = repository.dispatch(
+        created = repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_restart_cancel",
@@ -6057,7 +6052,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="restart-cancel:create",
             )
         ).snapshot
-        active = repository.dispatch(
+        active = repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id=created.workflow_id,
@@ -6068,12 +6063,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="restart-cancel:start",
             )
         ).snapshot
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (active.workflow_id,),
             )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEST_EXECUTION_RESTART",
                 workflow_id=active.workflow_id,
@@ -6096,12 +6091,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             semantic_effects=_NoopSemanticEffects(),
         )
         asyncio.run(processor.process_once(limit=10))
-        restarting = repository.read_snapshot(
+        restarting = repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             "wf_restart_cancel",
         )
         self.assertEqual(restarting.state, "RESTARTING")
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEST_CANCEL",
                 workflow_id=restarting.workflow_id,
@@ -6115,11 +6110,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         asyncio.run(processor.process_once(limit=10))
 
-        cancelled = repository.read_snapshot(
+        cancelled = repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             "wf_restart_cancel",
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             workflow_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM bunshin_v2_aggregate_snapshots WHERE aggregate_type = ?",
@@ -6216,7 +6211,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             semantic_effects=_NoopSemanticEffects(),
         )
 
-        with patch.object(service.repository, "dispatch") as dispatch:
+        with patch.object(service.repository.transitions, "dispatch") as dispatch:
             processor._reconcile_linked_revision(
                 workflow,
                 revision,
@@ -6289,7 +6284,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         task_id = self._create_task(service, "recover-review-without-delivery")
         workflow_id = "wf_recover_review_without_delivery"
         revision_id = "arch_recover_review_without_delivery"
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id=workflow_id,
@@ -6301,7 +6296,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"task_id": task_id, "owner": "nathan"},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id=workflow_id,
@@ -6320,7 +6315,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"verdict": "PASS", "findings": []},
             artifact_type="ArchitectureReviewArtifact",
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="IMPORT_ARCHITECTURE_REVISION",
                 workflow_id=workflow_id,
@@ -6332,7 +6327,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_manifest_ref": manifest_ref},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_ARCHITECTURE_REVISION",
                 workflow_id=workflow_id,
@@ -6344,7 +6339,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_revision_id": revision_id},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_ARCHITECTURE_REVIEW",
                 workflow_id=workflow_id,
@@ -6356,7 +6351,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"fencing_token": 1},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ARCHITECTURE_REVIEW_PASSED",
                 workflow_id=workflow_id,
@@ -6371,7 +6366,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        token = repository.issue_human_decision_token(
+        token = repository.human_decisions.issue_human_decision_token(
             workflow_id=workflow_id,
             architecture_revision_id=revision_id,
             manifest_sha=str(manifest_ref["sha256"]),
@@ -6391,7 +6386,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             artifact_type="HumanReviewCardArtifact",
             child_refs=((str(manifest_ref["sha256"]), "architecture_manifest"),),
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="HUMAN_REVIEW_PUBLISHED",
                 workflow_id=workflow_id,
@@ -6403,7 +6398,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"human_review_card_ref": card_ref},
             )
         )
-        repository.store_plan_cycle(
+        repository.cycles.store_plan_cycle(
             workflow_id=workflow_id,
             cycle=PlanCycle(
                 cycle_id=f"{workflow_id}:plan",
@@ -6414,7 +6409,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertIsNone(
-            repository.latest_task_delivery(
+            repository.deliveries.latest_task_delivery(
                 task_id=task_id,
                 workflow_id=workflow_id,
                 event_kind="architecture_review_pending",
@@ -6441,7 +6436,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "ACCEPTED")
         self.assertEqual(
-            repository.read_plan_cycle(workflow_id=workflow_id).state,
+            repository.cycles.read_plan_cycle(workflow_id=workflow_id).state,
             PlanCycleState.ACCEPTED,
         )
 
@@ -6512,7 +6507,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         status = service.workflow_status(started["workflow_id"])
         self.assertEqual(status["current_phase"], "architecture")
         self.assertEqual(status["active_node_state"], "ARCHITECT_QUEUED")
-        snapshots = service.repository.list_workflow_snapshots("wf_route")
+        snapshots = service.repository.queries.list_workflow_snapshots("wf_route")
         self.assertFalse(any("milestone" in key or "cursor" in key for item in snapshots for key in item.payload))
 
     def test_standalone_review_artifact_routes_without_architecture_or_coder(self) -> None:
@@ -6539,7 +6534,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             asyncio.run(processor.process_once(limit=10))
 
         status = service.workflow_status("wf_review_only")
-        snapshots = service.repository.list_workflow_snapshots("wf_review_only")
+        snapshots = service.repository.queries.list_workflow_snapshots("wf_review_only")
         self.assertEqual(status["current_phase"], "standalone_review")
         self.assertTrue(any(item.aggregate_type == AggregateType.STANDALONE_REVIEW for item in snapshots))
         self.assertFalse(any(item.aggregate_type == AggregateType.ARCHITECTURE_REVISION for item in snapshots))
@@ -6561,10 +6556,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         asyncio.run(processor.process_once(limit=10))
         revision = next(
             item
-            for item in service.repository.list_workflow_snapshots("wf_triage_resume")
+            for item in service.repository.queries.list_workflow_snapshots("wf_triage_resume")
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ENTER_TRIAGE",
                 workflow_id=revision.workflow_id,
@@ -6585,7 +6580,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             resolution="Removed the stale worker lease and verified the architecture workspace is stable.",
         )
 
-        resumed = service.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
+        resumed = service.repository.snapshots.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
         self.assertEqual(result["status"], "triage_resolved")
         self.assertEqual(resumed.state, "ARCHITECT_QUEUED")
         self.assertEqual(
@@ -6650,7 +6645,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_triage_subjects_disambiguate_module_names_from_phase_names(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
         repository = service.repository
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_subjects",
@@ -6661,7 +6656,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="subjects:create-workflow",
             )
         )
-        revision = repository.dispatch(
+        revision = repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="wf_subjects",
@@ -6676,7 +6671,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"module_name": "architecture"},
             artifact_type="ModuleContractArtifact",
         )
-        node = repository.dispatch(
+        node = repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_subjects",
@@ -6696,7 +6691,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
         ).snapshot
         for snapshot, key in ((revision, "architecture"), (node, "module")):
-            repository.dispatch(
+            repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="ENTER_TRIAGE",
                     workflow_id="wf_subjects",
@@ -6722,11 +6717,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertNotEqual(
-            repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_subjects").state,
+            repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "node_subjects").state,
             "TRIAGE_REQUIRED",
         )
         self.assertEqual(
-            repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, "arch_subjects").state,
+            repository.snapshots.read_snapshot(AggregateType.ARCHITECTURE_REVISION, "arch_subjects").state,
             "TRIAGE_REQUIRED",
         )
 
@@ -6747,7 +6742,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"requirements_ref": requirements_ref},
             artifact_type="WorkflowRequestArtifact",
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_imported_triage",
@@ -6759,7 +6754,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"request_ref": request_ref, "owner": "nathan"},
             )
         )
-        imported = repository.dispatch(
+        imported = repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="IMPORT_ARCHITECTURE_REVISION",
                 workflow_id="wf_imported_triage",
@@ -6771,7 +6766,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_manifest_ref": manifest_ref},
             )
         ).snapshot
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ENTER_TRIAGE",
                 workflow_id=imported.workflow_id,
@@ -6792,7 +6787,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             resolution="Verified the imported manifest and Workflow Request bind identical Requirements.",
         )
 
-        restored = repository.read_snapshot(
+        restored = repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_imported_triage",
         )
@@ -6805,7 +6800,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_resume_workflow_normalizes_orphaned_node_before_retry(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_orphaned_node",
@@ -6816,7 +6811,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="orphaned-node:create-workflow",
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id="wf_orphaned_node",
@@ -6865,7 +6860,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             input_fingerprint="orphaned-producer",
         )
         node_id = "epoch_orphaned:node:drawing"
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_orphaned_node",
@@ -6883,7 +6878,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="wf_orphaned_node",
@@ -6895,7 +6890,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"accepted_dependency_node_ids": []},
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_PRODUCING",
                 workflow_id="wf_orphaned_node",
@@ -6911,7 +6906,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        with sqlite3.connect(str(service.repository.db_path)) as connection:
+        with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_orphaned_node",),
@@ -6930,7 +6925,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             source_channel="socket:test",
         )
 
-        node = service.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        node = service.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         self.assertEqual(result["status"], "triage_requires_resolution")
         self.assertEqual(result["triage"][0]["subject"], "unit:drawing")
         self.assertEqual(node.state, "TRIAGE_REQUIRED")
@@ -6971,7 +6966,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             resolution="Confirmed the previous worker is gone and the worktree contains no active writers.",
         )
 
-        node = service.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        node = service.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         self.assertEqual(resolved["status"], "triage_resolved")
         self.assertEqual(node.state, "QUEUED")
         self.assertNotIn("active_worker_id", node.payload)
@@ -7001,7 +6996,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "goal": "Use normalized paths",
             }
         )
-        workflow = service.repository.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
+        workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
         request = service.artifacts.read_json(dict(workflow.payload["request_ref"]))
 
         self.assertEqual(request["workspace"]["repo_path"], str(repo))
@@ -7053,7 +7048,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "task_spec": task_spec,
             }
         )
-        workflow = service.repository.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
+        workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
         request = service.artifacts.read_json(dict(workflow.payload["request_ref"]))
         artifact = service.artifacts.read_json(dict(request["requirements_ref"]))
         self.assertEqual(artifact["original"], task_spec)
@@ -7095,7 +7090,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             "task_spec": {"acceptance": "Run the repository tests."},
         })
         source.write_text("Changed after submission", encoding="utf-8")
-        workflow = service.repository.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
+        workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
         request = service.artifacts.read_json(dict(workflow.payload["request_ref"]))
         ledger = service.artifacts.read_json(request["requirements_ref"])
         original = ledger["original"]
@@ -7138,7 +7133,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         for invalid in invalid_requests:
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "task_spec_file"):
                 service.start_workflow({**base, **invalid})
-        self.assertEqual(service.repository.search_tasks(include_archived=True, limit=10), ())
+        self.assertEqual(service.repository.search.search_tasks(include_archived=True, limit=10), ())
 
     def test_effect_replay_after_side_effect_before_ack_is_idempotent(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
@@ -7151,13 +7146,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "goal": "Exercise effect replay",
             }
         )
-        effect = service.repository.claim_outbox("crash-window-worker", limit=1, lease_seconds=60)[0]
+        effect = service.repository.outbox_claims.claim_outbox("crash-window-worker", limit=1, lease_seconds=60)[0]
         processor = BunshinV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
 
         asyncio.run(processor._execute_mechanical(effect))
-        first = service.repository.read_snapshot(AggregateType.WORKFLOW, "wf_effect_replay")
+        first = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_effect_replay")
         asyncio.run(processor._execute_mechanical(effect))
-        replayed = service.repository.read_snapshot(AggregateType.WORKFLOW, "wf_effect_replay")
+        replayed = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_effect_replay")
 
         self.assertEqual(first.state, "ACTIVE")
         self.assertEqual(replayed.version, first.version)
@@ -7181,7 +7176,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         for _ in range(6):
             asyncio.run(processor.process_once(limit=10))
 
-        with sqlite3.connect(str(service.repository.db_path)) as connection:
+        with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             row = connection.execute(
                 """
                 SELECT status, attempt_count, last_error
@@ -7196,7 +7191,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(row[0], "failed")
         self.assertEqual(row[1], 1)
         self.assertIn("SubmissionInvariantError", row[2])
-        snapshots = service.repository.list_workflow_snapshots("wf_permanent_submit_failure")
+        snapshots = service.repository.queries.list_workflow_snapshots("wf_permanent_submit_failure")
         self.assertTrue(any(item.state == "TRIAGE_REQUIRED" for item in snapshots))
 
     def test_manager_restart_defers_semantic_effect_without_triage_or_retry_cost(self) -> None:
@@ -7219,7 +7214,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 break
 
         self.assertEqual(semantic.calls, 1)
-        with sqlite3.connect(str(service.repository.db_path)) as connection:
+        with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             row = connection.execute(
                 """
                 SELECT status, attempt_count, last_error
@@ -7236,7 +7231,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertFalse(
             any(
                 item.state == "TRIAGE_REQUIRED"
-                for item in service.repository.list_workflow_snapshots("wf_restart_defer")
+                for item in service.repository.queries.list_workflow_snapshots("wf_restart_defer")
             )
         )
 
@@ -7277,7 +7272,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         workflow_id = "wf_blocked_pause"
         epoch_id = "epoch_blocked_pause"
         node_id = f"{epoch_id}:node:downstream"
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id=workflow_id,
@@ -7288,7 +7283,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="blocked-pause:create-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id=workflow_id,
@@ -7311,7 +7306,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"module_name": "downstream"},
             artifact_type="ModuleContractArtifact",
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_EXECUTION_EPOCH",
                 workflow_id=workflow_id,
@@ -7326,7 +7321,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_EXECUTION",
                 workflow_id=workflow_id,
@@ -7337,7 +7332,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="blocked-pause:start-epoch",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id=workflow_id,
@@ -7355,7 +7350,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="NODES_COMPILED",
                 workflow_id=workflow_id,
@@ -7367,7 +7362,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"node_ids": [node_id]},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_EXECUTION_EPOCH",
                 workflow_id=workflow_id,
@@ -7379,7 +7374,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"execution_epoch_id": epoch_id},
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (workflow_id,),
@@ -7393,11 +7388,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         reconcile_control_requests(repository, workflow_id)
 
-        epoch = repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-        node = repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        epoch = repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+        node = repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         self.assertEqual(epoch.state, "PAUSE_REQUESTED")
         self.assertEqual(node.state, "PAUSE_REQUESTED")
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="PAUSE_CONFIRMED",
                 workflow_id=workflow_id,
@@ -7410,11 +7405,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         reconcile_control_requests(repository, workflow_id)
         self.assertEqual(
-            repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
+            repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
             "PAUSED",
         )
         self.assertEqual(
-            repository.read_snapshot(AggregateType.WORKFLOW, workflow_id).state,
+            repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id).state,
             "PAUSED",
         )
 
@@ -7425,17 +7420,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         reconcile_control_requests(repository, workflow_id)
         self.assertEqual(
-            repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id).state,
+            repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id).state,
             "BLOCKED_BY_DEPS",
         )
         self.assertEqual(
-            repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
+            repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
             "RUNNING",
         )
 
     def test_failed_cancel_effect_enters_triage_and_replays_cancel_after_resolution(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_cancel_recovery",
@@ -7446,7 +7441,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="cancel-recovery:create-workflow",
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id="wf_cancel_recovery",
@@ -7457,7 +7452,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="cancel-recovery:start-workflow",
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="wf_cancel_recovery",
@@ -7468,7 +7463,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="cancel-recovery:create-revision",
             )
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_ARCHITECTURE_REVISION",
                 workflow_id="wf_cancel_recovery",
@@ -7480,16 +7475,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_revision_id": "arch_cancel_recovery"},
             )
         )
-        with sqlite3.connect(str(service.repository.db_path)) as connection:
+        with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_cancel_recovery",),
             )
-        revision = service.repository.read_snapshot(
+        revision = service.repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_cancel_recovery",
         )
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REQUEST_CANCEL",
                 workflow_id="wf_cancel_recovery",
@@ -7506,14 +7501,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             semantic_effects=_PermanentFailureSemanticEffects(),
         )
         asyncio.run(failing.process_once(limit=1))
-        triaged = service.repository.read_snapshot(
+        triaged = service.repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_cancel_recovery",
         )
         self.assertEqual(triaged.state, "TRIAGE_REQUIRED")
         self.assertEqual(triaged.payload["triage_resume_state"], "CANCEL_REQUESTED")
 
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="RESOLVE_TRIAGE",
                 workflow_id="wf_cancel_recovery",
@@ -7525,13 +7520,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             )
         )
         asyncio.run(failing.process_once(limit=1))
-        retriaged = service.repository.read_snapshot(
+        retriaged = service.repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_cancel_recovery",
         )
         self.assertEqual(retriaged.state, "TRIAGE_REQUIRED")
         self.assertEqual(retriaged.payload["triage_resume_state"], "CANCEL_REQUESTED")
-        service.repository.dispatch(
+        service.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="RESOLVE_TRIAGE",
                 workflow_id="wf_cancel_recovery",
@@ -7547,7 +7542,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             semantic_effects=SemanticOrchestrator(service),
         )
         asyncio.run(recovery.process_once(limit=1))
-        cancelled = service.repository.read_snapshot(
+        cancelled = service.repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             "arch_cancel_recovery",
         )
@@ -7556,7 +7551,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_workflow_triage_freezes_epoch_without_bypassing_node_owner(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
         repository = service.repository
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_triage_hierarchy",
@@ -7567,7 +7562,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="triage-hierarchy:create-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id="wf_triage_hierarchy",
@@ -7578,7 +7573,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="triage-hierarchy:start-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_EXECUTION_EPOCH",
                 workflow_id="wf_triage_hierarchy",
@@ -7593,7 +7588,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_EXECUTION",
                 workflow_id="wf_triage_hierarchy",
@@ -7604,7 +7599,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="triage-hierarchy:start-epoch",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
                 workflow_id="wf_triage_hierarchy",
@@ -7621,7 +7616,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="wf_triage_hierarchy",
@@ -7633,7 +7628,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"accepted_dependency_node_ids": []},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="NODES_COMPILED",
                 workflow_id="wf_triage_hierarchy",
@@ -7645,7 +7640,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"node_ids": ["node_triage_hierarchy"]},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_EXECUTION_EPOCH",
                 workflow_id="wf_triage_hierarchy",
@@ -7657,13 +7652,13 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"execution_epoch_id": "epoch_triage_hierarchy"},
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_triage_hierarchy",),
             )
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_triage_hierarchy")
-        repository.dispatch(
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_triage_hierarchy")
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ENTER_TRIAGE",
                 workflow_id="wf_triage_hierarchy",
@@ -7679,17 +7674,17 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         processor = BunshinV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
         asyncio.run(processor.process_once(limit=1))
 
-        epoch = repository.read_snapshot(
+        epoch = repository.snapshots.read_snapshot(
             AggregateType.EXECUTION_EPOCH,
             "epoch_triage_hierarchy",
         )
-        node = repository.read_snapshot(
+        node = repository.snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             "node_triage_hierarchy",
         )
         self.assertEqual(epoch.state, "PAUSE_REQUESTED")
         self.assertEqual(node.state, "PAUSE_REQUESTED")
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             pending_effect_types = {
                 str(row[0])
                 for row in connection.execute(
@@ -7705,7 +7700,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         repository = service.repository
         workflow_id = "wf_terminal_effect_failure"
         revision_id = "arch_terminal_effect_failure"
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id=workflow_id,
@@ -7716,7 +7711,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="terminal-effect:create-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id=workflow_id,
@@ -7731,7 +7726,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {"architecture": "accepted"},
             artifact_type="TestManifestArtifact",
         ).to_dict()
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="IMPORT_ARCHITECTURE_REVISION",
                 workflow_id=workflow_id,
@@ -7743,7 +7738,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_manifest_ref": manifest_ref},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="LINK_ARCHITECTURE_REVISION",
                 workflow_id=workflow_id,
@@ -7755,7 +7750,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"architecture_revision_id": revision_id},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_ARCHITECTURE_REVIEW",
                 workflow_id=workflow_id,
@@ -7767,7 +7762,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 payload={"fencing_token": 1},
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="ARCHITECTURE_REVIEW_PASSED",
                 workflow_id=workflow_id,
@@ -7782,18 +7777,18 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (workflow_id,),
             )
-        decision_token = repository.issue_human_decision_token(
+        decision_token = repository.human_decisions.issue_human_decision_token(
             workflow_id=workflow_id,
             architecture_revision_id=revision_id,
             manifest_sha=str(manifest_ref["sha256"]),
             actor_id="test",
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="HUMAN_ACCEPT",
                 workflow_id=workflow_id,
@@ -7809,7 +7804,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 },
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 """
                 UPDATE bunshin_v2_outbox
@@ -7825,11 +7820,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         asyncio.run(processor.process_once(limit=1))
 
-        revision = repository.read_snapshot(
+        revision = repository.snapshots.read_snapshot(
             AggregateType.ARCHITECTURE_REVISION,
             revision_id,
         )
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         self.assertEqual(revision.state, "ACCEPTED")
         self.assertEqual(workflow.state, "TRIAGE_REQUIRED")
         self.assertEqual(workflow.payload["triage_resume_state"], "ACTIVE")
@@ -7841,7 +7836,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_workflow_reconcile_relinks_an_existing_unlinked_child(self) -> None:
         service = BunshinV2WorkflowService(self.runtime_root)
         repository = service.repository
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
                 workflow_id="wf_relink_child",
@@ -7852,7 +7847,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="relink-child:create-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="START_WORKFLOW",
                 workflow_id="wf_relink_child",
@@ -7863,7 +7858,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="relink-child:start-workflow",
             )
         )
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
                 workflow_id="wf_relink_child",
@@ -7874,7 +7869,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 idempotency_key="relink-child:create-revision",
             )
         )
-        with sqlite3.connect(str(repository.db_path)) as connection:
+        with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_relink_child",),
@@ -7890,10 +7885,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             }
         )
 
-        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_relink_child")
+        workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_relink_child")
         revisions = [
             item
-            for item in repository.list_workflow_snapshots("wf_relink_child")
+            for item in repository.queries.list_workflow_snapshots("wf_relink_child")
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
         ]
         self.assertEqual(workflow.payload["architecture_revision_id"], "arch_unlinked")
@@ -8139,7 +8134,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         manager.runs[state.run_id] = state
         recorded: list[dict[str, object]] = []
         queued: list[dict[str, object]] = []
-        manager.v2_service.repository.read_snapshot = lambda *_args: AggregateSnapshot(
+        manager.v2_service.repository.snapshots.read_snapshot = lambda *_args: AggregateSnapshot(
             aggregate_type=AggregateType.WORKFLOW,
             aggregate_id="wf-routed-question",
             workflow_id="wf-routed-question",
@@ -8149,10 +8144,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
-        manager.v2_service.repository.record_worker_event = (
+        manager.v2_service.repository.role_events.record_worker_event = (
             lambda event: recorded.append(dict(event))
         )
-        manager.v2_service.repository.enqueue_task_delivery = lambda **kwargs: {
+        manager.v2_service.repository.deliveries.enqueue_task_delivery = lambda **kwargs: {
             "delivery_id": "delivery-routed-question",
             "task_id": kwargs["task_id"],
             "payload": kwargs["payload"],
@@ -8355,7 +8350,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             for _ in range(20):
                 revision = next(
                     item
-                    for item in service.repository.list_workflow_snapshots("wf_concurrent_control")
+                    for item in service.repository.queries.list_workflow_snapshots("wf_concurrent_control")
                     if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
                 )
                 if revision.state == "PAUSE_REQUESTED":

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.v2.unit_of_work import BunshinUnitOfWork
 
 import asyncio
 import hashlib
@@ -16,7 +17,8 @@ from pal.bunshin.v2.contracts import (
     PermanentEffectError,
 )
 from pal.bunshin.v2.delivery import DeliveryReceipt
-from pal.bunshin.v2.execution import DagScheduler, ExecutionCompiler
+from pal.bunshin.v2.dag_scheduling import DagScheduler
+from pal.bunshin.v2.epoch_compilation import ExecutionCompiler
 from pal.bunshin.v2.machine_dsl import ControlDisposition, ControlIntent
 from pal.bunshin.v2.human_review import (
     HUMAN_REVIEW_RENDER_VERSION,
@@ -132,7 +134,7 @@ class BunshinV2OutboxProcessor:
         return sum(not task.done() for task in self._background_tasks)
 
     async def process_once(self, *, limit: int = 10) -> dict[str, Any]:
-        claimed = self.repository.claim_outbox(
+        claimed = self.repository.outbox_claims.claim_outbox(
             self.worker_id,
             limit=max(1, int(limit)),
             lease_seconds=self.effect_lease_seconds,
@@ -152,7 +154,7 @@ class BunshinV2OutboxProcessor:
         available = max(0, int(max_concurrency) - len(self._background_tasks))
         if available == 0:
             return 0
-        claimed = self.repository.claim_outbox(
+        claimed = self.repository.outbox_claims.claim_outbox(
             self.worker_id,
             limit=available,
             lease_seconds=self.effect_lease_seconds,
@@ -189,7 +191,7 @@ class BunshinV2OutboxProcessor:
             )
             result_ref = dict(result.get("result_artifact_ref") or {}) if isinstance(result, Mapping) else {}
             provider_request_id = str(result.get("provider_request_id") or "") if isinstance(result, Mapping) else ""
-            self.repository.complete_outbox_effect(
+            self.repository.outbox_results.complete_outbox_effect(
                 effect_id,
                 worker_id=self.worker_id,
                 provider_request_id=provider_request_id,
@@ -197,7 +199,7 @@ class BunshinV2OutboxProcessor:
             )
             return "completed"
         except DeferredEffectError as exc:
-            self.repository.defer_outbox_effect(
+            self.repository.outbox_results.defer_outbox_effect(
                 effect_id,
                 worker_id=self.worker_id,
                 reason=str(exc) or "effect deferred at a durable restart safe point",
@@ -223,7 +225,7 @@ class BunshinV2OutboxProcessor:
                 )
             )
             if superseded:
-                self.repository.complete_outbox_effect(effect_id, worker_id=self.worker_id)
+                self.repository.outbox_results.complete_outbox_effect(effect_id, worker_id=self.worker_id)
                 self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
                 self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
                 self._publish_terminal_workflow_if_any(
@@ -234,33 +236,31 @@ class BunshinV2OutboxProcessor:
             if isinstance(exc, PermanentEffectError):
                 triage_action = self._failed_effect_triage_action(effect, exc)
                 with self.repository.transaction() as connection:
-                    self.repository.fail_outbox_effect(
+                    (connection or self.repository).outbox_results.fail_outbox_effect(
                         effect_id,
                         worker_id=self.worker_id,
                         error=error,
                         triage_action=triage_action,
-                        _connection=connection,
                     )
                     self._sync_cycle_triage(
                         triage_action,
-                        _connection=connection,
+                        unit_of_work=connection,
                     )
             else:
                 triage_action = None
                 if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
                     triage_action = self._failed_effect_triage_action(effect, exc)
                 with self.repository.transaction() as connection:
-                    self.repository.retry_outbox_effect(
+                    (connection or self.repository).outbox_results.retry_outbox_effect(
                         effect_id,
                         worker_id=self.worker_id,
                         error=error,
                         retry_after_seconds=5,
                         triage_action=triage_action,
-                        _connection=connection,
                     )
                     self._sync_cycle_triage(
                         triage_action,
-                        _connection=connection,
+                        unit_of_work=connection,
                     )
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
@@ -279,7 +279,7 @@ class BunshinV2OutboxProcessor:
         self,
         action: ActionEnvelope | None,
         *,
-        _connection=None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
         if action is None:
             return
@@ -287,15 +287,14 @@ class BunshinV2OutboxProcessor:
         if action.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
             coordinator.require_plan_triage(
                 workflow_id=action.workflow_id,
-                _connection=_connection,
+                unit_of_work=unit_of_work,
             )
             return
         if action.aggregate_type != AggregateType.DAG_NODE_RUN:
             return
-        node = self.repository.read_snapshot(
+        node = (unit_of_work or self.repository).snapshots.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             action.aggregate_id,
-            _connection=_connection,
         )
         if node is None:
             return
@@ -306,14 +305,14 @@ class BunshinV2OutboxProcessor:
                 or node.payload.get("unit_id")
                 or ""
             ),
-            _connection=_connection,
+            unit_of_work=unit_of_work,
         )
 
     async def _heartbeat(self, effect_id: str) -> None:
         interval = max(1.0, self.effect_lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
-            self.repository.renew_outbox_claim(
+            self.repository.outbox_claims.renew_outbox_claim(
                 effect_id,
                 worker_id=self.worker_id,
                 lease_seconds=self.effect_lease_seconds,
@@ -355,7 +354,7 @@ class BunshinV2OutboxProcessor:
             return self._control_epoch_nodes(effect_type, effect)
         if effect_type == "suspend_stale_node_assignments":
             node = self._effect_snapshot(effect)
-            self.repository.cancel_role_assignments(
+            self.repository.role_cancellation.cancel_role_assignments(
                 workflow_id=node.workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id=node.aggregate_id,
@@ -394,8 +393,8 @@ class BunshinV2OutboxProcessor:
             return self._create_replan_revision(effect)
         if effect_type == "submit_workflow_completion":
             epoch = self._effect_snapshot(effect)
-            workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
-            self.repository.dispatch(
+            workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="MARK_COMPLETED",
                     workflow_id=epoch.workflow_id,
@@ -407,7 +406,7 @@ class BunshinV2OutboxProcessor:
                     payload={"result_artifact_ref": epoch.payload.get("published_deliverable_ref")},
                 )
             )
-            self.repository.complete_workflow_role_sessions(epoch.workflow_id)
+            self.repository.role_maintenance.complete_workflow_role_sessions(epoch.workflow_id)
             return {}
         if effect_type == "cleanup_terminal_worktrees":
             epoch = self._effect_snapshot(effect)
@@ -435,12 +434,12 @@ class BunshinV2OutboxProcessor:
                 raise RuntimeError(
                     "terminal runtime cleanup requires a terminal workflow"
                 )
-            self.repository.complete_workflow_role_sessions(
+            self.repository.role_maintenance.complete_workflow_role_sessions(
                 workflow.workflow_id,
                 status="cancelled" if workflow.state == "CANCELLED" else "completed",
             )
-            self.repository.reconcile_role_session_checkpoints()
-            self.repository.reconcile_role_runtime_spool()
+            self.repository.role_maintenance.reconcile_role_session_checkpoints()
+            self.repository.role_maintenance.reconcile_role_runtime_spool()
             repository_layout = self._terminal_repository_layout(workflow)
             if repository_layout:
                 cleanup_workflow_worktrees(
@@ -454,8 +453,8 @@ class BunshinV2OutboxProcessor:
             return {}
         if effect_type == "submit_standalone_completion":
             review = self._effect_snapshot(effect)
-            workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, review.workflow_id)
-            self.repository.dispatch(
+            workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, review.workflow_id)
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="MARK_COMPLETED",
                     workflow_id=review.workflow_id,
@@ -467,7 +466,7 @@ class BunshinV2OutboxProcessor:
                     payload={"result_artifact_ref": review.payload.get("verification_artifact_ref")},
                 )
             )
-            self.repository.complete_workflow_role_sessions(review.workflow_id)
+            self.repository.role_maintenance.complete_workflow_role_sessions(review.workflow_id)
             return {}
         if effect_type == "start_review_repair_execution":
             review = self._effect_snapshot(effect)
@@ -482,9 +481,9 @@ class BunshinV2OutboxProcessor:
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
             self._complete_architecture_cycle_sessions(revision)
-            workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
+            workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
             if workflow is not None and workflow.state == "ACTIVE":
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="REJECT_WORKFLOW",
                         workflow_id=workflow.workflow_id,
@@ -495,7 +494,7 @@ class BunshinV2OutboxProcessor:
                         idempotency_key=f"effect:{effect['effect_key']}:reject-workflow",
                     )
                 )
-                self.repository.complete_workflow_role_sessions(revision.workflow_id)
+                self.repository.role_maintenance.complete_workflow_role_sessions(revision.workflow_id)
             return {}
         if effect_type == "reconcile_execution_epoch":
             return await self._reconcile_execution_epoch(effect)
@@ -508,7 +507,7 @@ class BunshinV2OutboxProcessor:
         workflow: AggregateSnapshot,
     ) -> dict[str, Any]:
         for snapshot in reversed(
-            self.repository.list_workflow_snapshots(workflow.workflow_id)
+            self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
         ):
             manifest_ref = dict(
                 snapshot.payload.get("architecture_manifest_ref") or {}
@@ -539,7 +538,7 @@ class BunshinV2OutboxProcessor:
     async def _reconcile_execution_epoch(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self._effect_snapshot(effect)
         if epoch.state == "NOT_STARTED":
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="START_EXECUTION",
                     workflow_id=epoch.workflow_id,
@@ -599,7 +598,7 @@ class BunshinV2OutboxProcessor:
             self._control_epoch_nodes("resume_epoch_nodes", effect)
             nodes = [
                 item
-                for item in self.repository.list_workflow_snapshots(epoch.workflow_id)
+                for item in self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
                 if item.aggregate_type == AggregateType.DAG_NODE_RUN
                 and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
             ]
@@ -609,7 +608,7 @@ class BunshinV2OutboxProcessor:
             payload = {"node_ids": [item.aggregate_id for item in nodes]}
             payload["implementation_node_ids"] = [item.aggregate_id for item in nodes]
             payload["sink_node_id"] = sinks[0].aggregate_id
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="NODES_COMPILED",
                     workflow_id=epoch.workflow_id,
@@ -626,7 +625,7 @@ class BunshinV2OutboxProcessor:
     def _reconcile_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
         if workflow.state == "CREATED":
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="START_WORKFLOW",
                     workflow_id=workflow.workflow_id,
@@ -646,7 +645,7 @@ class BunshinV2OutboxProcessor:
             return {}
 
         self._propagate_workflow_control("propagate_resume", effect)
-        snapshots = list(self.repository.list_workflow_snapshots(workflow.workflow_id))
+        snapshots = list(self.repository.queries.list_workflow_snapshots(workflow.workflow_id))
         epoch_id = str(workflow.payload.get("execution_epoch_id") or "")
         review_id = str(workflow.payload.get("standalone_review_id") or "")
         revision_id = str(workflow.payload.get("architecture_revision_id") or "")
@@ -766,7 +765,7 @@ class BunshinV2OutboxProcessor:
             card_ref = dict(revision.payload.get("human_review_card_ref") or {})
             if card_ref:
                 card_payload: dict[str, Any] = {}
-                record = self.repository.read_artifact_record(
+                record = self.repository.artifacts.read_artifact_record(
                     str(card_ref.get("sha256") or "")
                 )
                 if record and str(record.get("artifact_type") or "") == "HumanReviewCardArtifact":
@@ -775,7 +774,7 @@ class BunshinV2OutboxProcessor:
                     card_payload,
                     manifest_sha=str(manifest_ref.get("sha256") or ""),
                 ):
-                    self.repository.dispatch(
+                    self.repository.transitions.dispatch(
                         ActionEnvelope(
                             action_type="REFRESH_HUMAN_REVIEW_CARD",
                             workflow_id=revision.workflow_id,
@@ -820,7 +819,7 @@ class BunshinV2OutboxProcessor:
                 }
             )
         if revision.state == "REJECTED":
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="REJECT_WORKFLOW",
                     workflow_id=workflow.workflow_id,
@@ -832,7 +831,7 @@ class BunshinV2OutboxProcessor:
                 )
             )
         elif revision.state == "CANCELLED":
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="REQUEST_CANCEL",
                     workflow_id=workflow.workflow_id,
@@ -877,7 +876,7 @@ class BunshinV2OutboxProcessor:
                 result_ref = dict(existing.payload.get("published_deliverable_ref") or {})
                 if not result_ref:
                     raise RuntimeError("completed execution epoch has no published deliverable")
-                latest_workflow = self.repository.read_snapshot(
+                latest_workflow = self.repository.snapshots.read_snapshot(
                     AggregateType.WORKFLOW,
                     workflow.aggregate_id,
                 )
@@ -900,7 +899,7 @@ class BunshinV2OutboxProcessor:
         result_ref: Mapping[str, Any],
         effect_key: str,
     ) -> None:
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="MARK_COMPLETED",
                 workflow_id=workflow.workflow_id,
@@ -912,13 +911,13 @@ class BunshinV2OutboxProcessor:
                 payload={"result_artifact_ref": dict(result_ref)},
             )
         )
-        self.repository.complete_workflow_role_sessions(workflow.workflow_id)
+        self.repository.role_maintenance.complete_workflow_role_sessions(workflow.workflow_id)
 
     def _publish_terminal_workflow_if_any(self, workflow_id: str) -> None:
         normalized_workflow_id = str(workflow_id or "").strip()
         if self.publish_workflow_event is None or not normalized_workflow_id:
             return
-        workflow = self.repository.read_snapshot(
+        workflow = self.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             normalized_workflow_id,
         )
@@ -936,7 +935,7 @@ class BunshinV2OutboxProcessor:
         attachments: list[dict[str, str]] = []
         result_sha = str(result_artifact_ref.get("sha256") or "")
         if normalized_status == "completed" and result_sha:
-            record = self.repository.read_artifact_record(result_sha)
+            record = self.repository.artifacts.read_artifact_record(result_sha)
             if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
                 delivery_receipt = DeliveryReceipt.model_validate(
                     self.service.artifacts.read_json(result_artifact_ref)
@@ -947,7 +946,7 @@ class BunshinV2OutboxProcessor:
                     != delivery_receipt.patch_content_sha256
                 ):
                     raise IOError("delivery patch content hash does not match its receipt")
-                patch_record = self.repository.read_artifact_record(
+                patch_record = self.repository.artifacts.read_artifact_record(
                     str(delivery_receipt.patch_ref.get("sha256") or "")
                 )
                 if (
@@ -1009,7 +1008,7 @@ class BunshinV2OutboxProcessor:
                 causation_key=str(effect["effect_key"]),
                 source_epoch_id=str(snapshot.payload.get("source_execution_epoch_id") or ""),
             )
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type=action_type,
                 workflow_id=snapshot.workflow_id,
@@ -1021,7 +1020,7 @@ class BunshinV2OutboxProcessor:
                 # retry hashes as the same business action after the first
                 # attempt has already advanced the snapshot.
                 expected_version=(
-                    self.repository.read_domain_event_aggregate_version(
+                    self.repository.queries.read_domain_event_aggregate_version(
                         str(effect.get("event_id") or "")
                     )
                     or snapshot.version
@@ -1051,7 +1050,7 @@ class BunshinV2OutboxProcessor:
                 revision.payload,
             ),
         ):
-            self.repository.complete_role_session(session_id, status=status)
+            self.repository.role_sessions.complete_role_session(session_id, status=status)
 
     def _route_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
@@ -1062,9 +1061,9 @@ class BunshinV2OutboxProcessor:
             with self.repository.transaction() as connection:
                 WorkflowCoordinator(self.repository).ensure_plan_cycle(
                     workflow_id=workflow.workflow_id,
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
-                self.repository.dispatch(
+                (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="CREATE_ARCHITECTURE_REVISION",
                         workflow_id=workflow.workflow_id,
@@ -1081,14 +1080,13 @@ class BunshinV2OutboxProcessor:
                             "revision_number": 1,
                         },
                     ),
-                    _connection=connection,
                 )
                 self._link_workflow(
                     workflow.workflow_id,
                     "LINK_ARCHITECTURE_REVISION",
                     {"architecture_revision_id": revision_id},
                     str(effect["effect_key"]),
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
             return {}
         artifact_ref = dict(request.get("input_artifact_ref") or {})
@@ -1097,7 +1095,7 @@ class BunshinV2OutboxProcessor:
         if operation == "review_then_execute":
             revision_id = _derived_id("arch", str(effect["effect_key"]))
             with self.repository.transaction() as connection:
-                self.repository.dispatch(
+                (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="IMPORT_ARCHITECTURE_REVISION",
                         workflow_id=workflow.workflow_id,
@@ -1113,19 +1111,18 @@ class BunshinV2OutboxProcessor:
                             "revision_number": 1,
                         },
                     ),
-                    _connection=connection,
                 )
                 self._link_workflow(
                     workflow.workflow_id,
                     "LINK_ARCHITECTURE_REVISION",
                     {"architecture_revision_id": revision_id},
                     str(effect["effect_key"]),
-                    _connection=connection,
+                    unit_of_work=connection,
                 )
             return {}
         review_id = _derived_id("review", str(effect["effect_key"]))
         with self.repository.transaction() as connection:
-            self.repository.dispatch(
+            (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="CREATE_STANDALONE_REVIEW",
                     workflow_id=workflow.workflow_id,
@@ -1136,14 +1133,12 @@ class BunshinV2OutboxProcessor:
                     idempotency_key=f"effect:{effect['effect_key']}:review",
                     payload={"review_request_ref": artifact_ref, "review_mode": operation},
                 ),
-                _connection=connection,
             )
-            review = self.repository.read_snapshot(
+            review = (connection or self.repository).snapshots.read_snapshot(
                 AggregateType.STANDALONE_REVIEW,
                 review_id,
-                _connection=connection,
             )
-            self.repository.dispatch(
+            (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="QUEUE_REVIEW",
                     workflow_id=workflow.workflow_id,
@@ -1153,14 +1148,13 @@ class BunshinV2OutboxProcessor:
                     expected_version=review.version,
                     idempotency_key=f"effect:{effect['effect_key']}:queue-review",
                 ),
-                _connection=connection,
             )
             self._link_workflow(
                 workflow.workflow_id,
                 "LINK_STANDALONE_REVIEW",
                 {"standalone_review_id": review_id},
                 str(effect["effect_key"]),
-                _connection=connection,
+                unit_of_work=connection,
             )
         return {}
 
@@ -1171,9 +1165,9 @@ class BunshinV2OutboxProcessor:
         with self.repository.transaction() as connection:
             WorkflowCoordinator(self.repository).begin_plan_revision(
                 workflow_id=previous.workflow_id,
-                _connection=connection,
+                unit_of_work=connection,
             )
-            self.repository.dispatch(
+            (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="CREATE_ARCHITECTURE_REVISION",
                     workflow_id=previous.workflow_id,
@@ -1208,16 +1202,14 @@ class BunshinV2OutboxProcessor:
                         ),
                     },
                 ),
-                _connection=connection,
             )
             if source_epoch_id:
-                epoch = self.repository.read_snapshot(
+                epoch = (connection or self.repository).snapshots.read_snapshot(
                     AggregateType.EXECUTION_EPOCH,
                     source_epoch_id,
-                    _connection=connection,
                 )
                 if epoch is not None and epoch.state == "REPLAN_REQUIRED":
-                    self.repository.dispatch(
+                    (connection or self.repository).transitions.dispatch(
                         ActionEnvelope(
                             action_type="REPLAN_REVISION_LINKED",
                             workflow_id=previous.workflow_id,
@@ -1230,14 +1222,13 @@ class BunshinV2OutboxProcessor:
                             ),
                             payload={"active_replan_revision_id": revision_id},
                         ),
-                        _connection=connection,
                     )
             self._link_workflow(
                 previous.workflow_id,
                 "LINK_ARCHITECTURE_REVISION",
                 {"architecture_revision_id": revision_id},
                 str(effect["effect_key"]),
-                _connection=connection,
+                unit_of_work=connection,
             )
         return {}
 
@@ -1246,7 +1237,7 @@ class BunshinV2OutboxProcessor:
         if source.aggregate_type != AggregateType.DAG_NODE_RUN:
             raise ValueError("request_epoch_replan must originate from a DAG node")
         epoch_id = str(source.payload.get("epoch_id") or "")
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
         if epoch is None or epoch.state in {"SUPERSEDED", "COMPLETED", "CANCELLED"}:
             return {}
         finding_ref = dict(
@@ -1270,7 +1261,7 @@ class BunshinV2OutboxProcessor:
                 artifact_type="LateReplanFindingArtifact",
                 child_refs=((str(finding_ref["sha256"]), "late_finding"),),
             )
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="ENTER_TRIAGE",
                     workflow_id=epoch.workflow_id,
@@ -1291,7 +1282,7 @@ class BunshinV2OutboxProcessor:
             return {"result_artifact_ref": failure_ref.to_dict()}
         if epoch.state not in {"RUNNING", "FINALIZING", "REPLAN_COLLECTING"}:
             return {}
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REGISTER_REPLAN_FINDING",
                 workflow_id=source.workflow_id,
@@ -1333,7 +1324,7 @@ class BunshinV2OutboxProcessor:
                 "REVIEW_SNAPSHOTTING",
             }:
                 continue
-            legal = self.repository.engine.legal_actions(AggregateType.DAG_NODE_RUN, node.state)
+            legal = self.repository.transitions.legal_actions(AggregateType.DAG_NODE_RUN, node.state)
             action_type = (
                 "MARK_STALE"
                 if "MARK_STALE" in legal
@@ -1343,7 +1334,7 @@ class BunshinV2OutboxProcessor:
             )
             if not action_type:
                 continue
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=epoch.workflow_id,
@@ -1359,16 +1350,16 @@ class BunshinV2OutboxProcessor:
     def _reconcile_replan_collections(self, workflow_id: str) -> None:
         if not workflow_id:
             return
-        for epoch in self.repository.list_workflow_snapshots(workflow_id):
+        for epoch in self.repository.queries.list_workflow_snapshots(workflow_id):
             if epoch.aggregate_type == AggregateType.EXECUTION_EPOCH and epoch.state == "REPLAN_COLLECTING":
                 self._reconcile_replan_collection(epoch)
 
     def _reconcile_replan_collection(self, epoch: AggregateSnapshot) -> None:
-        current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+        current = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
         if current is None or current.state != "REPLAN_COLLECTING":
             return
         self._stale_non_drain_nodes(current)
-        current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+        current = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
         nodes = self._epoch_nodes(current)
         unsettled = {
             "PRODUCING",
@@ -1391,10 +1382,10 @@ class BunshinV2OutboxProcessor:
         manifest_ref = dict(current.payload.get("architecture_manifest_ref") or {})
         manifest = dict(self.service.artifacts.read_json(manifest_ref)) if manifest_ref else {}
         requirements_ref = dict(manifest.get("requirements_ref") or {})
-        latest = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, current.aggregate_id)
+        latest = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, current.aggregate_id)
         if latest is None or latest.state != "REPLAN_COLLECTING":
             return
-        self.repository.dispatch(
+        self.repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="REPLAN_BATCH_READY",
                 workflow_id=latest.workflow_id,
@@ -1415,7 +1406,7 @@ class BunshinV2OutboxProcessor:
         epoch = self._effect_snapshot(effect)
         if epoch.aggregate_type != AggregateType.EXECUTION_EPOCH or epoch.state != "REPLAN_REQUIRED":
             return {}
-        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
         if workflow is None:
             raise ValueError("replan epoch has no workflow")
         generation = int(epoch.payload.get("replan_generation") or 0)
@@ -1424,9 +1415,9 @@ class BunshinV2OutboxProcessor:
         with self.repository.transaction() as connection:
             plan_cycle = WorkflowCoordinator(self.repository).begin_plan_revision(
                 workflow_id=epoch.workflow_id,
-                _connection=connection,
+                unit_of_work=connection,
             )
-            self.repository.dispatch(
+            (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="CREATE_ARCHITECTURE_REVISION",
                     workflow_id=epoch.workflow_id,
@@ -1447,15 +1438,13 @@ class BunshinV2OutboxProcessor:
                         "revision_number": plan_cycle.generation,
                     },
                 ),
-                _connection=connection,
             )
-            latest = self.repository.read_snapshot(
+            latest = (connection or self.repository).snapshots.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
                 epoch.aggregate_id,
-                _connection=connection,
             )
             if latest is not None and latest.state == "REPLAN_REQUIRED":
-                self.repository.dispatch(
+                (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="REPLAN_REVISION_LINKED",
                         workflow_id=epoch.workflow_id,
@@ -1466,21 +1455,20 @@ class BunshinV2OutboxProcessor:
                         idempotency_key=f"replan-revision-linked:{epoch.aggregate_id}:{generation}",
                         payload={"active_replan_revision_id": revision_id},
                     ),
-                    _connection=connection,
                 )
             self._link_workflow(
                 epoch.workflow_id,
                 "LINK_ARCHITECTURE_REVISION",
                 {"architecture_revision_id": revision_id},
                 f"replan:{epoch.aggregate_id}:{generation}",
-                _connection=connection,
+                unit_of_work=connection,
             )
         return {"architecture_revision_id": revision_id, "result_artifact_ref": batch_ref}
 
     def _epoch_nodes(self, epoch: AggregateSnapshot) -> list[AggregateSnapshot]:
         return [
             item
-            for item in self.repository.list_workflow_snapshots(epoch.workflow_id)
+            for item in self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
         ]
@@ -1494,7 +1482,7 @@ class BunshinV2OutboxProcessor:
         source_epoch_id: str = "",
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+        record = self.repository.artifacts.read_artifact_record(str(manifest_ref.get("sha256") or ""))
         if record is None:
             raise ValueError("architecture manifest is missing")
         ref = ArtifactRef(
@@ -1522,12 +1510,12 @@ class BunshinV2OutboxProcessor:
         )
         self._link_workflow(workflow_id, "LINK_EXECUTION_EPOCH", {"execution_epoch_id": epoch_id}, causation_key)
         if source_epoch_id:
-            previous = self.repository.read_snapshot(
+            previous = self.repository.snapshots.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
                 source_epoch_id,
             )
             if previous is not None and previous.state == "REPLAN_REQUIRED":
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="SUCCESSOR_EPOCH_STARTED",
                         workflow_id=workflow_id,
@@ -1551,7 +1539,7 @@ class BunshinV2OutboxProcessor:
             return {}
         existing_replacement_id = str(source.payload.get("replacement_workflow_id") or "")
         if source.state == "CANCELLED" and existing_replacement_id:
-            replacement = self.repository.read_snapshot(
+            replacement = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 existing_replacement_id,
             )
@@ -1571,12 +1559,12 @@ class BunshinV2OutboxProcessor:
                 "execution restart request is missing Task, architecture, or Requirements binding"
             )
         replacement_id = _derived_id("wf", str(effect["effect_key"]))
-        replacement = self.repository.read_snapshot(
+        replacement = self.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             replacement_id,
         )
         if source.payload.get("restart_cancel_requested") and replacement is None:
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="REPLACEMENT_WORKFLOW_ABORTED",
                     workflow_id=source.workflow_id,
@@ -1602,18 +1590,18 @@ class BunshinV2OutboxProcessor:
                     "source_channel": "bunshin-v2-manager",
                 }
             )
-            replacement = self.repository.read_snapshot(
+            replacement = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 replacement_id,
             )
-        latest = self.repository.read_snapshot(AggregateType.WORKFLOW, source.aggregate_id)
+        latest = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, source.aggregate_id)
         if latest is None:
             raise RuntimeError("source workflow disappeared while creating replacement")
         if latest.state == "RESTARTING":
             if latest.payload.get("restart_cancel_requested"):
                 if replacement is None:
                     raise RuntimeError("replacement workflow disappeared before cancellation")
-                if "REQUEST_CANCEL" in self.repository.engine.legal_actions(
+                if "REQUEST_CANCEL" in self.repository.transitions.legal_actions(
                     AggregateType.WORKFLOW,
                     replacement.state,
                 ):
@@ -1624,7 +1612,7 @@ class BunshinV2OutboxProcessor:
                         source_channel="bunshin-v2-manager",
                         reason="execution restart was cancelled before replacement activation",
                     )
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="REPLACEMENT_WORKFLOW_STARTED",
                     workflow_id=latest.workflow_id,
@@ -1654,7 +1642,7 @@ class BunshinV2OutboxProcessor:
         )
         nodes = [
             item
-            for item in self.repository.list_workflow_snapshots(node.workflow_id)
+            for item in self.repository.queries.list_workflow_snapshots(node.workflow_id)
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch_id
         ]
@@ -1673,9 +1661,9 @@ class BunshinV2OutboxProcessor:
                 and str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
                 == graph_execution.published_sink_ref
             ):
-                epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+                epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
                 if epoch is not None and epoch.state == "RUNNING":
-                    self.repository.dispatch(
+                    self.repository.transitions.dispatch(
                         ActionEnvelope(
                             action_type="ALL_REQUIRED_NODES_ACCEPTED",
                             workflow_id=node.workflow_id,
@@ -1747,9 +1735,9 @@ class BunshinV2OutboxProcessor:
             ),
             provenance={"workflow_id": node.workflow_id, "node_run_id": node.aggregate_id},
         )
-        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+        current = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
         if current is not None and not current.payload.get("memory_candidate_ref"):
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="MEMORY_CANDIDATE_PUBLISHED",
                     workflow_id=node.workflow_id,
@@ -1765,16 +1753,16 @@ class BunshinV2OutboxProcessor:
 
     def _propagate_workflow_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
-        snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
         children = _active_control_children(snapshots, workflow)
         if effect_type == "propagate_resume":
             for child in children:
-                if "RESUME" not in self.repository.engine.legal_actions(
+                if "RESUME" not in self.repository.transitions.legal_actions(
                     child.aggregate_type,
                     child.state,
                 ):
                     continue
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="RESUME",
                         workflow_id=workflow.workflow_id,
@@ -1797,7 +1785,7 @@ class BunshinV2OutboxProcessor:
             if machine.control_disposition(intent, child.state) != ControlDisposition.REQUEST:
                 continue
             action_type = machine.control_policies[intent].request_action
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=workflow.workflow_id,
@@ -1810,8 +1798,8 @@ class BunshinV2OutboxProcessor:
             )
 
         if effect_type in {"propagate_pause", "propagate_cancel"}:
-            latest_snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
-            latest_workflow = self.repository.read_snapshot(
+            latest_snapshots = self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
+            latest_workflow = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 workflow.workflow_id,
             )
@@ -1830,15 +1818,15 @@ class BunshinV2OutboxProcessor:
             all_settled = False
         if all_settled:
             confirmation = "CHILDREN_PAUSED" if effect_type == "propagate_pause" else "CHILDREN_CANCELLED"
-            latest = self.repository.read_snapshot(
+            latest = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 workflow.workflow_id,
             )
-            if confirmation in self.repository.engine.legal_actions(
+            if confirmation in self.repository.transitions.legal_actions(
                 AggregateType.WORKFLOW,
                 latest.state,
             ):
-                self.repository.dispatch(
+                self.repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type=confirmation,
                         workflow_id=workflow.workflow_id,
@@ -1853,7 +1841,7 @@ class BunshinV2OutboxProcessor:
 
     def _control_epoch_nodes(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self._effect_snapshot(effect)
-        snapshots = self.repository.list_workflow_snapshots(epoch.workflow_id)
+        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
         nodes = [
             item
             for item in snapshots
@@ -1869,7 +1857,7 @@ class BunshinV2OutboxProcessor:
         for node in nodes:
             if effect_type == "resume_epoch_nodes":
                 action_type = "RESUME"
-                if action_type not in self.repository.engine.legal_actions(
+                if action_type not in self.repository.transitions.legal_actions(
                     AggregateType.DAG_NODE_RUN,
                     node.state,
                 ):
@@ -1881,7 +1869,7 @@ class BunshinV2OutboxProcessor:
                 ):
                     continue
                 action_type = node_machine.control_policies[intent].request_action
-            self.repository.dispatch(
+            self.repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=epoch.workflow_id,
@@ -1901,16 +1889,15 @@ class BunshinV2OutboxProcessor:
         payload: Mapping[str, Any],
         causation_key: str,
         *,
-        _connection=None,
+        unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        workflow = self.repository.read_snapshot(
+        workflow = (unit_of_work or self.repository).snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             workflow_id,
-            _connection=_connection,
         )
         if workflow is None:
             raise ValueError("workflow does not exist")
-        self.repository.dispatch(
+        (unit_of_work or self.repository).transitions.dispatch(
             ActionEnvelope(
                 action_type=action_type,
                 workflow_id=workflow_id,
@@ -1921,12 +1908,11 @@ class BunshinV2OutboxProcessor:
                 idempotency_key=f"link:{causation_key}:{action_type}",
                 payload=dict(payload),
             ),
-            _connection=_connection,
         )
 
     def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:
         aggregate_type = AggregateType(str(effect["aggregate_type"]))
-        snapshot = self.repository.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
+        snapshot = self.repository.snapshots.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
         if snapshot is None:
             raise ValueError("effect aggregate no longer exists")
         return snapshot
@@ -1938,15 +1924,15 @@ class BunshinV2OutboxProcessor:
     ) -> ActionEnvelope | None:
         source = self._effect_snapshot(effect)
         target = source
-        if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+        if "ENTER_TRIAGE" not in self.repository.transitions.legal_actions(
             source.aggregate_type,
             source.state,
         ):
-            workflow = self.repository.read_snapshot(
+            workflow = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 source.workflow_id,
             )
-            if workflow is None or "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+            if workflow is None or "ENTER_TRIAGE" not in self.repository.transitions.legal_actions(
                 AggregateType.WORKFLOW,
                 workflow.state,
             ):
@@ -1994,7 +1980,7 @@ class BunshinV2OutboxProcessor:
 def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
     if not workflow_id:
         return
-    snapshots = list(repository.list_workflow_snapshots(workflow_id))
+    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
     workflow = next(
         (item for item in snapshots if item.aggregate_type == AggregateType.WORKFLOW),
         None,
@@ -2015,7 +2001,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             ):
                 continue
             action_type = machine.control_policies[requested_intent].request_action
-            repository.dispatch(
+            repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=workflow_id,
@@ -2031,12 +2017,12 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             )
     elif workflow.state == "ACTIVE":
         for child in _active_control_children(snapshots, workflow):
-            if child.state != "PAUSED" or "RESUME" not in repository.engine.legal_actions(
+            if child.state != "PAUSED" or "RESUME" not in repository.transitions.legal_actions(
                 child.aggregate_type,
                 child.state,
             ):
                 continue
-            repository.dispatch(
+            repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="RESUME",
                     workflow_id=workflow_id,
@@ -2051,7 +2037,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                 )
             )
 
-    snapshots = list(repository.list_workflow_snapshots(workflow_id))
+    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
     for epoch in [
         item
         for item in snapshots
@@ -2076,7 +2062,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                 ):
                     continue
                 action_type = node_machine.control_policies[epoch_intent].request_action
-                repository.dispatch(
+                repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type=action_type,
                         workflow_id=workflow_id,
@@ -2090,7 +2076,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                         ),
                     )
                 )
-            snapshots = list(repository.list_workflow_snapshots(workflow_id))
+            snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
             nodes = [
                 item
                 for item in snapshots
@@ -2108,7 +2094,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             == ControlDisposition.SETTLED
             for item in nodes
         ):
-            repository.dispatch(
+            repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="NODES_PAUSED",
                     workflow_id=workflow_id,
@@ -2124,7 +2110,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             == ControlDisposition.SETTLED
             for item in nodes
         ):
-            repository.dispatch(
+            repository.transitions.dispatch(
                 ActionEnvelope(
                     action_type="NODES_CANCELLED",
                     workflow_id=workflow_id,
@@ -2137,12 +2123,12 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             )
         elif epoch.state in {"STARTING", "RUNNING", "FINALIZING"}:
             for node in nodes:
-                if node.state != "PAUSED" or "RESUME" not in repository.engine.legal_actions(
+                if node.state != "PAUSED" or "RESUME" not in repository.transitions.legal_actions(
                     AggregateType.DAG_NODE_RUN,
                     node.state,
                 ):
                     continue
-                repository.dispatch(
+                repository.transitions.dispatch(
                     ActionEnvelope(
                         action_type="RESUME",
                         workflow_id=workflow_id,
@@ -2157,7 +2143,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                     )
                 )
 
-    snapshots = list(repository.list_workflow_snapshots(workflow_id))
+    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
     workflow = next(
         (item for item in snapshots if item.aggregate_type == AggregateType.WORKFLOW),
         None,
@@ -2173,7 +2159,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
         == ControlDisposition.SETTLED
         for item in children
     ):
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CHILDREN_PAUSED",
                 workflow_id=workflow_id,
@@ -2192,7 +2178,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
         == ControlDisposition.SETTLED
         for item in children
     ):
-        repository.dispatch(
+        repository.transitions.dispatch(
             ActionEnvelope(
                 action_type="CHILDREN_CANCELLED",
                 workflow_id=workflow_id,
@@ -2204,7 +2190,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             )
         )
 
-    refreshed = list(repository.list_workflow_snapshots(workflow_id))
+    refreshed = list(repository.queries.list_workflow_snapshots(workflow_id))
     refreshed_workflow = next(
         (
             item

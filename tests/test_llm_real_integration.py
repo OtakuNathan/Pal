@@ -42,7 +42,9 @@ from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, _JSONFrame
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, SecretRef
 from pal.bunshin.ipc import open_manager_connection
-from pal.bunshin.runner import BunshinRunner, BunshinRuntimeBundle, build_slim_bunshin_runtime
+from pal.bunshin.runner import BunshinRunner
+from pal.bunshin.runner_components.models import BunshinRuntimeBundle
+from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
 from pal.memory import L1TranscriptMessage, MemoryService
 from pal.shared import EventKind, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, BunshinInvocationPack
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core

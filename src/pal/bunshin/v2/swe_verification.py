@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 from pal.execution.tool_facade import EmptyToolInput
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.execution import git_changed_paths
+from pal.bunshin.v2.workspace_git import git_changed_paths
 from pal.bunshin.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
@@ -486,7 +486,7 @@ def swe_verification_tool_result(
         else:
             artifact_store = ContentAddressedArtifactStore(
                 Path(str(workspace["runtime_root"])),
-                BunshinV2Repository(Path(str(workspace["runtime_root"]))),
+                BunshinV2Repository(Path(str(workspace['runtime_root']))).artifacts,
             )
             ref = artifact_store.put_json(
                 submission,

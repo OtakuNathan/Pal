@@ -27,12 +27,9 @@ from pal.bunshin.v2.contracts import (
     AggregateType,
 )
 from pal.bunshin.v2.input_binding import BoundInputError
-from pal.bunshin.v2.semantic_orchestration import orchestrator as orchestrator_module
-from pal.bunshin.v2.semantic_orchestration.orchestrator import (
-    SemanticOrchestrator,
-    _attach_bound_input_read_only_overlays,
-    _role_workspace_input_binding_roots,
-)
+from pal.bunshin.v2.semantic_orchestration import attempt_inputs as orchestrator_module
+from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.v2.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays, _role_workspace_input_binding_roots
 from pal.bunshin.v2.service import BunshinV2WorkflowService
 
 WORKFLOW_ID = "wf-bind"
@@ -167,7 +164,7 @@ class BindRoleAttemptInputsTests(unittest.TestCase):
         ):
             manifest_cls.from_payload.return_value = self.fake_manifest
             entries.return_value = [{"name": "docs", "bound_input": True}]
-            result = self.orchestrator._bind_role_attempt_inputs(
+            result = self.orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
                 workflow=self.workflow,
                 request=self.request,
                 workspace=workspace,
@@ -314,7 +311,7 @@ class BindRoleAttemptInputsTests(unittest.TestCase):
         with patch.object(orchestrator_module, "InputBindingManifest") as manifest_cls:
             manifest_cls.from_payload.return_value = SimpleNamespace(workflow_id="wf-other")
             with self.assertRaisesRegex(BoundInputError, "different workflow"):
-                self.orchestrator._bind_role_attempt_inputs(
+                self.orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
                     workflow=self.workflow,
                     request=self.request,
                     workspace={"repo_path": str(self.root)},
@@ -343,7 +340,7 @@ class BindRoleAttemptInputsTests(unittest.TestCase):
         ):
             manifest_cls.from_payload.return_value = self.fake_manifest
             with self.assertRaises(BoundInputError):
-                self.orchestrator._bind_role_attempt_inputs(
+                self.orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
                     workflow=self.workflow,
                     request=self.request,
                     workspace={"repo_path": str(workspace)},

@@ -131,7 +131,7 @@ class MemoryGenerationTests(unittest.TestCase):
             self.storage.pinned("new-workflow")
         with self.assertRaisesRegex(RuntimeError, "lost acknowledgement"):
             with workflow_memory_binding(self.root, repository, "new-workflow"):
-                repository.read_snapshot = lambda *args: object()
+                repository.snapshots.read_snapshot = lambda *args: object()
                 raise RuntimeError("lost acknowledgement")
         self.assertEqual(self.storage.pinned("new-workflow"), self.storage.current())
 

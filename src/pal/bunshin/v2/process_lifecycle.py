@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Mapping
 
-from pal.bunshin.v2.execution import WorkspaceLockRegistry
+from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.v2.coroutine_runtime import (
     CoroutineRunPermit,
     CoroutineRunSemaphore,
