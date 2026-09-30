@@ -1,3 +1,5 @@
+
+from pal.plugins.contracts import PluginBuildContext
 from pal.checklist import ChecklistService, register_with_core
 
 
@@ -9,5 +11,5 @@ class ChecklistPlugin:
         return register_with_core(scope.context, ChecklistService())
 
 
-def build_plugin() -> ChecklistPlugin:
+def build_plugin(context: PluginBuildContext) -> ChecklistPlugin:
     return ChecklistPlugin()

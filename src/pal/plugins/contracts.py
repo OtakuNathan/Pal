@@ -76,6 +76,10 @@ FirstPartyPluginBundle = PluginInstance
 @dataclass(frozen=True)
 class PluginBuildContext:
     runtime_root: Path
-    services: dict[str, Any] = field(default_factory=dict)
+    services: dict[str, object] = field(default_factory=dict)
     plugin_dir: Path | None = None
     environment: PackageEnvironment | None = None
+
+
+class PluginFactory(Protocol):
+    def __call__(self, context: PluginBuildContext) -> PluginInstance: ...

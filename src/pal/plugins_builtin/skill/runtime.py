@@ -1,3 +1,5 @@
+
+from pal.plugins.contracts import PluginBuildContext
 from pal.skill import SkillRepository, SkillService, register_with_core
 
 
@@ -15,5 +17,5 @@ class SkillPlugin:
         return register_with_core(scope.context, service)
 
 
-def build_plugin() -> SkillPlugin:
+def build_plugin(context: PluginBuildContext) -> SkillPlugin:
     return SkillPlugin()

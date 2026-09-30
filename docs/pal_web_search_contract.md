@@ -99,7 +99,7 @@ class WebSearchProviderPort(Protocol):
 
 `web_search` 通过 `plugins_builtin/web_search/` 作为第一方插件加载。
 
-`plugin.toml` 声明插件元数据，`runtime.py` 的 `build_plugin()` 负责创建 service 并注册到 core context。
+`plugin.toml` 声明插件元数据，`runtime.py` 的 `build_plugin(context: PluginBuildContext)` 负责创建 service 并注册到 core context。
 
 ## Supervisor 默认配置
 

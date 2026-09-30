@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.plugins.contracts import PluginBuildContext
+
 from dataclasses import dataclass
 
 from pal.llm.repository import RuntimeSettingRepository
@@ -19,5 +21,5 @@ class WebSearchBuiltinBundle:
         return register_web_search_with_core(scope.context, service)
 
 
-def build_plugin() -> WebSearchBuiltinBundle:
+def build_plugin(context: PluginBuildContext) -> WebSearchBuiltinBundle:
     return WebSearchBuiltinBundle()

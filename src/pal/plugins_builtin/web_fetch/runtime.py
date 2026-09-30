@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.plugins.contracts import PluginBuildContext
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,5 +21,5 @@ class WebFetchBuiltinBundle:
         return register_web_fetch_with_core(scope.context, service)
 
 
-def build_plugin(*, runtime_root: Path) -> WebFetchBuiltinBundle:
-    return WebFetchBuiltinBundle(runtime_root=runtime_root)
+def build_plugin(context: PluginBuildContext) -> WebFetchBuiltinBundle:
+    return WebFetchBuiltinBundle(runtime_root=context.runtime_root)

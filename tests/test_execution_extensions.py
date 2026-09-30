@@ -126,7 +126,7 @@ class Plugin:
     def __init__(self, extension): self.extension = extension
     def start(self, scope):
         return ModuleHandle('replacement', MODULE_TIER_DETACHABLE, detachable=True, execution_extension=self.extension)
-def build_plugin(extension): return Plugin(extension)
+def build_plugin(context): return Plugin(context.services['extension'])
 ''')
     extension = Extension()
     sys.path.insert(0, str(root))

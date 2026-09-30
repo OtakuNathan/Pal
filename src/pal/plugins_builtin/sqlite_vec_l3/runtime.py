@@ -41,6 +41,6 @@ class SQLiteVecL3BuiltinBundle:
         return register_l3_with_core(scope.context, plugin)
 
 
-def build_plugin(*, context: PluginBuildContext | None = None) -> SQLiteVecL3BuiltinBundle:
-    runtime_root = context.runtime_root if context is not None else None
+def build_plugin(context: PluginBuildContext) -> SQLiteVecL3BuiltinBundle:
+    runtime_root = context.runtime_root
     return SQLiteVecL3BuiltinBundle(runtime_root=runtime_root)

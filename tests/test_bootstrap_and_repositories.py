@@ -779,7 +779,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "        scope.context.register_module(handle)",
                     "        return handle",
                     "",
-                    "def build_plugin():",
+                    "def build_plugin(context):",
                     "    return DemoBundle()",
                 ]
             ),
@@ -900,7 +900,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                         "        scope.context.register_module(handle)",
                         "        return handle",
                         "",
-                        "def build_plugin():",
+                        "def build_plugin(context):",
                         "    return DemoBundle()",
                     ]
                 ),

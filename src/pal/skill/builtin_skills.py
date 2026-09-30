@@ -372,6 +372,7 @@ Example `runtime.py`:
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.plugins.contracts import PluginBuildContext
 from capabilities import DemoProvider
 
 
@@ -395,7 +396,7 @@ class DemoPluginBundle:
         return handle
 
 
-def build_plugin(context=None, runtime_root=None, plugin_dir=None):
+def build_plugin(context: PluginBuildContext):
     return DemoPluginBundle()
 ```
 

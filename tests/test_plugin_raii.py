@@ -66,7 +66,7 @@ def _write_plugin(
                 "        scope.defer(lambda: self.ledger.append((self.plugin_id, 'cleanup', None)))",
                 "        return handle",
                 "",
-                "def build_plugin(ledger): return Plugin(ledger)",
+                "def build_plugin(context): return Plugin(context.services['ledger'])",
             ]
         ),
         encoding="utf-8",

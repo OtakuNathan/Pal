@@ -80,8 +80,8 @@ class StubRuntimeHandle:
         for module_id, handle in tuple(self.core.context.module_registry.modules.items()):
             if module_id == "channel":
                 continue
-            shutdown_async = getattr(handle, "shutdown_async", None)
-            shutdown_sync = getattr(handle, "shutdown_sync", None)
+            shutdown_async = handle.shutdown_async
+            shutdown_sync = handle.shutdown_sync
             if callable(shutdown_async):
                 try:
                     await shutdown_async()

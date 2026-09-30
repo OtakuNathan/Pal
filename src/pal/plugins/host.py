@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.plugins.contracts import PluginFactory
+
 import contextlib
 import importlib
 import inspect
@@ -97,7 +99,7 @@ def _module_loaded_from(module_name: str, root: Path) -> bool:
 class PluginHost:
     context: "MainContext"
     runtime_root: Path
-    services: dict[str, Any] = field(default_factory=dict)
+    services: dict[str, object] = field(default_factory=dict)
     third_party_repository: PluginBundleRepository = field(default_factory=PluginBundleRepository)
     builtin_root: Path | None = None
     first_party_records: dict[str, PluginRecord] = field(default_factory=dict)
@@ -1040,25 +1042,14 @@ class PluginHost:
 
     # --- factory ---
 
-    def _call_plugin_factory(self, factory, *, plugin_dir: Path | None = None) -> FirstPartyPluginBundle:
-        signature = inspect.signature(factory)
-        kwargs = {}
+    def _call_plugin_factory(self, factory: PluginFactory, *, plugin_dir: Path | None = None) -> FirstPartyPluginBundle:
         build_context = PluginBuildContext(
             runtime_root=self.runtime_root,
             services=dict(self.services),
             plugin_dir=plugin_dir,
             environment=installed_environment(plugin_dir),
         )
-        if "context" in signature.parameters:
-            kwargs["context"] = build_context
-        if "runtime_root" in signature.parameters:
-            kwargs["runtime_root"] = self.runtime_root
-        if "plugin_dir" in signature.parameters:
-            kwargs["plugin_dir"] = plugin_dir
-        for key, value in self.services.items():
-            if key in signature.parameters:
-                kwargs[key] = value
-        return factory(**kwargs)
+        return factory(context=build_context)
 
     def _restore_control_action_handlers(self, handle: ModuleHandle) -> None:
         for action_kind, handler in handle.control_action_handlers.items():

@@ -1,3 +1,5 @@
+
+from pal.plugins.contracts import PluginBuildContext
 from pal.proactive import ProactiveManager, ProactiveRepository, ProactiveRunner, register_with_core
 
 
@@ -22,5 +24,5 @@ class ProactivePlugin:
         return handle
 
 
-def build_plugin() -> ProactivePlugin:
+def build_plugin(context: PluginBuildContext) -> ProactivePlugin:
     return ProactivePlugin()
