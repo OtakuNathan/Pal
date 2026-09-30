@@ -123,7 +123,7 @@ class MemoryGenerationTests(unittest.TestCase):
 
     def test_failed_workflow_creation_does_not_leak_a_pin_but_committed_creation_does(self):
         from pal.bunshin.memory_binding import workflow_memory_binding
-        repository = SimpleNamespace(read_snapshot=lambda *args: None)
+        repository = SimpleNamespace(snapshots=SimpleNamespace(read_snapshot=lambda *args: None))
         with self.assertRaisesRegex(RuntimeError, "failed"):
             with workflow_memory_binding(self.root, repository, "new-workflow"):
                 raise RuntimeError("failed")

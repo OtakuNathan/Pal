@@ -308,7 +308,10 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(llm.calls), 1)
 
     async def test_worker_runtime_restarts_with_its_workflow_generation(self):
-        from pal.bunshin.runner import BunshinRunner
+        from pal.bunshin.runner_components.artifacts import Artifacts
+        from pal.bunshin.runner_components.memory_results import MemoryResults
+        from pal.bunshin.runner_components.status import Status
+        from pal.shared import BunshinInvocationPack
         from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
         self.storage.pin("workflow")
         result, _ = await self.run_dream()
@@ -322,10 +325,13 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(provider.repository.read_only)
                 document = provider.repository.get_document(self.refs[0])
                 bundle.memory_service.project_l2_entries([provider._project_entry(document, source_kind="l3_recall", candidate_state="stable")], touch=True)
-                owner = SimpleNamespace(_memory_generation_id=bundle.memory_generation_id,
-                    _result_memory_service=bundle.memory_service, memory_candidates=[], blocked_kind="",
-                    _short_summary=lambda text: text, _artifact_payload=lambda: {})
-                payload = Results.terminal_payload(owner, "completed", "Done")
+                memory = MemoryResults(run_id="workflow")
+                memory.bind_generation(bundle.memory_generation_id, bundle.memory_service)
+                results = Results(
+                    artifacts=Artifacts(BunshinInvocationPack(invocation_id="workflow")),
+                    memory_results=memory, status=Status(),
+                )
+                payload = results.terminal_payload("completed", "Done")
                 self.assertEqual(payload["memory_generation_id"], self.head)
                 self.assertIn(self.refs[0], payload["memory_refs"])
             finally:
