@@ -60,7 +60,9 @@ class BackgroundAssignments:
 
     def recover(self, effect_key: str, assignment_id: str, task: asyncio.Task[Effect]) -> None:
         self.bind(effect_key, assignment_id)
-        self._ready.setdefault(effect_key, asyncio.Event()).set()
+        ready = asyncio.Event()
+        ready.set()
+        self._ready[effect_key] = ready
         self.track(effect_key, task)
 
     def _done(self, effect_key: str, task: asyncio.Task[Effect]) -> None:
@@ -68,7 +70,7 @@ class BackgroundAssignments:
             task.exception()
         if self._tasks.get(effect_key) is task:
             self._tasks.pop(effect_key, None)
-        self._ready.pop(effect_key, None)
+            self._ready.pop(effect_key, None)
 
     async def drain(self, *, timeout_seconds: float) -> tuple[str, ...]:
         self.request_stop()
@@ -99,7 +101,8 @@ class BackgroundAssignments:
                 "provider_request_id": self._assignments.get(effect_key, effect_key),
                 "status": "already_running",
             }
-        ready = self._ready.setdefault(effect_key, asyncio.Event())
+        ready = asyncio.Event()
+        self._ready[effect_key] = ready
         task = asyncio.create_task(
             run_loop(effect, runner),
             name=f"bunshin-v2-assignment-{hashlib.sha256(effect_key.encode()).hexdigest()[:12]}",
@@ -109,12 +112,15 @@ class BackgroundAssignments:
             lambda completed, key=effect_key: self._done(key, completed)
         )
         ready_wait = asyncio.create_task(ready.wait())
-        done, _pending = await asyncio.wait(
-            {task, ready_wait},
-            timeout=120.0,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if ready_wait not in done:
+        try:
+            done, _pending = await asyncio.wait(
+                {task, ready_wait},
+                timeout=120.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            # The background assignment remains owned by this registry when
+            # its caller is cancelled; the caller's temporary waiter does not.
             ready_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await ready_wait

@@ -1,7 +1,8 @@
 from __future__ import annotations
 from pal.bunshin.v2.contract_runtime import ContractArtifactAccess
 from pal.bunshin.v2.artifacts import ArtifactRef
-from pal.bunshin.v2.contracts import AggregateType
+from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
+from collections.abc import Sequence
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.graph_executor import GraphDiff, NodeReuseKind
 from pal.bunshin.v2.graph_protocol import GraphIR
@@ -28,8 +29,9 @@ def _reconcile_skeleton_module_identities(
     graph_diff: GraphDiff,
     actor: str,
 ) -> tuple[str, ...]:
-    source_nodes, source_contracts = _epoch_module_contracts(repository, contracts, workflow_id, source_epoch_id)
-    target_nodes, target_contracts = _epoch_module_contracts(repository, contracts, workflow_id, target_epoch_id)
+    snapshots = repository.queries.list_workflow_snapshots(workflow_id)
+    source_nodes, source_contracts = _epoch_module_contracts(snapshots, contracts, source_epoch_id)
+    target_nodes, target_contracts = _epoch_module_contracts(snapshots, contracts, target_epoch_id)
     if set(target_graph.nodes) != set(target_nodes):
         return ()
     dependencies = {
@@ -164,10 +166,10 @@ def _reconcile_skeleton_module_identities(
     return tuple(carried_forward)
 
 
-def _epoch_module_contracts(repository: BunshinV2Repository, contracts: ContractArtifactAccess, workflow_id: str, epoch_id: str):
+def _epoch_module_contracts(snapshots: Sequence[AggregateSnapshot], contracts: ContractArtifactAccess, epoch_id: str):
     nodes = {
         str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
-        for item in repository.queries.list_workflow_snapshots(workflow_id)
+        for item in snapshots
         if item.aggregate_type == AggregateType.DAG_NODE_RUN
         and str(item.payload.get("epoch_id") or "") == epoch_id
         and str(item.payload.get("node_kind") or "") == "unit"
