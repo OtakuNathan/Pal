@@ -86,6 +86,233 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM generations").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT count(*) FROM archive_records").fetchone()[0], 0)
 
+    async def test_bucket_merges_small_batches_into_reviewed_parents_before_one_publication(self):
+        for i in range(3):
+            self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"API preference {i}",
+                summary="Nathan prefers explicit public APIs.", search_text="Nathan explicit APIs interfaces",
+                topics=["API"])).document_id)
+        original_refs = set(self.refs)
+        owner = self
+        class ObservingLLM(ReviewingLLM):
+            async def agenerate(self, request):
+                owner.assertEqual(owner.storage.current(), owner.head)
+                owner.assertEqual({r["document_id"] for r in owner.provider.repository.list_projection_rows()}, original_refs)
+                return await super().agenerate(request)
+        llm = ObservingLLM()
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
+        with patch.object(self.storage, "publish", wraps=self.storage.publish) as publish:
+            result = await service.run()
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["report"]["merge_level"], 3)
+        self.assertEqual(result["report"]["merged_groups"], 4)
+        self.assertEqual(publish.call_count, 1)
+        self.assertEqual(len(self.provider.repository.list_projection_rows()), 1)
+        payloads = [json.loads(r.messages[-1].text) for r in llm.calls]
+        self.assertEqual(sum("candidate" in p for p in payloads), 4)
+        parent_members = [d for p in payloads for c in p.get("clusters", []) for d in c["members"]
+                          if d["document_id"] not in original_refs]
+        self.assertTrue(parent_members)
+        self.assertTrue(all(d["payload"].get("source_refs") for d in parent_members))
+        with self.storage.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM archive_records").fetchone()[0], 8)
+
+    async def test_parent_receives_both_kept_originals_and_reviewed_child_successors(self):
+        for i in range(2):
+            self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"Preference {i}",
+                summary="Nathan prefers explicit public APIs.", search_text="Nathan explicit APIs interfaces",
+                topics=["API"])).document_id)
+        original_refs = set(self.refs)
+        class MixedLLM(ReviewingLLM):
+            async def agenerate(self, request):
+                response = await super().agenerate(request)
+                payload = json.loads(request.messages[-1].text)
+                if "clusters" in payload and len(payload["clusters"]) == 2:
+                    output = json.loads(response.response.message.parts[0].text)
+                    kept = output["clusters"][0]
+                    kept["keep_refs"] = kept["merges"][0]["source_refs"]
+                    kept["merges"] = []
+                    response.response = replace(response.response, message=LLMMessageIR(role="assistant",
+                        parts=(TextPartIR(text=json.dumps(output)),)))
+                return response
+        llm = MixedLLM()
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
+        result = await service.run()
+        self.assertEqual(result["status"], "completed", result)
+        payloads = [json.loads(r.messages[-1].text) for r in llm.calls]
+        parent = [p for p in payloads if "clusters" in p][-1]["clusters"][0]["members"]
+        self.assertEqual(len(parent), 3)
+        self.assertEqual(sum(d["document_id"] in original_refs for d in parent), 2)
+        self.assertEqual(sum("candidate" in p for p in payloads), 2)
+        self.assertEqual(len(self.provider.repository.list_projection_rows()), 1)
+
+    async def test_oversized_parent_preserves_reviewed_child_merges(self):
+        for i in range(2):
+            self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"Preference {i}",
+                summary="Nathan prefers explicit public APIs.", search_text="Nathan explicit APIs interfaces",
+                topics=["API"])).document_id)
+        original_refs = set(self.refs)
+        class LimitedParentLLM(ReviewingLLM):
+            async def apreflight(self, request):
+                payload = json.loads(request.request.messages[-1].text)
+                parent = any(d["document_id"] not in original_refs
+                             for c in payload.get("clusters", []) for d in c["members"])
+                return SimpleNamespace(status="ready", breakdown={"estimated_input_tokens": 20000 if parent else 1000})
+        llm = LimitedParentLLM()
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
+        result = await service.run()
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["report"]["merged_groups"], 2)
+        self.assertIn("exceeds request budget", str(result["report"]["notes"]))
+        self.assertEqual(len(self.provider.repository.list_projection_rows()), 2)
+        self.assertEqual(len(llm.calls), 3)  # One leaf batch and two independent reviews.
+
+    async def test_merge_tree_never_combines_separate_buckets(self):
+        for i in range(2):
+            self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"Preference {i}",
+                summary="Nathan prefers explicit public APIs.", search_text="Nathan explicit APIs interfaces",
+                topics=["API"])).document_id)
+        docs = tuple(self.provider.repository.get_document(ref) for ref in self.refs)
+        buckets = [Cluster("left", "fact", docs[:2]), Cluster("right", "fact", docs[2:])]
+        llm = ReviewingLLM()
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
+        with patch.object(service, "_prepare", return_value=buckets):
+            result = await service.run()
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["report"]["merge_level"], 1)
+        self.assertEqual(len(self.provider.repository.list_projection_rows()), 2)
+        self.assertEqual(len(llm.calls), 3)
+
+    async def test_parent_review_failure_leaves_original_generation_unpublished(self):
+        for i in range(2):
+            self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"Preference {i}",
+                summary="Nathan prefers explicit public APIs.", search_text="Nathan explicit APIs interfaces",
+                topics=["API"])).document_id)
+        original_refs = set(self.refs)
+        class FailingParentLLM(ReviewingLLM):
+            async def agenerate(self, request):
+                payload = json.loads(request.messages[-1].text)
+                if "candidate" in payload and any(d["document_id"] not in original_refs
+                        for d in payload["input"]["members"]):
+                    raise RuntimeError("parent review unavailable")
+                return await super().agenerate(request)
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=FailingParentLLM(), config=DreamingConfig())
+        result = await service.run()
+        self.assertEqual(result["status"], "failed", result)
+        self.assertIn("parent review unavailable", result["report"]["error"])
+        self.assertEqual(self.storage.current(), self.head)
+        self.assertEqual({r["document_id"] for r in self.provider.repository.list_projection_rows()}, original_refs)
+        self.assertFalse(self.storage.is_frozen(self.head))
+        with self.storage.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM archive_records").fetchone()[0], 0)
+
+    async def test_dreaming_uses_low_reasoning_independent_of_conversation(self):
+        for levels, expected in ((["off", "low", "high", "max"], "low"),
+                                 (["off", "high"], "off"), (["medium", "high"], "medium")):
+            with self.subTest(levels=levels):
+                llm = ReviewingLLM()
+                llm.thinking_levels_snapshot = lambda: {"test": "max"}
+                llm.resolve_endpoint_facts = lambda **kw: {"endpoint_id": "test", "thinking_levels": levels}
+                pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(), storage=self.storage)
+                for review in (False, True):
+                    request = pipeline._request({}, kind="fact", review=review)
+                    self.assertEqual(request.policy.thinking_level, expected)
+
+    async def test_request_budget_is_half_effective_output_including_prompt_and_review(self):
+        llm = ReviewingLLM()
+        llm.resolve_endpoint_facts = lambda **kw: {"endpoint_id": "test", "max_output_tokens": 8000}
+        pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(output_tokens=16000), storage=self.storage)
+        for review in (False, True):
+            with self.subTest(review=review):
+                async def preflight(request):
+                    payload = json.loads(request.request.messages[-1].text)
+                    return SimpleNamespace(status="ready", breakdown={"estimated_input_tokens":
+                        1000 if not payload else payload["tokens"]})
+                llm.apreflight = preflight
+                self.assertTrue(await pipeline._fits({"tokens": 4000}, kind="fact", review=review))
+                self.assertFalse(await pipeline._fits({"tokens": 4001}, kind="fact", review=review))
+                self.assertEqual(pipeline._request({}, kind="fact", review=review).policy.max_output_tokens, 8000)
+
+    async def test_length_splits_batches_and_reviews_only_complete_outputs(self):
+        class LimitedLLM(ReviewingLLM):
+            async def agenerate(self, request):
+                response = await super().agenerate(request)
+                payload = json.loads(request.messages[-1].text)
+                if len(payload.get("clusters", [])) > 1:
+                    response.response = replace(response.response, finish_reason="length")
+                return response
+
+        docs = tuple(self.provider.repository.get_document(ref) for ref in self.refs)
+        clusters = [Cluster(f"group-{i}", "fact", tuple(
+            dict(doc, document_id=f"{doc['document_id']}-{i}") for doc in docs)) for i in range(4)]
+        llm = LimitedLLM()
+        pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(), storage=self.storage)
+        progress = Mock()
+        results = await pipeline.process(clusters, progress=progress)
+        payloads = [json.loads(request.messages[-1].text) for request in llm.calls]
+        self.assertEqual([len(p["clusters"]) for p in payloads if "clusters" in p], [3, 1, 2, 1, 1, 1])
+        self.assertEqual(sum("candidate" in p for p in payloads), 4)
+        self.assertEqual([r.cluster_id for r in results], [c.cluster_id for c in clusters])
+        self.assertTrue(all(len(r.merges) == 1 for r in results))
+        self.assertEqual(pipeline.usage["calls"], 10)
+        self.assertEqual(progress.call_args.args[:2], (4, 4))
+        await pipeline.process(clusters)
+        self.assertEqual(len(llm.calls), 10)
+
+    async def test_single_truncated_group_does_not_block_other_reviewed_merges(self):
+        class LimitedLLM(ReviewingLLM):
+            async def agenerate(self, request):
+                response = await super().agenerate(request)
+                payload = json.loads(request.messages[-1].text)
+                if any(c["cluster_id"] == "limited" for c in payload.get("clusters", [])):
+                    response.response = replace(response.response, finish_reason="length")
+                return response
+
+        docs = tuple(self.provider.repository.get_document(ref) for ref in self.refs)
+        clusters = [Cluster(name, "fact", tuple(dict(doc, document_id=f"{name}-{i}")
+                    for i, doc in enumerate(docs))) for name in ("limited", "healthy")]
+        llm = LimitedLLM()
+        pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(), storage=self.storage)
+        results = await pipeline.process(clusters)
+        self.assertEqual(set(results[0].keep_refs), {d["document_id"] for d in clusters[0].members})
+        self.assertFalse(results[0].merges)
+        self.assertEqual(len(results[1].merges), 1)
+        self.assertEqual(len(llm.calls), 4)
+        self.assertIsNone(pipeline._cached(clusters[0]))
+        self.assertIsNotNone(pipeline._cached(clusters[1]))
+        with self.storage.connection() as db:
+            pairs = db.execute("SELECT left_ref,right_ref FROM dreaming_pairs").fetchall()
+        self.assertEqual([tuple(row) for row in pairs], [("healthy-0", "healthy-1")])
+
+    async def test_truncated_merge_or_review_keeps_originals_without_caching(self):
+        for stage in ("merge", "review"):
+            with self.subTest(stage=stage):
+                class LimitedLLM(ReviewingLLM):
+                    async def astream(self, request):
+                        response = await super().agenerate(request)
+                        payload = json.loads(request.messages[-1].text)
+                        if ("candidate" in payload) == (stage == "review"):
+                            # Even syntactically complete JSON must be discarded
+                            # if the provider marks the response truncated.
+                            response.response = replace(response.response, finish_reason="length")
+                        yield response
+
+                llm = LimitedLLM()
+                service = DreamingService(storage=self.storage, provider=self.provider,
+                    llm=llm, config=DreamingConfig())
+                result = await service.run()
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["report"]["outcome"], "no_changes")
+                self.assertIn("truncated", str(result["report"]["notes"]))
+                self.assertEqual(result["report"]["usage"]["calls"], 1 if stage == "merge" else 2)
+                self.assertEqual(self.storage.current(), self.head)
+                self.assertEqual({r["document_id"] for r in self.provider.repository.list_projection_rows()}, set(self.refs))
+                with self.storage.connection() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM dreaming_batches").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT count(*) FROM dreaming_pairs").fetchone()[0], 0)
+                # A later run actually calls the model again.
+                await service.run()
+                self.assertEqual(len(llm.calls), 2 if stage == "merge" else 4)
+
     async def test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline(self):
         service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(),
             config=DreamingConfig(enabled=True))

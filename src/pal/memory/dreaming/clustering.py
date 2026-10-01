@@ -38,6 +38,41 @@ class Cluster:
                 "references": [semantic_document(doc) for doc in self.references]}
 
 
+class MergeTree:
+    """Pairwise reduction inside each discovered bucket, never across buckets."""
+
+    def __init__(self, buckets):
+        self.nodes = [[self._node(bucket, bucket.members[i:i + 2])
+                       for i in range(0, len(bucket.members), 2)] for bucket in buckets]
+
+    @staticmethod
+    def _node(bucket, members):
+        refs = [doc["document_id"] for doc in members]
+        return Cluster("tree_" + content_hash([bucket.kind, refs])[:16],
+                       bucket.kind, tuple(members), bucket.references)
+
+    def clusters(self):
+        return [node for bucket in self.nodes for node in bucket]
+
+    def advance(self, repo, replacements):
+        successors = {ref: item["new_ref"] for item in replacements for ref in item["source_refs"]}
+        following = []
+        for bucket in self.nodes:
+            if len(bucket) < 2:
+                continue
+            parents = []
+            for index in range(0, len(bucket), 2):
+                children = bucket[index:index + 2]
+                refs = list(dict.fromkeys(successors.get(doc["document_id"], doc["document_id"])
+                    for child in children for doc in child.members))
+                members = [repo.get_document(ref) for ref in refs]
+                if any(doc is None for doc in members):
+                    raise RuntimeError("dreaming merge tree lost a source or successor")
+                parents.append(self._node(children[0], members))
+            following.append(parents)
+        self.nodes = following
+
+
 def pair_fingerprint(left, right):
     return content_hash([semantic_document(doc) for doc in sorted((left, right), key=lambda doc: doc["document_id"])])
 
@@ -123,18 +158,7 @@ def discover_clusters(repo, config, *, storage=None, review_scope="") -> list[Cl
         members = [ref, *[other for other in neighbors[ref] if other not in owned][:config.max_group_members - 1]]
         references = [other for other in neighbors[ref] if other not in members][:4]
         owned.update(members)
-        groups, group, size = [], [], 0
-        for member in members:
-            cost = len(json.dumps(semantic_document(documents[member]), ensure_ascii=False)) / 2
-            if group and size + cost > config.input_tokens * 0.75:
-                groups.append(group)
-                group, size = [], 0
-            group.append(member)
-            size += cost
-        if group:
-            groups.append(group)
-        for group in groups:
-            cluster_id = "cluster_" + content_hash(sorted(group))[:16]
-            clusters.append(Cluster(cluster_id, documents[ref]["document_kind"],
-                tuple(documents[item] for item in group), tuple(documents[item] for item in references)))
+        cluster_id = "cluster_" + content_hash(sorted(members))[:16]
+        clusters.append(Cluster(cluster_id, documents[ref]["document_kind"],
+            tuple(documents[item] for item in members), tuple(documents[item] for item in references)))
     return sorted(clusters, key=lambda cluster: (-sum(int(doc.get("use_count") or 0) for doc in cluster.members), cluster.cluster_id))

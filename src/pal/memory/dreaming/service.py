@@ -12,7 +12,7 @@ from pal.foundation import utc_now
 from pal.memory.service import MemoryService
 from pal.memory.storage import MemoryStorage, MemoryDatabase
 from pal.memory.repository import MemoryDurableRepository
-from pal.memory.dreaming.clustering import discover_clusters, semantic_document
+from pal.memory.dreaming.clustering import MergeTree, discover_clusters, semantic_document
 from pal.memory.dreaming.contracts import DreamingConfig
 from pal.memory.dreaming.pipeline import DreamingPipeline, apply_merges
 
@@ -245,23 +245,38 @@ class DreamingService:
                            "endpoints": pipeline.endpoints, "config_fingerprint": pipeline.config_fingerprint})
             self._phase(run_id, "refining", report)
             pipeline.phase_callback = lambda phase: self._phase(run_id, phase, report)
-            def progress(done, total, usage):
-                report.update(processed_groups=done, groups=total, usage=usage)
-                self._phase(run_id, "refining", report)
-            results = await pipeline.process(clusters, progress=progress)
-            self._phase(run_id, "reviewing", report)
-            report.update(usage=pipeline.usage, processed_groups=len(clusters),
-                          merged_groups=sum(len(result.merges) for result in results),
-                          notes=[{"cluster_id": result.cluster_id, "notes": result.notes} for result in results if result.notes])
-            if not report["merged_groups"]:
+            tree = MergeTree(clusters)
+            replacements = []
+            notes = []
+            level = 0
+            private_provider = None
+            while stage_clusters := tree.clusters():
+                level += 1
+                report.update(merge_level=level, level_groups=len(stage_clusters), level_processed_groups=0)
+                def progress(done, total, usage):
+                    report.update(level_processed_groups=done, level_groups=total, usage=usage)
+                    self._phase(run_id, "refining", report)
+                results = await pipeline.process(stage_clusters, progress=progress)
+                notes.extend({"cluster_id": result.cluster_id, "level": level, "notes": result.notes}
+                             for result in results if result.notes)
+                stage_merges = sum(len(result.merges) for result in results)
+                stage_replacements = []
+                if stage_merges:
+                    if candidate is None:
+                        candidate = await self._work(self.storage.candidate, source)
+                        private_provider = replace(self.provider, repository=candidate, service=MemoryService(), read_only=False)
+                    stage_replacements = await self._work(apply_merges, private_provider, stage_clusters, results)
+                    replacements.extend(stage_replacements)
+                report.update(usage=pipeline.usage, merged_groups=len(replacements), notes=notes,
+                              level_processed_groups=len(stage_clusters))
+                await self._work(tree.advance, candidate or source, stage_replacements)
+            report["processed_groups"] = len(clusters)
+            if not replacements:
                 await self._work(self.storage.flush_revisions, source)
                 report["outcome"] = "no_changes"
                 self._phase(run_id, "completed", report)
                 return self.status(run_id)
             self._phase(run_id, "verifying", report)
-            candidate = await self._work(self.storage.candidate, source)
-            private_provider = replace(self.provider, repository=candidate, service=MemoryService(), read_only=False)
-            replacements = await self._work(apply_merges, private_provider, clusters, results)
             await self._work(self._verify, private_provider, clusters, replacements)
             pipeline.assert_configuration()
             report.update(outcome="merged", replacements=replacements, generation_id=candidate.generation_id)

@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from pal.foundation import utc_now
 from pal.llm.contracts import LLMPreflightRequest
 from pal.llm.conversions import request_ir_from_prompt
-from pal.llm.ir import TextPartIR
+from pal.llm.ir import TextPartIR, ThinkingLevel
 from pal.memory.contracts import L3CommitRequest
 from pal.memory.mutations import _insert, content_hash, retire_document
 from pal.memory.dreaming.clustering import Cluster, event_identity, identity, pair_fingerprint
@@ -49,22 +49,32 @@ def keep_result(cluster, note=""):
     return ClusterResult(cluster_id=cluster.cluster_id, keep_refs=[doc["document_id"] for doc in cluster.members], merges=[], notes=[note] if note else [])
 
 
+class DreamingCapacityError(RuntimeError):
+    """A complete request or response exceeds its bounded capacity."""
+
+
+class DreamingOutputLimitError(DreamingCapacityError):
+    """The provider truncated a response; none of its content is usable."""
+
+
 class DreamingPipeline:
     def __init__(self, *, llm, config, storage):
         self.llm, self.config, self.storage = llm, config, storage
         endpoint = config.endpoint_id or str(getattr(llm, "active_endpoint_id", "") or "")
         self.endpoints = {"merge": endpoint, "review": config.review_endpoint_id or endpoint}
         self.models = {}
-        thinking_snapshot = getattr(llm, "thinking_levels_snapshot", None)
-        thinking = thinking_snapshot() if callable(thinking_snapshot) else {}
         self.thinking = {}
         resolver = getattr(llm, "resolve_endpoint_facts", None)
         for purpose, endpoint_id in self.endpoints.items():
             facts = resolver(preferred_endpoint_id=endpoint_id) if callable(resolver) else {}
             self.models[purpose] = dict(facts)
             self.endpoints[purpose] = str(facts.get("endpoint_id") or endpoint_id)
-            self.thinking[purpose] = thinking.get(self.endpoints[purpose])
-        self.config_fingerprint = content_hash({"config": asdict(config), "algorithm_version": "incremental_seed_v2", "models": self.models,
+            levels = facts.get("thinking_levels", [])
+            # Dreaming owns its reasoning policy instead of inheriting an
+            # interactive conversation's potentially high reasoning setting.
+            self.thinking[purpose] = (ThinkingLevel.LOW if "low" in levels else
+                next((level for level in ThinkingLevel if level.value in levels), None))
+        self.config_fingerprint = content_hash({"config": asdict(config), "algorithm_version": "merge_tree_v3", "models": self.models,
             "endpoints": self.endpoints, "thinking": self.thinking, "prompts": [COMMON_PROMPT, FACT_PROMPT, CASE_PROMPT, REVIEW_PROMPT],
             "schemas": [BatchResult.model_json_schema(), ReviewResult.model_json_schema()]})
         self.phase_callback = None
@@ -134,16 +144,19 @@ class DreamingPipeline:
         return replace(request, policy=replace(request.policy, thinking_level=self.thinking[purpose]),
                        logical_scope_id="memory:dreaming:" + self.config_fingerprint)
 
-    async def _fits(self, payload, *, kind, review=False):
+    async def _fits(self, payload, *, kind, review=False, correction=""):
+        request = self._request(payload, kind=kind, review=review, correction=correction)
+        total_tokens = sum(len(message.text) for message in request.messages) / 2
         material_tokens = len(json.dumps(payload, ensure_ascii=False)) / 2
         output_budget = min(self.config.output_tokens, int(self.models["review" if review else "merge"].get("max_output_tokens") or self.config.output_tokens))
         preflight = getattr(self.llm, "apreflight", None)
         if callable(preflight):
-            advice = await preflight(LLMPreflightRequest(self._request(payload, kind=kind, review=review)))
+            advice = await preflight(LLMPreflightRequest(request))
             if str(advice.status) != "ready":
                 return False
             estimated = getattr(advice, "breakdown", {}).get("estimated_input_tokens")
             if estimated is not None:
+                total_tokens = int(estimated)
                 key = (kind, review)
                 if key not in self._input_overhead:
                     empty = await preflight(LLMPreflightRequest(self._request({}, kind=kind, review=review)))
@@ -151,9 +164,9 @@ class DreamingPipeline:
                 material_tokens = max(0, int(estimated) - self._input_overhead[key]) + 32
         if material_tokens > self.config.input_tokens:
             return False
-        # Reproducing faithful case details competes with reasoning for output
-        # tokens. Bound merge batches by output capacity as well as context.
-        if not review and material_tokens > output_budget * 0.75:
+        # Include instructions/schema and, for review, both originals and the
+        # candidate. Reserve room for reasoning and faithful output expansion.
+        if total_tokens > output_budget * 0.5:
             return False
         return True
 
@@ -161,6 +174,8 @@ class DreamingPipeline:
         self.assert_configuration()
         if self.phase_callback is not None:
             self.phase_callback("reviewing" if review else "refining")
+        if not await self._fits(payload, kind=kind, review=review, correction=correction):
+            raise DreamingCapacityError("Complete request exceeds input budget")
         request = self._request(payload, kind=kind, review=review, correction=correction)
         async with asyncio.timeout(self.config.request_timeout_seconds):
             stream = getattr(self.llm, "astream", None)
@@ -176,9 +191,32 @@ class DreamingPipeline:
         self.usage["input_tokens"] += response.usage.input_tokens
         self.usage["output_tokens"] += response.usage.output_tokens
         self.usage["cost"] += response.usage.cost
+        if str(response.finish_reason) == "length":
+            raise DreamingOutputLimitError("dreaming LLM output truncated: length")
         if str(response.finish_reason) not in {"stop", "end_turn"}:
             raise RuntimeError(f"dreaming LLM failed: {response.finish_reason}")
         return "".join(part.text for part in response.message.parts if isinstance(part, TextPartIR))
+
+    async def _merge_batch(self, batch):
+        payload = {"clusters": [item.payload() for item in batch]}
+        error = ""
+        for attempt in range(3):
+            text = await self._generate(payload, kind=batch[0].kind, correction=error)
+            try:
+                output = BatchResult.model_validate_json(text)
+                by_id = {item.cluster_id: item for item in output.clusters}
+                if len(by_id) != len(output.clusters) or set(by_id) != {item.cluster_id for item in batch}:
+                    raise ValueError("batch must return each supplied cluster exactly once")
+                for cluster in batch:
+                    validate_result(cluster, by_id[cluster.cluster_id])
+                break
+            except ValueError as exc:
+                # Only structural errors cause correction calls. Provider
+                # failures use the shared LLM runtime's bounded retries.
+                error = str(exc)[:600]
+                if attempt == 2:
+                    raise ValueError("dreaming output failed structural validation") from exc
+        return by_id
 
     async def process(self, clusters, *, progress=None):
         self.assert_configuration()
@@ -201,14 +239,19 @@ class DreamingPipeline:
                 self._save(cluster, result, {"no_changes": True})
             else:
                 pending.append(cluster)
-        while pending:
-            first = pending.pop(0)
-            batch = [first]
-            while pending and len(batch) < self.config.max_clusters_per_request and pending[0].kind == first.kind:
-                trial = {"clusters": [item.payload() for item in (*batch, pending[0])]}
-                if not await self._fits(trial, kind=first.kind):
-                    break
-                batch.append(pending.pop(0))
+        retry_batches = []
+        while pending or retry_batches:
+            if retry_batches:
+                batch = retry_batches.pop(0)
+                first = batch[0]
+            else:
+                first = pending.pop(0)
+                batch = [first]
+                while pending and len(batch) < self.config.max_clusters_per_request and pending[0].kind == first.kind:
+                    trial = {"clusters": [item.payload() for item in (*batch, pending[0])]}
+                    if not await self._fits(trial, kind=first.kind):
+                        break
+                    batch.append(pending.pop(0))
             payload = {"clusters": [item.payload() for item in batch]}
             if not await self._fits(payload, kind=first.kind):
                 # No truncation: preserve any oversized records as-is.
@@ -217,23 +260,23 @@ class DreamingPipeline:
                     results[cluster.cluster_id] = result
                     self._save(cluster, result, {"oversized": True})
                 continue
-            error = ""
-            for attempt in range(3):
-                text = await self._generate(payload, kind=first.kind, correction=error)
-                try:
-                    output = BatchResult.model_validate_json(text)
-                    by_id = {item.cluster_id: item for item in output.clusters}
-                    if len(by_id) != len(output.clusters) or set(by_id) != {item.cluster_id for item in batch}:
-                        raise ValueError("batch must return each supplied cluster exactly once")
-                    for cluster in batch:
-                        validate_result(cluster, by_id[cluster.cluster_id])
-                    break
-                except ValueError as exc:
-                    # Only structural errors cause correction calls. Provider
-                    # failures use the shared LLM runtime's bounded retries.
-                    error = str(exc)[:600]
-                    if attempt == 2:
-                        raise ValueError("dreaming output failed structural validation") from exc
+            try:
+                by_id = await self._merge_batch(batch)
+            except DreamingCapacityError as exc:
+                if len(batch) > 1:
+                    middle = len(batch) // 2
+                    # Keep these as explicit batches so normal packing cannot
+                    # immediately join the truncated request back together.
+                    retry_batches[0:0] = [batch[:middle], batch[middle:]]
+                else:
+                    cluster = batch[0]
+                    results[cluster.cluster_id] = keep_result(cluster,
+                        f"Merge capacity limit ({exc}); originals retained without a completed duplicate check")
+                    # This is not a semantic KEEP decision. Do not cache it or
+                    # mark its pairs checked; a later round must be able to retry.
+                    if progress is not None:
+                        progress(len(results), len(clusters), dict(self.usage))
+                continue
             for cluster in batch:
                 result = by_id[cluster.cluster_id]
                 members = {doc["document_id"]: doc for doc in cluster.members}
@@ -251,7 +294,13 @@ class DreamingPipeline:
                     else:
                         correction = ""
                         for attempt in range(3):
-                            text = await self._generate(review_payload, kind=cluster.kind, review=True, correction=correction)
+                            try:
+                                text = await self._generate(review_payload, kind=cluster.kind, review=True, correction=correction)
+                            except DreamingCapacityError as exc:
+                                result = keep_result(cluster,
+                                    f"Review capacity limit ({exc}); unreviewed merge discarded and originals retained")
+                                review_record = None
+                                break
                             try:
                                 review = ReviewResult.model_validate_json(text)
                                 break
@@ -259,10 +308,12 @@ class DreamingPipeline:
                                 if attempt == 2:
                                     raise ValueError("dreaming review failed structural validation") from exc
                                 correction = str(exc)[:600]
-                        review_record = review.model_dump()
-                        if not review.approved or review.issues:
-                            result = keep_result(cluster, "Independent review did not confirm a faithful duplicate merge")
-                self._save(cluster, result, review_record)
+                        if review_record is not None:
+                            review_record = review.model_dump()
+                            if not review.approved or review.issues:
+                                result = keep_result(cluster, "Independent review did not confirm a faithful duplicate merge")
+                if review_record is not None:
+                    self._save(cluster, result, review_record)
                 results[cluster.cluster_id] = result
             if progress is not None:
                 progress(len(results), len(clusters), dict(self.usage))

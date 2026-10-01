@@ -119,18 +119,38 @@ work during deep sleep without starting a conversation LLM. Offline dry runs rea
 source settings without modifying them; CLI overrides apply only to the copy.
 
 Empty endpoints resolve to the main endpoint at run start. Review uses an
-independent request. The round locks endpoint/model facts, uses strict endpoint
-selection, and fails if those facts change. Timeouts apply to individual requests,
+independent request. Dreaming selects low reasoning when supported, otherwise
+the endpoint's lowest supported level, independently of conversation settings.
+Both merge and review requests must fit within half the effective output limit
+(the smaller of `output_tokens` and the endpoint limit). This bound includes
+instructions, schema, references, candidate text and structural correction text;
+the separate `input_tokens` limit still bounds source material. Preflight token
+estimates are used when available, with a character estimate as fallback.
+The round locks endpoint/model facts, uses strict endpoint selection, and fails if those facts change. Timeouts apply to individual requests,
 not to the whole round. Schema repair has at most two additional attempts;
-transport retries belong to the existing LLM runtime.
+transport retries belong to the existing LLM runtime. Truncated merge responses
+are discarded and multi-cluster batches are split in half for bounded retries.
+If a single cluster or its independent review still hits the output limit, its
+originals are retained and the round continues. The report records the skipped
+check; it is not cached or marked as a completed pair check, so a later round
+can retry it. Output recovery never concatenates partial JSON or bypasses review.
 
 The cron starts preprocessing in a background thread. Missing multiple scheduled
 occurrences coalesces to the latest occurrence. One nonterminal round is allowed.
 Preprocessing uses bounded vector/topic/FTS neighbors within kind/scope/task,
-then bounded seed groups with one primary owner per record. Cross-group references
-are read-only. Cached decisions bind full inputs, references, candidate hash,
+then bounded seed buckets with one primary owner per record. Within each bucket,
+a binary merge tree starts with at most two records per leaf. Reviewed merged
+successors and all retained originals from adjacent child nodes become the next
+level's input. Every proposed parent merge receives a new independent review;
+child approval never authorizes a parent merge. Buckets never merge with one
+another, and cross-bucket references remain read-only. Each level halves the
+number of nodes, so the tree terminates even when every decision is KEEP.
+Intermediate successors live only in a private candidate generation. Their source
+links and archived originals remain available; the final coverage check follows
+the entire replacement chain before the single publication transaction. Cached decisions bind full inputs, references, candidate hash,
 prompts, schemas and configuration. Whole originals are preserved in requests;
-oversized material is split into bounded input groups or kept unchanged.
+oversized nodes retain their current records rather than truncating text.
+A capacity-limited parent does not undo already reviewed child merges.
 
 Core waits for main turns, queued input and admitted preparation/control work to
 drain. Admission and the writer fence precede the sleep notice. Repository writes
@@ -154,8 +174,9 @@ No approved merge means `completed / no_changes`: same current generation, same
 IDs and content, no replacement archive. The report says no safe duplicates were
 confirmed, rather than claiming the whole database is duplicate-free.
 
-With approved changes, build a private candidate from a consistent SQLite backup,
-apply only reviewed replacements, prepare indices, validate reference coverage,
+On the first approved change, build a private candidate from a consistent SQLite
+backup and apply only reviewed replacements at each tree level. After the tree
+finishes, prepare indices, validate reference coverage,
 tombstones, integrity and retrieval, and open it privately through the repository
 path. Persist the complete candidate before publication. One archive/catalog
 transaction writes archive increments, successor relations, current generation
