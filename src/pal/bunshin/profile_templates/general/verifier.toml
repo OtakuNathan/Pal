@@ -61,7 +61,7 @@ require_complete = true
 
 [role.submission]
 kind = "verification"
-tool = "verification_submit"
+tool = "submit_verification"
 
 [metadata]
 builtin = true

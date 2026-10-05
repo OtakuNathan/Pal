@@ -82,7 +82,7 @@ def uninstall(service, name, *, purge_data=False):
     from pal.plugins.paths import _source_plugins_root
     if ((root / "plugins/_builtin" / name).exists() or (_source_plugins_root() / name / "plugin.toml").exists()
             or (service.activation and name in service.activation.host.first_party_records)):
-        raise PackageError("Built-in plugins cannot be uninstalled; use plugin_disable")
+        raise PackageError("Built-in plugins cannot be uninstalled; use disable_plugin")
     with install_lock(root):
         gate = service.activation.gate() if service.activation else runtime_lease(root)
         with gate:

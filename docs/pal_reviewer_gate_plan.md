@@ -296,15 +296,15 @@ LSP is not required for the first reviewer gate slice, but the gate schema shoul
 When the first-party LSP provider exists, reviewer can include evidence from:
 
 ```text
-lsp_definition
-lsp_hover
-lsp_implementation
-lsp_references
-lsp_prepare_call_hierarchy
-lsp_incoming_calls
-lsp_outgoing_calls
-lsp_diagnostics
-lsp_doctor
+find_lsp_definitions
+read_lsp_hover
+find_lsp_implementations
+find_lsp_references
+prepare_lsp_call_hierarchy
+find_lsp_incoming_calls
+find_lsp_outgoing_calls
+read_lsp_diagnostics
+diagnose_lsp_server
 ```
 
 LSP evidence is useful but not absolute. For high-risk API claims, pair it with source/docs/build/test evidence.

@@ -37,7 +37,7 @@ def test_only_committed_terminal_result_in_owning_scope_consumes_event(notify_fi
         source = PackageCompletionSource(core.context)
         notify = source.notifier('opening')
         state = {'job_id': 'job', 'status': 'ready', 'finished_at': 123, 'result': {'activation': 'attached'}}
-        tool_call = new_tool_call(name='call_tool', args={'name': 'package_status', 'args': {'job_id': 'job'}})
+        tool_call = new_tool_call(name='call_tool', args={'name': 'inspect_package_status', 'args': {'job_id': 'job'}})
         handle = register_plugins(core.context, SimpleNamespace(context=core.context))
         handle.introspection_provider.completion_events = source
         handle.introspection_provider.package_jobs = SimpleNamespace(

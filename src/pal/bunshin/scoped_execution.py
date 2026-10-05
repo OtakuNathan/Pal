@@ -146,7 +146,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinMemoryCandidatesInput,
     },
     "op_bunshin_artifact_write": {
-        "alias": "artifact_write",
+        "alias": "write_workflow_artifact",
         "guidance": {
             "purpose": "Write the profile-declared structured output artifact.",
             "use_when": "The current role must create or replace its declared structured output artifact.",
@@ -156,7 +156,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinScopedExecutionOpBunshinArtifactWriteInput,
     },
     "op_bunshin_artifact_edit": {
-        "alias": "artifact_edit",
+        "alias": "edit_workflow_artifact",
         "guidance": {
             "purpose": "Append to or replace one existing profile output artifact.",
             "use_when": "Supply relative_path, complete content, and operation=append|replace for a profile-owned output artifact.",

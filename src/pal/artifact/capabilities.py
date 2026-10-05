@@ -87,13 +87,13 @@ class ArtifactIntrospectionProvider:
         action_name="import",
         guidance=ToolGuidance(
             purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
-            use_when="A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing.",
+            use_when='A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing. Extracted OCR or transcript text is not proof of visual inspection; pixels are inspected only when actually attached to a vision-capable model.',
             do_not_use_when="The same image is already inline. A PDF artifact_id does not mean its page images are inline; import an image_file_path from its page index when pixels are needed. Reading ordinary source text (use read_file).",
-            failure_next_steps="Check the local path, image validity and size. Registration works without vision; core attaches pixels only when the selected model supports vision and image budgets permit. If pixels are not attached, discover a suitable OCR/image-analysis capability when needed; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with artifact_info. Reconcile uncertain outcomes with list_artifacts before retrying.",
+            failure_next_steps="Check the local path, image validity and size. Registration works without vision; core attaches pixels only when the selected model supports vision and image budgets permit. If pixels are not attached, discover a suitable OCR/image-analysis capability when needed; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with inspect_artifact_info. Reconcile uncertain outcomes with list_artifacts before retrying.",
         ),
         InputModel=ArtifactImportInput,
         metadata={"async_required": True},
-        aliases=("artifact_import",),
+        aliases=("import_artifact",),
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     async def import_file(self, call: CapabilityCall) -> CapabilityResult:
@@ -111,7 +111,7 @@ class ArtifactIntrospectionProvider:
             do_not_use_when="Looking for specific artifacts (use list_artifacts or search_artifacts). Reading artifact content (use read_artifact).",
             failure_next_steps="Read-only diagnostic tool. If limits look wrong, check ArtifactPolicy configuration in the runtime.",
         ),
-        aliases=("artifact_show",),
+        aliases=("inspect_artifact_state",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -134,7 +134,7 @@ class ArtifactIntrospectionProvider:
         action_name="list",
         guidance=ToolGuidance(
             purpose="List recent tagged conversation artifacts visible to the current turn.",
-            use_when="A file was received or imported into this conversation and you need to discover what is available.",
+            use_when='A file was received or imported into this conversation and you need to discover what is available. An empty list can mean no artifact has been received in this scope or available references have expired. Inspect scope and filters; ask for resend only when the needed artifact is unavailable.',
             do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were received or imported in this conversation.",
             failure_next_steps="If empty, artifacts may have expired (hot state TTL exceeded) or none were sent. Ask the user to resend.",
         ),
@@ -157,13 +157,13 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Inspect metadata and available representations for one artifact id.",
             use_when="Inspecting artifact metadata, choosing a specific representation, or diagnosing a representation_unavailable result.",
-            do_not_use_when="Ordinary text reading with a known artifact_id: call read_artifact directly; its auto mode selects a representation. Importing local images/documents (use artifact_import).",
+            do_not_use_when="Ordinary text reading with a known artifact_id: call read_artifact directly; its auto mode selects a representation. Importing local images/documents (use import_artifact).",
             failure_next_steps="If artifact_not_found, recover a current artifact_id with list_artifacts or search_artifacts. If artifact_handler_retired, its managed bytes were deleted; ask the user to attach it again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
         metadata={"async_required": True},
-        aliases=("artifact_info",),
+        aliases=("inspect_artifact_info",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     async def info(self, call: CapabilityCall) -> CapabilityResult:
@@ -178,9 +178,9 @@ class ArtifactIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
-            use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
-            do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use artifact_import). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use artifact_transcribe first).",
-            failure_next_steps="If representation_unavailable, use artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If artifact_handler_retired, ask the user to attach the source again.",
+            use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so inspect_artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
+            do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use transcribe_artifact first).",
+            failure_next_steps="If representation_unavailable, use inspect_artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If artifact_handler_retired, ask the user to attach the source again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
@@ -200,7 +200,7 @@ class ArtifactIntrospectionProvider:
         action_name="search",
         guidance=ToolGuidance(
             purpose="Search currently available conversation artifacts by filename, kind, caption, or summary. Results use relevance and recency ranking, not a date filter.",
-            use_when="You know roughly what file the user means by name, type, or content but lack the exact artifact_id.",
+            use_when='You know roughly what file the user means by name, type, or content but lack the exact artifact_id. An empty result is not proof of expiry. Broaden the query or use list_artifacts to inspect current references before asking for a resend.',
             do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
             failure_next_steps="If no results, try list_artifacts for a broader view, widen the query, or check if the artifact expired.",
         ),
@@ -229,7 +229,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
         metadata={"async_required": True},
-        aliases=("artifact_select",),
+        aliases=("select_artifact",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     async def select(self, call: CapabilityCall) -> CapabilityResult:
@@ -251,7 +251,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
         metadata={"async_required": True},
-        aliases=("artifact_grep",),
+        aliases=("grep_artifact",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     async def content_search(self, call: CapabilityCall) -> CapabilityResult:
@@ -273,7 +273,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
         metadata={"async_required": True},
-        aliases=("artifact_transcribe",),
+        aliases=("transcribe_artifact",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     async def transcribe(self, call: CapabilityCall) -> CapabilityResult:

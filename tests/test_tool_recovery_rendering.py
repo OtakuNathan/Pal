@@ -21,7 +21,7 @@ def test_mcp_body_is_displayed_once_and_raw_protocol_is_preserved(is_error):
     assert visible["raw_result"] == raw
     if is_error:
         assert "read_tool" in result.llm_text
-        assert "mcp_server_read" in result.llm_text
+        assert "read_mcp_server" in result.llm_text
 
 
 def test_mcp_prompt_and_protocol_error_do_not_duplicate_content():
@@ -34,7 +34,7 @@ def test_mcp_prompt_and_protocol_error_do_not_duplicate_content():
     assert result.structured["raw_result"] == raw
     error = normalize_protocol_error(ValueError("unique error body"), server_id="demo", name="inspect", kind="tool")
     assert error.llm_text.count("unique error body") == 1
-    assert "mcp_server_read" in error.llm_text
+    assert "read_mcp_server" in error.llm_text
 
 
 def test_memory_conflict_exposes_existing_recovery_information():

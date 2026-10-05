@@ -3337,7 +3337,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(len(runner.retry_notes), 2)
         self.assertEqual(runner.retry_notes[0], "")
-        self.assertIn("candidate_submit", runner.retry_notes[1])
+        self.assertIn("submit_candidate", runner.retry_notes[1])
         self.assertIn("coder_report.json", runner.retry_notes[1])
 
     def test_runner_stops_before_another_llm_round_after_primary_submit(self) -> None:
@@ -3461,7 +3461,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         self.assertIn("Read revision_finding before any other work", instruction)
         self.assertIn("package/__init__.py", instruction)
         self.assertIn("Do not report the earlier submit as completion", instruction)
-        self.assertIn("Call contract_submit again", instruction)
+        self.assertIn("Call submit_contract again", instruction)
 
         scoped = _contract_architect_instruction(
             finding={"summary": "One physical reference is invalid."},
@@ -4916,8 +4916,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 if descriptor.canonical_path == "op_bunshin_start_workflow"
             )
             generation = core.context.execution_runtime.registry_generation
-            self.assertIn("bunshin_start_workflow", generation.direct_aliases)
-            self.assertNotIn("bunshin_start_workflow", generation.indirect_aliases)
+            self.assertIn("start_bunshin_workflow", generation.direct_aliases)
+            self.assertNotIn("start_bunshin_workflow", generation.indirect_aliases)
             start_schema = start_descriptor.InputModel.model_json_schema(mode="validation")
             self.assertIn("task_spec", start_schema["properties"])
             self.assertIn("task_spec_file", start_schema["properties"])

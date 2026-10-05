@@ -221,7 +221,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             contract["function"]["name"]
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
-        self.assertNotIn("channel_send_message", direct_names)
+        self.assertNotIn("send_channel_message", direct_names)
 
         search = core.context.execution_runtime.execute_tool(
             new_tool_call(
@@ -231,13 +231,13 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(search.ok)
         self.assertIn(
-            "channel_send_message",
+            "send_channel_message",
             [hit["alias"] for hit in search.structured["hits"]],
         )
         read = core.context.execution_runtime.execute_tool(
             new_tool_call(
                 name="read_tool",
-                args={"name": "channel_send_message"},
+                args={"name": "send_channel_message"},
             )
         )
         self.assertTrue(read.ok)
@@ -250,7 +250,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             new_tool_call(
                 name="call_tool",
                 args={
-                    "name": "channel_send_message",
+                    "name": "send_channel_message",
                     "args": {
                         "name": "channel-main",
                         "message": "hello from Pal",
@@ -274,7 +274,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             new_tool_call(
                 name="call_tool",
                 args={
-                    "name": "channel_send_message",
+                    "name": "send_channel_message",
                     "args": {"name": "channel-main", "message": "/status"},
                 },
             )
@@ -301,7 +301,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             new_tool_call(
                 name="call_tool",
                 args={
-                    "name": "channel_send_message",
+                    "name": "send_channel_message",
                     "args": {
                         "name": "petra",
                         "message": "this would recursively start another peer turn",

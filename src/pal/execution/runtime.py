@@ -56,6 +56,7 @@ from pal.execution.tool_facade import (
     validate_output,
     validation_error_details,
 )
+from pal.shared.diagnostics import diagnostic_text, exception_diagnostic
 from pal.execution.tool_presentation import render_tool_definition, render_tool_search
 from pal.shared.result_rendering import render_structured_for_llm
 from pal.execution.tool_registry import (
@@ -120,17 +121,21 @@ def _leading_fact_block(text: str) -> str | None:
 def _is_plugin_lifecycle_tool(name: object) -> bool:
     normalized = str(name or "").strip()
     aliases = {
-        "plugin_attach",
-        "plugin_reattach",
-        "plugin_detach",
-        "plugin_enable",
-        "plugin_disable",
-        "plugin_rescan",
-        "plugin_rescan_and_attach_new_first_party",
+        "attach_plugin",
+        "reload_plugin",
+        "detach_plugin",
+        "enable_plugin",
+        "disable_plugin",
+        "rescan_plugins",
+        "rescan_and_attach_first_party_plugins",
     }
     if normalized in aliases:
         return True
-    return normalized in {f"op_plugin_mgmt_{alias.removeprefix('plugin_')}" for alias in aliases}
+    return normalized in {
+        f"op_plugin_mgmt_{action}" for action in (
+            "attach", "reattach", "detach", "enable", "disable", "rescan", "rescan_and_attach_new_first_party"
+        )
+    }
 
 
 def _is_package_job_tool(name: object) -> bool:
@@ -138,7 +143,7 @@ def _is_package_job_tool(name: object) -> bool:
     # owner holds the write fence for activation; a waiting read fence would
     # prevent that worker from completing.
     return str(name or "").strip() in {
-        "package_install", "package_prepare", "package_status", "plugin_uninstall",
+        "install_package", "prepare_package", "inspect_package_status", "uninstall_plugin",
         "op_plugin_package_install", "op_plugin_package_prepare",
         "intro_module_plugins_status", "op_plugin_mgmt_uninstall",
     }
@@ -918,7 +923,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 )
         return rejection(
             "unknown_target",
-            f"unknown {record.binding.descriptor.target_kind} name for {record.alias}: {target_name!r}",
+            (f"unknown {record.binding.descriptor.target_kind} name for {record.alias}: {target_name!r}. "
+             f"Valid {target_argument} values: {diagnostic_text(', '.join(available_names[:20]) or '(none)')}"
+             + ("; additional names available through discovery." if len(available_names) > 20 else "")),
             retry=RetryDirective.CORRECT_INPUT,
             affordances=affordances,
             details={"argument": target_argument, "available_names": available_names},
@@ -947,7 +954,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     f"unknown tool alias: {args.get('name')}",
                     affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
                 )
-            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload))
+            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload, view=args.get("view", "input")))
         if record.alias == "call_tool":
             target = new_tool_call(
                 call_id=call.call_id,
@@ -987,7 +994,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     f"unknown tool alias: {args.get('name')}",
                     affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
                 )
-            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload))
+            return self._complete_builtin(record, payload, llm_text=render_tool_definition(payload, view=args.get("view", "input")))
         if record.alias == "call_tool":
             target = new_tool_call(
                 call_id=call.call_id,
@@ -1135,7 +1142,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 error=str(exc),
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
-                llm_text=f"Built-in output failed validation for {record.alias}.",
+                llm_text=(f"Built-in output failed validation for {record.alias}.\n"
+                          f"Validation error: {exception_diagnostic(exc)}\n"
+                          "Use read_tool with view=output to inspect the output contract."),
+                affordances=[ToolAffordance(tool="read_tool", arguments={"name": record.alias, "view": "output"},
+                                           reason="Inspect the output contract to repair the provider; do not replay a mutation.")],
                 details={"output_schema": record.output_schema},
             )
         return CompleteResult(
@@ -1245,6 +1256,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         """
         try:
             result = self._resolve_result_guidance(generation, result)
+            if isinstance(result, (FailedResult, RejectedResult)) and not result.affordances and not result.recovery_hint:
+                record = generation.record_for_alias(call.name)
+                if record is not None and record.guidance.failure_next_steps.strip():
+                    result = result.model_copy(update={"recovery_hint": record.guidance.failure_next_steps.strip()})
         except Exception:
             # Guidance handling must never turn a delivered operation into a
             # new failure (B12); degrade to the bare typed result.
@@ -2080,13 +2095,13 @@ def _target_discovery_alias(descriptor: CapabilityDescriptor) -> str:
     if configured:
         return configured
     if descriptor.target_kind == "endpoint":
-        return "channel_list"
+        return "list_channel_endpoints"
     if descriptor.target_kind == "proactive_task":
-        return "proactive_list"
+        return "list_proactive_tasks"
     if descriptor.target_kind == "provider":
         return {
-            "memory": "memory_list_providers",
-            "web_search": "web_search_list_providers",
+            "memory": "list_memory_providers",
+            "web_search": "list_web_search_providers",
         }.get(descriptor.module_id, "")
     return ""
 

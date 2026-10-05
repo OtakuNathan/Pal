@@ -33,7 +33,7 @@ When needed, the same compaction engine as `/compact` runs on the old endpoint.
 One admission ticket holds incoming messages until Compact and the model/thinking
 settings commit finish. Failure keeps the old selection and resumes normal input;
 a summary already committed remains in effect and is reported. The agent has no
-`llm_set_active_endpoint` tool. `/llm_fallback` and `/fallback` are removed.
+`set_active_llm_endpoint` tool. `/llm_fallback` and `/fallback` are removed.
 
 /memory_review [batch_id] restores a host-owned memory proposal batch on its bound endpoint. Each candidate is marked or edited separately; only the final batch-submit action authorizes writes. Editing, navigation, retries and field replies remain deterministic control traffic outside L1 and conversational LLM requests.
 

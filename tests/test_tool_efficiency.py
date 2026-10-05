@@ -81,7 +81,7 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             assert 'Failure next steps:' not in visible['description']
             assert 'Execution semantics:' in visible['description']
             assert 'Valid example:' not in visible['description']
-        result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name':'exec_tools','args':{}}))
+        result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name':'list_tools','args':{}}))
         assert all('output_schema' in item for item in result.structured['tools'])
         assert all('output_schema' not in item for item in json.loads(result.invocation_result.llm_text)['tools'])
     finally:

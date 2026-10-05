@@ -54,7 +54,7 @@ model, available model revision, text processing version, source hash and vector
 dimension. A returned embedding is checked again before becoming current.
 Changing embedding configuration rebuilds indices without rewriting text.
 
-`memory_history` explicitly searches archived originals or resolves a historical
+`read_memory_history` explicitly searches archived originals or resolves a historical
 reference. Historical results are marked and are not installed into L2 HOT.
 Original vector metadata and blobs remain with archived originals, alongside FTS.
 
@@ -104,7 +104,7 @@ retention_days = 7
 
 Use `/dreaming config`, `/dreaming enable`, `/dreaming disable`, or
 `/dreaming configure {"input_tokens": 10000}` to inspect or update this configuration.
-The `memory_dreaming` tool accepts the same operations and a partial `config`
+The `manage_memory_dreaming` tool accepts the same operations and a partial `config`
 object for `configure`. Unknown fields and invalid values are rejected before
 writing. Endpoint changes must name enabled configured endpoints (or `""`).
 
@@ -222,7 +222,7 @@ Resident commands:
 /dreaming resume [run_id]
 ```
 
-The `memory_dreaming` capability exposes the same operations. Online dry runs use
+The `manage_memory_dreaming` capability exposes the same operations. Online dry runs use
 isolated copies. An offline audit does not need a live notification route:
 
 ```sh

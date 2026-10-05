@@ -140,7 +140,7 @@ class ToolSearchTests(unittest.TestCase):
         generation = runtime.registry_generation
 
         result = runtime.execute_tool(
-            new_tool_call(name="call_tool", args={"name": "exec_show", "args": {}})
+            new_tool_call(name="call_tool", args={"name": "inspect_execution_state", "args": {}})
         )
 
         self.assertTrue(result.ok, result.text)

@@ -15,10 +15,10 @@ from pal.shared import RuntimeStatus
 
 
 def test_plugin_lifecycle_gate_recognizes_aliases_and_canonical_paths() -> None:
-    for action in ("attach", "reattach", "detach", "enable", "disable", "rescan", "rescan_and_attach_new_first_party"):
-        assert _is_plugin_lifecycle_tool(f"plugin_{action}")
+    for action, alias in (("attach", "attach_plugin"), ("reattach", "reload_plugin"), ("detach", "detach_plugin"), ("enable", "enable_plugin"), ("disable", "disable_plugin"), ("rescan", "rescan_plugins"), ("rescan_and_attach_new_first_party", "rescan_and_attach_first_party_plugins")):
+        assert _is_plugin_lifecycle_tool(alias)
         assert _is_plugin_lifecycle_tool(f"op_plugin_mgmt_{action}")
-    assert not _is_plugin_lifecycle_tool("mcp_attach")
+    assert not _is_plugin_lifecycle_tool("attach_mcp_server")
 
 
 def _write_plugin(

@@ -246,7 +246,7 @@ def verification_path_scope_matches(
 
 SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_pass": {
-        "alias": "verification_pass",
+        "alias": "submit_verification_pass",
         "guidance": {
             "purpose": "Submit a successful semantic verification outcome.",
             "use_when": (
@@ -265,7 +265,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": EmptyToolInput,
     },
     "op_bunshin_verification_request_module_repair": {
-        "alias": "verification_request_module_repair",
+        "alias": "request_verification_module_repair",
         "guidance": {
             "purpose": "Submit reproduced implementation defects for module repair.",
             "use_when": (
@@ -283,7 +283,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput,
     },
     "op_bunshin_verification_request_contract_revision": {
-        "alias": "verification_request_contract_revision",
+        "alias": "request_verification_contract_revision",
         "guidance": {
             "purpose": "Submit a frozen public-contract defect for contract revision.",
             "use_when": (
@@ -296,7 +296,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput,
     },
     "op_bunshin_verification_request_architecture_revision": {
-        "alias": "verification_request_architecture_revision",
+        "alias": "request_verification_architecture_revision",
         "guidance": {
             "purpose": "Submit a topology or ownership defect for architecture revision.",
             "use_when": (
@@ -309,7 +309,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
     },
     "op_bunshin_verification_request_requirements_revision": {
-        "alias": "verification_request_requirements_revision",
+        "alias": "request_verification_requirements_revision",
         "guidance": {
             "purpose": "Submit a contradictory or materially incomplete requirement for user revision.",
             "use_when": "Use after recording the exact requirements conflict or omission with add_finding.",
@@ -322,7 +322,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
     },
     "op_bunshin_verification_unknown": {
-        "alias": "verification_unknown",
+        "alias": "submit_verification_unknown",
         "guidance": {
             "purpose": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
             "use_when": (
@@ -412,7 +412,7 @@ def swe_verification_tool_result(
         args = dict(call.args or {})
         reason = str(args.get("reason") or "").strip()
         if outcome == "pass" and args:
-            raise ValueError("verification_pass takes no arguments")
+            raise ValueError("submit_verification_pass takes no arguments")
         context = SubmissionDraftContext.from_workspace(
             workspace,
             draft_kind="verification",

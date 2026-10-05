@@ -173,7 +173,7 @@ class StandaloneReview:
                 raise ValueError("FAIL review requires at least one finding")
         except Exception as exc:
             raise SubmissionInvariantError(
-                f"accepted review_submit failed manager defense-in-depth validation: {exc}"
+                f"accepted submit_review failed manager defense-in-depth validation: {exc}"
             ) from exc
         test_workspace_ref = self.role_reports.publish_verification_evidence(
             review_scratch=review_scratch,

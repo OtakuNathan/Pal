@@ -97,7 +97,7 @@ def runtime_lease(runtime_root: Path):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise PackageError("Pal is running on this runtime root. Use package_install inside Pal for a coordinated switch, or stop Pal before CLI installation.") from exc
+            raise PackageError("Pal is running on this runtime root. Use install_package inside Pal for a coordinated switch, or stop Pal before CLI installation.") from exc
         try:
             yield
         finally:

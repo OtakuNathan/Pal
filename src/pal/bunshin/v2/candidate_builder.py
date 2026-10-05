@@ -44,7 +44,7 @@ CANDIDATE_BUILDER_CAPABILITIES = (
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_candidate_submit": {
-        "alias": "candidate_submit",
+        "alias": "submit_candidate",
         "guidance": {
             "purpose": "Submit the current module Candidate for independent verification.",
             "use_when": (
@@ -55,7 +55,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": (
                 "Do not use with unfinished checklist work, without a contracted product delta, "
                 "or when the correct terminal outcome is an architecture defect or module split. "
-                "Never add candidate_submit itself to the checklist."
+                "Never add submit_candidate itself to the checklist."
             ),
             "failure_next_steps": (
                 "Follow the returned recovery affordance, correct the checklist or workspace "
@@ -65,7 +65,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput,
     },
     "op_bunshin_candidate_report_architecture_defect": {
-        "alias": "candidate_report_architecture_defect",
+        "alias": "report_candidate_architecture_defect",
         "guidance": {
             "purpose": "Terminally report that the frozen architecture contract cannot satisfy the task.",
             "use_when": (
@@ -88,7 +88,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
     },
     "op_bunshin_candidate_request_module_split": {
-        "alias": "candidate_request_module_split",
+        "alias": "request_candidate_module_split",
         "guidance": {
             "purpose": "Terminally request an architecture-owned module split.",
             "use_when": (
@@ -184,7 +184,7 @@ def _submit_candidate(
             ) from exc
         if args:
             raise ToolRejectedError(
-                "candidate_submit takes no arguments",
+                "submit_candidate takes no arguments",
                 error_code="invalid_arguments",
             )
     else:
@@ -205,7 +205,7 @@ def _submit_candidate(
         )
     if status == "candidate_ready" and _is_artifact_unit_view(work_view) and not files_changed:
         raise ToolRejectedError(
-            "candidate_submit requires at least one contracted product file in the artifact workspace",
+            "submit_candidate requires at least one contracted product file in the artifact workspace",
             error_code="candidate_product_required",
         )
     report = {

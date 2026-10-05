@@ -17,9 +17,9 @@ from pal.lsp import build_lsp_plugin
 from pal.lsp.plugin import LspManagerPluginProvider
 from pal.shared.tool_protocol import new_tool_call
 
-READY_FORBIDDEN = ("lsp_doctor", "lsp_status", "lsp_rescan", "read_tool", "call_tool",
-                   "lsp_hover", "lsp_definition", "lsp_references", "lsp_diagnostics",
-                   "lsp_document_symbols", "next_tools")
+READY_FORBIDDEN = ("diagnose_lsp_server", "inspect_lsp_status", "rescan_lsp_servers", "read_tool", "call_tool",
+                   "read_lsp_hover", "find_lsp_definitions", "find_lsp_references", "read_lsp_diagnostics",
+                   "list_lsp_document_symbols", "next_tools")
 
 
 def _payload_ready(root: str) -> dict:
@@ -65,7 +65,7 @@ class TestProviderLevel:
 
     def _prepare(self, provider, root: str):
         return provider.prepare_workspace(
-            CapabilityCall(name="lsp_prepare_workspace", args={"workspace_root": root})
+            CapabilityCall(name="prepare_lsp_workspace", args={"workspace_root": root})
         )
 
     def test_ready_first_call_has_no_guidance(self):
@@ -93,8 +93,8 @@ class TestProviderLevel:
         provider = self._provider([_payload_partial("/w/B", server="clangd")])
         result = self._prepare(provider, "/w/B")
         tools = {item.tool: item for item in result.affordances}
-        assert set(tools) <= {"lsp_doctor", "lsp_status"}
-        doctor = tools.get("lsp_doctor")
+        assert set(tools) <= {"diagnose_lsp_server", "inspect_lsp_status"}
+        doctor = tools.get("diagnose_lsp_server")
         if doctor is not None:
             assert doctor.arguments.get("workspace_root") == "/w/B"
             assert doctor.arguments.get("name") == "clangd"
@@ -106,7 +106,7 @@ class TestProviderLevel:
         for item in result.affordances:
             assert "name" not in item.arguments
             assert item.arguments.get("workspace_root") == "/w/B"
-            assert item.tool in {"lsp_status"}
+            assert item.tool in {"inspect_lsp_status"}
 
     def test_partial_then_ready_stops_suggesting(self):
         provider = self._provider(
@@ -162,7 +162,7 @@ class TestProviderLevel:
     def test_diagnostics_empty_and_ready_has_no_doctor(self):
         provider = self._provider([{"status": "ok", "diagnostics": []}])
         result = provider.diagnostics(
-            CapabilityCall(name="lsp_diagnostics", args={"file": "/w/A/src.py"})
+            CapabilityCall(name="read_lsp_diagnostics", args={"file": "/w/A/src.py"})
         )
         assert not result.affordances
         assert result.recovery_hint == ""
@@ -175,12 +175,12 @@ class TestProviderLevel:
         provider = self._provider([payload])
         result = provider.prepare_call_hierarchy(
             CapabilityCall(
-                name="lsp_prepare_call_hierarchy",
+                name="prepare_lsp_call_hierarchy",
                 args={"file": "/w/A/src.py", "line": 10, "character": 4},
             )
         )
         tools = sorted(item.tool for item in result.affordances)
-        assert tools == ["lsp_incoming_calls", "lsp_outgoing_calls"]
+        assert tools == ["find_lsp_incoming_calls", "find_lsp_outgoing_calls"]
         for item in result.affordances:
             assert item.arguments["file"] == "/w/A/src.py"
             assert item.arguments["line"] == 10
@@ -190,7 +190,7 @@ class TestProviderLevel:
         provider = self._provider([{"status": "ok", "items": []}])
         result = provider.prepare_call_hierarchy(
             CapabilityCall(
-                name="lsp_prepare_call_hierarchy",
+                name="prepare_lsp_call_hierarchy",
                 args={"file": "/w/A/src.py", "line": 10, "character": 4},
             )
         )
@@ -208,7 +208,7 @@ class TestProviderLevel:
         provider = self._provider([payload])
         result = provider.prepare_call_hierarchy(
             CapabilityCall(
-                name="lsp_prepare_call_hierarchy",
+                name="prepare_lsp_call_hierarchy",
                 args={"file": "/w/A/src.py", "line": 10, "character": 4},
             )
         )
@@ -250,14 +250,14 @@ class TestEndToEndSequence:
             budget = ToolCallBudget(max_output_chars=4000)
             ready_a = runtime.execute_tool(
                 new_tool_call(
-                    name="lsp_prepare_workspace", args={"workspace_root": "/w/A"}, call_id="h1"
+                    name="prepare_lsp_workspace", args={"workspace_root": "/w/A"}, call_id="h1"
                 ),
                 budget=budget,
                 turn_id="t",
             )
             ready_b = runtime.execute_tool(
                 new_tool_call(
-                    name="lsp_prepare_workspace", args={"workspace_root": "/w/B"}, call_id="h2"
+                    name="prepare_lsp_workspace", args={"workspace_root": "/w/B"}, call_id="h2"
                 ),
                 budget=budget,
                 turn_id="t",
@@ -273,14 +273,14 @@ class TestEndToEndSequence:
 
             partial_b = runtime.execute_tool(
                 new_tool_call(
-                    name="lsp_prepare_workspace", args={"workspace_root": "/w/B"}, call_id="h3"
+                    name="prepare_lsp_workspace", args={"workspace_root": "/w/B"}, call_id="h3"
                 ),
                 budget=budget,
                 turn_id="t",
             )
             partial_a = runtime.execute_tool(
                 new_tool_call(
-                    name="lsp_prepare_workspace", args={"workspace_root": "/w/A"}, call_id="h4"
+                    name="prepare_lsp_workspace", args={"workspace_root": "/w/A"}, call_id="h4"
                 ),
                 budget=budget,
                 turn_id="t",
@@ -297,8 +297,8 @@ class TestEndToEndSequence:
             # The static descriptor never changed and still advertises the
             # conditional diagnostic relation (H10).
             assert runtime.registry_generation.generation_hash == generation_hash_before
-            record = runtime.registry_generation.direct_aliases["lsp_prepare_workspace"]
-            assert "lsp_doctor" in record.compiled_description
+            record = runtime.registry_generation.direct_aliases["prepare_lsp_workspace"]
+            assert "diagnose_lsp_server" in record.compiled_description
             assert "Failure next steps" not in record.compiled_description
         finally:
             core.close()
@@ -309,12 +309,12 @@ class TestEndToEndSequence:
         try:
             read = runtime.execute_tool(
                 new_tool_call(
-                    name="read_tool", args={"name": "lsp_prepare_workspace"}, call_id="h11"
+                    name="read_tool", args={"name": "prepare_lsp_workspace"}, call_id="h11"
                 ),
                 turn_id="t",
             )
-            assert "lsp_doctor" in read.llm_text
-            assert "lsp_status" in read.llm_text
+            assert "diagnose_lsp_server" in read.llm_text
+            assert "inspect_lsp_status" in read.llm_text
             assert "Failure next steps" not in read.llm_text
             assert "before retrying" not in read.llm_text
         finally:
@@ -328,11 +328,11 @@ class TestEndToEndSequence:
         provider._request_or_error = lambda _m, p=None: dict(_payload_ready("/w/A"))  # type: ignore[method-assign]
         runtime = core.context.execution_runtime
         try:
-            record = runtime.registry_generation.direct_aliases["lsp_prepare_workspace"]
+            record = runtime.registry_generation.direct_aliases["prepare_lsp_workspace"]
             assert record.guidance.next_tool_hints
             result = runtime.execute_tool(
                 new_tool_call(
-                    name="lsp_prepare_workspace",
+                    name="prepare_lsp_workspace",
                     args={"workspace_root": "/w/A"},
                     call_id="h21",
                 ),
@@ -355,7 +355,7 @@ class TestEndToEndSequence:
             for index in range(3):
                 result = runtime.execute_tool(
                     new_tool_call(
-                        name="lsp_prepare_workspace",
+                        name="prepare_lsp_workspace",
                         args={"workspace_root": "/w/A"},
                         call_id=f"h20-{index}",
                     ),

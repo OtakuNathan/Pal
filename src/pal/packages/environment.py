@@ -19,7 +19,7 @@ class PackageEnvironment:
     def python_executable(self) -> Path:
         python = self.root / "bin" / "python"
         if not python.is_file():
-            raise RuntimeError("Package environment is missing; run package_prepare")
+            raise RuntimeError("Package environment is missing; run prepare_package")
         # Do not resolve this symlink: Python needs the venv path to find pyvenv.cfg.
         return python
 

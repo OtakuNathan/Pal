@@ -207,7 +207,7 @@ def test_package_wait_allows_worker_activation_through_real_dispatch(tmp_path, a
                 result = asyncio.run(runtime.call_registered_async(call)) if asynchronous else runtime.call_registered(call)
                 payload = result.structured
             else:
-                call = new_tool_call(name='call_tool', args={'name': 'package_prepare', 'args': {'name': 'demo', 'wait_ms': 1000}})
+                call = new_tool_call(name='call_tool', args={'name': 'prepare_package', 'args': {'name': 'demo', 'wait_ms': 1000}})
                 result = asyncio.run(runtime.execute_tool_async(call)) if asynchronous else runtime.execute_tool(call)
                 assert result.ok
                 payload = result.structured

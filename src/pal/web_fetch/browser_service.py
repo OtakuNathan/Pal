@@ -212,7 +212,7 @@ class _PlaywrightCliWorker:
             or self._node_major_cached < NODE_MINIMUM_MAJOR
             or self._cli_version_cached != PLAYWRIGHT_CLI_VERSION
         ):
-            # An external package_prepare may have repaired an already-running sidecar.
+            # An external prepare_package may have repaired an already-running sidecar.
             self._node_major_cached = self._node_major()
             self._cli_version_cached = self._detected_cli_version()
         return bool(
@@ -493,7 +493,7 @@ class _PlaywrightCliWorker:
                     "navigation_completed": True,
                     "content_status": "unavailable",
                     "read_error": exc.to_dict(),
-                    "next_step": "Navigation completed, but page text could not be read. Use browser_read without url to read the current page; do not navigate again solely to recover text.",
+                    "next_step": "Navigation completed, but page text could not be read. Use read_browser_page without url to read the current page; do not navigate again solely to recover text.",
                 }
             if navigated:
                 payload["navigation_completed"] = True
@@ -540,7 +540,7 @@ class _PlaywrightCliWorker:
             tabs = section.split("\n### ", 1)[0].strip() if marker else ""
             if tabs:
                 return {"open_tabs": tabs[:12000], "tabs_truncated": len(tabs) > 12000, "_full_text": tabs,
-                        "next_step": "Inspect open_tabs. To read a popup or another tab, use browser_tabs with operation=select and its index, then browser_read or browser_snapshot. Use operation=list to refresh indices first if tabs changed."}
+                        "next_step": "Inspect open_tabs. To read a popup or another tab, use manage_browser_tabs with operation=select and its index, then read_browser_page or capture_browser_snapshot. Use operation=list to refresh indices first if tabs changed."}
             return {}
         if action == "fill":
             options = []
@@ -599,7 +599,7 @@ class _PlaywrightCliWorker:
                 if index is None and operation == "close":
                     return {"tabs": self._run_write(record, argv, timeout_ms=timeout_ms)}
                 if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-                    raise BrowserServiceError("select/close requires a nonnegative index from browser_tabs list", code="invalid_arguments")
+                    raise BrowserServiceError("select/close requires a nonnegative index from manage_browser_tabs list", code="invalid_arguments")
                 argv = _cli_args(command, str(index))
             return {"tabs": self._run_write(record, argv, timeout_ms=timeout_ms)}
         if action == "dialog":
@@ -779,7 +779,7 @@ class _PlaywrightCliWorker:
                 self._close_named(record, force=True)
                 raise BrowserServiceError(
                     "The browser started, but restoring the saved page failed. "
-                    "Provide a new HTTP(S) URL to browser_navigate or browser_read to continue; "
+                    "Provide a new HTTP(S) URL to navigate_browser or read_browser_page to continue; "
                     "the new URL will skip saved-page restoration. "
                     "Do not edit last_url or reset the profile; login data is retained. "
                     f"Restore error ({exc.code}): {exc}",
@@ -820,7 +820,7 @@ class _PlaywrightCliWorker:
         elif operation in {"unmount", "reload"}:
             extension_id = str(args.get("extension_id") or "")
             if not any(item['id'] == extension_id for item in items):
-                raise ValueError("Unknown extension_id; inspect browser_extensions first")
+                raise ValueError("Unknown extension_id; use inspect_browser_extensions first")
             if operation == "unmount":
                 items = [item for item in items if item['id'] != extension_id]
             else:

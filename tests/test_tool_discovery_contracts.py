@@ -25,17 +25,17 @@ def runtime():
 
 
 def test_word_search_distinguishes_install_and_uninstall_and_splits_alias(runtime):
-    for alias, purpose in (("package_install", "Install package dependencies"), ("plugin_uninstall", "Uninstall plugin")):
+    for alias, purpose in (("install_package", "Install package dependencies"), ("uninstall_plugin", "Uninstall plugin")):
         mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
                               InputModel=EmptyToolInput, OutputModel=EmptyToolOutput,
                               handler=lambda _: {}, guidance=ToolGuidance(
                                   purpose=purpose, use_when=purpose, do_not_use_when="unrelated task"))
-    for query in ("install", "install dependencies", "package_inst", "package_install"):
+    for query in ("install", "install dependencies", "install_pack", "install_package"):
         result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
         assert result.ok
         aliases = [hit["alias"] for hit in result.structured["hits"]]
-        assert aliases[0] == "package_install"
-        assert "plugin_uninstall" not in aliases
+        assert aliases[0] == "install_package"
+        assert "uninstall_plugin" not in aliases
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={}))
     assert result.structured["top_k"] == 3
     assert len(result.structured["hits"]) == 3
@@ -57,13 +57,13 @@ def test_discovery_exposes_plugin_reattach_and_provider_install():
         core.publish_module_capabilities(module)
     runtime = core.context.execution_runtime
     try:
-        for query, expected in (("reload plugin", "plugin_reattach"), ("install provider", "package_install")):
+        for query, expected in (("reload plugin", "reload_plugin"), ("install provider", "install_package")):
             result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
             hit = result.structured["hits"][0]
             assert hit["alias"] == expected
             assert hit["input_contract"]
         result = runtime.execute_tool(new_tool_call(name="call_tool", args={
-            "name": "plugin_reattach", "args": {"name": "lsp"},
+            "name": "reload_plugin", "args": {"name": "lsp"},
         }))
         assert result.ok
         assert calls == ["lsp"]
@@ -173,7 +173,7 @@ def test_find_symbols_keeps_symbol_tools_despite_other_full_matches(tmp_path):
     try:
         result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find symbols", "top_k": 10}))
         aliases = {hit["alias"] for hit in result.structured["hits"]}
-        assert {"lsp_document_symbols", "lsp_workspace_symbols"} <= aliases
+        assert {"list_lsp_document_symbols", "search_lsp_workspace_symbols"} <= aliases
     finally:
         runtime.shutdown()
 
@@ -207,7 +207,7 @@ def test_authored_examples_are_still_visible(runtime):
 def test_alias_words_converge_without_description_contamination(runtime):
     for alias, purpose, when in (
         ('remember_memory', 'Store a durable fact.', 'Saving a preference.'),
-        ('memory_active_provider', 'Show the active memory provider.', 'Remember memory before changing providers.'),
+        ('inspect_active_memory_provider', 'Show the active memory provider.', 'Remember memory before changing providers.'),
         ('unrelated_helper', 'Inspect a helper.', 'remember memory'),
     ):
         mount_test_capability(runtime, alias=alias, canonical_path=f'op_test_{alias}',
@@ -219,7 +219,7 @@ def test_alias_words_converge_without_description_contamination(runtime):
         assert [hit['alias'] for hit in result.structured['hits']] == ['remember_memory']
     broad = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': 'remember memory', 'top_k': 20}))
     aliases = [hit['alias'] for hit in broad.structured['hits']]
-    assert 'memory_active_provider' in aliases
+    assert 'inspect_active_memory_provider' in aliases
     assert 'unrelated_helper' not in aliases
 
 
@@ -235,16 +235,16 @@ def test_domain_partial_alias_and_purpose_synonym(tmp_path):
         def hits(query):
             return [item['alias'] for item in runtime.execute_tool(
                 new_tool_call(name='search_tools', args={'query': query})).structured['hits']]
-        assert set(hits('lsp prepare')) == {'lsp_prepare_workspace', 'lsp_prepare_call_hierarchy'}
-        assert hits('workspace prepare lsp') == ['lsp_prepare_workspace']
-        assert hits('lsp callers') == ['lsp_incoming_calls']
-        assert hits('lsp_incoming_calls') == ['lsp_incoming_calls']
+        assert set(hits('lsp prepare')) == {'prepare_lsp_workspace', 'prepare_lsp_call_hierarchy'}
+        assert hits('workspace prepare lsp') == ['prepare_lsp_workspace']
+        assert hits('lsp callers') == ['find_lsp_incoming_calls']
+        assert hits('find_lsp_incoming_calls') == ['find_lsp_incoming_calls']
     finally:
         runtime.shutdown()
 
 
 def test_inventory_is_compact_but_exact_schema_remains_available(runtime):
-    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'exec_tools', 'args': {}}))
+    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'list_tools', 'args': {}}))
     assert result.ok
     compact, _ = json.JSONDecoder().raw_decode(result.llm_text)
     assert compact['tools']
@@ -264,7 +264,7 @@ def test_model_list_contains_selection_capabilities_without_credentials():
         supports_vision=vision, supports_tools=True, context_window=64000, api_key='SECRET')
         for name, vision in [('text', False), ('vision', True)]]
     runtime = SimpleNamespace(endpoint_resolver=SimpleNamespace(enabled=lambda: endpoints))
-    result = LLMIntrospectionProvider(runtime).list_endpoints(IntrospectionCall(name='llm_list'))
+    result = LLMIntrospectionProvider(runtime).list_endpoints(IntrospectionCall(name='list_llm_endpoints'))
     assert [item['name'] for item in result.structured['items'] if item['supports_vision']] == ['vision']
     assert all(item['context_window'] == 64000 for item in result.structured['items'])
     assert 'SECRET' not in result.llm_text

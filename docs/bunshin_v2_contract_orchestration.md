@@ -81,12 +81,12 @@ and broken scenario references.
 Architect first reads the task and designs the complete module graph. In the
 software family it then writes declaration-level code and normative comments.
 Only after the design is settled does it encode `architect.yaml`, reconcile both
-projections, complete its checklist, and call `contract_submit`.
+projections, complete its checklist, and call `submit_contract`.
 
 Reviewer receives the same task ledger plus the complete immutable contract.
 It audits breadth-first, traces success and material failure paths through the
 contract graph, records every independent defect with `add_finding`, completes
-the checklist, and calls `review_submit`. It never fail-firsts and never emits
+the checklist, and calls `submit_review`. It never fail-firsts and never emits
 Markdown as a machine contract. PASS is mechanically impossible while a
 blocking finding exists; p2 is blocking unless explicitly advisory.
 

@@ -127,7 +127,7 @@ class SkillSubsystemTests(unittest.TestCase):
         )
 
         result = SkillIntrospectionProvider(service=self.service).show(
-            CapabilityCall(name="skill_show", args={})
+            CapabilityCall(name="inspect_skill_state", args={})
         )
 
         self.assertEqual(result.status, "ok")
@@ -319,6 +319,7 @@ Run the workflow.
         self.assertEqual(len(active.context_messages), 1)
         self.assertIn("<skill>", active.context_messages[0].content)
         self.assertIn("Injected skill:", active.context_messages[0].content)
+        self.assertIn("follow higher-priority system/developer/user instructions", active.context_messages[0].content)
         self.assertIn("Manual:\n1. Do it.", active.context_messages[0].content)
         self.assertNotIn("manual_text", active.context_messages[0].content)
         self.assertEqual(disabled.structured["reason"], "skill_not_found_or_inactive")
@@ -346,7 +347,7 @@ Run the workflow.
         self.assertEqual(search.status, "ok")
         self.assertEqual(search.structured["hits"][0]["skill_id"], "safe.git.commit")
         self.assertNotIn("manual_text", search.structured["hits"][0])
-        self.assertEqual(read_without_manual.structured["skill"]["manual_text"], "[omitted; call skill_inject or read with include_manual=true if needed]")
+        self.assertEqual(read_without_manual.structured["skill"]["manual_text"], "[omitted; call inject_skill or read with include_manual=true if needed]")
         self.assertEqual(read_with_manual.structured["skill"]["manual_text"], "1. Review changes.\n2. Commit.")
 
     def test_search_ignores_function_words_and_matches_compound_identifiers(self):
@@ -409,20 +410,20 @@ Run the workflow.
         register_skill_with_core(core.context, self.service)
         published = set(core.publish_module_capabilities("skill"))
 
-        self.assertIn("skill_show", published)
+        self.assertIn("inspect_skill_state", published)
         self.assertNotIn("skill_list", published)
         self.assertNotIn("skill_stats_read", published)
-        self.assertIn("skill_search", published)
-        self.assertIn("skill_read", published)
-        self.assertIn("skill_inject", published)
+        self.assertIn("search_skills", published)
+        self.assertIn("read_skill", published)
+        self.assertIn("inject_skill", published)
 
         descriptors = core.context.capability_registry.descriptors
-        self.assertEqual(descriptors["skill_inject"].module_id, "skill")
+        self.assertEqual(descriptors["inject_skill"].module_id, "skill")
         payload = core.context.execution_runtime._search_generation(
             core.context.execution_runtime.registry_generation,
-            {"query": "skill_search", "namespace": "inspect", "module_name": "skill"},
+            {"query": "search_skills", "namespace": "inspect", "module_name": "skill"},
         )
-        self.assertIn("skill_search", [hit["alias"] for hit in payload["hits"]])
+        self.assertIn("search_skills", [hit["alias"] for hit in payload["hits"]])
 
     def test_skill_inject_validates_through_facade_as_an_idempotent_read(self) -> None:
         self.skill_repository.upsert_skill(
@@ -447,7 +448,7 @@ Run the workflow.
         result = core.context.execution_runtime.execute_tool(
             new_tool_call(
                 name="call_tool",
-                args={"name": "skill_inject", "args": {"name": "safe.workflow"}},
+                args={"name": "inject_skill", "args": {"name": "safe.workflow"}},
             )
         )
 
@@ -467,14 +468,14 @@ Run the workflow.
         self.assertIsInstance(result.invocation_result, CompleteResult)
         self.assertEqual(result.structured["status"], SKILL_STATUS_ACTIVE)
         record = core.context.execution_runtime.registry_generation.indirect_aliases[
-            "skill_inject"
+            "inject_skill"
         ]
         self.assertIn("current conversation context", record.compiled_description)
         self.assertNotIn("active skills in system prompt", record.compiled_description)
         self.assertEqual(record.execution.effect_kind, EffectKind.LOCAL_READ)
         self.assertEqual(record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         update_record = core.context.execution_runtime.registry_generation.indirect_aliases[
-            "skill_update"
+            "update_skill"
         ]
         self.assertEqual(update_record.execution.effect_kind, EffectKind.LOCAL_WRITE)
         self.assertEqual(update_record.execution.idempotency, Idempotency.NON_IDEMPOTENT)
@@ -494,7 +495,7 @@ Run the workflow.
         self.assertEqual(skill.module_id, "skill")
         self.assertTrue(skill.active)
         self.assertIn("build_plugin", skill.manual_text)
-        self.assertIn("plugin_attach", skill.capability_refs)
+        self.assertIn("attach_plugin", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "create plugin capability extension", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.plugin.development")
@@ -606,7 +607,7 @@ Run the workflow.
         self.assertIn("build_channel_provider", skill.manual_text)
         self.assertIn("rescan does not detect or reload in-place source changes", skill.manual_text)
         self.assertIn("do not restart the Pal service", skill.manual_text)
-        self.assertIn("channel_provider_rescan", skill.capability_refs)
+        self.assertIn("rescan_channel_providers", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "add channel provider provider.toml slash command", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.channel.provider.development")
@@ -638,7 +639,7 @@ Run the workflow.
             self.assertNotIn("<runtime_root>/plugins/bunshin/workspace_environment/<preparer_id>.toml", skill.manual_text)
             self.assertNotIn("WorkspaceEnvironmentPreparer", skill.manual_text)
             self.assertNotIn("workspace_environment.py", skill.manual_text)
-            self.assertIn("lsp_rescan", skill.capability_refs)
+            self.assertIn("rescan_lsp_servers", skill.capability_refs)
             self.assertTrue(skill.metadata["may_require_code_changes"])
 
             search = SkillSearchTool(service=self.service).invoke({"query": "add new language lsp template language server", "top_k": 4})

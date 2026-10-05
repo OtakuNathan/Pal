@@ -182,11 +182,11 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
         return BunshinInvocationPack(
             invocation_id="architect-session",
             instruction=(
-                "Use update_checklist, then call contract_submit with no "
+                "Use update_checklist, then call submit_contract with no "
                 "arguments."
             ),
             acceptance_criteria=[
-                "Call contract_submit after update_checklist."
+                "Call submit_contract after update_checklist."
             ],
             workspace={
                 "repo_path": str(self.root),
@@ -232,7 +232,7 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
 
         self.assertNotIn("named Pal role", request.developer_instructions)
         combined = request.developer_instructions + request.user_input
-        self.assertNotIn("contract_submit", combined)
+        self.assertNotIn("submit_contract", combined)
         self.assertNotIn("update_checklist", combined)
         self.assertIn("Design a complete contract", request.developer_instructions)
         self.assertIn("Batch independent tool calls in one response", request.developer_instructions)

@@ -49,31 +49,32 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
 
     contracts = core._build_llm_tool_contracts()
     direct = {item["function"]["name"] for item in contracts}
-    assert {name for name in direct if name.startswith("browser_")} == {"browser_navigate"}
-    navigate = next(item["function"] for item in contracts if item["function"]["name"] == "browser_navigate")
-    for name in ("browser_read", "browser_snapshot", "browser_find", "browser_status",
-                 "browser_extensions", "browser_extension_manage"):
+    browser_aliases = {descriptor.aliases[0] for descriptor in core.context.capability_registry.descriptors.values() if descriptor.module_id == "web_fetch"}
+    assert direct & browser_aliases == {"navigate_browser"}
+    navigate = next(item["function"] for item in contracts if item["function"]["name"] == "navigate_browser")
+    for name in ("read_browser_page", "capture_browser_snapshot", "find_browser_text", "inspect_browser_status",
+                 "inspect_browser_extensions", "manage_browser_extension"):
         assert name in navigate["description"]
-    assert "`browser_read` (indirect)" in navigate["description"]
+    assert "`read_browser_page` (indirect)" in navigate["description"]
     assert "A separate browser read is unnecessary" in navigate["description"]
     assert "text_file" in navigate["description"]
-    assert "browser_click" not in direct
-    assert "browser_screenshot" not in direct
+    assert "click_browser_target" not in direct
+    assert "capture_browser_screenshot" not in direct
 
     descriptors = core.context.capability_registry.descriptors
-    assert all(name in descriptors for name in ("browser_click", "browser_screenshot", "browser_reset"))
-    assert descriptors["browser_read"].InputModel.__module__ == "pal.web_fetch.tool_models"
+    assert all(name in descriptors for name in ("click_browser_target", "capture_browser_screenshot", "reset_browser"))
+    assert descriptors["read_browser_page"].InputModel.__module__ == "pal.web_fetch.tool_models"
     assert not any(name.startswith("web_fetch_provider_") for name in descriptors)
     assert not {"read_web", "inspect_web_layout", "screenshot_web"} & set(descriptors)
-    for query, expected in (("read webpage", "browser_navigate"), ("find controls", "browser_find")):
+    for query, expected in (("read webpage", "navigate_browser"), ("find controls", "find_browser_text")):
         found = core.context.execution_runtime.execute_tool(
             new_tool_call(name="search_tools", args={"query": query})
         )
         assert found.structured["hits"][0]["alias"] == expected
-    assert descriptors["browser_click"].execution.invocation_mode == InvocationMode.INDIRECT
-    assert descriptors["browser_click"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
-    assert descriptors["browser_click"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
-    assert descriptors["browser_screenshot"].execution.effect_kind == EffectKind.LOCAL_WRITE
+    assert descriptors["click_browser_target"].execution.invocation_mode == InvocationMode.INDIRECT
+    assert descriptors["click_browser_target"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
+    assert descriptors["click_browser_target"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
+    assert descriptors["capture_browser_screenshot"].execution.effect_kind == EffectKind.LOCAL_WRITE
 
 
 def test_session_keys_are_stable_non_reversible_and_require_a_lifetime() -> None:
@@ -228,6 +229,7 @@ def test_worker_config_is_pinned_bounded_and_has_no_recording_surface(tmp_path: 
             "http_proxy": "",
             "HTTPS_PROXY": "http://proxy.test:8080",
             "NO_PROXY": "localhost,.cn",
+            "no_proxy": "",
         },
         clear=False,
     ):
@@ -398,7 +400,7 @@ def test_failed_restore_reports_new_url_recovery_without_reset(tmp_path: Path) -
     with pytest.raises(BrowserServiceError) as error:
         worker._execute_ready(key=key, action="read", args={}, persistent=True, timeout_ms=1000)
     assert error.value.code == "page_restore_failed"
-    assert "browser_navigate" in str(error.value)
+    assert "navigate_browser" in str(error.value)
     assert "offline" in str(error.value)
     assert closed == [key]
     assert key not in worker.sessions
@@ -479,7 +481,7 @@ def test_click_preserves_cli_tabs_without_selecting_or_extra_query(tmp_path):
     assert 'Popup' in result['open_tabs']
     assert '(current)' in result['open_tabs']
     assert 'Snapshot' not in result['open_tabs']
-    assert 'browser_tabs' in result['next_step']
+    assert 'manage_browser_tabs' in result['next_step']
     assert run.call_count == 1
     assert run.call_args.kwargs['raw'] is False
 

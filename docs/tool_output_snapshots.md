@@ -56,7 +56,7 @@ byte intervals; remote transport keeps its existing incremental download and
 capacity rules. Snapshot creation and L1 delivery precede output acknowledgment.
 Failed delivery retries output preparation, never command execution. ACK retry
 does not create another L1 event. A save failure delivers an honest error without
-acknowledging or releasing native output. `shell_session` can retry a failed
+acknowledging or releasing native output. `manage_shell_session` can retry a failed
 session's captured export; a one-shot result without a session supplies an
 `output_ref` for read/release instead. Release is explicit abandonment, never a
 consequence of a disk error. Generic save failures preserve validated structured
@@ -90,5 +90,5 @@ those processing steps succeed. The flat text includes page headings; index
 line ranges point to page text. `max_pages` limits processing, and failures or
 limits produce partial status with per-page evidence. Legacy textless/fallback
 image settings no longer select pages. PDF pixels are imported on demand using
-`artifact_import` with an indexed image path, then injected only if the model
+`import_artifact` with an indexed image path, then injected only if the model
 supports vision and its image budget permits.

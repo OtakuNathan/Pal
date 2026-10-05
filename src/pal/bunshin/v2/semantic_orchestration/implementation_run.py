@@ -195,7 +195,7 @@ class ImplementationRun:
                 _reject_manager_identity_fields(report, owner="Coder output")
             except Exception as exc:
                 raise SubmissionInvariantError(
-                    f"accepted candidate_submit failed manager defense-in-depth validation: {exc}"
+                    f"accepted submit_candidate failed manager defense-in-depth validation: {exc}"
                 ) from exc
         status = str(report.get("status") or "candidate_ready").strip().lower()
         report_ref = self.artifacts.put_json(

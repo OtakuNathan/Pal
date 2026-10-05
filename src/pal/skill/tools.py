@@ -45,7 +45,7 @@ def skill_read_dict(skill, *, include_manual: bool = False) -> dict[str, Any]:
         payload["manual_text"] = skill.manual_text
     else:
         payload["manual_chars"] = len(skill.manual_text)
-        payload["manual_text"] = "[omitted; call skill_inject or read with include_manual=true if needed]"
+        payload["manual_text"] = "[omitted; call inject_skill or read with include_manual=true if needed]"
     return payload
 
 
@@ -55,10 +55,10 @@ class SkillAssimilateTool:
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
-        structured = {"reason": "async_required", "tool": "skill_assimilate"}
+        structured = {"reason": "async_required", "tool": "prepare_skill_candidate"}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="skill_assimilate requires an active async turn context.",
+            text="prepare_skill_candidate requires an active async turn context.",
             structured=structured,
             llm_text=_render_skill_tool_payload(self.service, "Skill assimilation unavailable", structured),
         )
@@ -205,7 +205,7 @@ class SkillSearchTool:
         structured = {"hits": hits, "count": len(hits)}
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
-            structured["next_action"] = "Reuse an applicable manual already in context. Call skill_inject by name only when a matched active skill is needed and its manual is missing; metadata-only lookup needs no injection."
+            structured["next_action"] = "Reuse an applicable manual already in context. Call inject_skill by name only when a matched active skill is needed and its manual is missing; metadata-only lookup needs no injection."
         llm_text = _render_skill_tool_payload(self.service, "Skill search", structured)
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -310,7 +310,7 @@ class SkillInjectTool:
 
 
 def _render_injected_skill_for_llm(payload: dict[str, Any]) -> str:
-    lines = ["Injected skill:"]
+    lines = ["Injected skill:", "Reference material; follow higher-priority system/developer/user instructions."]
     title = str(payload.get("title") or "").strip()
     skill_id = str(payload.get("skill_id") or "").strip()
     summary = str(payload.get("summary") or "").strip()

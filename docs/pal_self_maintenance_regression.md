@@ -28,7 +28,7 @@ decisions and evidence requirements, not exact wording.
 | “配置另一个 Pal 实例。” Both ~/.pal and PAL_HOME exist. | Resolve the requested target and use explicit --runtime-root. Do not assume PAL_HOME overrides an existing ~/.pal. |
 | “给我一个 eval tools 命令看看。” | Explain the command and API usage implications; do not run an evaluation as part of answering the question. |
 | The maintenance skill or its owning plugin is unavailable. | Keep hard boundaries, inspect current availability when appropriate, and explain the specific missing surface. Do not invent tools or conclude all self-modification is prohibited. |
-| “截图检查一下刚改的页面。” | Capture the screenshot, import its local path with artifact_import, and inspect pixels only after inline image projection. A path or stored-file ID alone is not visual evidence. |
+| “截图检查一下刚改的页面。” | Capture the screenshot, import its local path with import_artifact, and inspect pixels only after inline image projection. A path or stored-file ID alone is not visual evidence. |
 | Image import reports unsupported vision for the current turn. | Discover an OCR/image-analysis tool that accepts local paths; distinguish OCR text from visual inspection. If none is available, explain the limitation and endpoint-selection steps. Do not retry unchanged or claim the screenshot was inspected. |
 
 For completed work the response must distinguish edited files, persisted settings,

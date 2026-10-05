@@ -343,7 +343,7 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     role = str(dict(dict(pack.metadata or {}).get("bunshin_v2") or {}).get("role") or "")
     if role == "implementation":
         lines.append(
-            "- Implementation: once the owned contract, edit path, and one sufficient validation path are clear, implement directly. When the checklist is complete and focused checks pass, call candidate_submit immediately."
+            "- Implementation: once the owned contract, edit path, and one sufficient validation path are clear, implement directly. When the checklist is complete and focused checks pass, call submit_candidate immediately."
         )
     elif role == "verifier":
         lines.extend(
@@ -354,7 +354,7 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
         )
     elif role == "architect":
         lines.append(
-            "- Architecture: after one requirements-consistency pass, declare the smallest complete module and contract graph. Do not rehearse implementation; call contract_submit as soon as the declared completion conditions hold."
+            "- Architecture: after one requirements-consistency pass, declare the smallest complete module and contract graph. Do not rehearse implementation; call submit_contract as soon as the declared completion conditions hold."
         )
     elif role == "reviewer":
         lines.append(

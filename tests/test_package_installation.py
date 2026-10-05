@@ -198,9 +198,9 @@ def test_package_tools_remain_indirect(tmp_path):
     host.publish_management_capabilities()
     contracts = core._build_llm_tool_contracts()
     direct = {item["function"]["name"] for item in contracts}
-    assert not direct & {"package_install", "package_prepare", "package_status"}
-    listing = next(item["function"] for item in contracts if item["function"]["name"] == "plugins_list")
-    assert "package_install" in listing["description"]
+    assert not direct & {"install_package", "prepare_package", "inspect_package_status"}
+    listing = next(item["function"] for item in contracts if item["function"]["name"] == "list_plugins")
+    assert "install_package" in listing["description"]
     host.shutdown()
 
 

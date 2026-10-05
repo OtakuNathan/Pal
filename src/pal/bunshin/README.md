@@ -113,7 +113,7 @@ Interaction rule:
   checkpoint schemas through v7 are not migrated in place
 - Manager records one origin/current delivery binding on the Task, outside
   `task.yaml`, `GraphIR`, workflow payloads, and worker context. Ordinary input
-  from another channel never changes it; `bunshin_rebind_task_delivery` changes
+  from another channel never changes it; `rebind_bunshin_task_delivery` changes
   only that reply target. A dead target falls back to a connected recovery
   socket, otherwise the durable notification remains pending
 - verified software delivery has one authority and one portable projection:

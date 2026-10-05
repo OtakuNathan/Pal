@@ -25,7 +25,7 @@ from pal.bunshin.v2.submission_errors import (
 REVIEW_SUBMIT_CAPABILITY = "op_bunshin_review_submit"
 
 REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
-    "alias": "review_submit",
+    "alias": "submit_review",
     "guidance": {
         "purpose": "Submit the completed semantic review and let the Manager derive its verdict.",
         "use_when": (
@@ -57,7 +57,7 @@ def review_submit_tool_result(
     submission_started = False
     try:
         if dict(call.args or {}):
-            raise SubmissionValidationError("review_submit takes no arguments")
+            raise SubmissionValidationError("submit_review takes no arguments")
         ledger = assert_work_items_complete(workspace)
         findings = findings_from_work_items(workspace)
         blocking, advisories = partition_findings(findings)
@@ -65,7 +65,7 @@ def review_submit_tool_result(
         role = str(binding.get("role") or "")
         mode = str(binding.get("mode") or "")
         if role != "reviewer":
-            raise ValueError("review_submit is available only to reviewer roles")
+            raise ValueError("submit_review is available only to reviewer roles")
         draft_kind = (
             "architecture_review"
             if mode == "architecture"

@@ -32,7 +32,7 @@ keep transcript output; typed requests and replay explicitly disable it.
 source record. The compatibility compiler merges the summary into the first
 user message and does not advertise it as a dynamic context candidate.
 
-Native shell now adds at most one `shell_session` capability hint. It lists only
+Native shell now adds at most one `manage_shell_session` capability hint. It lists only
 the actions applicable to the delivered state and retains `read_tool` as the
 discovery entry point. Already-known operations remain callable directly.
 Result status, session ID, errors, effect semantics and output snapshot references remain

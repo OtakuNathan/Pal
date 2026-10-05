@@ -73,7 +73,7 @@ class ReferenceBinding:
             invocation_acceptance = [
                 "Spend architecture work on the declaration-level skeleton; never compile, build, test, link, or execute product behavior. Any private product code incidentally authored must stay inside its final owning module's implementation_scopes, has no contract authority, and may be replaced by the Coder.",
                 "Finish only when boundaries and responsibilities, unique state/resource owners, contracts, and closed lifecycle/joins are declared independently of any private product draft.",
-                "Use update_checklist as the fixed durable phase cursor: settle requirements and the complete semantic module graph first; then write only declaration skeletons; only then fill the Manager-preseeded architect.yaml, reconcile both projections, complete the checklist, and call contract_submit with no arguments. Never work ahead of the current phase.",
+                "Use update_checklist as the fixed durable phase cursor: settle requirements and the complete semantic module graph first; then write only declaration skeletons; only then fill the Manager-preseeded architect.yaml, reconcile both projections, complete the checklist, and call submit_contract with no arguments. Never work ahead of the current phase.",
             ]
         elif (
             contract_authoring or profile_group == "software_engineering"
@@ -93,7 +93,7 @@ class ReferenceBinding:
                 "For every module, verify responsibility, dependency handoffs and consumed outputs, input/output/error/invariant contracts, ownership, lifecycle, optional state machine, and agreement between architect.yaml and declaration comments.",
                 "Before PASS, reject every public semantic ambiguity: audit absent/null/empty/zero-length inputs, partial output followed by failure and its commitment/consumption/post-error state, and all permitted copy/move/clone/share/reset/reuse operations on public stateful values. If two conforming implementations may make observably different choices that a consumer must know, add a finding; review_guarded private implementation freedom cannot close that gap.",
                 "PASS only when key scenarios traverse the contract graph, failure paths terminate legally, every Requirement maps, no dependency is undeclared, and every observable edge case has one declared outcome or an explicitly declared set of outcomes safe for every consumer.",
-                "Inspect the complete Manager-bound scope, record every material defect with add_finding, complete the checklist, and call review_submit once.",
+                "Inspect the complete Manager-bound scope, record every material defect with add_finding, complete the checklist, and call submit_review once.",
             ]
         elif activation == RoleActivation(
             OrchestrationRole.REVIEWER,
@@ -102,13 +102,13 @@ class ReferenceBinding:
             invocation_acceptance = [
                 "Review the ordered task ledger and the complete immutable contract breadth-first; never stop at the first defect.",
                 "Trace each requirement through module dependencies, ownership, lifecycle, errors, and scenarios to a legal success or failure endpoint. Schema validity is not semantic proof.",
-                "Record every independent defect with add_finding, complete the checklist, and call review_submit exactly once. Do not repair or redesign private implementation.",
+                "Record every independent defect with add_finding, complete the checklist, and call submit_review exactly once. Do not repair or redesign private implementation.",
             ]
         elif activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
                 "Read the ordered task ledger and perform one bounded consistency pass before authoring Contract fields.",
                 "Immediately call update_checklist after that pass, then work only on its current phase. Externalize each settled phase to the durable Contract Draft before moving on; batch independent tool calls in one response and sequence only dependent definitions.",
-                "Complete the fixed checklist, reconcile topology and end-to-end integration against the task, then call contract_submit with no arguments. The checklist is a cursor, never contract truth or review evidence.",
+                "Complete the fixed checklist, reconcile topology and end-to-end integration against the task, then call submit_contract with no arguments. The checklist is a cursor, never contract truth or review evidence.",
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
@@ -121,17 +121,17 @@ class ReferenceBinding:
                 invocation_acceptance = [
                     "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verifier read-only.",
                     "Treat private product code inherited from the Architect as a non-authoritative draft: inspect it as workspace evidence, then keep, modify, delete, or replace it as needed; you own and must validate the final implementation.",
-                    "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient self-check with ordinary shell or LSP tools, then call candidate_submit with no arguments.",
+                    "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient self-check with ordinary shell or LSP tools, then call submit_candidate with no arguments.",
                 ]
             else:
                 invocation_acceptance = [
                     "Write the contracted product artifact in the bound workspace and run a focused validation.",
-                    "Maintain a compact checklist with update_checklist, run one focused self-check with ordinary available tools, then call candidate_submit with no arguments; do not write producer_report.json.",
+                    "Maintain a compact checklist with update_checklist, run one focused self-check with ordinary available tools, then call submit_candidate with no arguments; do not write producer_report.json.",
                 ]
         elif activation.mode == RoleMode.STANDALONE:
             invocation_acceptance = [
                 "Review only the bound immutable target and run reproducible read-only probes.",
-                "Use the checklist as the audit cursor, record every independent defect with add_finding, then call review_submit with no arguments.",
+                "Use the checklist as the audit cursor, record every independent defect with add_finding, then call submit_review with no arguments.",
             ]
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]

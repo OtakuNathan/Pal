@@ -122,7 +122,7 @@ class BunshinWebBrokerTests(unittest.TestCase):
                                 canonical_path="op_web_search",
                                 input_model=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
                             ),
-                            "browser_read": SimpleNamespace(
+                            "read_browser_page": SimpleNamespace(
                                 canonical_path="op_browser_read",
                                 input_model=BrowserReadInput,
                             ),

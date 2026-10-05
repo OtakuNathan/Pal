@@ -6,7 +6,7 @@ def _web_research_capability_name(name: object) -> str | None:
     normalized = str(name or "").strip()
     if normalized in {"op_web_search", "search_web"}:
         return "op_web_search"
-    if normalized in {"op_browser_read", "browser_read"}:
+    if normalized in {"op_browser_read", "read_browser_page"}:
         return "op_browser_read"
     return None
 
@@ -15,7 +15,7 @@ def _web_research_budget_keys(canonical_name: str) -> tuple[str, ...]:
     if canonical_name == "op_web_search":
         return ("op_web_search", "search_web")
     if canonical_name == "op_browser_read":
-        return ("op_browser_read", "browser_read")
+        return ("op_browser_read", "read_browser_page")
     return (canonical_name,)
 
 

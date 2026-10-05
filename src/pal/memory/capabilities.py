@@ -128,7 +128,7 @@ class MemoryIntrospectionProvider:
     module_id: str = "memory"
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="dreaming",
-        InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("memory_dreaming",),
+        InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("manage_memory_dreaming",),
         async_handler_name="dreaming_async",
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
         guidance=ToolGuidance(purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
@@ -164,7 +164,7 @@ class MemoryIntrospectionProvider:
         return self.dreaming(call)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="history",
-        InputModel=MemoryHistoryInput, aliases=("memory_history",),
+        InputModel=MemoryHistoryInput, aliases=("read_memory_history",),
         execution=INDIRECT_LOCAL_READ,
         examples=({"query": "prior API preference"},),
         guidance=ToolGuidance(purpose="Explicitly read archived original memories and successor references.",
@@ -246,10 +246,10 @@ class MemoryIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show memory runtime state.",
-            use_when="Diagnosing memory system health — provider count, active provider, record counts.",
+            use_when='Diagnosing memory system health — provider count, active provider, record counts. If there is no active backend, inspect list_memory_providers for installed and mounted providers.',
             do_not_use_when="Recalling specific memories (use recall_memory).",
-            failure_next_steps="Read-only diagnostic. If no active provider, check memory_list_providers.",
-        ), aliases=("memory_show",))
+            failure_next_steps="Read-only diagnostic. If no active provider, check list_memory_providers.",
+        ), aliases=("inspect_memory_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
@@ -266,11 +266,11 @@ class MemoryIntrospectionProvider:
         action_name="list_providers",
         guidance=ToolGuidance(
             purpose="List registered L3 memory providers.",
-            use_when="Checking which memory backends are installed and mounted.",
-            do_not_use_when="Checking the active provider (use memory_active_provider). Recalling memories (use recall_memory).",
+            use_when='Checking which memory backends are installed and mounted. An empty list means no L3 providers are registered; inspect list_plugins for their installation and attachment state.',
+            do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Recalling memories (use recall_memory).",
             failure_next_steps="Read-only. If empty, no L3 plugins are installed.",
         ),
-        aliases=("memory_list_providers",),
+        aliases=("list_memory_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -298,11 +298,11 @@ class MemoryIntrospectionProvider:
         action_name="active_provider",
         guidance=ToolGuidance(
             purpose="Show the current active memory provider.",
-            use_when="Checking which backend handles recall/remember/update/forget operations.",
-            do_not_use_when="Listing all providers (use memory_list_providers). Switching providers (use memory_set_active_provider).",
+            use_when='Checking which backend handles recall/remember/update/forget operations. L3 storage and recall require an active mounted provider. If none is available, inspect list_memory_providers before selecting one.',
+            do_not_use_when="Listing all providers (use list_memory_providers). Switching providers (use set_active_memory_provider).",
             failure_next_steps="Read-only. If none active, memories cannot be stored or recalled.",
         ),
-        aliases=("memory_active_provider",),
+        aliases=("inspect_active_memory_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -584,11 +584,11 @@ class MemoryIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Switch the active L3 memory provider.",
             use_when="Changing which memory backend handles recall/remember/update/forget.",
-            do_not_use_when="Checking the active provider (use memory_active_provider). Listing providers (use memory_list_providers).",
-            failure_next_steps="If the provider name is not found, verify it with memory_list_providers.",
+            do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Listing providers (use list_memory_providers).",
+            failure_next_steps="If the provider name is not found, verify it with list_memory_providers.",
         ),
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
-        aliases=("memory_set_active_provider",),
+        aliases=("set_active_memory_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:

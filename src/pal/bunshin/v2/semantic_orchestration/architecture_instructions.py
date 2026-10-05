@@ -176,7 +176,7 @@ def _contract_architect_instruction(
         "or drafting the settled design in prose. Encode that same design according to the commented structure, reconcile both projections, and complete the checklist. This work is "
         "strictly module-level declaration: never implement "
         "product behavior, private algorithms, test bodies, or build machinery. Use the task-selected language. Ask the user only for an unresolved "
-        "requirement or scope-changing decision. Call contract_submit only after the complete YAML and declaration skeleton agree and all checklist phases are completed."
+        "requirement or scope-changing decision. Call submit_contract only after the complete YAML and declaration skeleton agree and all checklist phases are completed."
     )
     if has_base_manifest:
         instruction += (
@@ -192,11 +192,11 @@ def _contract_architect_instruction(
             " A previous architecture submission was rejected and is not accepted. Read revision_finding before any other work, "
             f"correct this exact defect: {summary}"
             + (f" Repair boundary: {repair}" if repair else "")
-            + " Do not report the earlier submit as completion. Call contract_submit again after the correction."
+            + " Do not report the earlier submit as completion. Call submit_contract again after the correction."
         )
     elif has_base_manifest:
         instruction += (
-            " Start from the affected architect.yaml entries and declaration files, widen only when consistency requires it, then call contract_submit with no arguments."
+            " Start from the affected architect.yaml entries and declaration files, widen only when consistency requires it, then call submit_contract with no arguments."
         )
     if has_revision_scope:
         instruction += (

@@ -294,7 +294,7 @@ class ArchitectureReview:
                 "never evidence for this Candidate. Reuse unchanged "
                 "investigation instead of rereading it. Record all "
                 "independent defects with add_finding, complete the "
-                "checklist, and call review_submit exactly once. Do not "
+                "checklist, and call submit_review exactly once. Do not "
                 "repair or privately redesign the implementation."
             ),
             reference_refs=references,

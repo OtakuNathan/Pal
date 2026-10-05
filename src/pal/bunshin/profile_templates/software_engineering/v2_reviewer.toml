@@ -33,7 +33,7 @@ Private product code inside its owning module's declared implementation_scopes i
 The Reviewer logical coroutine persists across Candidates, but its verdict does not: a prior PASS is context rather than evidence. For each Candidate, first regress prior findings and touched invariants; then inspect its diff and changed semantic neighborhood for new defects. Reuse unchanged investigation, but revalidate every touched contract edge.
 """
 output_contract_fragment = """
-Finish every audit phase before verdict; never fail-first. Batch architecture-level findings through add_finding. Any blocking finding, including p2, produces FAIL; only optional p2 advisories may accompany PASS. Complete the checklist and call review_submit once.
+Finish every audit phase before verdict; never fail-first. Batch architecture-level findings through add_finding. Any blocking finding, including p2, produces FAIL; only optional p2 advisories may accompany PASS. Complete the checklist and call submit_review once.
 """
 capability_groups = ["software_reviewer", "v2_contract_reviewer"]
 
@@ -73,7 +73,7 @@ Start from the bound ReviewRequest and explicit scope. Inspect source breadth-fi
 Review the current implementation, not a hypothetical redesign. Reproduce material defects, distinguish product failures from test or environment failures, and use compilation or LSP only as supporting evidence. Do not edit, delete, commit, branch, merge, reset, clean, or begin repair merely because a fix appears straightforward. Finish the complete requested review and submit one structured verdict.
 """
 output_contract_fragment = """
-Finish the requested code audit before verdict; never fail-first. Batch evidence-backed findings through add_finding, complete the checklist, and call review_submit once. Never repair the reviewed product or emit Markdown findings.
+Finish the requested code audit before verdict; never fail-first. Batch evidence-backed findings through add_finding, complete the checklist, and call submit_review once. Never repair the reviewed product or emit Markdown findings.
 """
 
 [role]
@@ -105,4 +105,4 @@ require_complete = true
 
 [role.submission]
 kind = "architecture_review"
-tool = "review_submit"
+tool = "submit_review"

@@ -75,11 +75,11 @@ class ExecutionIntrospectionProvider(
         action_name="show",
         guidance=ToolGuidance(
             purpose="Show execution runtime state — capability count and tool count.",
-            use_when="Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred.",
-            do_not_use_when="Listing specific tools (use exec_tools). Searching for a capability (use search_tools).",
-            failure_next_steps="Read-only diagnostic. If counts look wrong, a module may have failed to mount — check core_observe for detached modules.",
+            use_when='Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred. If counts differ from expectations, inspect observe_core for module lifecycle state and search_tools for the current registry; counts alone do not identify a missing capability.',
+            do_not_use_when="Listing specific tools (use list_tools). Searching for a capability (use search_tools).",
+            failure_next_steps="Read-only diagnostic. If counts look wrong, a module may have failed to mount — check observe_core for detached modules.",
         ),
-        aliases=("exec_show",),
+        aliases=("inspect_execution_state",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

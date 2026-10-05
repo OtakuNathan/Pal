@@ -993,10 +993,10 @@ class ChannelRuntime(ChannelRuntimePort):
         current = dict(current_binding or {})
         requested = str(endpoint_id or current.get("channel_id") or "").strip()
         if not requested:
-            raise ValueError("No current channel destination. Supply out_channel_name from channel_list.")
+            raise ValueError("No current channel destination. Supply out_channel_name from list_channel_endpoints.")
         endpoint = self.get_endpoint(requested)
         if endpoint is None:
-            raise ValueError(f"Channel endpoint {requested!r} is unavailable; inspect channel_list.")
+            raise ValueError(f"Channel endpoint {requested!r} is unavailable; inspect list_channel_endpoints.")
         if reply_target is not None:
             target = dict(reply_target)
         elif requested == str(current.get("channel_id") or "") and current.get("reply_target"):

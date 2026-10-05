@@ -53,7 +53,7 @@ require_complete = true
 
 [role.submission]
 kind = "contract"
-tool = "contract_submit"
+tool = "submit_contract"
 
 [metadata]
 builtin = true

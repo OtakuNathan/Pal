@@ -1621,7 +1621,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         result = self._verification_call(workspace, "op_bunshin_verification_submit")
 
         self.assertFalse(result.ok)
-        self.assertIn("verification_submit found 4 consistent errors", result.llm_text)
+        self.assertIn("submit_verification found 4 consistent errors", result.llm_text)
         self.assertIn("warning_clean evidence", result.llm_text)
         self.assertIn("consumer_probe evidence", result.llm_text)
         self.assertIn("public_surface_dogfood evidence", result.llm_text)
@@ -2111,7 +2111,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         try:
             result = asyncio.run(
                 runtime.execute_tool_async(
-                    new_tool_call(name="candidate_submit", args={})
+                    new_tool_call(name="submit_candidate", args={})
                 )
             )
             self.assertIsInstance(result.invocation_result, RejectedResult)
@@ -2767,7 +2767,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         ]
         self.assertIn("returned scratch_path", scratch_guidance["use_when"])
         self.assertIn(
-            "call verification_scratch_write again",
+            "call write_verification_scratch again",
             scratch_guidance["use_when"],
         )
         self.assertIn("product source", scratch_guidance["do_not_use_when"])

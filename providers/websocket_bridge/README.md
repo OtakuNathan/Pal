@@ -45,7 +45,7 @@ sidecar convention, mirroring the LSP manager). It:
   config and runs the declared `serve` entrypoint),
 * probes `health` and `shutdown` over the manager socket,
 * accepts the endpoint-private fire-and-forget `send_message` RPC used by
-  `channel_send_message(channel_id, message)`,
+  `send_channel_message(channel_id, message)`,
 * force-terminates the process group if a clean shutdown does not return in time.
 
 The sidecar process exclusively owns its WebSocket connections and opens
@@ -64,7 +64,7 @@ socket while keeping peer semantics endpoint-owned:
   the peer.
 * `send_message(message)` starts a new peer exchange and returns as soon as the
   connected WebSocket accepts the root frame.
-* Calling `channel_send_message` for the same endpoint while handling its current
+* Calling `send_channel_message` for the same endpoint while handling its current
   peer turn is forbidden. The model replies with its normal final response.
 
 Every peer frame carries an exchange UUID and one-based message count. Messages
@@ -72,7 +72,7 @@ Every peer frame carries an exchange UUID and one-based message count. Messages
 An exact entire final of `[[peer_end]]` is also dropped before ingress. Sentinel,
 limit, invalid context, delivery error, or disconnect terminates the exchange
 and clears process-local exchange state. The next explicit
-`channel_send_message` begins a fresh exchange at count 1.
+`send_channel_message` begins a fresh exchange at count 1.
 
 Legacy socket response frames received from a peer are discarded. They are never
 reinterpreted as new user input.

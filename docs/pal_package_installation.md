@@ -18,12 +18,12 @@ pal package status --runtime-root ~/.pal
 
 The CLI installs while Pal is stopped; starting Pal or using the existing owner
 rescan/attach path activates prepared files. A runtime lease prevents CLI file
-replacement under a running Pal. In a running Pal, use indirect `package_install`
-or `package_prepare`. They wait up to `wait_ms` (default 1000, maximum 5000)
+replacement under a running Pal. In a running Pal, use indirect `install_package`
+or `prepare_package`. They wait up to `wait_ms` (default 1000, maximum 5000)
 for the result. Longer jobs return a job id and notification availability; a
 scheduled completion event supplies the result to Pal in a continuation turn
 when idle, bound to the initiating conversation. Notices are best effort within the live runtime and are not replayed
-after restart. Use `package_status` for unavailable notices or diagnostics;
+after restart. Use `inspect_package_status` for unavailable notices or diagnostics;
 with a job id it also accepts a bounded `wait_ms`. It reports job progress,
 package records and activation results. Downloads and tool waits do not hold
 the runtime lifecycle fence; the worker owns the activation write fence.
@@ -84,7 +84,7 @@ moving a venv would invalidate absolute script shebangs. Upgrades prepare a new
 environment rather than editing one used by a running sidecar. Reinstall and
 prepare also use a fresh environment, since hooks may change dependencies. Pip
 can reuse its download cache. Failed attempts
-can be retried with `package_prepare`; old environments are retained.
+can be retried with `prepare_package`; old environments are retained.
 
 The host receives the selected environment through `PluginBuildContext.environment`
 or `ChannelProviderBuildContext.environment`. Wire it into the plugin's existing
@@ -147,11 +147,11 @@ No live browser worker is constructed during installation verification.
 
 ## Disable and uninstall
 
-`plugin_disable` persists the startup preference, including for builtins, and
-uses the existing dependency-aware detach. `plugin_detach` is temporary.
-`plugin_uninstall(name, purge_data=false)` removes a community installation; it
+`disable_plugin` persists the startup preference, including for builtins, and
+uses the existing dependency-aware detach. `detach_plugin` is temporary.
+`uninstall_plugin(name, purge_data=false)` removes a community installation; it
 runs as a package job with a brief completion wait and, when available, a
-completion event to Pal for the initiating task. Use `package_status` when
+completion event to Pal for the initiating task. Use `inspect_package_status` when
 notification is unavailable or cleanup diagnostics are needed. Builtins and channel
 providers are outside this operation's scope. Offline equivalent:
 
@@ -170,7 +170,7 @@ By default, the complete installation directory is retired under
 `packages/previous/plugin/<id>/uninstall-<operation>/`, preserving legacy inline
 data. Application data and saved enabled/configuration preferences remain; a
 normal reinstall restores preferences but creates a fresh runtime generation.
-`package_prepare` cannot reinstall an uninstalled package implicitly.
+`prepare_package` cannot reinstall an uninstalled package implicitly.
 
 Explicit purge requires a complete ownership declaration in `plugin.toml`:
 

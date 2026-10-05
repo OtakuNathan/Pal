@@ -1,0 +1,177 @@
+Pal 工具契约整改记录
+评审来源：Pal_tool_contract_review.txt
+范围：Pal 源码、pal-shell-native 源码、文档、契约与生命周期回归。
+状态：源码整改完成；隔离运行时安装/加载/执行验收完成。
+当前常驻 /home/nathan/.pal 未更新 native 安装包、未重启；不声称线上已生效。
+
+A. 公共工具名称
+- 固定改名见 docs/tool_alias_migration.json。每个 capability 保持一个 alias。
+- 评审中建议保留的名称保留；旧 canonical path、handler、内部控制命令保持原义。
+- Bunshin scoped alias、角色模板、恢复提示、示例、测试、当前文档同步。
+- MCP 动态工具为 call_mcp_*，prompt 为 render_mcp_*；最长 64 字符。
+  长名称与规范化冲突用确定性 hash 后缀区分；外部原始身份用于实际调用。
+- native 增加八个独立 shell_session 动作 capability，每个拥有严格 schema。
+  read/release 保留 session_id/output_ref 二选一与 output_ref 无等待规则。
+  统一 manage_shell_session 作为单独的兼容入口保留。
+  所有会话入口保守声明 control/reconcile_first，因为 read 也参与输出交付和确认；
+  不因 read 名称承诺纯读取或自动重试。角色扩展保持原来的 shell/evidence 权限条件。
+- 注册、搜索精确/前缀/分词/default top-k、direct/indirect、角色隔离均有回归。
+  未运行付费 LLM 行为基准，不声称模型命中率、调用数或 token 成本得到改善。
+
+B. 模型可见诊断（评审附录 B 的 A1–A11）
+A1  native busy：保留 inspect_shell_status 恢复入口；跟踪状态不伪称确定阻塞根因。
+A2  normalization：保留实际验证原因、session/output_ref、禁止重跑提示。
+    恢复测试用只写一次 marker 证明重导出不会重复执行。
+A3  write_file：有界原始 exception/errno/cause 与提交不确定性、读取后重试提示。
+A4  delete_path：文件系统原因、当前 digest、部分删除风险；目录拒绝 expected_sha256
+    时明确文件类型规则，不再报 hex 格式误导。
+A5  channel 持久化：原始原因及回滚后的实际状态进入模型正文。
+A6  builtin 输出验证：详细原因与 read_tool(view=output) 恢复入口。
+A7  unknown_target：有界有效目标值进入正文，无 discovery 工具也可诊断。
+A8  read_tool：默认紧凑 input，output/full 可见输出 schema/完整契约。
+A9  remote 包装：保留有界 cause chain 和原始连接/准备错误。
+A10 remote 子进程：保存有界 stderr；启动动作不会因继承 stderr 的 daemon 永久挂起。
+A11 affordance 过滤：不可达 handler hint 被过滤后重新应用声明的 fallback，权限不扩大。
+共用 diagnostics 对长度、cause 深度、URI 密码与常见 token/password 字段限界/脱敏。
+不公开不必要的内部协调标识，也不把 structured 无条件全部回灌。
+
+B1. 成功语义
+- remote_start 非零返回为失败；动作完成不证明 ready，结果标记 readiness=unverified。
+- remote_power accepted 不等于关机完成；unknown 不伪称成功，shutdown_confirmed=false。
+- LSP 空结果解释进入稳定描述；pending/timed_out 保持原状态。
+- usage/cost unknown 不等于零；thinking choices 为空说明支持边界。
+- grep_artifact 明确大小写不敏感词匹配，regex/逐行使用 rg。
+- artifact_select 无续期时返回 ttl_refresh_reason。
+- failure reports 明确最近 16 项窗口；control 明确 resident 重启边界。
+- core cache deadline 无调度时提供 unscheduled_reason。
+
+B2. 关系发现与既有正确行为
+- browser hover/scroll/resize/history 的 snapshot 提示进入稳定描述；network 导航后重装。
+- extensions 的行为验证、extension_manage 源目录删除后仍可 unmount 明确。
+  原有成功 next_step 保留。
+- OCR/转录不证明视觉检查；原有 artifact context_messages 保留。
+- prepare_skill_candidate 后 review/commit 的 NextToolHint、skill wrapper 引用信任边界明确。
+- memory 输入说明、file cache stale 正文、stub 非真实后端说明原已正确，保留。
+
+B3. 15 组低优先级项目全部处理
+01 LLM：空启用列表、无 active 的发现入口。
+02 web search：空 provider、未授权、unhealthy 的成功诊断说明。
+03 MCP：空服务器列表及 rescan。
+04 memory：无 active、空列表、不可存取边界。
+05 channel：空端点、attach no-op、detach 恢复、backlog/health 的诊断路线。
+06 plugins：缺失/发现、detach/disable 恢复、scan_errors/attach_errors 独立于 wrapper 状态。
+07 sqlite-vec：未挂载、缺 embedding/index 诊断和重新 attach。
+08 execution/core/failure：计数、负载、近期失败入口，不从 mode 标签推断 maintenance。
+09 skill：空列表、拓宽搜索、恢复需 enabled=true 且 status=active。
+10 proactive：空任务、无历史运行、disable 后恢复。
+11 identity：无 persona 的默认 fragments。
+12 artifact：空列表/搜索可能由 scope/filter/未收到/过期导致，不认定必然过期。
+13 checklist：inactive/no-op 不证明用户任务完成。
+14 Bunshin：override reset 无对象 no-op、空 task 搜索拓宽 query。
+15 browser：close 幂等、cache 清理后按需 reload、reset 后重新导航。
+这些解释进入稳定 description/条件性成功结果，不全量重播 failure fallback。
+
+C. 43 个参数/状态检查项逐项结论
+说明：“保留”表示评审原已确认正确的组合或边界，不是未处理缺陷。
+A1 shell action 矩阵：补 schema 条件规则、精确说明；八个独立入口只暴露本动作字段。
+A2 session/output_ref：schema + validator + 恢复测试，XOR 与无等待保留。
+A3 sudo/target/tty：remote-only、tty=false、支持命令与每次审批明确；既有 gate 保留。
+A4 wait/timeout：保留独立参数，不新增错误的大小关系限制。
+A5 shell 状态：PTY、stdin、terminal release、有限 deadline 前提明确；状态 gate 保留。
+A6 remote：target/refresh/view、start action、accepted/unknown/readiness 边界明确。
+B1 read_file ranges 优先：保留已正确规则，不误写 XOR。
+B2 edit_file：保留批次/顺序规则，old_string/new_string 不相等的字段说明补齐。
+B3 delete_path：文件 digest 与目录 recursive 类型关系明确。
+B4 read_artifact：page/chunk 覆盖 representation 明确。
+B5 search_tools：保留 top_k 优先及可自由组合 filters；测试默认上限。
+B6 call_tool：args 必须符合所选 name 的契约。
+B7 MCP image：URL 在 auto/url 优先、artifact 覆盖 path、各 mode 输出形态明确。
+C1 browser_find：定位/仅搜索分支、随后操作所需参数明确。
+C2 browser_tabs：按 operation 的 index 条件和忽略规则明确，保留统一入口。
+C3 browser_dialog：type 与 text 的使用/忽略规则明确。
+C4 browser_network：operation 对 limit 的忽略及 hook 生命周期明确。
+C5 extension_manage：mount path、reload/unmount extension_id 的要求/忽略明确。
+C6 browser_read：target/js/bypass 选择优先级明确。
+C7 browser target：保留自然操作参数组合，不新增无依据冲突。
+D1 recall_memory：mem_ref 完整身份与优先级保留，不误写 query XOR。
+D2 remember/update：kind-dependent 字段与 fact 忽略 case 字段明确。
+D3 memory_history：mem_ref/event_ref 选择优先级明确。
+D4 memory_dreaming：action 对状态、配置、启动、恢复字段的使用/忽略明确。
+D5 skill_commit：有效 candidate_id 优先、未知 ID 可回退 inline、replace 语义明确。
+D6 skill_update：enabled/status 合取恢复条件明确。
+E1 proactive schedule：manual/cron/once typed union；禁止分支无关键，timezone/naive 时间明确。
+E2 proactive create 输出：非空 reply target 需要 channel，清除方式明确。
+E3 proactive set output：channel/target 的联动清除及要求明确。
+E4 package status：保留 kind/name 的正确关系，不误写 XOR。
+E5 prepare/uninstall：保留匹配 kind 和卸载保留数据默认值。
+F1 start workflow：已有 task 禁止 profile/workspace；新建需 profile/workspace 明确。
+F2 workflow operation：new_requirement 需 goal+task_spec/file；其余需 artifact 禁止 spec，
+   artifact 信任/类型约束明确，不声称所有 INVALID 都无副作用。
+F3 task_spec_file：保留与额外结构字段共存，仅禁止 authoritative_text/source 重复。
+F4 workspace：repo_path 优先、repo_root 仅 fallback 明确，不声称实现验证两者相等。
+F5 task selector：统一为 actor 唯一 active Task，移除错误的当前 channel 绑定描述。
+F6 human decision：edit_instruction 仅 edit 必填，其余省略；review 状态门保留。
+F7 triage：保留恰好一个 pending item 才可省略 subject 的正确说明。
+F8 role binding：merge 后的 profile/null/reason、四角色及 implementation/verifier 联动明确。
+G1 candidate defect：path 锚定 symbol/contract_section；source_file 独立，不误写 XOR。
+G2 verification evidence：path 注释、既有 scratch probe、空 exit_codes 默认 [0] 明确；
+   保留动态 obligation/history 状态门，不声称校验 command 实际消费 probe 文件。
+H1 LSP doctor：至少一个 name/file/path selector，file 优先 path，root 单独不足。
+H2 LSP：name/root pin、项目 compile 配置优先于 fallback 明确；坐标组合保留。
+
+验收与激活
+- Pal 四批回归已执行；首次 core-a 的 skill heading 兼容和 bunshin-a 的并发 sandbox
+  timeout 已分别修正/隔离复测。最后增量有定向契约测试和 core-b 重跑。
+- native 原有五个 Bunshin 测试对齐公开组件所有权和当前 LLM 测试接口，原有审批、
+  取消前清理、交付与 lease 断言保留；完整 suite 不再排除这五项。
+- native 包安装测试使用独立 venv，其他 suite 使用可被 bwrap 访问的系统解释器。
+  package install -> discover -> loaded module 路径 -> 新八入口 -> 实际远端执行 -> reload
+  -> delivery -> disable 全链验证；安装文件存在与实际加载分别断言。
+- 精确测试结果见本文件结尾；原始日志在 /tmp/pal-contract-review/。
+- Linux / Python 3.13；未验证 macOS 或 Python 3.12。
+
+常驻实例激活交接（不自动执行，不改运行配置）
+服务：systemd user pal.service
+执行：/usr/bin/python3 -m pal.main run --runtime-root /home/nathan/.pal
+Pal 已是本 checkout 的 editable source；native 当前使用 runtime 内安装副本。
+先确认 /status 的 active turns 和 queued messages 均为 0，再由外部监督者执行：
+  systemctl --user stop pal.service
+  /usr/bin/python3 -m pal.main package install --runtime-root /home/nathan/.pal /tmp/pal-contract-review/packages/plugin-remote-0.4.2.palpkg
+  systemctl --user start pal.service
+随后查 /status、list_tools、read_tool(read_shell_session)、read_tool(view=output)，
+核对新 alias 和成功描述。失败时保持旧包备份并按安装状态诊断，不将 metadata rescan
+或 endpoint reconnect 当作 resident 代码激活。
+依据：src/pal/skill/builtin_skills.py 的 pal.self.maintenance resident 重启边界。
+
+最终结果（2026-10-05）
+Pal core-b 最后整批：1331 passed，5 skipped，201 subtests passed。
+Pal 成功语义/浏览器/skill/discovery 最后定向：88 passed，17 subtests passed。
+Pal review 独立回归：41 passed（含规范化冲突实际路由、词序/关键词搜索对照）。
+native 最终完整系统套件：170 passed；唯一另测 package lifecycle 包含在 28 项 package
+套件内，28 passed。最终总计 171 个不同测试通过，五个旧 Bunshin 失败全部消除。
+最后切换独立 read affordance 后：production 27 passed，contract review 7 passed。
+独立 session action 五项测试已包含在完整系统套件内。
+实际隔离 registry、native shell role 和 schema 导出：/tmp/pal-contract-review/tool-inventory.json。
+安装包：/tmp/pal-contract-review/packages/plugin-remote-0.4.2.palpkg。
+两仓库 compileall 与 git diff --check 通过。整改按仓库分别提交；没有推送或部署。
+
+提交前代码 review
+- 核查固定 alias、canonical/handler/control/event 标识、strict schema、角色权限、
+  输出交付/恢复、未知效果重试边界；canonical 等 owner 标识的 AST 对照无漂移。
+- 发现并修复 SSH stderr 生命周期缺口：独立拥有 stderr pipe，父进程的退出与
+  后代持有 pipe 的 EOF 解耦；启动失败及主动断开均有真实 fork 回归。
+- 修正 disabled plugin 的恢复 hint：enable_plugin 使用 name 参数。
+- native 原有的 shared contracts/output contract 拆分属于本整改的必要依赖，一并
+  检查兼容导出身份、stdlib-only 契约包、导入关系、安装与重载边界。
+- Pal 提交前定向：144 passed；native 提交前完整结果见下方。
+
+- 完整复核发现共享 RUN_GUIDANCE 的独立动作提示破坏只注册 multiplexer 的宿主。
+  新动作提示移至实际提供这些动作的 native provider 描述；旧宿主的恢复路由由
+  兼容 fixture 保留，生产恢复指向 read_shell_session。相关三套回归 41 passed。
+- 最终提交依据为 review-native-full-final.log 与独立安装用例，先前 168 项的整批
+  结果不能代表切换独立恢复入口后的最终快照。
+
+提交前最终验收：review-native-full-final.log，170 tests / OK；
+review-native-installed-final.log，1 test / OK（独立 venv，实际安装/加载/执行链）。
+Pal review-commit-pal.log：144 passed。两仓库 staged diff --check 均通过。
+安装包已重新构建以包含 review 修复。没有推送，没有升级或重启常驻实例。

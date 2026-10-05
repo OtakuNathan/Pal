@@ -56,7 +56,7 @@ def test_layout_capability_returns_text_consumable_visual_evidence() -> None:
 
     result = provider.inspect_layout(
         IntrospectionCall(
-            name="browser_inspect_layout",
+            name="inspect_browser_layout",
             args={"selector": ".bubble li", "max_elements": 4},
             meta={"turn_id": "layout-turn"},
         )

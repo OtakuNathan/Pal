@@ -67,6 +67,7 @@ class McpCompilerTests(unittest.TestCase):
         descriptor = projection.mounted_subtree.descriptors[0]
         self.assertEqual(descriptor.canonical_path, "op_mcp_demo_server_tool_read_file")
         self.assertEqual(descriptor.module_id, "mcp")
+        self.assertEqual(descriptor.aliases, ("call_mcp_demo_server_read_file",))
         result = projection.mounted_subtree.bound_actions[0].callable(CapabilityCall(name=descriptor.canonical_path, args={"path": "a.txt"}))
         self.assertEqual(result.status, RuntimeStatus.OK)
         self.assertEqual(invoker.tool_calls, [("demo-server", "read.file", {"path": "a.txt"})])
@@ -132,6 +133,7 @@ class McpCompilerTests(unittest.TestCase):
 
         descriptor = projection.mounted_subtree.descriptors[0]
         self.assertEqual(descriptor.canonical_path, "op_mcp_demo_prompt_code_review_render")
+        self.assertEqual(descriptor.aliases, ("render_mcp_demo_code_review",))
         self.assertEqual(projection.skills[0].skill_id, "mcp_demo_prompt_code_review")
         result = projection.mounted_subtree.bound_actions[0].callable(CapabilityCall(name=descriptor.canonical_path, args={"diff": "patch"}))
         self.assertEqual(result.status, RuntimeStatus.OK)
@@ -501,33 +503,33 @@ class McpPluginSidecarTests(unittest.TestCase):
         host._do_attach(handle)
         try:
             search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "alpha"}))
-            alpha_hit = next(item for item in search.structured["hits"] if item["alias"] == "mcp_demo_alpha")
+            alpha_hit = next(item for item in search.structured["hits"] if item["alias"] == "call_mcp_demo_alpha")
             alpha_read = core.context.execution_runtime.execute(
                 CapabilityCall(name="op_tool_read", args={"name": alpha_hit["alias"]})
             )
-            self.assertEqual(alpha_read.structured["alias"], "mcp_demo_alpha")
+            self.assertEqual(alpha_read.structured["alias"], "call_mcp_demo_alpha")
             self.assertNotIn("canonical_path", alpha_read.structured)
             self.assertIn("mcp_demo_prompt_brief", str(SkillSearchTool(service=skill_service).invoke({"query": "brief", "top_k": 5}).structured))
-            show = core.context.execution_runtime.execute(CapabilityCall(name="mcp_show", args={}))
+            show = core.context.execution_runtime.execute(CapabilityCall(name="inspect_mcp_state", args={}))
             self.assertEqual(show.status, RuntimeStatus.OK)
-            image = core.context.execution_runtime.execute(CapabilityCall(name="mcp_image_prepare", args={"url": "https://example.test/a.png"}))
+            image = core.context.execution_runtime.execute(CapabilityCall(name="prepare_mcp_image", args={"url": "https://example.test/a.png"}))
             self.assertEqual(image.structured["kind"], "url")
             image_path = self.root / "image.png"
             image_path.write_bytes(b"not really an image")
             path_image = core.context.execution_runtime.execute(
-                CapabilityCall(name="mcp_image_prepare", args={"path": str(image_path), "mode": "path"})
+                CapabilityCall(name="prepare_mcp_image", args={"path": str(image_path), "mode": "path"})
             )
             self.assertEqual(path_image.structured["kind"], "path")
             self.assertEqual(Path(path_image.structured["path"]), image_path.resolve())
             image_record = core.context.execution_runtime.registry_generation.indirect_aliases[
-                "mcp_image_prepare"
+                "prepare_mcp_image"
             ]
             self.assertEqual(image_record.execution.effect_kind, EffectKind.LOCAL_WRITE)
             self.assertEqual(image_record.execution.idempotency, Idempotency.IDEMPOTENT)
             self.assertEqual(image_record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         finally:
             host._do_detach(handle)
-        missing = core.context.execution_runtime.execute(CapabilityCall(name="mcp_demo_alpha", args={}))
+        missing = core.context.execution_runtime.execute(CapabilityCall(name="call_mcp_demo_alpha", args={}))
         self.assertIn("unknown capability", missing.text)
 
     def test_default_disabled_first_party_mcp_can_attach_temporarily_or_enable(self) -> None:
@@ -554,7 +556,7 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
         self.assertFalse(attached["enabled"])
-        self.assertNotIn("mcp_show", core.context.capability_registry.descriptors)
+        self.assertNotIn("inspect_mcp_state", core.context.capability_registry.descriptors)
 
         enabled = host.enable("mcp")
         try:
@@ -562,8 +564,8 @@ class McpPluginSidecarTests(unittest.TestCase):
             mcp_record = next(item for item in host.list_plugins() if item["plugin_id"] == "mcp")
             self.assertTrue(mcp_record["enabled"])
             self.assertTrue(mcp_record["attached"])
-            self.assertIn("mcp_show", core.context.capability_registry.descriptors)
-            self.assertIn("mcp_image_prepare", core.context.capability_registry.descriptors)
+            self.assertIn("inspect_mcp_state", core.context.capability_registry.descriptors)
+            self.assertIn("prepare_mcp_image", core.context.capability_registry.descriptors)
         finally:
             host.detach("mcp")
 
@@ -593,7 +595,7 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
         self.assertEqual(attached["reason"], "plugin_disabled")
-        self.assertEqual(attached["next_action"], "plugin_enable")
+        self.assertEqual(attached["next_action"], "enable_plugin")
 
 
 if __name__ == "__main__":

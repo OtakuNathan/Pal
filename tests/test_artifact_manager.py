@@ -98,7 +98,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )).ainvoke({}, session_key="a" * 64, persistent=True,
                    runtime=SimpleNamespace(runtime_root=self.root), turn_id=self.turn_id)
         self.assertEqual(screenshot.status, RuntimeStatus.OK)
-        self.assertIn("artifact_import", screenshot.structured["next_step"])
+        self.assertIn("import_artifact", screenshot.structured["next_step"])
         path = Path(screenshot.structured["artifact"]["local_cached_path"])
         core = PalCore()
         register_core_with_core(core)
@@ -107,7 +107,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
         register_artifact_with_core(core.context, self.manager)
         core.publish_module_capabilities("artifact")
-        call = new_tool_call(name="call_tool", args={"name": "artifact_import", "args": {"path": str(path)}})
+        call = new_tool_call(name="call_tool", args={"name": "import_artifact", "args": {"path": str(path)}})
         result = await core.context.execution_runtime.execute_tool_async(call, turn_id=self.turn_id)
         self.assertTrue(result.ok, result.llm_text)
         artifact_id = result.structured["artifact_id"]
@@ -192,7 +192,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         core.publish_module_capabilities("artifact")
         register_browser(core.context, browser)
         core.publish_module_capabilities("web_fetch")
-        call = new_tool_call(name="call_tool", args={"name": "browser_screenshot", "args": {}})
+        call = new_tool_call(name="call_tool", args={"name": "capture_browser_screenshot", "args": {}})
         try:
             result = await runtime.execute_tool_async(call, turn_id=self.turn_id)
             self.assertTrue(result.ok, result.llm_text)
@@ -1082,7 +1082,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Available Artifacts", merged_text)
         self.assertIn("visual_content: attached_inline", merged_text)
         self.assertIn("answer from those pixels directly", merged_text)
-        self.assertIn("optional_tools: artifact_info", merged_text)
+        self.assertIn("optional_tools: inspect_artifact_info", merged_text)
         self.assertNotIn("inspect_inline_image", merged_text)
         self.assertNotIn("actions: info, read, search", merged_text)
         self.assertIn("what do you see?", merged_text)

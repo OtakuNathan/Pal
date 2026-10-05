@@ -209,7 +209,7 @@ _DEFECT_PRECEDENCE = {
 
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_scratch_write": {
-        "alias": "verification_scratch_write",
+        "alias": "write_verification_scratch",
         "guidance": {
             "purpose": "Create or replace one complete verifier-owned probe file in bound scratch storage.",
             "use_when": (
@@ -229,7 +229,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     **{
         name: {
-            "alias": name.removeprefix("op_bunshin_"),
+            "alias": "run_verification_" + name.removeprefix("op_bunshin_verification_run_"),
             "guidance": {
                 "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case.",
                 "use_when": " ".join(
@@ -255,7 +255,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         for name, (_, tag) in _RUN_TO_KIND_TAG.items()
     },
     "op_bunshin_verification_run_lsp_check": {
-        "alias": "verification_run_lsp_check",
+        "alias": "run_verification_lsp_check",
         "guidance": {
             "purpose": "Run and durably register LSP diagnostics for one source file.",
             "use_when": (
@@ -268,13 +268,13 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             ),
             "failure_next_steps": (
                 "If the prepared operation is unavailable, record the required LSP obligation "
-                "UNKNOWN once with verification_check_unavailable."
+                "UNKNOWN once with record_unavailable_verification."
             ),
         },
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput,
     },
     "op_bunshin_verification_check_unavailable": {
-        "alias": "verification_check_unavailable",
+        "alias": "record_unavailable_verification",
         "guidance": {
             "purpose": "Record one required verification obligation as unavailable in the bound environment.",
             "use_when": "Use only for an applicable required obligation that genuinely cannot be exercised.",
@@ -287,7 +287,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput,
     },
     "op_bunshin_verification_set_summary": {
-        "alias": "verification_set_summary",
+        "alias": "set_verification_summary",
         "guidance": {
             "purpose": "Replace the concise verifier summary for the current verification draft.",
             "use_when": "Use after the material verification cases and findings are known.",
@@ -297,7 +297,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput,
     },
     "op_bunshin_verification_draft_status": {
-        "alias": "verification_draft_status",
+        "alias": "read_verification_draft_status",
         "guidance": {
             "purpose": "Read compact current verification cases, findings, obligations, and next actions.",
             "use_when": "Use to resume an assignment or select the next unfinished risk-directed action.",
@@ -307,7 +307,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput,
     },
     "op_bunshin_verification_remove_case": {
-        "alias": "verification_remove_case",
+        "alias": "remove_verification_case",
         "guidance": {
             "purpose": "Withdraw one recorded verification case and its attached findings by semantic name.",
             "use_when": "Use only when a recorded case itself is invalid, duplicate, or no longer applicable.",
@@ -317,7 +317,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput,
     },
     "op_bunshin_verification_submit": {
-        "alias": "verification_submit",
+        "alias": "submit_verification",
         "guidance": {
             "purpose": "Submit the current immutable verification evidence and findings for Manager-derived routing.",
             "use_when": "Use with no arguments after every required obligation and checklist item is closed.",
@@ -490,7 +490,7 @@ def compile_verification_invocation_tool_contract(
             "use_when": (
                 "Create or replace a complete executable verifier probe in the bound durable review scratch. "
                 "Use the returned scratch_path directly in a dedicated verification run command and set that run "
-                "tool's probe_path to the same relative path. To correct the probe, call verification_scratch_write "
+                "tool's probe_path to the same relative path. To correct the probe, call write_verification_scratch "
                 "again with the same relative path and complete replacement content; do not use read_file, "
                 "edit_file, or write_file in the sink node's verifier corpus."
             ),
@@ -530,7 +530,7 @@ def compile_verification_invocation_tool_contract(
         overrides["op_bunshin_verification_run_historical_regression"] = {"use_when": (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
             "Use an exact case name from the checklist and a command that executes its preserved reproducer or committed project regression. "
-            "Every listed case must be recorded before new risk exploration and before verification_submit. A repeated "
+            "Every listed case must be recorded before new risk exploration and before submit_verification. A repeated "
             "FAIL blocks PASS but must not skip the current Candidate diff-risk audit; finish that audit, batch all "
             "findings, and then submit one outcome. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
@@ -1038,7 +1038,7 @@ def _preflight_verification_submission(
     value: Mapping[str, Any], workspace: Mapping[str, Any]
 ) -> tuple[str, ...]:
     errors, reference_warnings = _verification_submission_errors(value, workspace)
-    raise_submission_errors(errors, owner="verification_submit")
+    raise_submission_errors(errors, owner="submit_verification")
     return reference_warnings
 
 

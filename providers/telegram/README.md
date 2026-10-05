@@ -32,7 +32,7 @@ into Pal's shared Python environment. `pal provider install` validates and
 atomically publishes its payload under the runtime root, archives the previous
 copy, and leaves endpoint configuration, credentials, and provider data alone.
 The CLI installation requires Pal to be stopped; start it afterward to load the
-new generation. For online installation use `package_install` inside Pal and
-check `package_status` for the coordinated activation result. For an existing
-provider updated directly on disk, use `channel_reload_provider` with
+new generation. For online installation use `install_package` inside Pal and
+check `inspect_package_status` for the coordinated activation result. For an existing
+provider updated directly on disk, use `reload_channel_provider` with
 `name="telegram"`; rescan alone does not reload existing provider code.

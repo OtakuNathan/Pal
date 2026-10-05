@@ -802,7 +802,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
             state_result = runtime.invoke_indirect_tool(
                 new_tool_call(
-                    name="file_state",
+                    name="inspect_file_cache",
                     args={"file_path": str(path)},
                     call_id="state-after-l1",
                 ),
@@ -1050,7 +1050,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertEqual(active.pending_call_ids, {"read-atomic"})
             state_result = runtime.invoke_indirect_tool(
                 new_tool_call(
-                    name="file_state",
+                    name="inspect_file_cache",
                     args={"file_path": str(path)},
                     call_id="state-after-failed-delivery",
                 ),

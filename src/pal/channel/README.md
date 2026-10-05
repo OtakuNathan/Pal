@@ -49,7 +49,7 @@ Interaction rule:
   - `inspect_health(...)`
   - `inspect_auth_state(...)`
 - active delivery is a separate contract from replying to a turn:
-  - LLM-facing: `channel_send_message(channel_id, message)`
+  - LLM-facing: `send_channel_message(channel_id, message)`
   - runtime: resolve one attached, enabled endpoint by `channel_id`
   - endpoint: `send_message(message)` using only its persisted binding
   - provider-specific recipients are never accepted from the LLM
@@ -99,9 +99,9 @@ Interaction rule:
   management actions
 - channel root and the recovery socket endpoint are core runtime components and
   cannot be detached
-- `channel_restart_endpoint` refreshes one endpoint connection without evicting
-  provider modules; `channel_reload_provider` explicitly performs provider
-  detach/unload/load/attach; `channel_provider_rescan` discovers only physical
+- `restart_channel_endpoint` refreshes one endpoint connection without evicting
+  provider modules; `reload_channel_provider` explicitly performs provider
+  detach/unload/load/attach; `rescan_channel_providers` discovers only physical
   additions/removals
 - EndpointHub is the internal registry and comes early/leaves late. It owns
   endpoint identity and ordered backpressure while transports and code are

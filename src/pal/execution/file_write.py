@@ -22,6 +22,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import diagnostic_text, exception_diagnostic
 
 
 MAX_CONTENT_BYTES = 1_000_000
@@ -76,7 +77,7 @@ class FileWriteTool:
         try:
             resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
-            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=str(exc))
+            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=exception_diagnostic(exc))
 
         if resolved.exists():
             return self._overwrite(resolved, content)
@@ -94,7 +95,7 @@ class FileWriteTool:
             try:
                 parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=str(exc))
+                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc))
         if not parent.is_dir():
             return _err(RuntimeStatus.INVALID, ERR_PARENT_NOT_DIRECTORY, file_path=str(resolved))
 
@@ -108,7 +109,7 @@ class FileWriteTool:
         except FileContentChangedError:
             return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=str(exc))
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -134,7 +135,7 @@ class FileWriteTool:
             self.cache.invalidate(resolved)
             return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=str(exc))
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -180,6 +181,10 @@ def _err(status: str, error_code: str, **structured: Any) -> CapabilityResult:
     payload: dict[str, Any] = {"error_code": error_code}
     payload.update(structured)
     text = _ERROR_LLMS[error_code]
+    if structured.get("details"):
+        text += "\nCause: " + diagnostic_text(structured["details"])
+    if structured.get("commit_uncertain"):
+        text += "\nThe replacement may have committed before persistence failed. Read the current file before retrying."
     return CapabilityResult(status=status, text=text, llm_text=text, structured=payload)
 
 

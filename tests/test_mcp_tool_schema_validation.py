@@ -83,7 +83,7 @@ def _runtime_with_mcp():
 
 def test_mcp_schema_keeps_draft_2020_12_contract_and_fixed_output_shape() -> None:
     runtime, invoker = _runtime_with_mcp()
-    record = runtime.registry_generation.indirect_aliases["mcp_schema_validate"]
+    record = runtime.registry_generation.indirect_aliases["call_mcp_schema_validate"]
     assert record.input_model is None
     assert "$defs" in record.input_schema
 
@@ -119,7 +119,7 @@ def test_mcp_schema_keeps_draft_2020_12_contract_and_fixed_output_shape() -> Non
 )
 def test_mcp_schema_rejects_type_required_extra_enum_const_composition_and_bounds(value) -> None:
     runtime, invoker = _runtime_with_mcp()
-    result = runtime.invoke_indirect_tool(new_tool_call(name="mcp_schema_validate", args=value))
+    result = runtime.invoke_indirect_tool(new_tool_call(name="call_mcp_schema_validate", args=value))
     assert isinstance(result, RejectedResult)
     assert result.error_code == "invalid_arguments"
     assert not invoker.calls
@@ -146,10 +146,10 @@ def test_mcp_defaults_indirect_but_can_declare_direct() -> None:
     runtime = PalCore().context.execution_runtime
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
 
-    assert "mcp_mode_direct" in runtime.registry_generation.provider_specs
-    assert "mcp_mode_indirect" not in runtime.registry_generation.provider_specs
-    assert "mcp_mode_indirect" in runtime.registry_generation.indirect_aliases
-    direct_record = runtime.registry_generation.direct_aliases["mcp_mode_direct"]
+    assert "call_mcp_mode_direct" in runtime.registry_generation.provider_specs
+    assert "call_mcp_mode_indirect" not in runtime.registry_generation.provider_specs
+    assert "call_mcp_mode_indirect" in runtime.registry_generation.indirect_aliases
+    direct_record = runtime.registry_generation.direct_aliases["call_mcp_mode_direct"]
     assert direct_record.execution.effect_kind is EffectKind.EXTERNAL_WRITE
     assert direct_record.execution.idempotency is Idempotency.NON_IDEMPOTENT
     assert direct_record.execution.retry_policy is RetryPolicy.RECONCILE_FIRST
@@ -183,7 +183,7 @@ def test_mcp_declared_output_schema_is_validated(structured_content, expected_ty
     runtime = PalCore().context.execution_runtime
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
 
-    result = runtime.invoke_indirect_tool(new_tool_call(name="mcp_output_typed", args={}))
+    result = runtime.invoke_indirect_tool(new_tool_call(name="call_mcp_output_typed", args={}))
     assert isinstance(result, expected_type)
     if isinstance(result, FailedResult):
         assert result.error_code == "output_validation_failed"

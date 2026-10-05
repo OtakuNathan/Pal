@@ -29,7 +29,7 @@ flowchart LR
     AM --> PROMPT["Available Artifacts user-context"]
     LLM["LLM"] --> TOOLS["artifact tools by artifact_id"]
     TOOLS --> AM
-    LOCAL["Local screenshot/file"] --> IMPORT["artifact_import(path)"]
+    LOCAL["Local screenshot/file"] --> IMPORT["import_artifact(path)"]
     IMPORT --> AM
     IMPORT --> REF["ToolContextMessageIR.artifact_ids"]
     REF --> L1["L1 user message with ArtifactRefPartIR"]
@@ -107,10 +107,10 @@ Rules:
   workspace path before editing it; the copied/output file is not governed by
   artifact TTL.
 - Tool-generated files (for example, web screenshots) stay ordinary stored
-  files until explicitly imported with `artifact_import(path=...)`.
+  files until explicitly imported with `import_artifact(path=...)`.
 
-For self-inspection, call `browser_screenshot`, then pass its
-`artifact.local_cached_path` to `artifact_import`. The import copies the file
+For self-inspection, call `capture_browser_screenshot`, then pass its
+`artifact.local_cached_path` to `import_artifact`. The import copies the file
 into managed storage and emits a user-authority context message containing a
 stable artifact reference. On the next model request, core resolves that
 reference using the current conversation scope, live lease, vision capability,
@@ -138,14 +138,14 @@ shape; no provider fetch of a channel URL is required.
 
 Artifact capabilities:
 
-- `artifact_import`: import a local image, screenshot, or document into the current conversation and emit its reference for the next model request.
+- `import_artifact`: import a local image, screenshot, or document into the current conversation and emit its reference for the next model request.
 - `artifact_list`: list hot artifacts visible to the current turn.
-- `artifact_info`: inspect metadata and available representations for one artifact.
+- `inspect_artifact_info`: inspect metadata and available representations for one artifact.
 - `artifact_read`: read text-like representations by `artifact_id`.
 - `artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
-- `artifact_select`: mark one artifact as chosen and refresh TTL.
-- `artifact_grep`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
-- `artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
+- `select_artifact`: mark one artifact as chosen and refresh TTL.
+- `grep_artifact`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
+- `transcribe_artifact`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
 
 Artifact capabilities are indirect: discover their current aliases with
 `search_tools` and invoke them through `call_tool`.

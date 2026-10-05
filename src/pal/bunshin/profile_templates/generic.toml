@@ -10,7 +10,7 @@ and recommendations. Ground factual claims in supplied or inspected evidence. Wr
 """
 output_contract_fragment = """
 Write the contracted product artifact in the owned workspace. Use update_checklist as a compact work ledger, run one focused self-check with ordinary available
-tools, complete the checklist, then call candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
+tools, complete the checklist, then call submit_candidate with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
 """
 capability_groups = ["generic_producer", "v2_candidate_builder"]
 
@@ -55,7 +55,7 @@ require_complete = true
 
 [role.submission]
 kind = "candidate"
-tool = "candidate_submit"
+tool = "submit_candidate"
 
 [metadata]
 builtin = true

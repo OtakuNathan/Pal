@@ -310,7 +310,7 @@ class CodexArchitectWorker:
                     )
                     submission = contract_submit_tool_result(
                         new_tool_call(
-                            name="contract_submit",
+                            name="submit_contract",
                             args={},
                             call_id=(
                                 f"codex-submit-{turn_id}-"

@@ -48,11 +48,11 @@ class IdentityIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             purpose="Read Pal's configured identity and preferences from durable storage and refresh the resident in-memory projection.",
-            use_when="Inspecting Pal's configured persona/preferences or explicitly refreshing identity after external configuration changes.",
+            use_when="Inspecting Pal's configured persona/preferences or explicitly refreshing identity after external configuration changes. If no persona is configured, prompt assembly uses the default identity fragments.",
             do_not_use_when="Recalling user facts (use recall_memory).",
             failure_next_steps="Read-only. If no persona, identity prompt fragments will use defaults.",
         ),
-        aliases=("identity_show",),
+        aliases=("refresh_identity",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

@@ -68,7 +68,7 @@ Current boundaries:
 对于本地环境能力，推荐保持最小 built-in tool 集：
 
 - `tool_search` / `tool_read` / `tool_call` 作为 capability discovery 和 invocation 元能力
-- `file_read` / `file_edit` / `file_write` / `file_state` 作为 UTF-8 文本文件读写改的结构化路径
+- `file_read` / `file_edit` / `file_write` / `inspect_file_cache` 作为 UTF-8 文本文件读写改的结构化路径
 - `shell` 作为命令、测试、构建、脚本和无专用 capability 时的 escape hatch
 - `web_search` 作为独立 capability / provider family
 - `web_fetch` 发布会话级 `browser_*` 能力；`curl` 只是主 Pal 的显式 raw-HTTP escape hatch
@@ -496,8 +496,8 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 - `tool_search`
 - `tool_read`
-- `skill_search`
-- `skill_read`
+- `search_skills`
+- `read_skill`
 
 ## Introspection Index
 

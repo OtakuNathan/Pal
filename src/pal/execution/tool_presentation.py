@@ -39,10 +39,13 @@ def compact_input_contract(schema: Any) -> Any:
     return result
 
 
-def render_tool_definition(payload: dict[str, Any]) -> str:
+def render_tool_definition(payload: dict[str, Any], *, view: str = "input") -> str:
+    excluded = (set() if view == "full" else
+                {"input_schema", "example"} if view == "output" else
+                {"output_schema", "example"})
     return render_structured_for_llm({
         key: value for key, value in payload.items()
-        if key not in {"output_schema", "example"}
+        if key not in excluded
     })
 
 

@@ -65,13 +65,13 @@ class Completion:
         primary = self.required_primary_artifact_name()
         target = f"the required primary artifact {primary!r}" if primary else "required submit evidence"
         submit_tool = {
-            "architect.yaml": "contract_submit",
-            "contract_review.json": "review_submit",
-            "coder_report.json": "candidate_submit",
-            "producer_report.json": "candidate_submit",
-            "verification_plan.json": "verification_submit",
+            "architect.yaml": "submit_contract",
+            "contract_review.json": "submit_review",
+            "coder_report.json": "submit_candidate",
+            "producer_report.json": "submit_candidate",
+            "verification_plan.json": "submit_verification",
             "verification_submission.json": "a semantic verification outcome tool",
-            "standalone_review.json": "review_submit",
+            "standalone_review.json": "submit_review",
         }.get(primary, "the bound role-specific submit tool")
         return (
             f"Completion gate rejected the final response because {target} is absent. "

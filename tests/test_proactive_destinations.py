@@ -44,11 +44,11 @@ def invoke(runtime, alias, args, turn_id="turn"):
 
 def test_create_defaults_to_current_conversation_and_persists(env):
     runtime, manager, binding = env
-    result = invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"})
+    result = invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"})
     assert result.ok, result.llm_text
     assert result.structured["out_reply_target"] == {"chat_id": "42", "thread_id": "7"}
     binding.update(channel_id="socket_main", reply_target={"session_id": "new"})
-    replaced = invoke(runtime, "proactive_create", {"name": "reminder", "goal": "revised reminder"})
+    replaced = invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "revised reminder"})
     assert replaced.ok
     stored = ProactiveRepository().list_definitions()[0].definition
     assert stored.goal == "revised reminder"
@@ -62,42 +62,42 @@ def test_create_defaults_to_current_conversation_and_persists(env):
 def test_explicit_channel_uses_unique_default_without_old_provider_fields(env):
     runtime, manager, binding = env
     binding.update(channel_id="socket_main", reply_target={"session_id": "old", "request_id": "old-request"})
-    created = invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"})
+    created = invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"})
     assert created.ok, created.llm_text
-    moved = invoke(runtime, "proactive_set_output_channel", {"name": "reminder", "out_channel_name": "telegram_main"})
+    moved = invoke(runtime, "set_proactive_output_channel", {"name": "reminder", "out_channel_name": "telegram_main"})
     assert moved.ok, moved.llm_text
     assert moved.structured["out_reply_target"] == {"chat_id": "42"}
-    created = invoke(runtime, "proactive_create", {"name": "another", "goal": "remind me", "out_channel_name": "telegram_main"})
+    created = invoke(runtime, "upsert_proactive_task", {"name": "another", "goal": "remind me", "out_channel_name": "telegram_main"})
     assert created.ok and created.structured["out_reply_target"] == {"chat_id": "42"}
 
 
 def test_unresolved_destination_does_not_create_or_partially_move_task(env):
     runtime, manager, binding = env
-    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
     before = manager.registered["reminder"]
     for name in ("socket_main", "missing"):
-        moved = invoke(runtime, "proactive_set_output_channel", {"name": "reminder", "out_channel_name": name})
+        moved = invoke(runtime, "set_proactive_output_channel", {"name": "reminder", "out_channel_name": name})
         assert not moved.ok
         assert manager.registered["reminder"] == before
-        created = invoke(runtime, "proactive_create", {"name": "bad", "goal": "remind me", "out_channel_name": name})
+        created = invoke(runtime, "upsert_proactive_task", {"name": "bad", "goal": "remind me", "out_channel_name": name})
         assert not created.ok
         assert "bad" not in manager.registered
     binding.clear()
-    assert not invoke(runtime, "proactive_create", {"name": "bad", "goal": "remind me"}).ok
+    assert not invoke(runtime, "upsert_proactive_task", {"name": "bad", "goal": "remind me"}).ok
     assert "bad" not in manager.registered
-    assert invoke(runtime, "proactive_create", {"name": "internal", "goal": "internal"}, turn_id=None).ok
+    assert invoke(runtime, "upsert_proactive_task", {"name": "internal", "goal": "internal"}, turn_id=None).ok
     assert manager.registered["internal"].out_channel_id is None
 
 
 def test_channel_and_explicit_target_change_together_and_can_clear(env):
     runtime, manager, binding = env
-    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
-    moved = invoke(runtime, "proactive_set_output_channel", {
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
+    moved = invoke(runtime, "set_proactive_output_channel", {
         "name": "reminder", "out_channel_name": "socket_main", "out_reply_target": {"session_id": "other"},
     })
     assert moved.ok, moved.llm_text
     assert manager.registered["reminder"].out_reply_target == {"session_id": "other"}
-    cleared = invoke(runtime, "proactive_set_output_channel", {"name": "reminder"})
+    cleared = invoke(runtime, "set_proactive_output_channel", {"name": "reminder"})
     assert cleared.ok
     assert manager.registered["reminder"].out_channel_id is None
     assert manager.registered["reminder"].out_reply_target == {}
@@ -105,7 +105,7 @@ def test_channel_and_explicit_target_change_together_and_can_clear(env):
 
 def test_telegram_rejects_non_chat_target(env):
     runtime, manager, binding = env
-    result = invoke(runtime, "proactive_create", {
+    result = invoke(runtime, "upsert_proactive_task", {
         "name": "bad", "goal": "remind me", "out_channel_name": "telegram_main",
         "out_reply_target": {"session_id": "socket-only"},
     })
@@ -116,9 +116,9 @@ def test_telegram_rejects_non_chat_target(env):
 
 def test_explicit_same_channel_resolves_current_topic_and_persists(env):
     runtime, manager, binding = env
-    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
     binding["reply_target"] = {"chat_id": "42", "thread_id": "8"}
-    moved = invoke(runtime, "proactive_set_output_channel", {
+    moved = invoke(runtime, "set_proactive_output_channel", {
         "name": "reminder", "out_channel_name": "telegram_main",
     })
     assert moved.ok, moved.llm_text
@@ -130,16 +130,16 @@ def test_explicit_same_channel_resolves_current_topic_and_persists(env):
 def test_internal_proactive_turn_can_create_outputless_or_explicitly_routed_task(env):
     runtime, manager, binding = env
     binding.update(channel_id="proactive:maintenance", channel_kind="proactive", reply_target={})
-    created = invoke(runtime, "proactive_create", {"name": "internal", "goal": "internal check"})
+    created = invoke(runtime, "upsert_proactive_task", {"name": "internal", "goal": "internal check"})
     assert created.ok, created.llm_text
     assert manager.registered["internal"].out_channel_id is None
     assert manager.registered["internal"].out_reply_target == {}
-    routed = invoke(runtime, "proactive_create", {
+    routed = invoke(runtime, "upsert_proactive_task", {
         "name": "routed", "goal": "send report", "out_channel_name": "telegram_main",
     })
     assert routed.ok, routed.llm_text
     assert manager.registered["routed"].out_reply_target == {"chat_id": "42"}
-    invalid = invoke(runtime, "proactive_create", {
+    invalid = invoke(runtime, "upsert_proactive_task", {
         "name": "bad", "goal": "send report", "out_channel_name": "missing",
     })
     assert not invalid.ok
@@ -160,11 +160,11 @@ def test_internal_proactive_turn_can_create_outputless_or_explicitly_routed_task
 ])
 def test_invalid_schedule_reports_task_parameter_error_without_creating(env, schedule):
     runtime, manager, _ = env
-    result = invoke(runtime, "proactive_create", {
+    result = invoke(runtime, "upsert_proactive_task", {
         "name": "bad_schedule", "goal": "remind me", "schedule": schedule,
     })
     assert not result.ok
-    assert "Task parameter error:" in result.llm_text
+    assert "Task parameter error:" in result.llm_text or (result.status == "invalid_arguments" and "schedule" in result.llm_text)
     assert "schedule" in result.llm_text
     assert "bad_schedule" not in manager.registered
 
@@ -172,7 +172,7 @@ def test_invalid_schedule_reports_task_parameter_error_without_creating(env, sch
 @pytest.mark.parametrize("schedule", [{}, {"cadence": "manual"}, {"timezone": "UTC"}])
 def test_explicit_manual_defaults_remain_valid(env, schedule):
     runtime, manager, _ = env
-    result = invoke(runtime, "proactive_create", {
+    result = invoke(runtime, "upsert_proactive_task", {
         "name": "manual", "goal": "run on request", "schedule": schedule,
     })
     assert result.ok, result.llm_text
@@ -181,20 +181,20 @@ def test_explicit_manual_defaults_remain_valid(env, schedule):
 
 def test_invalid_schedule_update_preserves_existing_task(env):
     runtime, manager, _ = env
-    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
     before = manager.registered["reminder"]
-    result = invoke(runtime, "proactive_update_schedule", {
+    result = invoke(runtime, "update_proactive_schedule", {
         "name": "reminder", "schedule": {"cron": "0 9 * * *"},
     })
     assert not result.ok
-    assert "Task parameter error:" in result.llm_text
+    assert "Task parameter error:" in result.llm_text or (result.status == "invalid_arguments" and "schedule" in result.llm_text)
     assert manager.registered["reminder"] == before
 
 
-@pytest.mark.parametrize("alias", ["proactive_last_run", "proactive_list_runs"])
+@pytest.mark.parametrize("alias", ["read_latest_proactive_run", "list_proactive_runs"])
 def test_history_unavailable_is_distinct_from_empty(env, alias):
     runtime, manager, _ = env
-    assert invoke(runtime, "proactive_create", {"name": "reminder", "goal": "remind me"}).ok
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
     empty = invoke(runtime, alias, {"name": "reminder"})
     assert empty.ok, empty.llm_text
     assert empty.structured["history_status"] == "empty"

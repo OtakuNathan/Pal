@@ -38,7 +38,7 @@ class PackageJobs:
                 raise PackageError("Package manager is stopping")
             self.threads = {key: value for key, value in self.threads.items() if value[0].is_alive()}
             if self.threads:
-                raise PackageError("A package operation is already running; inspect package_status before retrying")
+                raise PackageError("A package operation is already running; use inspect_package_status before retrying")
             self.completions.clear()
             job_id = uuid.uuid4().hex
             state = dict(job_id=job_id, operation=operation, status="running", started_at=time.time())
@@ -59,7 +59,7 @@ class PackageJobs:
             state["next_step"] = (
                 "Completion will be delivered to Pal to continue the initiating task when it is idle; do not poll or repeat the operation."
                 if on_complete else
-                "No completion notice is available; use package_status with this job_id and a bounded wait_ms. Do not repeat the operation."
+                "No completion notice is available; use inspect_package_status with this job_id and a bounded wait_ms. Do not repeat the operation."
             )
             atomic_json(self.root / f"{job_id}.json", state)
             return dict(state)

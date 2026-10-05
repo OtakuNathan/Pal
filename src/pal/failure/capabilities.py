@@ -31,10 +31,10 @@ class FailureIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show failure runtime summary.",
-            use_when="Diagnosing reply delivery failures or checking failure tracking health.",
-            do_not_use_when="Checking LLM token or cost metrics (use llm_usage; it does not diagnose transport errors). Checking proactive task failures (use proactive_list_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
-            failure_next_steps="Read-only diagnostic. Use failure_recent_reports for specific failure details.",
-        ), aliases=("failure_show",))
+            use_when='Diagnosing reply delivery failures or checking failure tracking health. Use list_failure_reports when individual recent failures are needed; the summary is not the complete failure history.',
+            do_not_use_when="Checking LLM token or cost metrics (use inspect_llm_usage; it does not diagnose transport errors). Checking proactive task failures (use list_proactive_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
+            failure_next_steps="Read-only diagnostic. Use list_failure_reports for specific failure details.",
+        ), aliases=("inspect_failure_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.runtime.show_summary()
@@ -50,12 +50,12 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="recent_reports",
         guidance=ToolGuidance(
-            purpose="List recent structured failure reports.",
+            purpose="List the last 16 structured failure reports; this is a bounded recent window, not a complete history.",
             use_when="Investigating why replies or deliveries failed recently.",
-            do_not_use_when="Module-level health (use failure_show).",
+            do_not_use_when="Module-level health (use inspect_failure_state).",
             failure_next_steps="Read-only. Returns the last 16 reports. If empty, no failures have been recorded.",
         ),
-        aliases=("failure_recent_reports",),
+        aliases=("list_failure_reports",),
     )
     def recent_reports(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

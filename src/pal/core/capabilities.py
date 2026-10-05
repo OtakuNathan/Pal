@@ -49,11 +49,11 @@ class CoreIntrospectionProvider:
         action_name="observe",
         guidance=ToolGuidance(
             purpose="Observe core runtime state — queued events, active turns, mode, detached modules.",
-            use_when="Diagnosing core health: event backlog, stuck turns, or checking which modules are detached.",
-            do_not_use_when="Checking control plane status (use control_show). Checking execution tool count (use exec_show).",
+            use_when='Diagnosing core health: event backlog, stuck turns, or checking which modules are detached. Queue backlog and active turns are current workload observations. The mode label alone does not prove maintenance or draining; defer activation while Pal is busy.',
+            do_not_use_when="Checking control plane status (use inspect_control_state). Checking execution tool count (use inspect_execution_state).",
             failure_next_steps="Read-only diagnostic. If event queue is backed up, turns may be stuck. If modules are unexpectedly detached, investigate lifecycle.",
         ),
-        aliases=("core_observe",),
+        aliases=("observe_core",),
     )
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -71,12 +71,12 @@ class CoreIntrospectionProvider:
         action_name="configure",
         guidance=ToolGuidance(
             purpose="Set the core state mode label.",
-            use_when="Changing the mode label exposed by core_observe; this does not pause, drain, restart, or enter maintenance.",
-            do_not_use_when="Reading core state (use core_observe). Configuring a specific module (use that module's capabilities).",
-            failure_next_steps="If mode change fails, check core_observe for current state and module health.",
+            use_when="Changing the mode label exposed by observe_core; this does not pause, drain, restart, or enter maintenance.",
+            do_not_use_when="Reading core state (use observe_core). Configuring a specific module (use that module's capabilities).",
+            failure_next_steps="If mode change fails, check observe_core for current state and module health.",
         ),
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
-        aliases=("core_configure",),
+        aliases=("configure_core",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def configure(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -97,10 +97,10 @@ class CoreIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Inspect the hot prompt-cache compact reminder configuration and current in-memory deadline.",
             use_when="Checking whether Pal will suggest compacting before the confirmed A cache expires.",
-            do_not_use_when="Checking general token usage (use llm_usage). Triggering compaction now (use the compact control action).",
+            do_not_use_when="Checking general token usage (use inspect_llm_usage). Triggering compaction now (use the compact control action).",
             failure_next_steps="If no timer is scheduled, inspect whether A is confirmed, the provider exposes an A TTL, and the prefix exceeds the configured minimum.",
         ),
-        aliases=("core_cache_warm_deadline",),
+        aliases=("inspect_core_cache_warm_deadline",),
     )
     def cache_warm_deadline(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -124,10 +124,10 @@ class CoreIntrospectionProvider:
             purpose="Enable, disable, or tune Pal's compact reminder before the confirmed A prompt cache expires.",
             use_when="The user asks to change hot-cache compact reminders, their lead time, or their minimum prompt size.",
             do_not_use_when="Triggering compaction immediately. Inspect first when the requested setting is ambiguous.",
-            failure_next_steps="Use core_cache_warm_deadline to inspect valid current values; lead_seconds must be at least 30 and min_prefix_tokens at least 1024.",
+            failure_next_steps="Use inspect_core_cache_warm_deadline to inspect valid current values; lead_seconds must be at least 30 and min_prefix_tokens at least 1024.",
         ),
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput,
-        aliases=("core_configure_cache_warm_deadline",),
+        aliases=("configure_core_cache_warm_deadline",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def configure_cache_warm_deadline(

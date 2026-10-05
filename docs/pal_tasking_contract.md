@@ -306,7 +306,7 @@ continuity 不绑定单个 bunshins 进程。
 
 这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_bunshin_*`，也不能递归 spawn 新 runner。
 
-runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`file_read`、`file_edit`、`file_write`、`shell`、`web_search`、`web_read`、只读 `memory_recall`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
+runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`file_read`、`file_edit`、`file_write`、`shell`、`web_search`、`web_read`、只读 `recall_memory`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
 
 ## bunshins Observation Contract
 

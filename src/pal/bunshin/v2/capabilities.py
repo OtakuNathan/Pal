@@ -61,7 +61,7 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
         "that benefits from architect/coder/verifier gates, or a task the user explicitly asks Bunshin to perform. "
         "Choose by identity binding and task nature, not by prose length or step count. Reuse known skill contracts, "
-        "discovery results, and the user's existing approval for this workflow. Use skill_search only when relevant "
+        "discovery results, and the user's existing approval for this workflow. Use search_skills only when relevant "
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
         "manuals without approval, ask whether to provide them and wait; pass only explicitly approved names in "
         "skill_refs. Supply the canonical profile, short goal, narrow workspace, and complete task specification. "
@@ -82,7 +82,7 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
     ),
     failure_next_steps=(
         "Correct invalid task, profile, workspace, operation, artifact, or approved skill input. If creation may have "
-        "succeeded, reconcile with bunshin_task_status before retrying; do not start a duplicate workflow."
+        "succeeded, reconcile with read_bunshin_task_status before retrying; do not start a duplicate workflow."
     ),
 )
 
@@ -107,7 +107,7 @@ class BunshinV2StartWorkflowWorkspace(StrictToolModel):
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Legacy path spelling accepted only as an alias for repo_path. It is not "
+            "Legacy fallback when repo_path is omitted or blank; prefer repo_path and do not supply both. It is not "
             "a broader search root and must identify the same exact project repository."
         ),
     )
@@ -119,7 +119,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
 
     task: str | None = Field(
         default=None,
-        description="Optional natural-language title of an existing Task.",
+        description="Existing actor-owned active Task title; omit profile/workspace when supplied. Otherwise provide profile and workspace to create or reuse a Task.",
     )
     title: str | None = None
     profile: str | None = Field(
@@ -136,7 +136,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
         "review_then_execute",
         "standalone_review",
         "review_and_repair",
-    ] = "new_requirement"
+    ] = Field(default="new_requirement", description="new_requirement requires nonempty goal and task_spec or task_spec_file. Other operations require artifact and forbid task_spec/task_spec_file. execute_trusted requires trusted architecture; software review_and_repair requires a ContractArtifact with one implementation module.")
     goal: str | None = Field(
         default=None,
         description=(
@@ -145,7 +145,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
             "complete semantic source of truth."
         ),
     )
-    workspace: BunshinV2StartWorkflowWorkspace | None = None
+    workspace: BunshinV2StartWorkflowWorkspace | None = Field(default=None, description="Required when task is omitted; omit for an existing task.")
     task_spec: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -181,7 +181,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
     skill_refs: list[str] | None = Field(
         default=None,
         description=(
-            "Exact active Pal skill names already known or discovered with skill_search that the user explicitly approved for this "
+            "Exact active Pal skill names already known or discovered with search_skills that the user explicitly approved for this "
             "workflow. The Manager injects their manuals as user-side system reminders "
             "when each logical role session is first spawned."
         ),
@@ -205,7 +205,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
     research_mode: Literal["none", "local_only", "external_allowed"] = "local_only"
     artifact: str | None = Field(
         default=None,
-        description="Natural-language name previously given to bunshin_submit_artifact.",
+        description="Natural-language name previously given to submit_bunshin_artifact.",
     )
 
 
@@ -220,7 +220,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput(Stric
     edit_instruction: str | None = Field(
         default=None,
         description=(
-            "Required for decision=edit. Correct only architecture drift from the "
+            "Required only for decision=edit; omit for accept/reject. Correct only architecture drift from the "
             "already pinned task; new requirements or preferences must use normal Pal "
             "communication and a new workflow revision."
         ),
@@ -233,7 +233,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     task: str = Field(description="Exact human-readable Task title.")
     channel_name: str = Field(
         description=(
-            "Enabled channel endpoint name returned by channel_list that should receive future Task notifications. "
+            "Enabled channel endpoint name returned by list_channel_endpoints that should receive future Task notifications. "
             "Provider-specific reply-target fields are Manager-owned and are not accepted."
         )
     )
@@ -295,11 +295,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Read the effective Bunshin profile/family catalog from the sidecar.",
             use_when="Checking available Bunshin profiles and families before starting a workflow.",
-            do_not_use_when="Starting a workflow (use bunshin_start_workflow). Checking task status (use bunshin_task_status).",
-            failure_next_steps="If sidecar not responding, check plugins_list for the bunshin plugin attach status.",
+            do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking task status (use read_bunshin_task_status).",
+            failure_next_steps="If sidecar not responding, check list_plugins for the bunshin plugin attach status.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderReadInput,
-        aliases=("bunshin_catalog_read",),
+        aliases=("read_bunshin_catalog",),
     )
     def read_catalog(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -326,11 +326,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Patch one Bunshin profile override in the sidecar.",
             use_when="Customizing a profile (e.g. changing model, constraints, or instructions) for future Tasks.",
-            do_not_use_when="Removing an override (use bunshin_catalog_reset_profile_override). Existing Tasks are unaffected.",
-            failure_next_steps="If profile name invalid, check bunshin_catalog_read for available profiles.",
+            do_not_use_when="Removing an override (use reset_bunshin_profile_override). Existing Tasks are unaffected.",
+            failure_next_steps="If profile name invalid, check read_bunshin_catalog for available profiles.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput,
-        aliases=("bunshin_catalog_set_profile_override",),
+        aliases=("set_bunshin_profile_override",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
@@ -355,12 +355,12 @@ class BunshinV2PublicProvider:
         action_name="reset_profile_override",
         guidance=ToolGuidance(
             purpose="Remove one profile override and restore the package builtin.",
-            use_when="Reverting a profile customization back to defaults.",
-            do_not_use_when="Patching a profile (use bunshin_catalog_set_profile_override).",
+            use_when='Reverting a profile customization back to defaults. If no override exists, resetting is an idempotent no-op.',
+            do_not_use_when="Patching a profile (use set_bunshin_profile_override).",
             failure_next_steps="If no override exists, this is a no-op.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput,
-        aliases=("bunshin_catalog_reset_profile_override",),
+        aliases=("reset_bunshin_profile_override",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
@@ -381,11 +381,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Patch one Bunshin family override in the sidecar.",
             use_when="Customizing role bindings or profile availability for a family.",
-            do_not_use_when="Removing a family override (use bunshin_catalog_reset_family_override).",
-            failure_next_steps="If family name invalid, check bunshin_catalog_read for available families.",
+            do_not_use_when="Removing a family override (use reset_bunshin_family_override).",
+            failure_next_steps="If family name invalid, check read_bunshin_catalog for available families.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput,
-        aliases=("bunshin_catalog_set_family_override",),
+        aliases=("set_bunshin_family_override",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
@@ -405,12 +405,12 @@ class BunshinV2PublicProvider:
         action_name="reset_family_override",
         guidance=ToolGuidance(
             purpose="Remove one family override and restore the package builtin.",
-            use_when="Reverting a family customization back to defaults.",
-            do_not_use_when="Patching a family (use bunshin_catalog_set_family_override).",
+            use_when='Reverting a family customization back to defaults. If no override exists, resetting is an idempotent no-op.',
+            do_not_use_when="Patching a family (use set_bunshin_family_override).",
             failure_next_steps="If no override exists, this is a no-op.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput,
-        aliases=("bunshin_catalog_reset_family_override",),
+        aliases=("reset_bunshin_family_override",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
@@ -431,11 +431,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Reload Bunshin package builtins and validate overrides.",
             use_when="After upgrading the Bunshin package or when catalog changes are not reflected.",
-            do_not_use_when="Reading the catalog (use bunshin_catalog_read). Patching profiles (use bunshin_catalog_set_profile_override).",
+            do_not_use_when="Reading the catalog (use read_bunshin_catalog). Patching profiles (use set_bunshin_profile_override).",
             failure_next_steps="If refresh fails, the sidecar may need restart.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput,
-        aliases=("bunshin_catalog_refresh",),
+        aliases=("refresh_bunshin_catalog",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
@@ -451,7 +451,7 @@ class BunshinV2PublicProvider:
         scope="bunshin",
         action_name="start_workflow",
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
-        aliases=("bunshin_start_workflow",),
+        aliases=("start_bunshin_workflow",),
         guidance=BUNSHIN_START_WORKFLOW_GUIDANCE,
         execution=DIRECT_CONTROL,
     )
@@ -496,7 +496,7 @@ class BunshinV2PublicProvider:
             failure_next_steps="Correct invalid input; the Manager owns content hash and internal identity.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
-        aliases=("bunshin_submit_artifact",),
+        aliases=("submit_bunshin_artifact",),
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     def submit_artifact(self, call: CapabilityCall) -> CapabilityResult:
@@ -522,12 +522,12 @@ class BunshinV2PublicProvider:
         action_name="search",
         guidance=ToolGuidance(
             purpose="Search the durable Bunshin V2 Task Ledger for the current actor.",
-            use_when="Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks.",
-            do_not_use_when="Not for live workflow state (use bunshin_task_status).",
+            use_when='Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks. An empty result means no matching actor-owned Task was found; broaden the query before declaring the workflow missing.',
+            do_not_use_when="Not for live workflow state (use read_bunshin_task_status).",
             failure_next_steps="Correct invalid input; try a broader query if no results.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput,
-        aliases=("bunshin_task_search",),
+        aliases=("search_bunshin_tasks",),
     )
     def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -581,10 +581,10 @@ class BunshinV2PublicProvider:
                 "When workflow.human_review_available is true, call with view=human_review to read the durable review."
             ),
             do_not_use_when="Do not poll repeatedly after workflow acceptance; completion returns through system callbacks.",
-            failure_next_steps="Correct the Task title; reconcile with bunshin_task_search if the title is uncertain.",
+            failure_next_steps="Correct the Task title; reconcile with search_bunshin_tasks if the title is uncertain.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput,
-        aliases=("bunshin_task_status",),
+        aliases=("read_bunshin_task_status",),
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -622,11 +622,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
             use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
-            do_not_use_when="Not for triage resolution (use bunshin_resolve_triage after addressing blockers).",
-            failure_next_steps="Correct invalid input; reconcile with bunshin_task_status before retrying.",
+            do_not_use_when="Not for triage resolution (use resolve_bunshin_triage after addressing blockers).",
+            failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput,
-        aliases=("bunshin_resume_workflow",),
+        aliases=("resume_bunshin_workflow",),
         execution=INDIRECT_CONTROL,
     )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
@@ -658,11 +658,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Discard the current execution attempt and restart from its accepted architecture.",
             use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
-            do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use bunshin_resolve_triage).",
-            failure_next_steps="Correct invalid input; reconcile with bunshin_task_status before retrying.",
+            do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_bunshin_triage).",
+            failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput,
-        aliases=("bunshin_restart_execution",),
+        aliases=("restart_bunshin_execution",),
         execution=INDIRECT_CONTROL,
     )
     def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
@@ -696,10 +696,10 @@ class BunshinV2PublicProvider:
             purpose="Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it.",
             use_when="After the blocker has actually been addressed. Copy the exact semantic subject from workflow status (e.g. module:ohos_font).",
             do_not_use_when="Does not accept a candidate, waive verification, or skip a gate.",
-            failure_next_steps="Correct invalid input; reconcile with bunshin_task_status before retrying.",
+            failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput,
-        aliases=("bunshin_resolve_triage",),
+        aliases=("resolve_bunshin_triage",),
         execution=INDIRECT_CONTROL,
     )
     def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
@@ -733,11 +733,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Submit Accept/Edit/Reject for an architecture review.",
             use_when="When an inline review card is unavailable and the user needs to decide manually.",
-            do_not_use_when="Not for live workflow state queries (use bunshin_task_status).",
+            do_not_use_when="Not for live workflow state queries (use read_bunshin_task_status).",
             failure_next_steps="Correct invalid input; the Manager validates actor, revision, and content atomically.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
-        aliases=("bunshin_submit_human_decision",),
+        aliases=("submit_bunshin_human_decision",),
         execution=INDIRECT_CONTROL,
     )
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
@@ -774,12 +774,12 @@ class BunshinV2PublicProvider:
         scope="bunshin",
         action_name="rebind_task_delivery",
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput,
-        aliases=("bunshin_rebind_task_delivery",),
+        aliases=("rebind_bunshin_task_delivery",),
         guidance=ToolGuidance(
             purpose="Rebind one Task's Manager-owned reply target without changing its workflow.",
             use_when="Use only after the user explicitly names a Task and destination channel endpoint.",
             do_not_use_when="Do not use merely because the user contacted Pal from another channel; ordinary conversation never moves Task delivery.",
-            failure_next_steps="Use channel_list to find endpoint names or correct the exact Task title; never edit workflow state to repair delivery.",
+            failure_next_steps="Use list_channel_endpoints to find endpoint names or correct the exact Task title; never edit workflow state to repair delivery.",
         ),
         execution=DIRECT_CONTROL,
     )
@@ -821,7 +821,7 @@ class BunshinV2PublicProvider:
             failure_next_steps="Correct invalid input; the Architect receives the answer through its existing tool call.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput,
-        aliases=("bunshin_answer_question",),
+        aliases=("answer_bunshin_question",),
         execution=INDIRECT_CONTROL,
     )
     def answer_question(self, call: CapabilityCall) -> CapabilityResult:
@@ -856,11 +856,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Request asynchronous pause or cancel for a V2 workflow.",
             use_when="The user wants to stop a running workflow.",
-            do_not_use_when="Starting a workflow (use bunshin_start_workflow). Checking status (use bunshin_task_status).",
-            failure_next_steps="If task not found, verify title with bunshin_task_search.",
+            do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking status (use read_bunshin_task_status).",
+            failure_next_steps="If task not found, verify title with search_bunshin_tasks.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
-        aliases=("bunshin_control_workflow",),
+        aliases=("control_bunshin_workflow",),
         execution=INDIRECT_CONTROL,
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
@@ -894,11 +894,11 @@ class BunshinV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Archive a terminal V2 workflow.",
             use_when="Cleaning up a completed or cancelled workflow from the active task list.",
-            do_not_use_when="Active workflows must be cancelled first (use bunshin_control_workflow).",
-            failure_next_steps="If task not found or not terminal, verify status with bunshin_task_status.",
+            do_not_use_when="Active workflows must be cancelled first (use control_bunshin_workflow).",
+            failure_next_steps="If task not found or not terminal, verify status with read_bunshin_task_status.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput,
-        aliases=("bunshin_archive_workflow",),
+        aliases=("archive_bunshin_workflow",),
         execution=INDIRECT_CONTROL,
     )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:

@@ -37,7 +37,7 @@ def test_prepare_workspace_ready_reports_facts_without_navigation_menu() -> None
     }
 
     result = provider.prepare_workspace(
-        CapabilityCall(name="lsp_prepare_workspace", args={"workspace_root": "/workspace"})
+        CapabilityCall(name="prepare_lsp_workspace", args={"workspace_root": "/workspace"})
     )
 
     assert result.status == "ok"
@@ -48,7 +48,7 @@ def test_prepare_workspace_ready_reports_facts_without_navigation_menu() -> None
     assert "next_tools" not in result.structured
     assert not result.affordances
     assert result.recovery_hint == ""
-    for token in ("call_tool", "read_tool", "lsp_diagnostics", "lsp_document_symbols"):
+    for token in ("call_tool", "read_tool", "read_lsp_diagnostics", "list_lsp_document_symbols"):
         assert token not in result.llm_text
 
 
@@ -66,7 +66,7 @@ def test_partial_prepare_offers_bound_doctor_not_a_menu() -> None:
     }
 
     result = provider.prepare_workspace(
-        CapabilityCall(name="lsp_prepare_workspace", args={"workspace_root": "/workspace"})
+        CapabilityCall(name="prepare_lsp_workspace", args={"workspace_root": "/workspace"})
     )
 
     assert result.status == "ok"
@@ -74,11 +74,11 @@ def test_partial_prepare_offers_bound_doctor_not_a_menu() -> None:
     assert result.structured["status"] == "partial"
     assert "next_tools" not in result.structured
     tools = {item.tool: item for item in result.affordances}
-    assert set(tools) == {"lsp_doctor"}
-    doctor = tools["lsp_doctor"]
+    assert set(tools) == {"diagnose_lsp_server"}
+    doctor = tools["diagnose_lsp_server"]
     assert doctor.arguments["workspace_root"] == "/workspace"
     assert doctor.arguments["name"] == "clangd"
-    assert "lsp_document_symbols" not in result.llm_text
+    assert "list_lsp_document_symbols" not in result.llm_text
 
 
 def test_prepare_workspace_is_only_resident_lsp_tool() -> None:
@@ -93,10 +93,10 @@ def test_prepare_workspace_is_only_resident_lsp_tool() -> None:
             contract["function"]["name"]
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
-        assert "lsp_prepare_workspace" in names
-        assert "lsp_diagnostics" not in names
-        assert "lsp_definition" not in names
-        assert "lsp_status" not in names
+        assert "prepare_lsp_workspace" in names
+        assert "read_lsp_diagnostics" not in names
+        assert "find_lsp_definitions" not in names
+        assert "inspect_lsp_status" not in names
     finally:
         handle.shutdown_sync()
 
@@ -110,13 +110,13 @@ def test_failed_request_does_not_replay_cached_success(tmp_path, monkeypatch):
     }))
     provider._request_or_error("hover", {})
     monkeypatch.setattr(provider, "_ensure_manager_started", Mock(side_effect=RuntimeError("startup failed")))
-    result = provider.definition(CapabilityCall(name="lsp_definition", args={"file": "a.py", "line": 0, "character": 0}))
+    result = provider.definition(CapabilityCall(name="find_lsp_definitions", args={"file": "a.py", "line": 0, "character": 0}))
     assert result.status == "error"
     assert result.structured["operation"] == "definition"
     assert "result" not in result.structured
     assert "OLD_HOVER" not in result.llm_text
     assert "startup failed" in result.llm_text
-    shown = provider.show(CapabilityCall(name="lsp_show", args={}))
+    shown = provider.show(CapabilityCall(name="inspect_lsp_provider", args={}))
     assert shown.structured["manager_running"] is False
     assert shown.structured["cached_snapshot"]["result"]["value"] == "OLD_HOVER"
     assert "startup failed" in shown.structured["last_error"]

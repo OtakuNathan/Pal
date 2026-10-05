@@ -317,7 +317,7 @@ class FileCapabilityMixin:
             do_not_use_when="Reading file content (use read_file). Editing a file (use edit_file).",
             failure_next_steps="Read-only diagnostic. If cache is stale, re-read the file with read_file before editing.",
         ),
-        aliases=("file_state",),
+        aliases=("inspect_file_cache",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateOutput,
         execution=INDIRECT_LOCAL_READ,

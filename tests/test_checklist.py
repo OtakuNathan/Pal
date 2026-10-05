@@ -169,12 +169,12 @@ class TestChecklistCapabilities:
         assert "before the first mutation" in blueprint.guidance.use_when
         assert "multiple delivery phases" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when
-        assert "bunshin_start_workflow" not in blueprint.guidance.use_when
+        assert "start_bunshin_workflow" not in blueprint.guidance.use_when
         assert "remember_memory" not in blueprint.guidance.do_not_use_when
 
     def test_upsert_returns_structured_snapshot(self):
         result = self.provider.upsert(
-            CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}, {"step": "b"}]})
+            CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}, {"step": "b"}]})
         )
         assert result.status == RuntimeStatus.OK
         assert result.structured is not None
@@ -188,7 +188,7 @@ class TestChecklistCapabilities:
         assert "plan" not in result.llm_text
 
     def test_identical_upsert_is_a_noop_without_broadcast(self):
-        call = CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]})
+        call = CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}]})
         self.provider.upsert(call)
         repeated = self.provider.upsert(call)
         assert repeated.structured is not None
@@ -196,8 +196,8 @@ class TestChecklistCapabilities:
         assert "echo" not in repeated.structured
 
     def test_check_emits_echo_declaration(self):
-        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}, {"step": "b"}]}))
-        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}, {"step": "b"}]}))
+        result = self.provider.check(CapabilityCall(name="complete_checklist_step", args={"step": "a"}))
         assert result.status == RuntimeStatus.OK
         assert result.structured is not None
         assert result.structured["changed"] is True
@@ -208,13 +208,13 @@ class TestChecklistCapabilities:
         assert "✅ a" in echo["markdown"]
 
     def test_check_without_active_returns_error(self):
-        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        result = self.provider.check(CapabilityCall(name="complete_checklist_step", args={"step": "a"}))
         assert result.status == RuntimeStatus.ERROR
         assert result.structured is not None and result.structured["error"] == "no_active_checklist"
 
     def test_last_check_emits_independent_clear_event_with_completed_result(self):
-        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
-        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}]}))
+        result = self.provider.check(CapabilityCall(name="complete_checklist_step", args={"step": "a"}))
         assert result.status == RuntimeStatus.OK
         assert result.structured["cleared"] is True
         assert result.structured["active"] is False
@@ -228,7 +228,7 @@ class TestChecklistCapabilities:
 
     def test_completed_upsert_closes_without_an_extra_clear_call(self):
         plan = [{"step": "a", "status": "completed"}, {"step": "b", "status": "completed"}]
-        result = self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": plan}))
+        result = self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": plan}))
         assert self.provider.service.show() is None
         assert result.structured["cleared"] is True
         assert result.structured["done"] == result.structured["total"] == 2
@@ -239,33 +239,33 @@ class TestChecklistCapabilities:
     def test_long_active_card_is_bounded_and_full_plan_remains_available(self):
         plan = [{"step": f"phase-{i}: " + "x" * 900,
                  "status": "completed" if i < 50 else "pending"} for i in range(64)]
-        result = self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": plan}))
+        result = self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": plan}))
         echo = result.structured["echo"]
         assert len(echo["markdown"]) < 2000
         assert "phase-50:" in echo["markdown"]
         assert "48 earlier steps" in echo["markdown"]
         assert "8 more steps" in echo["markdown"]
-        shown = self.provider.show(CapabilityCall(name="checklist_show", args={}))
+        shown = self.provider.show(CapabilityCall(name="read_checklist", args={}))
         assert shown.structured["plan"] == plan
         assert result.structured["plan"] == plan
 
     def test_check_unknown_step_returns_error_without_echo(self):
-        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
-        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "zzz"}))
+        self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}]}))
+        result = self.provider.check(CapabilityCall(name="complete_checklist_step", args={"step": "zzz"}))
         assert result.status == RuntimeStatus.ERROR
         assert result.structured is not None and result.structured["error"] == "step_not_found"
         assert result.structured["plan"] == [{"step": "a", "status": "pending"}]
         assert '"step":"a"' in result.llm_text
-        assert "checklist_show" not in result.llm_text
+        assert "read_checklist" not in result.llm_text
         assert "echo" not in result.structured
 
     def test_show_and_clear(self):
-        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
-        shown = self.provider.show(CapabilityCall(name="checklist_show", args={}))
+        self.provider.upsert(CapabilityCall(name="upsert_checklist", args={"plan": [{"step": "a"}]}))
+        shown = self.provider.show(CapabilityCall(name="read_checklist", args={}))
         assert shown.status == RuntimeStatus.OK
         assert shown.structured is not None and shown.structured["total"] == 1
 
-        cleared = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
+        cleared = self.provider.clear(CapabilityCall(name="close_checklist", args={}))
         assert cleared.status == RuntimeStatus.OK
         assert cleared.structured is not None
         assert cleared.structured["cleared"] is True
@@ -278,7 +278,7 @@ class TestChecklistCapabilities:
             "payload": {"action": "clear", "active": False},
         }
         assert "echo" not in cleared.structured
-        repeated = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
+        repeated = self.provider.clear(CapabilityCall(name="close_checklist", args={}))
         assert repeated.structured == {"cleared": False}
 
         clear_blueprint = ChecklistIntrospectionProvider.clear.__capability_action_blueprints__[0]
@@ -299,8 +299,8 @@ class TestChecklistPrompt:
         assert "multiple independent" in operating_rule.content
         assert "before the first mutation" in operating_rule.content
         assert task_flow.section == "task_flow"
-        assert "checklist_check" in task_flow.content
-        assert "checklist_clear" in task_flow.content
+        assert "complete_checklist_step" in task_flow.content
+        assert "close_checklist" in task_flow.content
         assert "automatically close" in task_flow.content
         assert "cancel or replace" in task_flow.content
         assert "review the user's requirements" in task_flow.content
@@ -332,7 +332,7 @@ class TestChecklistPrompt:
         assert 'authority="execution_cursor"' in reminder.content
         assert 'trusted_as_evidence="false"' in reminder.content
         assert "execution cursor" in reminder.content
-        assert "checklist_clear" not in reminder.content
+        assert "close_checklist" not in reminder.content
 
     def test_clear_retires_checklist_from_next_prompt_tail(self):
         core = PalCore()
@@ -368,12 +368,12 @@ class TestChecklistPrompt:
 
         generation = core.context.execution_runtime.registry_generation
 
-        for alias in ("checklist_upsert", "checklist_check", "checklist_clear"):
+        for alias in ("upsert_checklist", "complete_checklist_step", "close_checklist"):
             assert alias in generation.direct_aliases
-        assert "checklist_show" in generation.indirect_aliases
+        assert "read_checklist" in generation.indirect_aliases
         from pal.shared.tool_protocol import new_tool_call
         result = core.context.execution_runtime.execute_tool(new_tool_call(
-            name="checklist_upsert", args={"plan": [{"step": "one"}, {"step": "two"}]}
+            name="upsert_checklist", args={"plan": [{"step": "one"}, {"step": "two"}]}
         ))
         assert result.ok
         assert result.structured["echo"]["payload"]["total"] == 2
@@ -390,7 +390,7 @@ class TestChecklistPrompt:
         core.publish_module_capabilities("checklist")
         runtime = core.context.execution_runtime
         try:
-            result = runtime.execute_tool(new_tool_call(name="checklist_upsert", args={"plan": [
+            result = runtime.execute_tool(new_tool_call(name="upsert_checklist", args={"plan": [
                 {"step": str(i) + "x" * 899, "status": "completed"} for i in range(64)
             ]}), budget=ToolCallBudget(max_output_chars=500))
             assert result.ok
@@ -418,7 +418,7 @@ class TestToolEchoFanOut:
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
         result = _tool_result(
-            "checklist_check",
+            "complete_checklist_step",
             structured={"echo": {"markdown": "Checklist progress 1/1\n✅ a", "dedupe_key": "checklist:check:a"}},
         )
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
@@ -435,7 +435,7 @@ class TestToolEchoFanOut:
         continuation = _continuation()
         continuation.channel_stream_active = True
         result = _tool_result(
-            "checklist_check",
+            "complete_checklist_step",
             structured={
                 "echo": {
                     "markdown": "Checklist progress 1/1",
@@ -491,7 +491,7 @@ class TestToolEchoFanOut:
         captured: list = []
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
-        result = _tool_result("checklist_check", structured={"changed": True})
+        result = _tool_result("complete_checklist_step", structured={"changed": True})
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert captured == []
 
@@ -499,7 +499,7 @@ class TestToolEchoFanOut:
         captured = []
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
-        result = _tool_result("checklist_check", structured={
+        result = _tool_result("complete_checklist_step", structured={
             "echo": {"markdown": "x" * 5000},
             "channel_event": {"tag": "checklist", "payload": {"action": "clear", "active": False}},
         })
@@ -528,7 +528,7 @@ class TestToolEchoFanOut:
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
         result = _tool_result(
-            "checklist_check",
+            "complete_checklist_step",
             structured={"echo": {"markdown": "m", "dedupe_key": "same"}},
         )
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
@@ -548,10 +548,10 @@ class TestToolEchoFanOut:
         captured: list = []
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
-        result = _tool_result("checklist_check", structured={"echo": {"markdown": "m"}})
+        result = _tool_result("complete_checklist_step", structured={"echo": {"markdown": "m"}})
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert len(captured) == 1
-        assert "checklist_check:call-1" in continuation.echoed_keys
+        assert "complete_checklist_step:call-1" in continuation.echoed_keys
 
 
 def test_duplicate_steps_rejected_without_replacing_current_plan():
@@ -578,7 +578,7 @@ def test_unknown_step_large_plan_is_recoverable_from_snapshot():
     service.upsert(plan)
     runtime = core.context.execution_runtime
     try:
-        result = runtime.execute_tool(new_tool_call(name="checklist_check", args={"step": "missing"}),
+        result = runtime.execute_tool(new_tool_call(name="complete_checklist_step", args={"step": "missing"}),
                                       budget=ToolCallBudget(max_output_chars=2000))
         assert not result.ok
         assert result.snapshot_refs

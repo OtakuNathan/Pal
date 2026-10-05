@@ -33,13 +33,14 @@ the result's hit and filter guidance.
 Important arguments:
 
 - `query`: natural-language search text or a partial capability name
-- `namespace`: `intro`/`introspection` for inspection capabilities, or
-  `op`/`operation` for mutating/external-service actions
+- `namespace`: `inspect`/`introspection`, or `action`/`operation`. These select
+  registry namespaces; read-only tools can also be registered under operation.
 - `family`: optional family filter
 - `module_name`: optional module filter
 - `tags`: optional tag filters
 - `top_k` / `limit`: hit count, default up to 3 strongest matches; an exact alias
-  normally returns one match. An explicit limit permits broader results.
+  normally returns one match. `top_k` takes precedence when both are supplied.
+  An explicit limit permits broader results.
 - `facets`: defaults to false; when true, include namespace/module/family counts
   for broad-search narrowing
 
@@ -52,24 +53,59 @@ contract details. Facets are
 available when the model needs narrowing statistics, but they should not be
 returned by default.
 
+`read_tool(name=..., view="input")` is the default compact contract view.
+Use `view="output"` for the output schema, or `view="full"` for
+both schemas and the available input example. Output validation failures retain a bounded diagnostic
+and offer the output view. Inspect that contract and any retained result before
+repeating a command that may already have applied its effect.
+
+## Public Alias Migration
+
+[tool_alias_migration.json](tool_alias_migration.json) records the fixed alias
+renames from the tool contract review. Each capability has one public alias;
+old names are not compatibility aliases. Update external callers and custom
+role allowlists using the table. Canonical capability paths and Python handler
+names remain stable. Entries describe the reviewed name migration and do not
+imply every capability is registered in every runtime or role.
+
+Native shell also exposes eight independent indirect capabilities:
+`read_shell_session`, `write_shell_session`, `resize_shell_session`,
+`terminate_shell_session`, `release_shell_session`, `watch_shell_session`,
+`extend_shell_session` and `unwatch_shell_session`. Each has its own canonical
+path and strict input schema. Read/release retain the exclusive
+`session_id`/`output_ref` branches; an output reference cannot wait.
+`manage_shell_session` remains a distinct compatibility multiplexer.
+
+All session actions conservatively declare control and reconcile-first retry:
+reading also participates in output delivery and acknowledgement. A read alias
+does not promise a side-effect-free read or authorize automatic control replay.
+Role projections expose these actions only when shell or shell evidence is allowed;
+session ownership, pending-output gates and delivery leases remain with the same owner.
+Successful empty, unhealthy, unknown and no-op observations are explained in stable
+contracts or conditional results; failure guidance is not appended to every success.
+
+Apply the Pal and native shell source changes together. The native shell uses
+Pal's shared diagnostic helper. Resident core/execution changes require a full
+host restart; copying files or rescanning metadata alone does not activate them.
+
 ## Artifact Tool Boundary
 
 Artifact tools accept `artifact_id`, not arbitrary local paths.
 
-`artifact_grep` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
+`grep_artifact` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
 
 Image import and browser screenshots register artifacts regardless of the
 selected model's vision support. Core may attach their pixels within its image
 budget when the endpoint supports vision. Otherwise the artifact reference is
-available, but Pal cannot claim to have inspected pixels. `browser_navigate`
+available, but Pal cannot claim to have inspected pixels. `navigate_browser`
 opens a page and returns its text, metadata, and links in the same call;
-`browser_read` can reread the current page after interaction.
+`read_browser_page` can reread the current page after interaction.
 The inline text is a preview. The complete captured text is saved as an immutable
 `text_file` in the receiving runtime's result store, including brokered worker
 reads. Use `rg` and `read_file` on that snapshot for remaining text; reread the
 browser only for fresh content. Storage failures retain the preview and report
 that the full text is unavailable.
-Truncated `browser_snapshot`, `browser_find`, and `browser_evaluate` results use
+Truncated `capture_browser_snapshot`, `find_browser_text`, and `evaluate_browser_script` results use
 the same snapshot storage. Evaluate saves complete JSON for objects and arrays;
 reading omitted output never requires executing the script again. Element refs
 in a saved snapshot can become stale after page changes.
@@ -84,6 +120,11 @@ means extraction found no text, not that the page is visually blank.
 MCP tools are not resident by default. The MCP manager plugin compiles discovered server tools into Pal-native capabilities and publishes them into the capability inventory.
 
 MCP prompt templates become declared skills plus render capabilities. They do not enter the resident prompt automatically.
+
+Dynamic aliases use `call_mcp_<server>_<tool>` and
+`render_mcp_<server>_<prompt>`. Names over 64 characters retain a prefix and a
+stable hash suffix. Colliding normalized identities receive distinct deterministic
+hash suffixes; original server/tool/prompt identities still route to the external service.
 
 ## Invariants
 

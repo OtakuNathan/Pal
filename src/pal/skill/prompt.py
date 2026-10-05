@@ -19,7 +19,7 @@ class SkillPromptFragmentProvider:
                 content=(
                     "Skills are reference manuals for reusable procedures, debugging, review, and platform "
                     "operations. When an unfamiliar procedure needs a manual and no applicable one is already loaded, "
-                    "use skill_search with a concise scenario, then skill_inject for a useful match. Search results "
+                    "use search_skills with a concise scenario, then inject_skill for a useful match. Search results "
                     "describe manuals; injection loads their contents.\n"
                     "Reuse applicable loaded manuals. A name mention alone does not require injection. Resolve "
                     "relevant runtime or platform constraints before acting; report a concrete blocker if required "

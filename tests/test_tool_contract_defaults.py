@@ -72,18 +72,18 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     from pal.mcp.normalize import normalize_protocol_error, normalize_tool_result
     context = SimpleNamespace(port_registry={})
     memory = MemoryIntrospectionProvider(service=SimpleNamespace(_resolve_l3_provider=lambda: None), context=context)
-    assert 'main Pal runtime' in memory.dreaming(IntrospectionCall(name='memory_dreaming')).llm_text
-    assert 'No memory archive' in memory.history(IntrospectionCall(name='memory_history')).llm_text
+    assert 'main Pal runtime' in memory.dreaming(IntrospectionCall(name='manage_memory_dreaming')).llm_text
+    assert 'No memory archive' in memory.history(IntrospectionCall(name='read_memory_history')).llm_text
     context.port_registry['memory.dreaming:dreaming'] = SimpleNamespace(configure=Mock(side_effect=ValueError('bad schedule')))
-    result = memory.dreaming(IntrospectionCall(name='memory_dreaming', args={'operation': 'configure', 'config': {}}))
+    result = memory.dreaming(IntrospectionCall(name='manage_memory_dreaming', args={'operation': 'configure', 'config': {}}))
     assert 'bad schedule' in result.llm_text
     mcp = McpManagerPluginProvider(runtime_root=tmp_path, core_context=None)
-    result = mcp.image_prepare(IntrospectionCall(name='mcp_image_prepare', args={'path': str(tmp_path / 'artifact-absent.png')}))
+    result = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={'path': str(tmp_path / 'artifact-absent.png')}))
     assert 'artifact-absent.png' in result.llm_text and 'run_shell' in result.llm_text
-    missing = mcp.image_prepare(IntrospectionCall(name='mcp_image_prepare', args={}))
+    missing = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={}))
     assert 'read_tool' in missing.llm_text
     assert 'ValueError' != result.llm_text
     error = normalize_protocol_error(ConnectionError('connection refused'), server_id='demo', name='inspect', kind='tool')
-    assert 'connection refused' in error.llm_text and "mcp_server_read(name='demo')" in error.llm_text
+    assert 'connection refused' in error.llm_text and "read_mcp_server(name='demo')" in error.llm_text
     error = normalize_tool_result({'isError': True, 'content': [{'type': 'text', 'text': 'invalid field'}]}, server_id='demo', tool_name='inspect')
     assert 'invalid field' in error.llm_text and 'read_tool' in error.llm_text

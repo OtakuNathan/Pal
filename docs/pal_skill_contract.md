@@ -36,7 +36,7 @@ Core fields:
 
 `status` values are `draft`, `active`, `disabled`, `deprecated`, and `needs_review`.
 
-Only `active` skills can be returned as usable `skill_refs` or injected through `skill_inject`.
+Only `active` skills can be returned as usable `skill_refs` or injected through `inject_skill`.
 
 ## STAR Applicability
 
@@ -62,7 +62,7 @@ V1 source formats:
 - `plain_text`
 - `skill_md`
 
-V1 does not accept artifact id or file path directly. If the source is in a file or artifact, Pal must first read it with the appropriate existing tool and then pass text into `skill_assimilate`.
+V1 does not accept artifact id or file path directly. If the source is in a file or artifact, Pal must first read it with the appropriate existing tool and then pass text into `prepare_skill_candidate`.
 
 Assimilation includes parsing, prompt-injection risk scan, no-tool LLM sanitization, semantic compression, STAR generation, `use_when` / `avoid_when` generation, duplicate/conflict detection.
 
@@ -85,19 +85,19 @@ Skill storage is two-layer:
 - SQLite stores normalized searchable skill metadata and manual text.
 - `runtime_root/SKILL/<skill_id>/skill.json` mirrors the normalized skill for owner inspection and backup.
 
-Raw external source is not injected. `skill_inject` only reads normalized skill data.
+Raw external source is not injected. `inject_skill` only reads normalized skill data.
 
 ## Tools
 
-- `skill_assimilate`: creates a sanitized skill candidate and does not commit.
-- `skill_commit`: commits a candidate, writes normalized skill storage, without creating a separate routing record.
-- `skill_update`: updates a normalized skill or manual text.
-- `skill_disable`: disables a skill without deleting history.
-- `skill_search`: searches active skills for the current scenario or explicit skill name, without returning manuals.
-- `skill_read`: reads normalized skill metadata and optionally manual text.
-- `skill_inject`: injects an active normalized skill manual and never executes capabilities.
+- `prepare_skill_candidate`: creates a sanitized skill candidate and does not commit.
+- `commit_skill_candidate`: commits a candidate, writes normalized skill storage, without creating a separate routing record.
+- `update_skill`: updates a normalized skill or manual text.
+- `disable_skill`: disables a skill without deleting history.
+- `search_skills`: searches active skills for the current scenario or explicit skill name, without returning manuals.
+- `read_skill`: reads normalized skill metadata and optionally manual text.
+- `inject_skill`: injects an active normalized skill manual and never executes capabilities.
 
-`skill_inject` returns structured failure for missing, disabled, deprecated, or over-budget skills.
+`inject_skill` returns structured failure for missing, disabled, deprecated, or over-budget skills.
 
 ## Discovery
 
@@ -140,7 +140,7 @@ to review explanation, execution, and handoff behavior.
 
 ### General skill use
 
-Use `skill_search` before `skill_inject` when the user explicitly asks Pal to use a named skill. Do not guess `skill_id` from raw text.
+Use `search_skills` before `inject_skill` when the user explicitly asks Pal to use a named skill. Do not guess `skill_id` from raw text.
 
 Use skill assimilation when the user explicitly asks Pal to learn a skill, summarize a reusable workflow, sanitize an external skill, import SKILL.md content, or remember how to do a class of future tasks.
 

@@ -27,7 +27,7 @@ class WebToolGuidanceTests(unittest.TestCase):
         provider = WebSearchIntrospectionProvider(service=service)  # type: ignore[arg-type]
 
         result = provider.set_active_provider(
-            IntrospectionCall(name="web_search_set_active_provider", args={"name": "disabled"})
+            IntrospectionCall(name="set_active_web_search_provider", args={"name": "disabled"})
         )
 
         self.assertEqual(result.status, RuntimeStatus.INVALID)

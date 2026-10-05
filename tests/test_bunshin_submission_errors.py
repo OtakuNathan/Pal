@@ -37,8 +37,9 @@ def test_submit_errors_preserve_failure_meaning(module, phase, exc, category, ef
         target = {'checklist': checklist, 'read': store.read, 'submit': store.mark_submitted}[phase]
         target.side_effect = exc
         name = 'contract_submit' if module is contract_submission else 'review_submit'
+        alias = 'submit_contract' if module is contract_submission else 'submit_review'
         result = getattr(module, name + '_tool_result')(
-            new_tool_call(name=name, args={}, call_id='test'),
+            new_tool_call(name=alias, args={}, call_id='test'),
             {'runtime_root': '/unused', 'architect_path': '/unused/architect.yaml',
              'bunshin_v2': {'role': 'reviewer', 'mode': 'architecture'}},
         )
@@ -131,7 +132,7 @@ def test_wrapped_yaml_io_error_is_infrastructure(tmp_path):
         with submission_validation():
             read_architect_yaml(tmp_path / 'missing.yaml')
     result = submission_error_result(
-        new_tool_call(name='contract_submit', args={}, call_id='yaml'),
+        new_tool_call(name='submit_contract', args={}, call_id='yaml'),
         caught.value, submission_started=False,
         invalid_code='invalid_contract_submission', correction='Correct content.',
     )

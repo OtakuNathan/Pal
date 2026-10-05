@@ -41,7 +41,7 @@ def test_long_text_is_readable_beyond_artifact_preview_with_file_tool(manager, a
     preview = manager.read(ref.artifact_id, 'scope', max_chars=100000)
     assert preview.truncated and len(preview.text) == 50000
     assert preview.text_file['file_path'] == path
-    assert not any('artifact_transcribe' in action for action in preview.next_actions)
+    assert not any('transcribe_artifact' in action for action in preview.next_actions)
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {})
     assert path in exposure.text and 'read_file' in exposure.text
     core = PalCore()
@@ -75,7 +75,7 @@ def test_short_text_is_a_file_handle_without_inline_body(manager):
     assert 'included_text:' not in exposure.text
     assert Path(ref.text_file['file_path']).read_bytes().decode() == content
     assert manager.read(ref.artifact_id, 'scope').next_actions == ()
-    assert ref.available_actions == ('artifact_info',)
+    assert ref.available_actions == ('inspect_artifact_info',)
 
 
 @pytest.mark.parametrize('text', ['', 'Short page'])
@@ -93,7 +93,7 @@ def test_pdf_keeps_page_access_and_imports_pixels_on_demand(manager, text):
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {'supports_vision': True})
     assert exposure.inline_parts == ()
     assert 'PDF pixels are not attached' in exposure.text
-    assert 'artifact_import' in exposure.text
+    assert 'import_artifact' in exposure.text
     assert 'page_index_file_path' in exposure.text
     assert 'page_file_pattern' in exposure.text
     record = manager.repository.get_record(ref.artifact_id)

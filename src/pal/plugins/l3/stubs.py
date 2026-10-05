@@ -122,7 +122,7 @@ class _L3ProviderCapabilityMixin:
             do_not_use_when="Checking a real provider (use search_tools to discover its bound provider-state alias). Recalling memories (use recall_memory).",
             failure_next_steps="Read-only. This is a stub provider for testing.",
         ),
-        aliases=("memory_provider_show",),
+        aliases=("inspect_memory_provider_state",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -144,7 +144,7 @@ class _L3ProviderCapabilityMixin:
             do_not_use_when="Real provider inventory (use search_tools to discover the selected provider's bound inventory alias).",
             failure_next_steps="Read-only. This is a stub provider.",
         ),
-        aliases=("memory_provider_inventory",),
+        aliases=("inspect_memory_provider_inventory",),
     )
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -170,7 +170,7 @@ class _L3ProviderCapabilityMixin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
-        aliases=("memory_provider_recall",),
+        aliases=("recall_provider_memory",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -217,7 +217,7 @@ class _L3ProviderCapabilityMixin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
-        aliases=("memory_provider_write",),
+        aliases=("write_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -282,7 +282,7 @@ class _L3ProviderCapabilityMixin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
-        aliases=("memory_provider_update",),
+        aliases=("update_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -333,7 +333,7 @@ class _L3ProviderCapabilityMixin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
-        aliases=("memory_provider_delete",),
+        aliases=("delete_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -357,7 +357,7 @@ class _L3ProviderCapabilityMixin:
             use_when="Testing with the stub memory backend.",
             do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound attach alias).",
             failure_next_steps="This is a stub provider.",
-        ), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
+        ), aliases=("attach_memory_provider",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -374,7 +374,7 @@ class _L3ProviderCapabilityMixin:
             use_when="Disconnecting the stub memory backend.",
             do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound detach alias).",
             failure_next_steps="This is a stub provider.",
-        ), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
+        ), aliases=("detach_memory_provider",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -398,7 +398,7 @@ class _L3ProviderCapabilityMixin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
-        aliases=("memory_provider_refresh_indexes",),
+        aliases=("refresh_memory_provider_indexes",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:

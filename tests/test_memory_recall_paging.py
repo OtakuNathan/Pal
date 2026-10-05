@@ -12,7 +12,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 
 @pytest.mark.parametrize("view", ["summary", "origin"])
-@pytest.mark.parametrize("alias", ["recall_memory", "memory_provider_recall"])
+@pytest.mark.parametrize("alias", ["recall_memory", "recall_provider_memory"])
 def test_long_memory_can_be_read_completely_from_snapshot(view, alias):
     core = PalCore()
     runtime = core.context.execution_runtime
@@ -34,7 +34,7 @@ def test_long_memory_can_be_read_completely_from_snapshot(view, alias):
         runtime.begin_tool_result_turn(turn_id="read-memory", scope_key="paging-test")
         invoke = runtime.invoke_direct_tool if alias == "recall_memory" else runtime.invoke_indirect_tool
         args = {"queries": ["pagination"], "view": view}
-        if alias == "memory_provider_recall":
+        if alias == "recall_provider_memory":
             args["name"] = provider.provider_id
         result = invoke(
             new_tool_call(name=alias, args=args,
@@ -61,7 +61,7 @@ def test_long_memory_can_be_read_completely_from_snapshot(view, alias):
         runtime.shutdown()
 
 
-@pytest.mark.parametrize("alias", ["recall_memory", "memory_provider_recall"])
+@pytest.mark.parametrize("alias", ["recall_memory", "recall_provider_memory"])
 def test_all_selected_hits_remain_available_in_snapshot(alias):
     core = PalCore()
     runtime = core.context.execution_runtime
@@ -77,7 +77,7 @@ def test_all_selected_hits_remain_available_in_snapshot(alias):
         core.publish_module_capabilities(provider.module_id)
         runtime.begin_tool_result_turn(turn_id="many", scope_key="many")
         args = {"queries": ["many hits"], "limit": 6}
-        if alias == "memory_provider_recall":
+        if alias == "recall_provider_memory":
             args["name"] = provider.provider_id
         invoke = runtime.invoke_direct_tool if alias == "recall_memory" else runtime.invoke_indirect_tool
         result = invoke(new_tool_call(name=alias, args=args, call_id="many-result"),

@@ -583,7 +583,7 @@ class TestScopedRoleFiltering:
         try:
             mount_test_capability(
                 base,
-                alias="lsp_doctor",
+                alias="diagnose_lsp_server",
                 execution=_echo_semantics(),
                 canonical_path="op_test_doctor",
                 InputModel=EchoInput,
@@ -601,7 +601,7 @@ class TestScopedRoleFiltering:
                     llm_text="probe done",
                     affordances=(
                         Affordance(
-                            tool="lsp_doctor",
+                            tool="diagnose_lsp_server",
                             arguments={"value": "clangd"},
                             reason="bound recovery the role cannot use",
                         ),
@@ -629,7 +629,7 @@ class TestScopedRoleFiltering:
                     do_not_use_when="outside scoped filter tests",
                     failure_next_steps="",
                     next_tool_hints=(
-                        NextToolHint(name="lsp_doctor", use_when="diagnosis is needed."),
+                        NextToolHint(name="diagnose_lsp_server", use_when="diagnosis is needed."),
                     ),
                 ),
             )
@@ -642,7 +642,7 @@ class TestScopedRoleFiltering:
                 for item in scoped.build_llm_tool_contracts()
             }
             assert "probe" in spec
-            assert "lsp_doctor" not in spec
+            assert "diagnose_lsp_server" not in spec
             assert "not available in the current tool surface" in spec["probe"]["description"]
 
             # Dynamic suggestions resolve against the captured role view only.
@@ -661,7 +661,7 @@ class TestScopedRoleFiltering:
             )
             assert global_result.ok
             assert [item.tool for item in global_result.invocation_result.affordances] == [
-                "lsp_doctor"
+                "diagnose_lsp_server"
             ]
         finally:
             base.shutdown()

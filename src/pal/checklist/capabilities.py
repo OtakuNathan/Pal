@@ -116,11 +116,11 @@ class ChecklistIntrospectionProvider:
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a unique non-empty step string and an optional status of pending/in_progress/completed.",
             next_tool_hints=(
                 NextToolHint(
-                    name="checklist_check",
+                    name="complete_checklist_step",
                     use_when="One concrete checklist step has actually been completed.",
                 ),
                 NextToolHint(
-                    name="checklist_show",
+                    name="read_checklist",
                     use_when="Exact step text or remaining progress must be recovered.",
                 ),
             ),
@@ -128,7 +128,7 @@ class ChecklistIntrospectionProvider:
         InputModel=ChecklistUpsertInput,
         execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_upsert"},
-        aliases=("checklist_upsert",),
+        aliases=("upsert_checklist",),
     )
     def upsert(self, call: CapabilityCall) -> CapabilityResult:
         previous = self.service.show()
@@ -168,11 +168,11 @@ class ChecklistIntrospectionProvider:
             failure_next_steps="If no checklist is active, it may already have closed; open a new one only if work remains. If the step does not match exactly, copy its exact text from the returned current plan.",
             next_tool_hints=(
                 NextToolHint(
-                    name="checklist_show",
+                    name="read_checklist",
                     use_when="The exact remaining step text or overall progress is needed and not already present in the returned plan or current context.",
                 ),
                 NextToolHint(
-                    name="checklist_clear",
+                    name="close_checklist",
                     use_when="Cancel or retire remaining work. Both the last check and a fully completed upsert close automatically.",
                 ),
             ),
@@ -180,7 +180,7 @@ class ChecklistIntrospectionProvider:
         InputModel=ChecklistCheckInput,
         execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_check"},
-        aliases=("checklist_check",),
+        aliases=("complete_checklist_step",),
     )
     def check(self, call: CapabilityCall) -> CapabilityResult:
         step = str(call.args.get("step") or "").strip()
@@ -190,7 +190,7 @@ class ChecklistIntrospectionProvider:
                 status=RuntimeStatus.ERROR,
                 text="no active checklist",
                 structured={"changed": False, "step": step, "error": "no_active_checklist"},
-                llm_text="No active checklist; it may already have completed and closed. Use checklist_upsert only if work remains.",
+                llm_text="No active checklist; it may already have completed and closed. Use upsert_checklist only if work remains.",
             )
         if not outcome.found:
             payload = {"changed": False, "step": step, "error": "step_not_found",
@@ -229,16 +229,16 @@ class ChecklistIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             purpose="Read Pal's active checklist and exact step text.",
-            use_when="Exact step text or current progress is needed.",
+            use_when='Exact step text or current progress is needed. No active checklist is a valid inactive state; it does not prove the user task is complete.',
             do_not_use_when="The runtime reminder already provides enough checklist state.",
             failure_next_steps="If inactive, no checklist is open.",
             next_tool_hints=(
                 NextToolHint(
-                    name="checklist_check",
+                    name="complete_checklist_step",
                     use_when="The snapshot identifies a step that has now been completed.",
                 ),
                 NextToolHint(
-                    name="checklist_clear",
+                    name="close_checklist",
                     use_when=(
                         "The task is complete, cancelled, replaced, or made stale; close the progress cursor without additional work."
                     ),
@@ -247,7 +247,7 @@ class ChecklistIntrospectionProvider:
         ),
         execution=INDIRECT_LOCAL_READ,
         metadata={"canonical_path": "op_checklist_show"},
-        aliases=("checklist_show",),
+        aliases=("read_checklist",),
     )
     def show(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -275,15 +275,14 @@ class ChecklistIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Close Pal's checklist and return its recorded progress.",
             use_when=(
-                "The task is complete, cancelled, replaced, or made stale. Closing adds no verification requirement; "
-                "describe actual execution evidence and the verification scope already performed."
+                'The task is complete, cancelled, replaced, or made stale. Closing adds no verification requirement; describe actual execution evidence and the verification scope already performed. Closing an inactive checklist is an idempotent no-op.'
             ),
             do_not_use_when="The active task is still expected to continue and checklist work remains in progress.",
-            failure_next_steps="If inactive, this is an idempotent no-op. If uncertain, use checklist_show to inspect the current state.",
+            failure_next_steps="If inactive, this is an idempotent no-op. If uncertain, use read_checklist to inspect the current state.",
         ),
         execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_clear"},
-        aliases=("checklist_clear",),
+        aliases=("close_checklist",),
     )
     def clear(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -313,12 +312,12 @@ class ChecklistIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             purpose="Inspect the checklist module's current state.",
-            use_when="Diagnosing checklist state or verifying the module is mounted.",
-            do_not_use_when="Managing checklist work as Pal (use checklist_show, checklist_upsert, checklist_check, or checklist_clear).",
+            use_when='Diagnosing checklist state or verifying the module is mounted. Inactive checklist state is not an execution failure or proof that all user work is complete.',
+            do_not_use_when="Managing checklist work as Pal (use read_checklist, upsert_checklist, complete_checklist_step, or close_checklist).",
             failure_next_steps="Read-only. If inactive, no checklist is open.",
         ),
         execution=INDIRECT_LOCAL_READ,
-        aliases=("checklist_inspect",),
+        aliases=("inspect_checklist_state",),
     )
     def show_introspection(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

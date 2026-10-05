@@ -470,17 +470,17 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                 )
                 self.assertEqual(search.status, "ok")
                 hit_names = [item["alias"] for item in search.structured["hits"]]
-                self.assertNotIn("llm_set_active_endpoint", hit_names)
+                self.assertNotIn("set_active_llm_endpoint", hit_names)
 
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_tool_read", args={"name": "llm_set_active_endpoint"})
+                    CapabilityCall(name="op_tool_read", args={"name": "set_active_llm_endpoint"})
                 )
                 self.assertNotEqual(read.status, "ok")
 
                 call = core.context.execution_runtime.execute(
                     CapabilityCall(
                         name="op_tool_call",
-                        args={"name": "llm_set_active_endpoint", "args": {"name": "beta"}},
+                        args={"name": "set_active_llm_endpoint", "args": {"name": "beta"}},
                     )
                 )
                 self.assertNotEqual(call.status, "ok")

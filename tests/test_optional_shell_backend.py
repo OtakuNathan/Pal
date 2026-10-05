@@ -26,7 +26,7 @@ async def main():
         core.publish_module_capabilities('execution')
         record = runtime.registry_generation.record_for_alias('run_shell')
         assert not {'wait_ms', 'target'} & record.input_schema['properties'].keys()
-        assert 'shell_session' not in runtime.registry_generation.indirect_aliases
+        assert 'manage_shell_session' not in runtime.registry_generation.indirect_aliases
         result = await runtime.execute_tool_async(new_tool_call(name='run_shell', args={'cmd': 'printf standalone'}), turn_id='test')
         assert result.ok and 'standalone' in result.text, result.text
         assert not any(k.startswith('pal_shell_native') for k in sys.modules)

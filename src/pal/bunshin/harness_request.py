@@ -11,7 +11,7 @@ from pal.shared.tool_routing import TOOL_EFFICIENCY_SYSTEM_GUIDANCE
 
 _PAL_TOOL_TOKENS = (
     "ask_question",
-    "contract_submit",
+    "submit_contract",
     "update_checklist",
     "read_tool",
     "call_tool",

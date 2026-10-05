@@ -100,10 +100,10 @@ class WebSearchIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             purpose="Show web search module state.",
-            use_when="Diagnosing web search health — provider count, active provider, mounted status.",
-            do_not_use_when="Searching the web (use search_web). Listing providers (use web_search_list_providers).",
-            failure_next_steps="Read-only. If no active provider, check web_search_list_providers.",
-        ), aliases=("web_search_show",))
+            use_when='Diagnosing web search health — provider count, active provider, mounted status. If no provider is active, inspect list_web_search_providers before selecting an enabled backend.',
+            do_not_use_when="Searching the web (use search_web). Listing providers (use list_web_search_providers).",
+            failure_next_steps="Read-only. If no active provider, check list_web_search_providers.",
+        ), aliases=("inspect_web_search_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = inspect_web_search(self).__dict__
@@ -120,11 +120,11 @@ class WebSearchIntrospectionProvider:
         action_name="list_providers",
         guidance=ToolGuidance(
             purpose="List configured web search providers.",
-            use_when="Discovering available search backends and their enabled status.",
-            do_not_use_when="Checking the active provider (use web_search_active_provider). Searching (use search_web).",
+            use_when='Discovering available search backends and their enabled status. An empty list means no providers are configured.',
+            do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). Searching (use search_web).",
             failure_next_steps="Read-only. If empty, no providers are configured.",
         ),
-        aliases=("web_search_list_providers",),
+        aliases=("list_web_search_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -143,11 +143,11 @@ class WebSearchIntrospectionProvider:
         action_name="active_provider",
         guidance=ToolGuidance(
             purpose="Show the active web search provider.",
-            use_when="Checking which search backend handles queries.",
-            do_not_use_when="Listing all providers (use web_search_list_providers). Switching (use web_search_set_active_provider).",
-            failure_next_steps="If no active provider is reported, use web_search_list_providers to find an enabled provider, then select it with web_search_set_active_provider.",
+            use_when='Checking which search backend handles queries. If no effective provider is reported, inspect list_web_search_providers and select an enabled provider with set_active_web_search_provider.',
+            do_not_use_when="Listing all providers (use list_web_search_providers). Switching (use set_active_web_search_provider).",
+            failure_next_steps="If no active provider is reported, use list_web_search_providers to find an enabled provider, then select it with set_active_web_search_provider.",
         ),
-        aliases=("web_search_active_provider",),
+        aliases=("inspect_active_web_search_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -169,10 +169,10 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show one web search provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
-            do_not_use_when="Module health (use web_search_show). Auth state (use web_search_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
+            do_not_use_when="Module health (use inspect_web_search_state). Auth state (use inspect_web_search_provider_auth).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
         ),
-        aliases=("web_search_provider_show",),
+        aliases=("inspect_web_search_provider",),
     )
     def show_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -192,11 +192,11 @@ class WebSearchIntrospectionProvider:
         action_name="auth_state",
         guidance=ToolGuidance(
             purpose="Show one web search provider's authorization state.",
-            use_when="Diagnosing auth failures or checking if API keys are configured.",
-            do_not_use_when="Applying credentials (use web_search_provider_set_auth_material). Provider metadata (use web_search_provider_show).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. If not authorized, apply credentials.",
+            use_when='Diagnosing auth failures or checking if API keys are configured. A successful inspection can report unauthorized or unknown authorization; inspect the returned state and apply credentials only when needed.',
+            do_not_use_when="Applying credentials (use set_web_search_provider_auth_material). Provider metadata (use inspect_web_search_provider).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. If not authorized, apply credentials.",
         ),
-        aliases=("web_search_provider_auth_state",),
+        aliases=("inspect_web_search_provider_auth",),
     )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -217,11 +217,11 @@ class WebSearchIntrospectionProvider:
         action_name="health",
         guidance=ToolGuidance(
             purpose="Show one web search provider's health.",
-            use_when="Diagnosing search failures or connectivity issues.",
-            do_not_use_when="Auth state (use web_search_provider_auth_state). Module health (use web_search_show).",
-            failure_next_steps="If unhealthy, try switching providers with web_search_set_active_provider.",
+            use_when='Diagnosing search failures or connectivity issues. A successful inspection can report an unhealthy backend. Inspect authorization and the reported cause; choose a healthy enabled provider with set_active_web_search_provider if needed.',
+            do_not_use_when="Auth state (use inspect_web_search_provider_auth). Module health (use inspect_web_search_state).",
+            failure_next_steps="If unhealthy, try switching providers with set_active_web_search_provider.",
         ),
-        aliases=("web_search_provider_health",),
+        aliases=("inspect_web_search_provider_health",),
     )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -244,11 +244,11 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Set the active web search provider.",
             use_when="Switching to a different enabled search backend.",
-            do_not_use_when="Checking the active provider (use web_search_active_provider). The target provider is disabled (enable it first).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. If disabled, enable the provider before selecting it.",
+            do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). The target provider is disabled (enable it first).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. If disabled, enable the provider before selecting it.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
-        aliases=("web_search_set_active_provider",),
+        aliases=("set_active_web_search_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -284,7 +284,7 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
-            do_not_use_when="Reading a new webpage at a known URL (use browser_navigate, which also returns content). Rereading the current page (use browser_read). Reading local files (use read_file).",
+            do_not_use_when="Reading a new webpage at a known URL (use navigate_browser, which also returns content). Rereading the current page (use read_browser_page). Reading local files (use read_file).",
             failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
@@ -336,10 +336,10 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Enable a web search provider.",
             use_when="Re-enabling a disabled search provider.",
-            do_not_use_when="Disabling (use web_search_provider_disable). Setting active (use web_search_set_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
+            do_not_use_when="Disabling (use disable_web_search_provider). Setting active (use set_active_web_search_provider).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
         ),
-        aliases=("web_search_provider_enable",),
+        aliases=("enable_web_search_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -353,10 +353,10 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Disable a web search provider.",
             use_when="Temporarily removing a provider from the active pool.",
-            do_not_use_when="Enabling (use web_search_provider_enable).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
+            do_not_use_when="Enabling (use enable_web_search_provider).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
         ),
-        aliases=("web_search_provider_disable",),
+        aliases=("disable_web_search_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -370,11 +370,11 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Apply auth material to a web search provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
-            do_not_use_when="Reading auth state (use web_search_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. Check provider docs for required auth fields.",
+            do_not_use_when="Reading auth state (use inspect_web_search_provider_auth).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. Check provider docs for required auth fields.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
-        aliases=("web_search_provider_set_auth_material",),
+        aliases=("set_web_search_provider_auth_material",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -405,11 +405,11 @@ class WebSearchIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Merge config into a web search provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. result count, safe search defaults).",
-            do_not_use_when="Setting auth material (use web_search_provider_set_auth_material).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
+            do_not_use_when="Setting auth material (use set_web_search_provider_auth_material).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
-        aliases=("web_search_provider_set_config",),
+        aliases=("configure_web_search_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:

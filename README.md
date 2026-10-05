@@ -112,15 +112,15 @@ pal package status
 ```
 
 Start Pal afterward to activate the installed plugin. In a running Pal, ask it
-in natural language to install the package; its `package_install` tool queues
+in natural language to install the package; its `install_package` tool queues
 preparation and switches the plugin through the existing lifecycle owner.
-Use `package_status` to follow the returned job id.
+Use `inspect_package_status` to follow the returned job id.
 
 Packages with Python backends get private virtualenvs; their dependencies do
 not replace Pal's own Python dependencies. Existing hand-deployed plugins and
 legacy provider wheels remain supported. To repair dependencies, use
 `pal package prepare <plugin-id>` while Pal is stopped, or ask the running Pal
-to use `package_prepare`. Built-in browser dependencies can be prepared with
+to use `prepare_package`. Built-in browser dependencies can be prepared with
 `pal package prepare web_fetch --kind builtin`.
 
 See [Plugin package installation](./docs/pal_package_installation.md) for
@@ -140,8 +140,8 @@ lifecycle, **not** a detach.
 
 **Detach / attach (plugin lifecycle).** Real detach is a plugin operation.
 `artifact`, `behavior`, `checklist`, `proactive`, `skill`, Bunshin, LSP, MCP,
-L3 providers, and web integrations can be replaced with `plugin_detach` /
-`plugin_attach`. Core, execution, LLM, channel (including the recovery
+L3 providers, and web integrations can be replaced with `detach_plugin` /
+`attach_plugin`. Core, execution, LLM, channel (including the recovery
 socket), memory, identity, control, and failure are resident and cannot be
 unloaded. Channel endpoints retain their own target-level lifecycle.
 
@@ -279,7 +279,7 @@ plugin/port dependencies. The returned instance acquires resources in
 `start(scope)` and returns a `ModuleHandle`; the host publishes ports, events,
 prompts and capabilities only after start succeeds, then releases everything
 in reverse order on detach. Plugins can be **hot-attached/detached** at runtime
-(`plugin_rescan` / `plugin_attach` / `plugin_detach` / `plugin_enable`), no
+(`rescan_plugins` / `attach_plugin` / `detach_plugin` / `enable_plugin`), no
 daemon restart needed.
 
 The resident foundation is `core`, `execution`, `llm`, `channel` (including

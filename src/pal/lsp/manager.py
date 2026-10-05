@@ -1218,7 +1218,7 @@ class LspManager:
             diagnostic_state = result.get("diagnostics_state")
             if result.get("status") == "pending" or diagnostic_state in {"pending", "timed_out"}:
                 payload.update(status="unavailable", reason="diagnostics_not_ready",
-                               next_step="Diagnostics have not arrived; an empty list is not a clean check. Retry lsp_diagnostics after the server has had time to respond. If this persists, use lsp_doctor for this server.")
+                               next_step="Diagnostics have not arrived; an empty list is not a clean check. Retry read_lsp_diagnostics after the server has had time to respond. If this persists, use diagnose_lsp_server for this server.")
                 evidence["freshness"] = "pending"
             elif diagnostic_state != "fresh":
                 evidence["freshness"] = "unknown"

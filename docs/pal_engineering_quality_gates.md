@@ -57,18 +57,18 @@ LSP should not provide v1 write operations such as rename, code actions, formatt
 V1 operations:
 
 ```text
-lsp_status
-lsp_doctor
-lsp_hover
-lsp_definition
-lsp_implementation
-lsp_references
-lsp_prepare_call_hierarchy
-lsp_incoming_calls
-lsp_outgoing_calls
-lsp_document_symbols
-lsp_workspace_symbols
-lsp_diagnostics
+inspect_lsp_status
+diagnose_lsp_server
+read_lsp_hover
+find_lsp_definitions
+find_lsp_implementations
+find_lsp_references
+prepare_lsp_call_hierarchy
+find_lsp_incoming_calls
+find_lsp_outgoing_calls
+list_lsp_document_symbols
+search_lsp_workspace_symbols
+read_lsp_diagnostics
 ```
 
 Every LSP result used as evidence should carry enough metadata to judge freshness:
@@ -152,7 +152,7 @@ workspace_markers = ["compile_commands.json", ".clangd", ".git"]
 install_hint = "Install clangd and provide compile_commands.json for best C/C++ results."
 ```
 
-`lsp_doctor` should check:
+`diagnose_lsp_server` should check:
 
 - binary availability
 - workspace root detection

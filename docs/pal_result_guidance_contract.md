@@ -67,8 +67,8 @@ edit/write 的 diff proof_length 不再被当作源行长度;受管快照的长�
 | 来源 | 分类 | 去向 |
 |---|---|---|
 | `compile_tool_description` 的 Failure next steps 段 | FAILURE_FALLBACK | 移出描述;runtime 失败时填 recovery_hint |
-| `lsp_prepare_workspace` ready 分支 next_tools 菜单 + direction 尾巴 | DROP_REDUNDANT | 删除(不转 typed);ready 只报事实 |
-| `lsp_prepare_workspace` partial/failed 菜单 | RESULT_DYNAMIC | 迁为 lsp_doctor/lsp_status 绑定当前 workspace/server 的 typed affordance |
+| `prepare_lsp_workspace` ready 分支 next_tools 菜单 + direction 尾巴 | DROP_REDUNDANT | 删除(不转 typed);ready 只报事实 |
+| `prepare_lsp_workspace` partial/failed 菜单 | RESULT_DYNAMIC | 迁为 diagnose_lsp_server/inspect_lsp_status 绑定当前 workspace/server 的 typed affordance |
 | LSP prepare/doctor/status 静态 hints(use_when 已条件化) | STATIC_RELATION_KEEP | 保留 descriptor 投影与搜索文档 |
 | `prepare_call_hierarchy` incoming/outgoing 静态 hints | STATIC_RELATION_KEEP | 保留;单 item 结果另给位置绑定 continuation |
 | `_render_invocation_for_llm` 的 `_FAILURE_MEMORY_NEXT_STEP` 尾巴 | DROP_REDUNDANT | 删除;失败不再固定推荐 recall_memory |
@@ -82,7 +82,7 @@ edit/write 的 diff proof_length 不再被当作源行长度;受管快照的长�
 | bunshin `op_exec_shell` failure 文本中 "trapped 不换壳重试" | PRECALL_KEEP(迁移) | 迁入 `do_not_use_when`(调用前可见);failure 侧只留恢复流程 |
 
 ## 结果指导示例(交付物 4;稳定 descriptor 始终保留
-"Preparation was partial or failed … lsp_status/lsp_doctor" 条件关系)
+"Preparation was partial or failed … inspect_lsp_status/diagnose_lsp_server" 条件关系)
 
 以下为实际出口产出的形态摘要:
 
@@ -91,7 +91,7 @@ edit/write 的 diff proof_length 不再被当作源行长度;受管快照的长�
 2. **跨 workspace 第二次 ready(B)**:与 1 完全同形;workspace_root/primary_server
    作为事实保留,不构成推荐理由;descriptor 哈希不变。
 3. **两个 workspace 分别 partial(B 失败 clangd / A 失败 clangd)**:各给
-   `affordances=[lsp_doctor(workspace_root=<该次>, name=<失败 server>)]`,
+   `affordances=[diagnose_lsp_server(workspace_root=<该次>, name=<失败 server>)]`,
    reason 指向本次未就绪事实;互不压制(A partial 不因 B 提示过 doctor 而消失)。
 4. **call hierarchy 单 item**:两个 affordance 绑定产生 item 的
    file/line/character(+可选 workspace_root/name),指向 incoming/outgoing;
@@ -143,13 +143,13 @@ edit/write 的 diff proof_length 不再被当作源行长度;受管快照的长�
 | 指标 | before | after |
 |---|---|---|
 | provider 描述总字符 | 9,186 | 7,460(-19%) |
-| read_tool(lsp_prepare_workspace)字符 | 637 | 280(-56%) |
+| read_tool(prepare_lsp_workspace)字符 | 637 | 280(-56%) |
 | 普通成功结果最终字符 | 15 | 15(不变,零建议) |
 | 50KB 异常最终模型可见字符 | 50,727(**无界**) | 688(有界) |
 | 失败固定 recall_memory 尾巴 | 存在 | 移除 |
 | prepare(A)→ready 最终字符 | 680(含菜单词) | 202(零菜单词) |
 | prepare(B)→ready | 680(含菜单词) | 202(零菜单词) |
-| prepare(B)→partial | 0 个 typed 建议(菜单散文) | 1 个 lsp_doctor 绑定 B/clangd |
+| prepare(B)→partial | 0 个 typed 建议(菜单散文) | 1 个 diagnose_lsp_server 绑定 B/clangd |
 | prepare(A)→partial | 0(同上) | 1 个绑定 A/clangd |
 | descriptor 哈希(序列内) | 稳定 | 稳定 |
 | 固定搜索查询命中 | — | 与 before 逐项一致(静态关系保留) |

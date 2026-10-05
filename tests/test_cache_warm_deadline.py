@@ -356,7 +356,7 @@ def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:
 
     configured = provider.configure_cache_warm_deadline(
         IntrospectionCall(
-            name="core_configure_cache_warm_deadline",
+            name="configure_core_cache_warm_deadline",
             args={
                 "enabled": True,
                 "lead_seconds": 180,
@@ -365,7 +365,7 @@ def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:
         )
     )
     observed = provider.cache_warm_deadline(
-        IntrospectionCall(name="core_cache_warm_deadline")
+        IntrospectionCall(name="inspect_core_cache_warm_deadline")
     )
 
     assert configured.status == RuntimeStatus.OK

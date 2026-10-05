@@ -67,7 +67,7 @@ class BrowserScreenshotTool:
         register = getattr(owner, "import_local_for_turn", None)
         if not callable(register):
             payload["registration"] = "unavailable"
-            payload["next_step"] = "Screenshot saved but not registered or attached inline: artifact owner is unavailable. Once available, use artifact_import with artifact.local_cached_path."
+            payload["next_step"] = "Screenshot saved but not registered or attached inline: artifact owner is unavailable. Once available, use import_artifact with artifact.local_cached_path."
             return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
         try:
             imported = await register(stored, runtime=runtime, turn_id=turn_id, source_channel="web_fetch")
@@ -79,7 +79,7 @@ class BrowserScreenshotTool:
         if imported.status != RuntimeStatus.OK:
             payload["registration"] = "failed"
             payload["registration_error"] = dict(imported.structured or {})
-            payload["next_step"] = "Screenshot saved but not attached inline. Resolve the registration error; an existing artifact_id can be inspected with artifact_info."
+            payload["next_step"] = "Screenshot saved but not attached inline. Resolve the registration error; an existing artifact_id can be inspected with inspect_artifact_info."
             return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
         payload["artifact_id"] = imported.structured["artifact_id"]
         payload["registration"] = "registered"

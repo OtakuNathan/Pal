@@ -37,9 +37,9 @@ class ChecklistPromptFragmentProvider:
                 title="Task Flow",
                 content=(
                     "Keep the active checklist small and concrete; its first unfinished item is the work cursor. "
-                    "Use checklist_check for one completed phase or checklist_upsert to update several phases together. "
+                    "Use complete_checklist_step for one completed phase or upsert_checklist to update several phases together. "
                     "Before marking the final phase complete, review the user's requirements against actual results and note omissions or unverified items; do not repeat completed checks. "
-                    "The last checklist_check and a fully completed checklist_upsert automatically close the checklist. Use checklist_clear to cancel or replace work. "
+                    "The last complete_checklist_step and a fully completed upsert_checklist automatically close the checklist. Use close_checklist to cancel or replace work. "
                     "Batch checklist creation, updates, and checks for already-confirmed phases with independent useful tool calls in the same response instead of spending a separate round on bookkeeping. "
                     "For example, check a completed inspection alongside the next edit; wait for test results before checking verification complete. "
                     "Do not perform remaining work just to clear the checklist or repeat verification solely to close it. "

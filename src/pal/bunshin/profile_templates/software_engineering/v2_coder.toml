@@ -34,7 +34,7 @@ Account for ordering, reuse, cancellation, timeout, exception escape, cleanup, a
 - Review changed functions and helpers before submission. Keep improvements local; do not refactor unrelated code or reopen public contracts for style. Report genuine contract defects through the existing role protocol.
 """
 output_contract_fragment = """
-Use update_checklist for the compact micro-plan. When it has no unfinished work and focused checks pass, call candidate_submit with no arguments. Report an impossible contract through candidate_report_architecture_defect or an oversized module through candidate_request_module_split. After a successful terminal call, stop.
+Use update_checklist for the compact micro-plan. When it has no unfinished work and focused checks pass, call submit_candidate with no arguments. Report an impossible contract through report_candidate_architecture_defect or an oversized module through request_candidate_module_split. After a successful terminal call, stop.
 """
 capability_groups = ["software_producer", "v2_candidate_builder"]
 
@@ -99,4 +99,4 @@ require_complete = true
 
 [role.submission]
 kind = "candidate"
-tool = "candidate_submit"
+tool = "submit_candidate"

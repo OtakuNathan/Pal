@@ -67,8 +67,8 @@
     {
       "id": "direct-indirect-pair",
       "category": "direct_indirect",
-      "prompt": "Call search_tools with namespace=\"inspect\", module_id=\"execution\", and query=\"execution runtime state\". Select the indirect alias exec_show from the results, then invoke exec_show through call_tool with empty arguments.",
-      "expected_alias": "exec_show",
+      "prompt": "Call search_tools with namespace=\"inspect\", module_id=\"execution\", and query=\"execution runtime state\". Select the indirect alias inspect_execution_state from the results, then invoke inspect_execution_state through call_tool with empty arguments.",
+      "expected_alias": "inspect_execution_state",
       "expected_first_alias": "search_tools"
     }
   ]

@@ -1749,7 +1749,7 @@ class BunshinManager:
         return await self._web_broker_call(
             params,
             canonical_path="op_browser_read",
-            alias="browser_read",
+            alias="read_browser_page",
         )
 
     async def _web_broker_call(

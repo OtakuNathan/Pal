@@ -127,7 +127,7 @@ class PackageService:
             from pal.packages.uninstall import removal_record
             removal = removal_record(self.runtime_root, artifact.package_id)
             if removal and removal["status"] != "uninstalled":
-                raise PackageError("Plugin uninstall is incomplete; retry plugin_uninstall first")
+                raise PackageError("Plugin uninstall is incomplete; retry uninstall_plugin first")
         target = self._target(artifact)
         if target.is_symlink():
             raise PackageError("Package target must not be a symlink")
@@ -275,7 +275,7 @@ class PackageService:
             if kind == "plugin":
                 from pal.packages.uninstall import removal_record
                 if removal_record(self.runtime_root, name):
-                    raise PackageError("Plugin is uninstalled or removal is incomplete; finish removal and use package_install")
+                    raise PackageError("Plugin is uninstalled or removal is incomplete; finish removal and use install_package")
             if kind == "builtin":
                 return self._prepare_builtin(name)
             path = self._record_path(kind, name)
@@ -285,7 +285,7 @@ class PackageService:
                 raise PackageError("Package has no installation record")
             record = json.loads(path.read_text())
             if not record.get("artifact"):
-                raise PackageError("Legacy provider has no cached package artifact; reinstall its .whl with package_install")
+                raise PackageError("Legacy provider has no cached package artifact; reinstall its .whl with install_package")
             from pal.packages.archive import inspect_extracted
             artifact = inspect_extracted(Path(record["artifact"]), record["sha256"])
             return self._install_artifact(artifact)

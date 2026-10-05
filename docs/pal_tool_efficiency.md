@@ -15,9 +15,9 @@ apply to the rendered body and pages concatenate back to that body.
 Word matching and alias splitting are isolated to execution discovery; they do
 not change memory or skill retrieval.
 
-Plugin lifecycle names have separate responsibilities: `plugin_attach` loads an
-enabled detached plugin and preserves an attached instance; `plugin_detach`
-unloads it; `plugin_reattach` unloads and reloads it in one call, coordinating
+Plugin lifecycle names have separate responsibilities: `attach_plugin` loads an
+enabled detached plugin and preserves an attached instance; `detach_plugin`
+unloads it; `reload_plugin` unloads and reloads it in one call, coordinating
 affected dependents. Existing integrations that used attach as a reload must use
 reattach. Package install/prepare discovery covers both plugins and channel
 providers.
@@ -81,7 +81,7 @@ continuation when idle. The job does not directly send a message to the user;
 Pal decides how to continue the task and report its outcome.
 The result includes actual activation state; notification failure does not change
 the package outcome. Notices are best effort within the live runtime, not a
-durable delivery queue across restarts. Use `package_status(job_id=...,
+durable delivery queue across restarts. Use `inspect_package_status(job_id=...,
 wait_ms=...)` when notification is unavailable or diagnostics are needed.
 The resident job handlers do not hold a lifecycle read fence while waiting;
 the package worker owns the activation write fence.

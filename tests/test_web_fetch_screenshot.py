@@ -87,7 +87,7 @@ class BrowserScreenshotToolTests(unittest.TestCase):
             core.context.execution_runtime.execute_tool_async(
                 new_tool_call(
                     name="call_tool",
-                    args={"name": "browser_screenshot", "args": {"full_page": False}},
+                    args={"name": "capture_browser_screenshot", "args": {"full_page": False}},
                 ),
                 turn_id="turn-browser-shot",
             )
@@ -105,7 +105,7 @@ class BrowserScreenshotToolTests(unittest.TestCase):
         register_web_fetch_with_core(core.context, service)  # type: ignore[arg-type]
         core.publish_module_capabilities("web_fetch")
 
-        self.assertIn("browser_screenshot", core.context.capability_registry.descriptors)
+        self.assertIn("capture_browser_screenshot", core.context.capability_registry.descriptors)
         self.assertNotIn("screenshot_web", core.context.capability_registry.descriptors)
 
 

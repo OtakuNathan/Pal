@@ -66,12 +66,12 @@
     {
       "id": "direct-indirect-pair",
       "category": "direct_indirect",
-      "prompt": "Call search_tools with namespace=\"inspect\", module_name=\"execution\", and query=\"execution runtime state\". Select the indirect alias exec_show from the results, then invoke exec_show through call_tool with empty arguments.",
-      "expected_alias": "exec_show",
+      "prompt": "Call search_tools with namespace=\"inspect\", module_name=\"execution\", and query=\"execution runtime state\". Select the indirect alias inspect_execution_state from the results, then invoke inspect_execution_state through call_tool with empty arguments.",
+      "expected_alias": "inspect_execution_state",
       "expected_first_alias": "search_tools",
       "required_aliases": [
         "search_tools",
-        "exec_show"
+        "inspect_execution_state"
       ]
     },
     {
@@ -100,12 +100,12 @@
       "id": "lsp-ready",
       "category": "discovery",
       "prompt": "Prepare the current workspace \".\" for Python LSP, then inspect the diagnostics tool input contract, and obtain diagnostics for sample.py. All LSP responses in this evaluation come from a local test server.",
-      "expected_alias": "lsp_diagnostics",
-      "expected_first_alias": "lsp_prepare_workspace",
+      "expected_alias": "read_lsp_diagnostics",
+      "expected_first_alias": "prepare_lsp_workspace",
       "required_aliases": [
-        "lsp_prepare_workspace",
+        "prepare_lsp_workspace",
         "read_tool",
-        "lsp_diagnostics"
+        "read_lsp_diagnostics"
       ],
       "expected_output": {
         "status": "ok",
@@ -115,17 +115,17 @@
     {
       "id": "lsp-partial",
       "category": "discovery",
-      "prompt": "Prepare the current workspace \".\" for Python LSP. If preparation is partial, inspect the lsp_status input contract and use that tool to check readiness; do not navigate or query diagnostics until ready.",
-      "expected_alias": "lsp_status",
-      "expected_first_alias": "lsp_prepare_workspace",
+      "prompt": "Prepare the current workspace \".\" for Python LSP. If preparation is partial, inspect the inspect_lsp_status input contract and use that tool to check readiness; do not navigate or query diagnostics until ready.",
+      "expected_alias": "inspect_lsp_status",
+      "expected_first_alias": "prepare_lsp_workspace",
       "required_aliases": [
-        "lsp_prepare_workspace",
+        "prepare_lsp_workspace",
         "read_tool",
-        "lsp_status"
+        "inspect_lsp_status"
       ],
       "forbidden_aliases": [
-        "lsp_diagnostics",
-        "lsp_document_symbols"
+        "read_lsp_diagnostics",
+        "list_lsp_document_symbols"
       ],
       "expected_output": {
         "ready": false

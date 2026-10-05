@@ -266,7 +266,7 @@ class BunshinSandboxTests(unittest.TestCase):
                     "read_file": record(ToolEffectKind.LOCAL_READ),
                     "write_file": record(ToolEffectKind.LOCAL_WRITE),
                     "run_shell": record(ToolEffectKind.LOCAL_WRITE),
-                    "candidate_submit": record(ToolEffectKind.CONTROL),
+                    "submit_candidate": record(ToolEffectKind.CONTROL),
                 },
                 indirect_aliases={},
             )
@@ -277,14 +277,14 @@ class BunshinSandboxTests(unittest.TestCase):
                     {"function": {"name": "read_file"}},
                     {"function": {"name": "write_file"}},
                     {"function": {"name": "run_shell"}},
-                    {"function": {"name": "candidate_submit"}},
+                    {"function": {"name": "submit_candidate"}},
                 ]
 
         selected = _llm_tools_for_allowed(Runtime(), [], action_only=True)
 
         self.assertEqual(
             [item["function"]["name"] for item in selected],
-            ["write_file", "run_shell", "candidate_submit"],
+            ["write_file", "run_shell", "submit_candidate"],
         )
 
     def test_length_recovery_uses_semantics_for_custom_aliases_and_fails_closed(self) -> None:
@@ -1064,7 +1064,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 )
             )
             self.assertIn("once the owned contract, edit path", implementation_prompt)
-            self.assertIn("call candidate_submit immediately", implementation_prompt)
+            self.assertIn("call submit_candidate immediately", implementation_prompt)
 
             no_reference_pack_value = pack.to_dict()
             no_reference_pack_value["workspace"] = {

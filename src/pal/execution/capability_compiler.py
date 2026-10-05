@@ -315,13 +315,13 @@ def _bound_input_model(
 
 def _target_discovery_alias(node_blueprint: CapabilityNodeBlueprint, *, module_id: str) -> str:
     if node_blueprint.target_kind == "endpoint":
-        return "channel_list"
+        return "list_channel_endpoints"
     if node_blueprint.target_kind == "proactive_task":
-        return "proactive_list"
+        return "list_proactive_tasks"
     if node_blueprint.target_kind == "provider":
         return {
-            "memory": "memory_list_providers",
-            "web_search": "web_search_list_providers",
+            "memory": "list_memory_providers",
+            "web_search": "list_web_search_providers",
         }.get(node_blueprint.path_module_id or module_id, "")
     return ""
 

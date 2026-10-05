@@ -450,7 +450,7 @@ class BunshinManagerProvider:
             if decision == "edit" and not str(
                 action.args.get("edit_instruction") or ""
             ).strip():
-                return "Reply with the exact architecture edit instruction, then submit it with bunshin_submit_human_decision."
+                return "Reply with the exact architecture edit instruction, then submit it with submit_bunshin_human_decision."
             try:
                 result = await asyncio.to_thread(
                     BunshinV2WorkflowService(self.runtime_root).submit_human_decision,

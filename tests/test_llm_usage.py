@@ -211,8 +211,8 @@ class LLMUsageLedgerTests(unittest.TestCase):
         )
 
         provider = LLMIntrospectionProvider(runtime=runtime)
-        result = provider.think_level(IntrospectionCall(name="llm_think_level"))
-        active = provider.active(IntrospectionCall(name="llm_active"))
+        result = provider.think_level(IntrospectionCall(name="inspect_llm_thinking_level"))
+        active = provider.active(IntrospectionCall(name="inspect_active_llm"))
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.structured["endpoint_id"], "primary")
@@ -284,15 +284,15 @@ class LLMUsageLedgerTests(unittest.TestCase):
         self.assertIn("1 successful", status["message"])
         self.assertEqual(status["usage"]["cached_input_tokens"], 800)
 
-        introspection = provider.usage(IntrospectionCall(name="llm_usage"))
+        introspection = provider.usage(IntrospectionCall(name="inspect_llm_usage"))
         self.assertEqual(introspection.structured["usage"]["input_tokens"], 1_000)
         self.assertNotIn("by_endpoint", introspection.structured["usage"])
         self.assertNotIn("latest_input_tokens", introspection.structured["usage"])
         self.assertIn("cost_complete", introspection.structured["usage"])
-        detail = provider.usage(IntrospectionCall(name="llm_usage", args={"view": "detail", "endpoint_id": "primary"}))
+        detail = provider.usage(IntrospectionCall(name="inspect_llm_usage", args={"view": "detail", "endpoint_id": "primary"}))
         self.assertEqual(detail.structured["usage"]["latest_input_tokens"], 1_000)
         self.assertNotIn("by_endpoint", detail.structured["usage"])
-        missing = provider.usage(IntrospectionCall(name="llm_usage", args={"endpoint_id": "missing"}))
+        missing = provider.usage(IntrospectionCall(name="inspect_llm_usage", args={"endpoint_id": "missing"}))
         self.assertEqual(missing.structured["reason"], "no_recorded_usage")
 
     def test_failed_request_and_provider_attempt_are_counted_separately(self) -> None:

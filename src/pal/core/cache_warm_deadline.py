@@ -273,11 +273,31 @@ class CacheWarmDeadlineManager:
                 0,
                 int((deadline - datetime.now(timezone.utc)).total_seconds()),
             )
+        scheduled = bool(self._task and not self._task.done())
+        reason = None
+        if not scheduled:
+            if not settings.enabled:
+                reason = "reminder_disabled"
+            elif not snapshot.get("eligible"):
+                reason = "cache_not_eligible"
+            elif not snapshot.get("anchor_epoch"):
+                reason = "cache_anchor_missing"
+            elif int(snapshot.get("anchor_ttl_seconds") or 0) <= 0:
+                reason = "provider_ttl_unavailable"
+            elif snapshot.get("anchor_remaining_ttl_seconds") is not None and int(snapshot["anchor_remaining_ttl_seconds"]) <= 0:
+                reason = "cache_expired"
+            elif _context_tokens(snapshot) < settings.min_prefix_tokens:
+                reason = "prefix_below_minimum"
+            elif str(snapshot.get("anchor_epoch")) in {self._notified_epoch, self._ignored_epoch}:
+                reason = "anchor_already_notified_or_ignored"
+            else:
+                reason = "no_pending_reminder"
         return {
+            "unscheduled_reason": reason,
             "enabled": settings.enabled,
             "lead_seconds": settings.lead_seconds,
             "min_prefix_tokens": settings.min_prefix_tokens,
-            "timer_scheduled": bool(self._task and not self._task.done()),
+            "timer_scheduled": scheduled,
             "scheduled_turn_id": self._scheduled_turn_id,
             "scheduled_epoch": self._scheduled_epoch,
             "scheduled_deadline_at": deadline.isoformat() if deadline else None,

@@ -164,9 +164,9 @@ def test_checklist_echo_covers_state_without_a_second_sync_message():
     from pal.shared.tool_protocol import ToolResultIR
     import json
     turn = L1TurnIR.begin('t')
-    call = ToolCallIR(call_id='check', name='checklist_check', arguments={})
+    call = ToolCallIR(call_id='check', name='complete_checklist_step', arguments={})
     turn = turn.upsert_assistant(LLMMessageIR(role=MessageRole.ASSISTANT, parts=(call,)))
-    turn = turn.append_tool_result(ToolResultIR(call_id='check', name='checklist_check', content=json.dumps(
+    turn = turn.append_tool_result(ToolResultIR(call_id='check', name='complete_checklist_step', content=json.dumps(
         {'echo': {'tag': 'checklist', 'markdown': 'Stage done', 'payload': {'active': True}}})))
     turn, added = advance(turn, [candidate('Stage done', coverage_kind='checklist')])
     assert not added

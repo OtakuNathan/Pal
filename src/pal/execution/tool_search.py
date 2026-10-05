@@ -38,9 +38,9 @@ class ExecutionToolSearchMixin:
             purpose="List a compact directory of registered tool aliases, purposes, modules, and invocation modes.",
             use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
             do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
-            failure_next_steps="Read-only. If expected tools are missing, check exec_show for capability/tool counts.",
+            failure_next_steps="Read-only. If expected tools are missing, check inspect_execution_state for capability/tool counts.",
         ),
-        aliases=("exec_tools",),
+        aliases=("list_tools",),
     )
     def tools(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -127,7 +127,7 @@ class ExecutionDiscoveryCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Read the full capability contract for an execution capability by exact alias.",
             use_when="When the capability contract is absent, changed, or insufficient for correct arguments and execution semantics. Reuse a valid contract already in context; do not read it before every call.",
-            do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use exec_tools).",
+            do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use list_tools).",
             failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
             next_tool_hints=(
                 NextToolHint(
@@ -163,7 +163,7 @@ class ExecutionDiscoveryCapabilityMixin:
             status=RuntimeStatus.OK,
             text="capability definition",
             structured=payload,
-            llm_text=render_tool_definition(payload),
+            llm_text=render_tool_definition(payload, view=call.args.get("view", "input")),
         )
 
 

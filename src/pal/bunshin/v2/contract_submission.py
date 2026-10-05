@@ -25,7 +25,7 @@ from pal.bunshin.v2.submission_errors import (
 CONTRACT_SUBMIT_CAPABILITY = "op_bunshin_contract_submit"
 
 CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
-    "alias": "contract_submit",
+    "alias": "submit_contract",
     "guidance": {
         "purpose": "Submit the Manager-preseeded architect.yaml for independent semantic review.",
         "use_when": (
@@ -86,7 +86,7 @@ def contract_submit_tool_result(
     submission_started = False
     try:
         if dict(call.args or {}):
-            raise SubmissionValidationError("contract_submit takes no arguments")
+            raise SubmissionValidationError("submit_contract takes no arguments")
         assert_work_items_complete(workspace)
         context = SubmissionDraftContext.from_workspace(
             workspace,
@@ -95,7 +95,7 @@ def contract_submit_tool_result(
         store = SubmissionDraftStore(_runtime_root(workspace))
         if not store.uses_role_gateway:
             raise ValueError(
-                "contract_submit requires the assignment-scoped Manager gateway"
+                "submit_contract requires the assignment-scoped Manager gateway"
             )
         snapshot = store.read(context, seed={})
         with submission_validation():
@@ -156,7 +156,7 @@ def _architect_root(workspace: Mapping[str, Any]) -> Path:
                 )
     # Artifact-family roles author inside the isolated role workspace exposed
     # to the worker.  Once that workspace exists, the Manager-preseeded file,
-    # workspace tools, and contract_submit must all name the same projection.
+    # workspace tools, and submit_contract must all name the same projection.
     # Falling through to artifact_stage_dir here creates two architect.yaml
     # files: the worker edits repo_path/architect.yaml while submission keeps
     # validating the untouched stage template.

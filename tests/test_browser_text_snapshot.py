@@ -31,11 +31,11 @@ def test_browser_full_text_is_saved_in_receiving_runtime_and_readable(runtime, b
     service = SimpleNamespace(execute=lambda **kwargs: {
         'document': {'text': text[:1000], 'text_truncated': True, '_full_text': text}})
     host = WebFetchIntrospectionProvider(service=service)
-    call = IntrospectionCall(name='browser_read', meta={
+    call = IntrospectionCall(name='read_browser_page', meta={
         'execution_runtime': runtime, 'turn_id': 'browser-turn',
-        'tool_call': new_tool_call(name='browser_read', args={})})
+        'tool_call': new_tool_call(name='read_browser_page', args={})})
     if broker:
-        transported = host.read(IntrospectionCall(name='browser_read', meta={'broker_run_id': 'run1'}))
+        transported = host.read(IntrospectionCall(name='read_browser_page', meta={'broker_run_id': 'run1'}))
         assert 'text_file' not in transported.structured['document']
         assert text not in transported.llm_text
         assert runtime.result_snapshots.references() == ()
@@ -67,7 +67,7 @@ def test_browser_storage_failure_keeps_preview_without_exposing_full_body(runtim
     monkeypatch.setattr(runtime.result_snapshots, 'capture', fail)
     provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **kwargs: {
         'document': {'text': 'preview', 'text_truncated': True, '_full_text': 'full private body'}}))
-    result = provider.read(IntrospectionCall(name='browser_read', meta={
+    result = provider.read(IntrospectionCall(name='read_browser_page', meta={
         'execution_runtime': runtime, 'turn_id': 'failed-storage'}))
     document = result.structured['document']
     assert document['text'] == 'preview'
@@ -90,7 +90,7 @@ def test_navigate_retains_snapshot_through_runtime_normalization():
     runtime = core.context.execution_runtime
     try:
         result = asyncio.run(runtime.execute_tool_async(new_tool_call(
-            name='browser_navigate', args={'url': 'https://example.com'}), turn_id='navigation'))
+            name='navigate_browser', args={'url': 'https://example.com'}), turn_id='navigation'))
         assert result.ok, result.llm_text
         assert len(result.snapshot_refs) == 1
         assert Path(result.snapshot_refs[0].path).read_text() == text
@@ -151,10 +151,10 @@ def test_all_links_survive_preview_budget_in_receiving_runtime(runtime, broker):
     assert len(payload['document']['links']) == 1
     provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **kwargs: payload))
     if broker:
-        result = provider.read(IntrospectionCall(name='browser_read', meta={'broker_run_id': 'run'}))
+        result = provider.read(IntrospectionCall(name='read_browser_page', meta={'broker_run_id': 'run'}))
         wire = web_result_to_payload(result)
         provider = WebFetchIntrospectionProvider(service=None, read_delegate=lambda _: web_result_from_payload(wire))
-    result = provider.read(IntrospectionCall(name='browser_read', meta={
+    result = provider.read(IntrospectionCall(name='read_browser_page', meta={
         'execution_runtime': runtime, 'turn_id': 'links'}))
     document = result.structured['document']
     assert json.loads(Path(document['links_file']['file_path']).read_text()) == links
@@ -171,6 +171,6 @@ def test_layout_file_preserves_all_elements_beyond_preview_limit(runtime):
                                      args={'selector': '.item', 'max_elements': 1}, timeout_ms=1000)
     assert len(payload['inspection']['elements']) == 1
     provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **kwargs: payload))
-    result = provider.inspect_layout(IntrospectionCall(name='browser_inspect_layout', meta={
+    result = provider.inspect_layout(IntrospectionCall(name='inspect_browser_layout', meta={
         'execution_runtime': runtime, 'turn_id': 'layout'}))
     assert json.loads(Path(result.structured['text_file']['file_path']).read_text())['elements'] == elements

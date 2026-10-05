@@ -335,7 +335,7 @@ workspace_policy: {}
         rejected = asyncio.run(
             scoped.execute_tool_async(
                 new_tool_call(
-                    name="artifact_write",
+                    name="write_workflow_artifact",
                     args={
                         "relative_path": "producer_report.json",
                         "content": "{}",
@@ -349,7 +349,7 @@ workspace_policy: {}
         product = asyncio.run(
             scoped.execute_tool_async(
                 new_tool_call(
-                    name="artifact_write",
+                    name="write_workflow_artifact",
                     args={
                         "relative_path": "checkin.json",
                         "content": '{"status":"recorded"}',
@@ -544,14 +544,14 @@ workspace_policy: {}
         spec = scoped.get_capability_spec("op_bunshin_verification_submit")
         self.assertIsNotNone(spec)
         assert spec is not None
-        self.assertEqual(spec["name"], "verification_submit")
+        self.assertEqual(spec["name"], "submit_verification")
         self.assertEqual(
-            scoped.resolve_capability_address("verification_submit"),
+            scoped.resolve_capability_address("submit_verification"),
             "op_bunshin_verification_submit",
         )
         self.assertEqual(
-            scoped.get_capability_spec("verification_submit")["name"],
-            "verification_submit",
+            scoped.get_capability_spec("submit_verification")["name"],
+            "submit_verification",
         )
         self.assertFalse(spec["input_schema"]["additionalProperties"])
         self.assertEqual(spec["input_schema"]["properties"], {})
@@ -559,7 +559,7 @@ workspace_policy: {}
         result = asyncio.run(
             scoped.execute_tool_async(
                 new_tool_call(
-                    name="verification_submit",
+                    name="submit_verification",
                     args={
                         "cases": [
                             {
@@ -599,8 +599,8 @@ workspace_policy: {}
         )
 
         expected = {
-            "op_bunshin_contract_submit": "contract_submit",
-            "op_bunshin_candidate_submit": "candidate_submit",
+            "op_bunshin_contract_submit": "submit_contract",
+            "op_bunshin_candidate_submit": "submit_candidate",
             "op_bunshin_ask_question": "ask_question",
         }
         for canonical, public_name in expected.items():
@@ -988,7 +988,7 @@ workspace_policy: {}
             checklist,
         )
 
-        submit = str(providers["candidate_submit"]["description"])
+        submit = str(providers["submit_candidate"]["description"])
         self.assertIn(
             "Purpose: Submit the current module Candidate for independent verification.",
             submit,
@@ -997,12 +997,12 @@ workspace_policy: {}
         self.assertIn("without a contracted product delta", submit)
 
         defect = str(
-            providers["candidate_report_architecture_defect"]["description"]
+            providers["report_candidate_architecture_defect"]["description"]
         )
         self.assertIn("changing a public boundary", defect)
         self.assertIn("ordinary implementation difficulty", defect)
 
-        split = str(providers["candidate_request_module_split"]["description"])
+        split = str(providers["request_candidate_module_split"]["description"])
         self.assertIn("genuinely cannot fit one Candidate cycle", split)
         self.assertIn("preferred refactor", split)
 
@@ -1011,11 +1011,11 @@ workspace_policy: {}
         self.assertIn("material ambiguity", question)
         self.assertIn("private implementation choice", question)
 
-        contract = str(providers["contract_submit"]["description"])
+        contract = str(providers["submit_contract"]["description"])
         self.assertIn("independent semantic review", contract)
         self.assertIn("unreconciled declarations", contract)
 
-        review = str(providers["review_submit"]["description"])
+        review = str(providers["submit_review"]["description"])
         self.assertIn("Manager derive its verdict", review)
         self.assertIn("separate Markdown verdict", review)
 
@@ -1023,31 +1023,31 @@ workspace_policy: {}
         self.assertIn("one actionable defect", finding)
         self.assertIn("Do not invent or maintain finding identities", finding)
 
-        verification_pass = str(providers["verification_pass"]["description"])
+        verification_pass = str(providers["submit_verification_pass"]["description"])
         self.assertIn("successful semantic verification outcome", verification_pass)
         self.assertIn("missing required evidence", verification_pass)
 
         module_repair = str(
-            providers["verification_request_module_repair"]["description"]
+            providers["request_verification_module_repair"]["description"]
         )
         self.assertIn("reproduced implementation defects", module_repair)
         self.assertIn("verifier-corpus", module_repair)
 
-        diff_risk = str(providers["verification_run_diff_risk"]["description"])
+        diff_risk = str(providers["run_verification_diff_risk"]["description"])
         self.assertIn("candidate delta review verification case", diff_risk)
         self.assertIn("changed Git review range", diff_risk)
 
-        lsp = str(providers["verification_run_lsp_check"]["description"])
+        lsp = str(providers["run_verification_lsp_check"]["description"])
         self.assertIn("Manager-prepared context", lsp)
         self.assertIn("Do not invoke a language-server executable", lsp)
 
         unavailable = str(
-            providers["verification_check_unavailable"]["description"]
+            providers["record_unavailable_verification"]["description"]
         )
         self.assertIn("required verification obligation", unavailable)
         self.assertIn("Do not use for a failed check", unavailable)
 
-        draft_status = str(providers["verification_draft_status"]["description"])
+        draft_status = str(providers["read_verification_draft_status"]["description"])
         self.assertIn("select the next unfinished risk-directed action", draft_status)
         self.assertIn("Do not poll it repeatedly", draft_status)
 
@@ -1287,7 +1287,7 @@ workspace_policy: {}
 
         provider = scoped.build_llm_tool_contracts()[0]["function"]
 
-        self.assertEqual(provider["name"], "contract_submit")
+        self.assertEqual(provider["name"], "submit_contract")
         self.assertEqual(provider["input_schema"]["properties"], {})
         self.assertIn("architect.yaml", provider["description"])
 

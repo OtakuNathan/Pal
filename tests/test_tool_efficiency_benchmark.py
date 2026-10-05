@@ -18,7 +18,7 @@ def test_fixture_isolates_shell_and_validates_real_lsp_chain(tmp_path, monkeypat
     async def run():
         result = await fixture.execute_tool_async(new_tool_call(name='run_shell',args={'cmd':'touch should-not-exist'}),turn_id='t')
         assert not result.ok and not (tmp_path/'should-not-exist').exists()
-        for name,args in [('lsp_prepare_workspace',{'workspace_root':'.'}),('call_tool',{'name':'lsp_diagnostics','args':{'file':'sample.py','workspace_root':'.'}})]:
+        for name,args in [('prepare_lsp_workspace',{'workspace_root':'.'}),('call_tool',{'name':'read_lsp_diagnostics','args':{'file':'sample.py','workspace_root':'.'}})]:
             result = await fixture.execute_tool_async(new_tool_call(name=name,args=args),turn_id='t')
             assert result.ok, result.llm_text
         assert result.structured['diagnostics'] == []
@@ -46,11 +46,11 @@ def test_fixture_read_cannot_escape_and_page_contains_exact_tail(tmp_path):
 def test_eval_does_not_accept_failed_target_and_requires_complete_chain(tmp_path):
     class LLM:
         async def agenerate(self, _request):
-            result = generation_result_from_values(tool_calls=[new_tool_call(name='call_tool',args={'name':'lsp_diagnostics','args':{'file':'sample.py'}})])
+            result = generation_result_from_values(tool_calls=[new_tool_call(name='call_tool',args={'name':'read_lsp_diagnostics','args':{'file':'sample.py'}})])
             return SimpleNamespace(response=result.response,tool_calls=result.tool_calls,preferred_endpoint_id='test',preferred_model_id='test')
     fixture = FixtureExecution(tmp_path,'lsp-ready')
     try:
-        result = asyncio.run(_run_case(case=EvalCase(case_id='test',category='discovery',prompt='diagnose',expected_alias='lsp_diagnostics',expected_first_alias='lsp_prepare_workspace',max_rounds=1,required_aliases=('lsp_prepare_workspace','lsp_diagnostics')),
+        result = asyncio.run(_run_case(case=EvalCase(case_id='test',category='discovery',prompt='diagnose',expected_alias='read_lsp_diagnostics',expected_first_alias='prepare_lsp_workspace',max_rounds=1,required_aliases=('prepare_lsp_workspace','read_lsp_diagnostics')),
             repetition=1,model='test',temperature=0,reasoning='medium',tool_contracts=[],llm_runtime=LLM(),execution_runtime=fixture))
         assert not result['eventual_correct']
         assert not result['chain_complete']
@@ -78,7 +78,7 @@ def test_affordance_manifest_and_isolated_effects(tmp_path):
     fixture = FixtureExecution(tmp_path, 'affordance-proactive-current')
     try:
         result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='call_tool', args={
-            'name': 'proactive_create', 'args': {'name': 'fixture_followup', 'goal': 'review fixture'},
+            'name': 'upsert_proactive_task', 'args': {'name': 'fixture_followup', 'goal': 'review fixture'},
         }), turn_id='eval:affordance-proactive-current:1'))
         assert result.ok, result.llm_text
         assert result.structured['out_reply_target'] == {'chat_id': '42'}
@@ -88,7 +88,7 @@ def test_affordance_manifest_and_isolated_effects(tmp_path):
 
     fixture = FixtureExecution(tmp_path, 'affordance-navigate-content')
     try:
-        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='browser_navigate', args={
+        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='navigate_browser', args={
             'url': 'https://example.com/',
         }), turn_id='eval:affordance-navigate-content:1'))
         assert result.ok, result.llm_text
@@ -100,7 +100,7 @@ def test_affordance_manifest_and_isolated_effects(tmp_path):
     fixture = FixtureExecution(tmp_path, 'affordance-screenshot')
     try:
         result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='call_tool', args={
-            'name': 'browser_screenshot', 'args': {},
+            'name': 'capture_browser_screenshot', 'args': {},
         }), turn_id='eval:affordance-screenshot:1'))
         assert result.ok, result.llm_text
         assert result.structured['registration'] == 'registered'
@@ -126,13 +126,13 @@ def test_forbidden_navigation_cannot_pass_by_later_checking_status(tmp_path):
     class LLM:
         async def agenerate(self, _request):
             result = generation_result_from_values(tool_calls=[
-                new_tool_call(name='call_tool',args={'name':'lsp_diagnostics','args':{'file':'sample.py'}}),
-                new_tool_call(name='call_tool',args={'name':'lsp_status','args':{}}),
+                new_tool_call(name='call_tool',args={'name':'read_lsp_diagnostics','args':{'file':'sample.py'}}),
+                new_tool_call(name='call_tool',args={'name':'inspect_lsp_status','args':{}}),
             ])
             return SimpleNamespace(response=result.response,tool_calls=result.tool_calls)
     fixture = FixtureExecution(tmp_path,'lsp-partial')
     try:
-        result = asyncio.run(_run_case(case=EvalCase(case_id='partial',category='discovery',prompt='check readiness',expected_alias='lsp_status',expected_first_alias='lsp_status',max_rounds=1,forbidden_aliases=('lsp_diagnostics',)),
+        result = asyncio.run(_run_case(case=EvalCase(case_id='partial',category='discovery',prompt='check readiness',expected_alias='inspect_lsp_status',expected_first_alias='inspect_lsp_status',max_rounds=1,forbidden_aliases=('read_lsp_diagnostics',)),
             repetition=1,model='test',temperature=0,reasoning='medium',tool_contracts=[],llm_runtime=LLM(),execution_runtime=fixture))
         assert result['dangerous_retry']
         assert not result['eventual_correct']

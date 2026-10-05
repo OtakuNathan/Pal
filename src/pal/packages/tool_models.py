@@ -16,11 +16,11 @@ class PackagePrepareInput(StrictToolModel):
 
 
 class PackageStatusInput(StrictToolModel):
-    job_id: str | None = Field(default=None, description="Exact job_id returned by package_install, package_prepare, or plugin_uninstall, or listed by package_status. Omit for recent jobs and package records.")
+    job_id: str | None = Field(default=None, description="Exact job_id returned by install_package, prepare_package, or uninstall_plugin, or listed by inspect_package_status. Omit for recent jobs and package records.")
     wait_ms: int = Field(default=0, ge=0, le=5000, description="Optional bounded wait for this job before returning status; requires job_id. Use when no completion notification is available, not for repeated short polling.")
 
 
 class PluginUninstallInput(StrictToolModel):
-    name: str = Field(description="Exact installed third-party plugin id from plugins_list.")
+    name: str = Field(description="Exact installed third-party plugin id from list_plugins.")
     purge_data: bool = Field(default=False, description="Also delete declared plugin-owned data and retained configuration. Requires [uninstall] data_paths in the plugin manifest; absent declarations reject purge before detach.")
     wait_ms: int = Field(default=1000, ge=0, le=5000, description="Bounded completion wait, not a job deadline. Longer jobs return a handle and notification availability.")

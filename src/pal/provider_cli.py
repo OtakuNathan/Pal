@@ -51,7 +51,7 @@ def run_provider_cli(args: argparse.Namespace) -> int:
             print(f"Installed provider {result['id']} {result['version']} to {target}")
             print(f"Wheel SHA-256: {result['sha256']}")
         print(
-            "Provider files are installed. Run channel_provider_rescan in the running Pal "
+            "Provider files are installed. Run rescan_channel_providers in the running Pal "
             "instance (or restart Pal) to activate the new generation."
         )
     except (OSError, ValueError, RuntimeError) as exc:

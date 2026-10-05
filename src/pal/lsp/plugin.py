@@ -62,7 +62,7 @@ def _file_schema() -> dict[str, Any]:
         "properties": {
             "file": {"type": "string"},
             "workspace_root": {"type": "string"},
-            "name": {"type": "string", "description": "Optional server name returned by lsp_status."},
+            "name": {"type": "string", "description": "Optional server name returned by inspect_lsp_status."},
         },
         "required": ["file"],
     }
@@ -75,7 +75,7 @@ def _doctor_schema() -> dict[str, Any]:
             "file": {"type": "string"},
             "path": {"type": "string"},
             "workspace_root": {"type": "string"},
-            "name": {"type": "string", "description": "Optional server name returned by lsp_status."},
+            "name": {"type": "string", "description": "Optional server name returned by inspect_lsp_status."},
         },
     }
 
@@ -187,9 +187,9 @@ class LspManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
-            do_not_use_when="Checking workspace readiness (use lsp_status). Running server health check (use lsp_doctor).",
-            failure_next_steps="Inspect the reported cause. Correct configuration errors before rescanning; use plugin_reattach name='lsp' when the manager lifecycle needs recovery. cached_snapshot is historical, not a live health check.",
-        ), aliases=("lsp_show",))
+            do_not_use_when="Checking workspace readiness (use inspect_lsp_status). Running server health check (use diagnose_lsp_server).",
+            failure_next_steps="Inspect the reported cause. Correct configuration errors before rescanning; use reload_plugin name='lsp' when the manager lifecycle needs recovery. cached_snapshot is historical, not a live health check.",
+        ), aliases=("inspect_lsp_provider",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self._status_payload()
@@ -203,21 +203,21 @@ class LspManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Report recorded workspace preparation and LSP server health. An absent preparation record alone does not block individual queries.",
             use_when="Inspecting workspace-wide preparation and server health, or diagnosing a readiness problem reported by an LSP operation.",
-            do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. A recent result already establishes readiness for the unchanged workspace. Module-level status (use lsp_show). One server health (use lsp_doctor).",
-            failure_next_steps="Follow the reported cause. workspace_not_prepared means no preparation record exists, not that every query requires preparation. Use lsp_prepare_workspace when project environment setup is needed or changed; use lsp_doctor for a specific server failure.",
+            do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. A recent result already establishes readiness for the unchanged workspace. Module-level status (use inspect_lsp_provider). One server health (use diagnose_lsp_server).",
+            failure_next_steps="Follow the reported cause. workspace_not_prepared means no preparation record exists, not that every query requires preparation. Use prepare_lsp_workspace when project environment setup is needed or changed; use diagnose_lsp_server for a specific server failure.",
             next_tool_hints=(
-                NextToolHint(name="lsp_document_symbols", use_when="A known file's symbol structure must be mapped."),
-                NextToolHint(name="lsp_workspace_symbols", use_when="A symbol must be located by name across the workspace."),
-                NextToolHint(name="lsp_definition", use_when="A known symbol's declaration or definition must be located."),
-                NextToolHint(name="lsp_references", use_when="Consumers of a known symbol must be found."),
-                NextToolHint(name="lsp_hover", use_when="Type or documentation at a known position is needed."),
-                NextToolHint(name="lsp_incoming_calls", use_when="Callers of a symbol at a known file position are needed; preparation is internal."),
-                NextToolHint(name="lsp_outgoing_calls", use_when="Callees of a symbol at a known file position are needed; preparation is internal."),
-                NextToolHint(name="lsp_diagnostics", use_when="A source file needs language-server diagnostics."),
+                NextToolHint(name="list_lsp_document_symbols", use_when="A known file's symbol structure must be mapped."),
+                NextToolHint(name="search_lsp_workspace_symbols", use_when="A symbol must be located by name across the workspace."),
+                NextToolHint(name="find_lsp_definitions", use_when="A known symbol's declaration or definition must be located."),
+                NextToolHint(name="find_lsp_references", use_when="Consumers of a known symbol must be found."),
+                NextToolHint(name="read_lsp_hover", use_when="Type or documentation at a known position is needed."),
+                NextToolHint(name="find_lsp_incoming_calls", use_when="Callers of a symbol at a known file position are needed; preparation is internal."),
+                NextToolHint(name="find_lsp_outgoing_calls", use_when="Callees of a symbol at a known file position are needed; preparation is internal."),
+                NextToolHint(name="read_lsp_diagnostics", use_when="A source file needs language-server diagnostics."),
             ),
         ),
         InputModel=LspPluginLspManagerPluginProviderStatusInput,
-        aliases=("lsp_status",),
+        aliases=("inspect_lsp_status",),
         execution=INDIRECT_LOCAL_READ,
     )
     def status(self, call: CapabilityCall) -> CapabilityResult:
@@ -233,16 +233,16 @@ class LspManagerPluginProvider:
         action_name="prepare_workspace",
         guidance=ToolGuidance(
             purpose="Configure a workspace's LSP project environment and optionally prewarm its language servers.",
-            use_when="Project environment setup is needed, such as C/C++ compile commands or include paths; those settings changed; a query reported missing project context; or workspace prewarming is explicitly requested.",
+            use_when='Project environment setup is needed, such as C/C++ compile commands or include paths; those settings changed; a query reported missing project context; or workspace prewarming is explicitly requested. name pins the server and workspace_root pins the root. Usable project compilation databases, compile_flags.txt and .clangd take precedence over generated fallback flags.',
             do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. Selecting a project alone does not require preparation. Not for non-LSP projects.",
-            failure_next_steps="Follow result-specific recovery. Use lsp_doctor for one failing server or lsp_status when workspace-wide diagnosis is needed; correct the reported environment or server problem before retrying. Reuse known tool contracts.",
+            failure_next_steps="Follow result-specific recovery. Use diagnose_lsp_server for one failing server or inspect_lsp_status when workspace-wide diagnosis is needed; correct the reported environment or server problem before retrying. Reuse known tool contracts.",
             next_tool_hints=(
-                NextToolHint(name="lsp_status", use_when="Preparation was partial or failed and workspace-wide readiness must be inspected."),
-                NextToolHint(name="lsp_doctor", use_when="Preparation was partial or failed and one selected language server needs diagnosis."),
+                NextToolHint(name="inspect_lsp_status", use_when="Preparation was partial or failed and workspace-wide readiness must be inspected."),
+                NextToolHint(name="diagnose_lsp_server", use_when="Preparation was partial or failed and one selected language server needs diagnosis."),
             ),
         ),
         InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
-        aliases=("lsp_prepare_workspace",),
+        aliases=("prepare_lsp_workspace",),
         execution=DIRECT_LOCAL_WRITE,
     )
     def prepare_workspace(self, call: CapabilityCall) -> CapabilityResult:
@@ -253,73 +253,73 @@ class LspManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Check one LSP server's binary, workspace, and initialization readiness.",
             use_when="Diagnosing why a specific language server is not working.",
-            do_not_use_when="Workspace-wide readiness (use lsp_status). Module status (use lsp_show).",
+            do_not_use_when="Workspace-wide readiness (use inspect_lsp_status). Module status (use inspect_lsp_provider).",
             failure_next_steps="If server not found or binary missing, check LSP config and install the language server.",
-        ), InputModel=LspPluginLspManagerPluginProviderDoctorInput, aliases=("lsp_doctor",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderDoctorInput, aliases=("diagnose_lsp_server",), execution=INDIRECT_LOCAL_READ)
     def doctor(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP doctor", self._request_or_error("doctor", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics",
         guidance=ToolGuidance(
             purpose="Read diagnostics (errors/warnings) for a file.",
-            use_when="Checking compile errors or type issues after editing a file.",
+            use_when='Checking compile errors or type issues after editing a file. A successful empty result means no diagnostics were reported. Diagnose readiness only when the operation reports an error.',
             do_not_use_when="Reading file content (use read_file). Searching code (use run_shell rg). No LSP server available.",
             failure_next_steps="A successful empty result means no diagnostics were reported. Diagnose readiness only when the operation reports an error.",
-        ), InputModel=LspPluginLspManagerPluginProviderDiagnosticsInput, aliases=("lsp_diagnostics",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderDiagnosticsInput, aliases=("read_lsp_diagnostics",), execution=INDIRECT_LOCAL_READ)
     def diagnostics(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP diagnostics", self._request_or_error("diagnostics", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover",
         guidance=ToolGuidance(
             purpose="Read hover information (type, docs) at a file position.",
-            use_when="Checking a symbol's type signature or documentation at a specific location.",
-            do_not_use_when="Finding definitions (use lsp_definition). Reading file content (use read_file).",
+            use_when="Checking a symbol's type signature or documentation at a specific location. A successful empty result means no hover information was returned at this position. Diagnose readiness only on a reported error.",
+            do_not_use_when="Finding definitions (use find_lsp_definitions). Reading file content (use read_file).",
             failure_next_steps="A successful empty result means no hover information was returned at this position. Diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderHoverInput, aliases=("lsp_hover",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderHoverInput, aliases=("read_lsp_hover",), execution=INDIRECT_LOCAL_READ)
     def hover(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP hover", self._request_or_error("hover", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition",
         guidance=ToolGuidance(
             purpose="Find definitions at a file position.",
-            use_when="Jumping to where a symbol is defined.",
-            do_not_use_when="Finding references (use lsp_references). Finding implementations (use lsp_implementation).",
+            use_when='Jumping to where a symbol is defined. A successful empty result means no definition was returned. Check the requested position or use text search if needed; diagnose readiness only on a reported error.',
+            do_not_use_when="Finding references (use find_lsp_references). Finding implementations (use find_lsp_implementations).",
             failure_next_steps="A successful empty result means no definition was returned. Check the requested position or use text search if needed; diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderDefinitionInput, aliases=("lsp_definition",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderDefinitionInput, aliases=("find_lsp_definitions",), execution=INDIRECT_LOCAL_READ)
     def definition(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP definition", self._request_or_error("definition", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation",
         guidance=ToolGuidance(
             purpose="Find implementations at a file position.",
-            use_when="Finding concrete implementations of an interface or abstract method.",
-            do_not_use_when="Finding definitions (use lsp_definition). Finding references (use lsp_references).",
+            use_when='Finding concrete implementations of an interface or abstract method. A successful empty result means no implementations were returned. Diagnose readiness only on a reported error.',
+            do_not_use_when="Finding definitions (use find_lsp_definitions). Finding references (use find_lsp_references).",
             failure_next_steps="A successful empty result means no implementations were returned. Diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderImplementationInput, aliases=("lsp_implementation",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderImplementationInput, aliases=("find_lsp_implementations",), execution=INDIRECT_LOCAL_READ)
     def implementation(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP implementation", self._request_or_error("implementation", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references",
         guidance=ToolGuidance(
             purpose="Find references at a file position.",
-            use_when="Finding all places that reference a symbol.",
-            do_not_use_when="Finding definitions (use lsp_definition). Call hierarchy (use lsp_incoming_calls).",
+            use_when='Finding all places that reference a symbol. A successful empty result means no references were returned. Diagnose readiness only on a reported error.',
+            do_not_use_when="Finding definitions (use find_lsp_definitions). Call hierarchy (use find_lsp_incoming_calls).",
             failure_next_steps="A successful empty result means no references were returned. Diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderReferencesInput, aliases=("lsp_references",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderReferencesInput, aliases=("find_lsp_references",), execution=INDIRECT_LOCAL_READ)
     def references(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP references", self._request_or_error("references", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy",
         guidance=ToolGuidance(
             purpose="Prepare call hierarchy items at a file position.",
-            use_when="Inspecting the candidate call hierarchy symbols at a file position when those items themselves are needed.",
-            do_not_use_when="Finding callers or callees at a known file position: call lsp_incoming_calls or lsp_outgoing_calls directly; each prepares its items internally.",
+            use_when='Inspecting the candidate call hierarchy symbols at a file position when those items themselves are needed. If empty, the position may not be a callable symbol.',
+            do_not_use_when="Finding callers or callees at a known file position: call find_lsp_incoming_calls or find_lsp_outgoing_calls directly; each prepares its items internally.",
             failure_next_steps="If empty, the position may not be a callable symbol.",
             next_tool_hints=(
-                NextToolHint(name="lsp_incoming_calls", use_when="The prepared item needs its callers."),
-                NextToolHint(name="lsp_outgoing_calls", use_when="The prepared item needs its callees."),
+                NextToolHint(name="find_lsp_incoming_calls", use_when="The prepared item needs its callers."),
+                NextToolHint(name="find_lsp_outgoing_calls", use_when="The prepared item needs its callees."),
             ),
-        ), InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput, aliases=("lsp_prepare_call_hierarchy",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput, aliases=("prepare_lsp_call_hierarchy",), execution=INDIRECT_LOCAL_READ)
     def prepare_call_hierarchy(self, call: CapabilityCall) -> CapabilityResult:
         return _call_hierarchy_result(
             self._request_or_error("prepare_call_hierarchy", dict(call.args or {})),
@@ -329,40 +329,40 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls",
         guidance=ToolGuidance(
             purpose="Find callers (incoming calls) for a symbol.",
-            use_when="Tracing who calls a specific function or method at a known file position. Preparation is internal; no prior lsp_prepare_call_hierarchy call is needed.",
-            do_not_use_when="Finding callees (use lsp_outgoing_calls). Finding references (use lsp_references).",
+            use_when='Tracing who calls a specific function or method at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callers were returned. Diagnose readiness only on a reported error.',
+            do_not_use_when="Finding callees (use find_lsp_outgoing_calls). Finding references (use find_lsp_references).",
             failure_next_steps="A successful empty result means no callers were returned. Diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput, aliases=("lsp_incoming_calls",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput, aliases=("find_lsp_incoming_calls",), execution=INDIRECT_LOCAL_READ)
     def incoming_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP incoming calls", self._request_or_error("incoming_calls", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls",
         guidance=ToolGuidance(
             purpose="Find callees (outgoing calls) for a symbol.",
-            use_when="Tracing what a specific function or method calls at a known file position. Preparation is internal; no prior lsp_prepare_call_hierarchy call is needed.",
-            do_not_use_when="Finding callers (use lsp_incoming_calls). Finding references (use lsp_references).",
+            use_when='Tracing what a specific function or method calls at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callees were returned. Diagnose readiness only on a reported error.',
+            do_not_use_when="Finding callers (use find_lsp_incoming_calls). Finding references (use find_lsp_references).",
             failure_next_steps="A successful empty result means no callees were returned. Diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput, aliases=("lsp_outgoing_calls",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput, aliases=("find_lsp_outgoing_calls",), execution=INDIRECT_LOCAL_READ)
     def outgoing_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP outgoing calls", self._request_or_error("outgoing_calls", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols",
         guidance=ToolGuidance(
             purpose="List document symbols (functions, classes, variables) for a file.",
-            use_when="Mapping the structure of a file before reading it in detail.",
-            do_not_use_when="Workspace-wide symbol search (use lsp_workspace_symbols). Reading file content (use read_file).",
+            use_when='Mapping the structure of a file before reading it in detail. A successful empty result means no document symbols were returned. Read the file if its contents are needed; diagnose readiness only on a reported error.',
+            do_not_use_when="Workspace-wide symbol search (use search_lsp_workspace_symbols). Reading file content (use read_file).",
             failure_next_steps="A successful empty result means no document symbols were returned. Read the file if its contents are needed; diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderDocumentSymbolsInput, aliases=("lsp_document_symbols",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderDocumentSymbolsInput, aliases=("list_lsp_document_symbols",), execution=INDIRECT_LOCAL_READ)
     def document_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP document symbols", self._request_or_error("document_symbols", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols",
         guidance=ToolGuidance(
             purpose="Search workspace symbols by name.",
-            use_when="Finding where a symbol is defined across the entire workspace.",
-            do_not_use_when="One file's symbols (use lsp_document_symbols). Text search (use run_shell rg).",
+            use_when='Finding where a symbol is defined across the entire workspace. A successful empty result means no matching symbols were returned. Refine the query or use text search if needed; diagnose readiness only on a reported error.',
+            do_not_use_when="One file's symbols (use list_lsp_document_symbols). Text search (use run_shell rg).",
             failure_next_steps="A successful empty result means no matching symbols were returned. Refine the query or use text search if needed; diagnose readiness only on a reported error.",
-        ), InputModel=LspPluginLspManagerPluginProviderWorkspaceSymbolsInput, aliases=("lsp_workspace_symbols",), execution=INDIRECT_LOCAL_READ)
+        ), InputModel=LspPluginLspManagerPluginProviderWorkspaceSymbolsInput, aliases=("search_lsp_workspace_symbols",), execution=INDIRECT_LOCAL_READ)
     def workspace_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP workspace symbols", self._request_or_error("workspace_symbols", dict(call.args or {})))
 
@@ -383,9 +383,9 @@ class LspManagerPluginProvider:
         guidance=ToolGuidance(
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
-            do_not_use_when="Restarting the manager (use plugin_reattach with name='lsp').",
-            failure_next_steps="Inspect lsp_show and lsp_status to reconcile manager readiness. Correct LSP config syntax or server availability before retrying.",
-        ), aliases=("lsp_rescan",), execution=INDIRECT_CONTROL)
+            do_not_use_when="Restarting the manager (use reload_plugin with name='lsp').",
+            failure_next_steps="Use inspect_lsp_provider and inspect_lsp_status to reconcile manager readiness. Correct LSP config syntax or server availability before retrying.",
+        ), aliases=("rescan_lsp_servers",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
@@ -547,7 +547,7 @@ class LspManagerPluginProvider:
 
     def _rpc_error(self, method: str, exc: Exception) -> dict[str, Any]:
         self.last_error = f"{exc.__class__.__name__}: {exc}"
-        # Keep cached observations available through lsp_show, never as this
+        # Keep cached observations available through inspect_lsp_provider, never as this
         # request's operation/result or as evidence of a running process.
         current = self._status_payload()
         current.pop("cached_snapshot", None)
@@ -608,7 +608,7 @@ def _prepare_workspace_result(payload: dict[str, Any]) -> CapabilityResult:
                 arguments["workspace_root"] = workspace_root
             affordances.append(
                 ToolAffordance(
-                    tool="lsp_doctor",
+                    tool="diagnose_lsp_server",
                     arguments=arguments,
                     reason=(
                         f"Language server {target!r} is not ready for this workspace; "
@@ -619,13 +619,13 @@ def _prepare_workspace_result(payload: dict[str, Any]) -> CapabilityResult:
         elif workspace_root:
             affordances.append(
                 ToolAffordance(
-                    tool="lsp_status",
+                    tool="inspect_lsp_status",
                     arguments={"workspace_root": workspace_root},
                     reason="Workspace preparation did not reach readiness; inspect its server readiness.",
                 )
             )
         else:
-            recovery_hint = "Preparation did not reach readiness; inspect workspace readiness with lsp_status."
+            recovery_hint = "Preparation did not reach readiness; inspect workspace readiness with inspect_lsp_status."
     result = _capability_from_rpc("LSP workspace preparation", projected)
     return CapabilityResult(
         status=result.status,
@@ -658,12 +658,12 @@ def _call_hierarchy_result(payload: dict[str, Any], args: dict[str, Any]) -> Cap
         affordances.extend(
             (
                 ToolAffordance(
-                    tool="lsp_incoming_calls",
+                    tool="find_lsp_incoming_calls",
                     arguments=dict(continuation),
                     reason="The prepared item can resolve its callers at this position.",
                 ),
                 ToolAffordance(
-                    tool="lsp_outgoing_calls",
+                    tool="find_lsp_outgoing_calls",
                     arguments=dict(continuation),
                     reason="The prepared item can resolve its callees at this position.",
                 ),

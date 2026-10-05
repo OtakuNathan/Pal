@@ -180,7 +180,7 @@ Non-coder profiles get an isolated folder workspace:
 - `data/bunshin/workspaces/{run_id}_{profile}/logs/`
 - `data/bunshin/workspaces/{run_id}_{profile}/deliverables/`
 
-The runner exposes scoped deliverable tools so bunshins can write structured files under `artifact_dir`. General report-style profiles use `artifact_write`; software architect profiles use plan builder tools that compile and register the primary `plan.json` artifact. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
+The runner exposes scoped deliverable tools so bunshins can write structured files under `artifact_dir`. General report-style profiles use `write_workflow_artifact`; software architect profiles use plan builder tools that compile and register the primary `plan.json` artifact. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
 
 When a Git-backed runner finishes a milestone:
 
@@ -285,7 +285,7 @@ Current builtin profiles are `generic`, `architect`, `coder`, `reviewer`, `revie
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones. Runtime files seeded from builtin templates carry `[metadata] builtin = true`; provisioning refreshes those managed seed copies on upgrade after writing a timestamped backup under `plugins/bunshin/profile_backups/`. Custom runtime profiles should omit that builtin marker or use a distinct profile id.
 
-Profiles may declare capability groups. `core_bunshin_read` includes scoped discovery/read/call plus read-only `memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `web_search` and `web_read`, so research-capable bunshins reuse Pal's existing web tools instead of owning a second web integration.
+Profiles may declare capability groups. `core_bunshin_read` includes scoped discovery/read/call plus read-only `recall_memory`, so runners can recall relevant experience without memory-write access. `web_research` expands to `web_search` and `web_read`, so research-capable bunshins reuse Pal's existing web tools instead of owning a second web integration.
 
 Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, workflow dispatch starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the bunshin deny policy. For `profile_only`, the profile is the upper bound; public calls cannot expand it with ad hoc `allowed_capabilities`.
 
@@ -363,7 +363,7 @@ Denied by default:
 
 This prevents recursive spawn/kill/list/read behavior. A task runner does not need to know the bunshin control plane exists; Pal observes and manages that layer through the bunshin module capabilities.
 
-`artifact_write` and planner `plan_*` builder tools are internal exceptions to the `op_bunshin_*` deny rule. `artifact_write` is scoped to `workspace.artifact_dir`; planner builder tools only maintain a planner-local draft and compile it into the normal primary `plan.json` artifact. Neither path can control the bunshin subsystem.
+`write_workflow_artifact` and planner `plan_*` builder tools are internal exceptions to the `op_bunshin_*` deny rule. `write_workflow_artifact` is scoped to `workspace.artifact_dir`; planner builder tools only maintain a planner-local draft and compile it into the normal primary `plan.json` artifact. Neither path can control the bunshin subsystem.
 
 ## Runner Loop
 
@@ -373,11 +373,11 @@ If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwa
 
 `TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: discovery/read/call, file tools, `delete_path`, `git`, `run_shell` (including bounded `tree`/`find` listings), `search`, artifact and semantic builder tools, web tools, memory recall, and LSP/code-intelligence tools when those capabilities are allowed. Immutable reference roots are projected read-only at stable `/pal/references/<name>` paths inside the sandbox. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `artifact_write` is available, the runner prompt asks the bunshin to write the primary deliverable to `artifact_dir` and keep the final summary short. Software architect profiles instead use the plan builder tools, starting with `plan_begin`, preferably adding a complete ordered module list through `plan_add_module_outlines_batch`, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. Single-outline and begin/end tools remain available for local repair or incremental construction. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `write_workflow_artifact` is available, the runner prompt asks the bunshin to write the primary deliverable to `artifact_dir` and keep the final summary short. Software architect profiles instead use the plan builder tools, starting with `plan_begin`, preferably adding a complete ordered module list through `plan_add_module_outlines_batch`, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. Single-outline and begin/end tools remain available for local repair or incremental construction. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 
-If a tool or capability call fails and read-only `memory_recall` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
+If a tool or capability call fails and read-only `recall_memory` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
 
 High-risk calls declared by the task approval policy pause the runner and emit `approval_requested`. Reject or edit decisions block the milestone; accept continues the tool call.
 

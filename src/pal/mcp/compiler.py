@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -60,6 +63,7 @@ class McpCompiler:
         subtree = MountedSubtreeHandle(module_id=module_id)
         skills: list[SkillDescriptor] = []
         used_paths: set[str] = set()
+        public_aliases = _projection_aliases(snapshots)
         compiled_snapshots: list[McpDiscoverySnapshot] = []
 
         for snapshot in sorted(snapshots, key=lambda item: item.server_id):
@@ -72,6 +76,7 @@ class McpCompiler:
                     invoker=invoker,
                     tool=tool,
                     used_paths=used_paths,
+                    public_aliases=public_aliases,
                 )
                 warnings.extend(tool_warnings)
                 if tool_rejection is not None:
@@ -88,6 +93,7 @@ class McpCompiler:
                     invoker=invoker,
                     prompt=prompt,
                     used_paths=used_paths,
+                    public_aliases=public_aliases,
                 )
                 _append_capability(subtree, descriptor, bound_action)
                 skills.append(
@@ -115,6 +121,7 @@ class McpCompiler:
         invoker: McpProjectionInvoker,
         tool: McpToolSpec,
         used_paths: set[str],
+        public_aliases: dict[tuple[str, str, str], str],
     ):
         if not tool.name:
             return None, None, (), McpRejectedItem(kind="tool", external_name="", reason="missing_tool_name", raw=tool.raw)
@@ -143,7 +150,7 @@ class McpCompiler:
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         tool_key = sanitize_name(tool.name, fallback="tool")
         canonical_path = _unique_path(f"op_mcp_{server_key}_tool_{tool_key}", used_paths)
-        alias = f"mcp_{server_key}_{tool_key}"
+        alias = public_aliases[("call", snapshot.server_id, tool.name)]
         if tool.output_schema is None:
             output_schema = McpToolOutput.model_json_schema(mode="validation")
         elif isinstance(tool.output_schema, dict):
@@ -226,11 +233,12 @@ class McpCompiler:
         invoker: McpProjectionInvoker,
         prompt,
         used_paths: set[str],
+        public_aliases: dict[tuple[str, str, str], str],
     ) -> tuple[CapabilityDescriptor, BoundCapabilityAction]:
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         prompt_key = sanitize_name(prompt.name, fallback="prompt")
         canonical_path = _unique_path(f"op_mcp_{server_key}_prompt_{prompt_key}_render", used_paths)
-        alias = f"mcp_{server_key}_{prompt_key}_render"
+        alias = public_aliases[("render", snapshot.server_id, prompt.name)]
         descriptor = CapabilityDescriptor(
             name=alias,
             canonical_path=canonical_path,
@@ -323,6 +331,35 @@ class McpCompiler:
                 },
             },
         )
+
+
+def _public_alias(verb: str, server_key: str, object_key: str) -> str:
+    alias = f"{verb}_mcp_{server_key}_{object_key}"
+    if len(alias) <= 64:
+        return alias
+    suffix = hashlib.sha256(alias.encode("utf-8")).hexdigest()[:12]
+    return alias[:51] + "_" + suffix
+
+
+def _projection_aliases(snapshots: tuple[McpDiscoverySnapshot, ...]) -> dict[tuple[str, str, str], str]:
+    """Disambiguate normalized identities, including server/object boundary collisions."""
+    groups: dict[str, set[tuple[str, str, str]]] = {}
+    for snapshot in snapshots:
+        for verb, items in (("call", snapshot.tools), ("render", snapshot.prompts)):
+            for item in items:
+                identity = (verb, snapshot.server_id, item.name)
+                alias = _public_alias(verb, sanitize_name(snapshot.server_id, fallback="server"),
+                                      sanitize_name(item.name, fallback="tool" if verb == "call" else "prompt"))
+                groups.setdefault(alias, set()).add(identity)
+    resolved = {}
+    for alias, identities in groups.items():
+        for identity in identities:
+            if len(identities) == 1:
+                resolved[identity] = alias
+            else:
+                suffix = hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode("utf-8")).hexdigest()[:12]
+                resolved[identity] = alias[:51] + "_" + suffix
+    return resolved
 
 
 def mcp_module_id(server_id: str) -> str:

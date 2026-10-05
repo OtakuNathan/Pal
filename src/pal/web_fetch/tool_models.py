@@ -10,7 +10,7 @@ from pal.execution.tool_facade import StrictToolModel, StructuredToolOutput
 TARGET_DESCRIPTION = (
     "Current snapshot ref such as e15, or a unique CSS selector (#main > button.submit) "
     "or Playwright locator (getByRole('button', { name: 'Submit' })). "
-    "Obtain refs from browser_snapshot/browser_find on the current page; refresh after navigation or stale-ref errors."
+    "Obtain refs from capture_browser_snapshot/find_browser_text on the current page; refresh after navigation or stale-ref errors."
 )
 
 
@@ -30,7 +30,7 @@ BrowserNavigateInput = _strict_model(
 BrowserReadInput = _strict_model(
     "BrowserReadInput",
     {
-        "url": (str | None, Field(None, max_length=8192)),
+        "url": (str | None, Field(None, max_length=8192, description="Omit to read the current page; supplying a URL navigates first.")),
         "timeout_ms": (int, Field(60000, ge=1000, le=120000, description="Timeout in milliseconds.")),
         "max_chars": (int, Field(12000, ge=1000, le=100000, description="Inline page-text preview budget; the complete captured text is saved to text_file for rg/read_file.")),
         "max_links": (int, Field(80, ge=0, le=500, description="Maximum inline links; the complete captured list is saved to links_file. Zero skips link collection.")),
@@ -135,14 +135,14 @@ class BrowserTabsInput(StrictToolModel):
         "then": {"required": ["index"], "properties": {"index": {"type": "integer", "minimum": 0}}},
     })
     operation: Literal["list", "new", "select", "close"] = "list"
-    index: int | None = Field(None, ge=0, description="Zero-based index from browser_tabs list; required for select. Omit for close to close the current tab.")
-    url: str | None = Field(None, max_length=8192)
+    index: int | None = Field(None, ge=0, description="Zero-based index from manage_browser_tabs list; required for select. Omit for close to close the current tab. Ignored for list/new.")
+    url: str | None = Field(None, max_length=8192, description="Used only by new; ignored by list/select/close.")
     timeout_ms: int = Field(60000, ge=1000, le=120000)
 
     @model_validator(mode="after")
     def validate_operation(self):
         if self.operation == "select" and self.index is None:
-            raise ValueError("index is required for select; copy it from browser_tabs list.")
+            raise ValueError("index is required for select; copy it from manage_browser_tabs list.")
         return self
 
 
@@ -150,7 +150,7 @@ BrowserDialogInput = _strict_model(
     "BrowserDialogInput",
     {
         "operation": (Literal["accept", "dismiss"], Field(...)),
-        "prompt": (str | None, Field(None, max_length=4000)),
+        "prompt": (str | None, Field(None, max_length=4000, description="Prompt response for accept; ignored for dismiss.")),
         "timeout_ms": (int, Field(15000, ge=1000, le=120000, description="Timeout in milliseconds.")),
     },
 )
@@ -166,7 +166,7 @@ BrowserEvaluateInput = _strict_model(
 BrowserNetworkInput = _strict_model(
     "BrowserNetworkInput",
     {
-        "operation": (Literal["start", "read", "clear"], Field("read")),
+        "operation": (Literal["start", "read", "clear"], Field("read", description="url_filter/since/limit/clear_on_read apply only to read; start/clear ignore them. Navigation retires the capture hook; install it again afterwards.")),
         "url_filter": (str | None, Field(None, max_length=500)),
         "since": (int, Field(0, ge=0, description="Exclusive sequence cursor: pass next_since from the previous read. Reset to 0 after navigation.")),
         "limit": (int, Field(50, ge=1, le=200)),
@@ -204,8 +204,8 @@ class BrowserExtensionManageInput(StrictToolModel):
              "then": {"required": ["extension_id"], "properties": {"extension_id": {"type": "string", "minLength": 1, "pattern": r"\S"}}}},
         ]})
     operation: Literal["mount", "unmount", "reload"]
-    path: str | None = Field(None, description="Required for mount: extension directory path.")
-    extension_id: str | None = Field(None, description="Required for reload/unmount: ID returned by extension management.")
+    path: str | None = Field(None, description="Required for mount: extension directory path; ignored for reload/unmount.")
+    extension_id: str | None = Field(None, description="Required for reload/unmount: ID returned by extension management; ignored for mount.")
     timeout_ms: int = Field(20000, ge=1000, le=120000)
 
     @model_validator(mode="after")

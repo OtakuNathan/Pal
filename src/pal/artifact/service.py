@@ -521,7 +521,7 @@ class ArtifactManager:
                 representation=representation,
                 metadata=self._record_dict(record),
                 reason="representation_unavailable",
-                next_actions=("Use artifact_info to inspect available representations.",),
+                next_actions=("Use inspect_artifact_info to inspect available representations.",),
             )
         if selected.representation_kind == REPRESENTATION_METADATA:
             return ArtifactReadResult(
@@ -541,7 +541,7 @@ class ArtifactManager:
                 representation=selected.representation_kind,
                 metadata={**self._record_dict(record), "representation": self._representation_dict(selected)},
                 reason="representation_not_text_readable",
-                next_actions=("Use a vision-capable model for image representations.", "Use artifact_info for metadata."),
+                next_actions=("Use a vision-capable model for image representations.", "Use inspect_artifact_info for metadata."),
             )
         text = Path(selected.path).read_text(encoding="utf-8", errors="replace") if selected.path else selected.text_preview
         truncated = len(text) > max_chars
@@ -617,6 +617,7 @@ class ArtifactManager:
             "artifact": self._record_dict(record),
             "hot_state": hot.__dict__,
             "ttl_refreshed": self.writable,
+            "ttl_refresh_reason": "refreshed" if self.writable else "read-only runtime has no write authority to renew TTL",
         }
 
     def content_search(
@@ -866,7 +867,7 @@ class ArtifactManager:
             page_guidance = (
                 "For PDFs, read a known page directly using page_file_pattern (1-based page); "
                 "page_index_file_path lists page processing status, text lines, and image_file_path. "
-                "PDF pixels are not attached. When needed, use artifact_import with the page image_file_path; "
+                "PDF pixels are not attached. When needed, use import_artifact with the page image_file_path; "
                 "image injection requires a vision-capable model and available image budget. "
                 if "page_index_file_path" in text_file else ""
             )
@@ -1045,11 +1046,11 @@ class ArtifactManager:
     def _ref_from_record(self, record: ArtifactRecord) -> ArtifactRef:
         reps = self.repository.list_representations(record.artifact_id)
         text_file = self._text_file_for_record(record)
-        actions = ["artifact_info"]
+        actions = ["inspect_artifact_info"]
         if not text_file and any(self.representation_registry.is_textual(rep.representation_kind) for rep in reps):
-            actions.extend(("read_artifact", "artifact_grep"))
+            actions.extend(("read_artifact", "grep_artifact"))
         if record.kind == ARTIFACT_KIND_AUDIO and not any(rep.representation_kind == REPRESENTATION_TRANSCRIPT for rep in reps):
-            actions.append("artifact_transcribe")
+            actions.append("transcribe_artifact")
         return ArtifactRef(
             artifact_id=record.artifact_id,
             kind=record.kind,
@@ -1277,15 +1278,15 @@ def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
 def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_IMAGE:
         if image_inlined:
-            return ("artifact_info",)
-        return ("artifact_info",)
+            return ("inspect_artifact_info",)
+        return ("inspect_artifact_info",)
     if record.kind in {ARTIFACT_KIND_TEXT, ARTIFACT_KIND_PDF}:
         if record.normalized_path or record.metadata.get("page_index_file_path"):
-            return ("artifact_info",)
-        return ("artifact_info", "read_artifact", "artifact_grep")
+            return ("inspect_artifact_info",)
+        return ("inspect_artifact_info", "read_artifact", "grep_artifact")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("artifact_info", "artifact_transcribe")
-    return ("artifact_info",)
+        return ("inspect_artifact_info", "transcribe_artifact")
+    return ("inspect_artifact_info",)
 
 
 def _terms(text: str) -> list[str]:
@@ -1301,9 +1302,9 @@ def _snippet(text: str, terms: list[str], *, max_chars: int) -> str:
 
 def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
-        return ("Use artifact_grep for specific terms.", "Use read_artifact with page or chunk for focused reading.")
+        return ("Use grep_artifact for specific terms.", "Use read_artifact with page or chunk for focused reading.")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("Use artifact_transcribe if a transcript is needed.",)
+        return ("Use transcribe_artifact if a transcript is needed.",)
     if record.kind == ARTIFACT_KIND_IMAGE:
         return ("Use a vision-capable model for image content.",)
     return ()

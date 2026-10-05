@@ -168,7 +168,7 @@ def build_channel_provider(context):
 
 `context` 包含 runtime root、provider 目录、manifest，以及 manager/runtime/repository/secret resolver 等 channel provider 需要的边界对象。
 
-`channel_provider_rescan` 的语义是：
+`rescan_channel_providers` 的语义是：
 
 - 重新扫描 `runtime_root/channel/providers`
 - 只比较物理新增、删除、enable/disable；不 fingerprint 源码，也不热重载 unchanged provider
@@ -180,10 +180,10 @@ def build_channel_provider(context):
 - manifest 解析失败不应把一个已知 provider 误判为物理删除
 - 不替 provider 决定 endpoint 的具体 attach 机制
 
-`channel_reload_provider(provider_id)` 是显式的 detach → unload → load → attach；
+`reload_channel_provider(provider_id)` 是显式的 detach → unload → load → attach；
 它不接受 endpoint id，也不能 reload core recovery socket。失败时如实报告，Hub 与
 backlog 保留且 capability 保持撤回，不创建并行代码代次或隐式 rollback runtime。
-`channel_restart_endpoint(endpoint_id)` 只重建一个 endpoint/transport，不重新导入
+`restart_channel_endpoint(endpoint_id)` 只重建一个 endpoint/transport，不重新导入
 provider code。
 
 每个物理 endpoint id 在 `ChannelRuntime` 中有稳定 `EndpointHub`。Hub 是内部
@@ -292,8 +292,8 @@ coalesce。预期 lifecycle gap 不会上升为 Safe Mode failure。队列只保
 
 主动发消息与当前 turn 的 reply 是两个契约：
 
-- LLM 只调用 `channel_send_message(channel_id, message)`
-- `channel_id` 是 `channel_list` 返回的已配置 endpoint id
+- LLM 只调用 `send_channel_message(channel_id, message)`
+- `channel_id` 是 `list_channel_endpoints` 返回的已配置 endpoint id
 - `ChannelRuntime` 负责解析 endpoint，并机械检查 attached/enabled 状态
 - endpoint 内部只接收 `send_message(message)`，收件人由 endpoint 的持久化 binding 决定
 - Telegram chat id、WebSocket peer URL 等 provider-specific target 不得出现在 LLM 输入中
@@ -609,7 +609,7 @@ interval while owners remain. It does not count as an END or affect model work.
 
 ### Checklist completion delivery
 
-The final `checklist_check` and a fully completed `checklist_upsert` close the
+The final `complete_checklist_step` and a fully completed `upsert_checklist` close the
 local cursor atomically and declare one independent `channel_event` with
 `tag=checklist`, `action=clear` and `active=false`. Core routes it through the same
 ordered message/stream queue as display updates, independently of echo text limits.
@@ -621,6 +621,6 @@ Delete failures preserve the target for existing channel delivery retries.
 
 Active checklist echoes display at most eight steps near the first unfinished
 step, with each step shortened to 160 characters and omitted counts shown. This
-presentation limit does not shorten the stored plan or `checklist_show` result.
+presentation limit does not shorten the stored plan or `read_checklist` result.
 Clear events carry no plan or completion markdown, so a long checklist cannot
 suppress cleanup. Channel control metadata stays out of the LLM-facing text.
