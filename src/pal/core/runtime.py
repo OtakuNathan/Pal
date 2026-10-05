@@ -1446,6 +1446,9 @@ class PalCore(MemoryMaintenanceMixin):
             return
         set_active_endpoint = getattr(llm_runtime, "set_active_endpoint", None)
         if callable(set_active_endpoint):
+            from pal.llm.runtime import LLMRuntime
+            if isinstance(llm_runtime, LLMRuntime):
+                llm_runtime.resume_subscription(requested)
             set_active_endpoint(requested)
         else:
             settings_repository = getattr(llm_runtime, "settings_repository", None)

@@ -36,6 +36,7 @@ from pal.llm.shapes.builder import (
 )
 from pal.llm.shapes.common import json_object, responses_tool_definition, tool_results
 from pal.shared.json_values import thaw_json
+from pal.llm.chatgpt import ChatGPTError, UNSUPPORTED_PARAMETERS, is_chatgpt, response_error
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
     wire_shape: WireShape = WireShape.OPENAI_RESPONSE
 
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
+        subscription = is_chatgpt(context.capabilities)
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
@@ -68,7 +70,7 @@ class OpenAIResponseCodec(ShapeCodecBase):
                     if text:
                         input_items.append(
                             {
-                                "role": message.role.value,
+                                "role": "developer" if subscription else message.role.value,
                                 "content": [{"type": "input_text", "text": text}],
                             }
                         )
@@ -157,6 +159,16 @@ class OpenAIResponseCodec(ShapeCodecBase):
             if not request_parameter_supported(context, "reasoning.context"):
                 raise ShapeDecodeError("endpoint does not support requested reasoning.context")
             payload.setdefault("reasoning", {})["context"] = policy.reasoning_context
+        if subscription:
+            for parameter in UNSUPPORTED_PARAMETERS:
+                payload.pop(parameter, None)
+            payload["store"] = False
+            if request.tools:
+                payload["tools"] = [{"type": "namespace", "name": "pal",
+                                     "description": "Pal tools", "tools": payload["tools"]}]
+            for item in input_items:
+                if item.get("type") == "function_call":
+                    item["namespace"] = "pal"
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
@@ -172,6 +184,24 @@ class OpenAIResponseDecoder:
         self.complete = False
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+        if is_chatgpt(self.context.capabilities):
+            event = str(frame.payload.get("type") or "")
+            if not event:
+                raise ChatGPTError("missing_stream_event")
+            response = frame.payload.get("response")
+            if event == "response.completed" and isinstance(response, Mapping):
+                for item in response.get("output", ()):
+                    if isinstance(item, Mapping) and item.get("namespace") not in (None, "pal"):
+                        raise ChatGPTError("unexpected_tool_namespace")
+            if event in {"response.failed", "error"}:
+                self.builder.discard_tool_calls()
+                raise response_error(frame.payload.get("response") or frame.payload)
+            if event == "response.incomplete":
+                self.builder.discard_tool_calls()
+                raise ChatGPTError("response_incomplete")
+            item = frame.payload.get("item")
+            if isinstance(item, Mapping) and item.get("namespace") not in (None, "pal"):
+                raise ChatGPTError("unexpected_tool_namespace")
         self.builder.observe_frame(frame)
         payload = dict(frame.payload)
         if isinstance(payload.get("output"), (list, tuple)):
@@ -230,6 +260,9 @@ class OpenAIResponseDecoder:
         return tuple(updates)
 
     def finish(self) -> LLMResponseIR:
+        if is_chatgpt(self.context.capabilities) and not self.complete:
+            self.builder.discard_tool_calls()
+            raise ChatGPTError("stream_interrupted")
         if not self.builder.complete:
             self._discard_open_tools()
             self.builder.mark_complete(

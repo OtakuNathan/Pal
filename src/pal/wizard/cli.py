@@ -416,6 +416,62 @@ def run_dependency_doctor(*, runtime_root: Path | None = None) -> int:
     return 0 if not blocking else 2
 
 
+def run_llm_setup_wizard(*, runtime_root: Path) -> int:
+    """Narrow settings flow: never provisions channels, plugins or services."""
+    from pal.foundation import PalV2Database
+    from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
+    from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
+    from pal.llm.schema import migrate_llm_endpoint_schema
+    from pal.wizard.prompts import WizardLLMEndpoint, prompt_llm_endpoints_with_current
+
+    runtime_root = Path(runtime_root).expanduser().resolve()
+    db_path = runtime_root / DEFAULT_DB_FILENAME
+    if not db_path.is_file():
+        print(f"Existing runtime required at {runtime_root}; run pal wizard for initial setup.")
+        return 2
+    migrate_llm_endpoint_schema(db_path)
+    database = PalV2Database(db_path)
+    database.initialize((LLMEndpointModel, PalRuntimeSettingModel))
+    try:
+        endpoints = []
+        for ep in LLMEndpointRepository().list_enabled():
+            endpoints.append(WizardLLMEndpoint(
+                endpoint_id=ep.endpoint_id, model_id=ep.model_id, wire_shape=ep.wire_shape,
+                base_url=ep.base_url, api_key=None, context_window=ep.context_window,
+                max_output_tokens=ep.max_output_tokens, thinking_levels=list(ep.thinking_levels_blob),
+                default_thinking_level=ep.default_thinking_level, supports_tools=ep.supports_tools,
+                supports_streaming=ep.supports_streaming, supports_vision=ep.supports_vision,
+                priority=ep.priority, provider=ep.provider, auth_kind=ep.auth_kind,
+                credential_ref=ep.credential_ref, capabilities_blob=dict(ep.capabilities_blob or {}), notes=ep.notes,
+            ))
+        collected, active = prompt_llm_endpoints_with_current(
+            endpoints, RuntimeSettingRepository().get_active_llm_endpoint_id(), runtime_root=runtime_root,
+        )
+        for endpoint in collected:
+            print(f"  {endpoint.endpoint_id}: {endpoint.model_id} ({endpoint.auth_kind})")
+        removed = {ep.endpoint_id for ep in endpoints} - {ep.endpoint_id for ep in collected}
+        for endpoint_id in sorted(removed):
+            print(f"  Remove endpoint: {endpoint_id} (saved credentials retained)")
+        print(f"  Active endpoint: {active}")
+        if not ask_yes_no("  Save LLM configuration?", True):
+            return 1
+        with database.peewee_db.atomic():
+            WizardService().save_llm_endpoints(runtime_root, collected, active)
+            for endpoint_id in removed:
+                LLMEndpointRepository().delete(endpoint_id)
+                RuntimeSettingRepository().delete_think_level(endpoint_id)
+        print("Saved. Send /refresh_llm_endpoint in Pal to load endpoint changes. Subscription failures never switch to an API endpoint automatically.")
+        return 0
+    except (ValueError, OSError) as exc:
+        print(f"LLM setup failed: {exc}")
+        return 2
+    except (KeyboardInterrupt, EOFError):
+        print("\nLLM setup cancelled.")
+        return 1
+    finally:
+        database.close()
+
+
 def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     print(_PAL_LOGO)
     print("  Interactive Setup Wizard")

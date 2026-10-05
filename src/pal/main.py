@@ -32,6 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=default_runtime_root(),
         help=RUNTIME_ROOT_HELP,
     )
+    setup_parser.add_argument("--llm", action="store_true", help="Manage only LLM endpoints and ChatGPT authorization")
     setup_parser.set_defaults(command="setup")
 
     subparsers.add_parser("doctor", help="Check local Pal runtime dependencies").add_argument("--runtime-root", type=Path, default=default_runtime_root(), help=RUNTIME_ROOT_HELP)
@@ -171,8 +172,11 @@ def main() -> int:
     # -- setup is synchronous, no asyncio ------------------------------------
     if args.command == "setup":
         from pal.wizard.cli import run_setup_wizard
-        if getattr(args, "check", False) and getattr(args, "upgrade", False):
-            parser.error("setup --check and --upgrade are mutually exclusive")
+        if sum((args.check, args.upgrade, args.llm)) > 1:
+            parser.error("setup --check, --upgrade and --llm are mutually exclusive")
+        if args.llm:
+            from pal.wizard.cli import run_llm_setup_wizard
+            return run_llm_setup_wizard(runtime_root=args.runtime_root)
         if getattr(args, "check", False):
             from pal.wizard.cli import run_dependency_doctor
             return run_dependency_doctor(runtime_root=getattr(args, "runtime_root", None))

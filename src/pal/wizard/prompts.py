@@ -475,6 +475,7 @@ def run_llm_endpoint_preflight(
     *,
     timeout_seconds: int = 20,
     invoker: object | None = None,
+    secret_store: object | None = None,
 ) -> WizardLLMPreflightResult:
     try:
         from pal.llm.credentials import LLMCredentialResolver
@@ -491,7 +492,7 @@ def run_llm_endpoint_preflight(
     except Exception as exc:
         return WizardLLMPreflightResult(status="error", detail=f"could not load LLM runtime: {exc}")
 
-    secret_store = InMemorySecretStore()
+    secret_store = secret_store or InMemorySecretStore()
     credential_ref = endpoint.credential_ref if endpoint.credential_ref is not None else f"{endpoint.endpoint_id}:api-key"
     if endpoint.api_key:
         secret_store.set_secret(SecretRef(service=endpoint.endpoint_id, account="api-key"), endpoint.api_key)
@@ -520,76 +521,109 @@ def run_llm_endpoint_preflight(
     )
     credentials = LLMCredentialResolver(secret_store=secret_store)
     active_invoker = invoker or ShapeEndpointInvoker(
-        credential_resolver=lambda candidate: str(credentials.resolve_api_key(candidate) or "")
+        credential_resolver=credentials.resolve_api_key
     )
+    from pal.llm.chatgpt import is_chatgpt
+    thinking = endpoint.default_thinking_level if is_chatgpt(endpoint) else None
 
     try:
-        text_outcome = active_invoker.invoke(
-            model,
-            LLMRequestIR(
-                messages=(
-                    LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM endpoint setup."),)),
-                    LLMMessageIR(MessageRole.USER, (TextPartIR("Reply with exactly PAL_PREFLIGHT_OK."),)),
+        try:
+            text_outcome = active_invoker.invoke(
+                model,
+                LLMRequestIR(
+                    messages=(
+                        LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM endpoint setup."),)),
+                        LLMMessageIR(MessageRole.USER, (TextPartIR("Reply with exactly PAL_PREFLIGHT_OK."),)),
+                    ),
+                    tools=(),
+                    policy=GenerationPolicyIR(max_output_tokens=16, temperature=0, thinking_level=thinking),
                 ),
-                tools=(),
-                policy=GenerationPolicyIR(max_output_tokens=16, temperature=0),
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            return WizardLLMPreflightResult(status="error", detail=f"text call failed: {exc}")
+
+        text_response = text_outcome[0] if isinstance(text_outcome, tuple) else text_outcome
+        from pal.shared import LLMFinishReason
+        if is_chatgpt(endpoint) and text_response.finish_reason != LLMFinishReason.STOP:
+            return WizardLLMPreflightResult(status="error", detail="Text probe did not complete")
+        text = str(getattr(getattr(text_response, "message", None), "text", "") or "").strip()
+        if not text and not getattr(getattr(text_response, "message", None), "tool_calls", None):
+            return WizardLLMPreflightResult(status="error", detail="text call returned no content")
+
+        if not endpoint.supports_tools:
+            return WizardLLMPreflightResult(
+                status="warn",
+                detail="text call succeeded, but this endpoint is configured without tool support",
+                text_ok=True,
+            )
+
+        tools = (
+            ToolDefinitionIR(
+                name="pal_preflight_probe",
+                description="Validate that this endpoint can emit a tool call.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
             ),
-            timeout_seconds=timeout_seconds,
         )
-    except Exception as exc:
-        return WizardLLMPreflightResult(status="error", detail=f"text call failed: {exc}")
-
-    text_response = text_outcome[0] if isinstance(text_outcome, tuple) else text_outcome
-    text = str(getattr(getattr(text_response, "message", None), "text", "") or "").strip()
-    if not text and not getattr(getattr(text_response, "message", None), "tool_calls", None):
-        return WizardLLMPreflightResult(status="error", detail="text call returned no content")
-
-    if not endpoint.supports_tools:
-        return WizardLLMPreflightResult(
-            status="warn",
-            detail="text call succeeded, but this endpoint is configured without tool support",
-            text_ok=True,
-        )
-
-    tools = (
-        ToolDefinitionIR(
-            name="pal_preflight_probe",
-            description="Validate that this endpoint can emit a tool call.",
-            input_schema={
-                "type": "object",
-                "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"],
-            },
-        ),
-    )
-    try:
-        tool_outcome = active_invoker.invoke(
-            model,
-            LLMRequestIR(
-                messages=(
-                    LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM tool calling setup."),)),
-                    LLMMessageIR(MessageRole.USER, (TextPartIR("Call pal_preflight_probe with ok=true. Do not answer in prose."),)),
-                ),
-                tools=tools,
-                policy=GenerationPolicyIR(max_output_tokens=64, temperature=0),
+        tool_request = LLMRequestIR(
+            messages=(
+                LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM tool calling setup."),)),
+                LLMMessageIR(MessageRole.USER, (TextPartIR("Call pal_preflight_probe with ok=true. After its result, reply PAL_PREFLIGHT_OK."),)),
             ),
-            timeout_seconds=timeout_seconds,
+            tools=tools,
+            policy=GenerationPolicyIR(max_output_tokens=64, temperature=0, thinking_level=thinking),
         )
-    except Exception as exc:
-        return WizardLLMPreflightResult(status="warn", detail=f"text call succeeded, tool probe failed: {exc}", text_ok=True)
+        try:
+            tool_outcome = active_invoker.invoke(
+                model,
+                tool_request,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            return WizardLLMPreflightResult(status="warn", detail=f"text call succeeded, tool probe failed: {exc}", text_ok=True)
 
-    tool_response = tool_outcome[0] if isinstance(tool_outcome, tuple) else tool_outcome
-    tool_ok = any(
-        str(call.name) == "pal_preflight_probe"
-        for call in getattr(getattr(tool_response, "message", None), "tool_calls", ())
-    )
-    if not tool_ok:
-        return WizardLLMPreflightResult(
-            status="warn",
-            detail="text call succeeded, but tool probe returned no tool call",
-            text_ok=True,
+        tool_response = tool_outcome[0] if isinstance(tool_outcome, tuple) else tool_outcome
+        if is_chatgpt(endpoint) and tool_response.finish_reason != LLMFinishReason.TOOL_CALLS:
+            return WizardLLMPreflightResult(status="error", detail="Tool probe did not complete", text_ok=True)
+        tool_ok = any(
+            str(call.name) == "pal_preflight_probe"
+            for call in getattr(getattr(tool_response, "message", None), "tool_calls", ())
         )
-    return WizardLLMPreflightResult(status="ok", detail="text and tool calls succeeded", text_ok=True, tool_ok=True)
+        if not tool_ok:
+            return WizardLLMPreflightResult(
+                status="warn",
+                detail="text call succeeded, but tool probe returned no tool call",
+                text_ok=True,
+            )
+        if is_chatgpt(endpoint):
+            if any(call.name != "pal_preflight_probe" or dict(call.arguments) != {"ok": True}
+                   for call in tool_response.message.tool_calls):
+                return WizardLLMPreflightResult(status="error", detail="Unexpected probe tool or arguments", text_ok=True)
+            from pal.shared.tool_protocol import ToolResultIR
+            try:
+                followup = active_invoker.invoke(model, LLMRequestIR(
+                    messages=(
+                        *tool_request.messages,
+                        tool_response.message,
+                        LLMMessageIR(MessageRole.TOOL, tuple(
+                            ToolResultIR(item.call_id, item.name, '{"ok":true}')
+                            for item in tool_response.message.tool_calls
+                        )),
+                    ), tools=tools, policy=GenerationPolicyIR(max_output_tokens=64, tool_choice="none", thinking_level=thinking),
+                ), timeout_seconds=timeout_seconds)
+                final = followup[0] if isinstance(followup, tuple) else followup
+                if final.finish_reason != LLMFinishReason.STOP or not final.message.text.strip():
+                    raise ValueError("probe did not complete")
+            except Exception as exc:
+                return WizardLLMPreflightResult(status="error", detail=f"Tool round trip failed: {exc}", text_ok=True)
+        return WizardLLMPreflightResult(status="ok", detail="text and tool calls succeeded", text_ok=True, tool_ok=True)
+    finally:
+        if invoker is None:
+            active_invoker.close()
 
 
 def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
@@ -609,7 +643,7 @@ def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
     return endpoint.endpoint_id
 
 
-def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_index: int) -> None:
+def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_index: int, runtime_root: Path | None = None) -> None:
     idx = 1
     if start_index > 1:
         idx = start_index
@@ -618,7 +652,8 @@ def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_inde
         source_choice = ask(
             "  Endpoint source:\n"
             "    1) API endpoint\n"
-            "    2) Done",
+            "    2) Done\n"
+            "    3) Use ChatGPT plan / manage accounts",
             default_choice,
         ).strip()
         if source_choice == "2":
@@ -626,7 +661,12 @@ def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_inde
                 print("  At least one endpoint is required.")
                 continue
             break
-        ep = _prompt_one_endpoint(idx)
+        if source_choice == "3":
+            ep = prompt_chatgpt_endpoint(runtime_root)
+            if ep is None:
+                continue
+        else:
+            ep = _prompt_one_endpoint(idx)
         if ep is None:
             if not endpoints:
                 print("  At least one endpoint is required.")
@@ -645,6 +685,7 @@ def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
 def prompt_llm_endpoints_with_current(
     current_endpoints: list[WizardLLMEndpoint] | None = None,
     current_active_endpoint_id: str | None = None,
+    *, runtime_root: Path | None = None,
 ) -> tuple[list[WizardLLMEndpoint], str]:
     _print_step(2, WIZARD_STEP_TOTAL, "LLM Endpoints")
     print("(OpenAI Completion, OpenAI Responses, and Anthropic Messages wire shapes are supported.)\n")
@@ -660,18 +701,21 @@ def prompt_llm_endpoints_with_current(
             if not ask_yes_no(f"  Keep endpoint {current.endpoint_id}", True):
                 continue
             if ask_yes_no(f"  Edit endpoint {current.endpoint_id}", False):
-                edited = _prompt_one_endpoint(len(endpoints) + 1, current)
-                if edited is not None:
-                    endpoints.append(edited)
+                from pal.llm.chatgpt import is_chatgpt
+                if is_chatgpt(current):
+                    edited = prompt_chatgpt_endpoint(runtime_root, current)
+                else:
+                    edited = _prompt_one_endpoint(len(endpoints) + 1, current)
+                endpoints.append(edited if edited is not None else current)
             else:
                 endpoints.append(current)
         if ask_yes_no("  Add another endpoint?", False):
-            _append_prompted_endpoints(endpoints, start_index=len(endpoints) + 1)
+            _append_prompted_endpoints(endpoints, start_index=len(endpoints) + 1, runtime_root=runtime_root)
         if not endpoints:
             print("  At least one endpoint is required.")
-            _append_prompted_endpoints(endpoints, start_index=1)
+            _append_prompted_endpoints(endpoints, start_index=1, runtime_root=runtime_root)
     else:
-        _append_prompted_endpoints(endpoints, start_index=1)
+        _append_prompted_endpoints(endpoints, start_index=1, runtime_root=runtime_root)
 
     if len(endpoints) > 1:
         print("\n  Priority order (lower = higher priority):")
@@ -871,6 +915,7 @@ def run_interactive_wizard(
     endpoints, active_endpoint_id = prompt_llm_endpoints_with_current(
         current.endpoints if current else None,
         current.active_endpoint_id if current else None,
+        runtime_root=runtime_root,
     )
     channel = prompt_channel(runtime_root, current.channel if current else None)
     memory_embedding = prompt_memory_embedding(current.memory_embedding if current else None)
@@ -888,3 +933,166 @@ def run_interactive_wizard(
         return None
 
     return runtime_root, data
+
+
+def _prompt_chatgpt_login(service, client_id: str | None = None) -> dict[str, Any]:
+    import os
+    import shlex
+    import socket
+
+    remote = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")) or (
+        sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    )
+    mode = ask("  Continue with ChatGPT: 1) Browser on this computer  2) Remote / headless", "2" if remote else "1")
+    if mode == "1":
+        print("  Continue with ChatGPT in this computer's browser.")
+        return service.login(client_id)
+    if mode != "2":
+        raise ValueError("Invalid login mode")
+    connection = os.environ.get("SSH_CONNECTION", "").split()
+    host = connection[2] if len(connection) == 4 else socket.gethostname()
+    ssh_port = connection[3] if len(connection) == 4 else "22"
+    destination = ask("  SSH destination reachable from your browser computer (user@host or SSH alias)",
+                      f"{getpass.getuser()}@{host}").strip()
+    if not destination or destination.startswith("-") or any(ord(char) < 32 for char in destination):
+        raise ValueError("Invalid SSH destination")
+    ssh_port = int(ask("  SSH port", ssh_port))
+    callback_port = int(ask("  Callback port (must be free on both computers)", "1455"))
+    if not (1 <= ssh_port <= 65535 and 1 <= callback_port <= 65535):
+        raise ValueError("Ports must be between 1 and 65535")
+
+    def listener_ready(port: int) -> None:
+        command = shlex.join([
+            "ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-L",
+            f"127.0.0.1:{port}:127.0.0.1:{port}", "-p", str(ssh_port), "--", destination,
+        ])
+        print("\n  On your browser computer, run this command in a separate terminal:")
+        print(f"    {command}")
+        print("  Keep that SSH connection open, then open the following link in that computer's browser.")
+        print("  Waiting up to 10 minutes. Ctrl+C cancels. If forwarding fails, cancel and choose another port.")
+
+    account = service.login(client_id, open_browser=None, callback_port=callback_port,
+                            on_listener_ready=listener_ready, timeout=600)
+    print("  Authorization received. You can stop the forwarding command with Ctrl+C.")
+    return account
+
+
+def _prompt_chatgpt_thinking(model: dict[str, Any], current: WizardLLMEndpoint | None) -> tuple[list[str], str]:
+    from pal.llm.ir import ThinkingLevel
+
+    # Catalog effort names are wire values. In particular, Pal's "off" omits
+    # the parameter; it must never stand in for the provider's "none".
+    allowed = {level.value for level in ThinkingLevel if level != ThinkingLevel.OFF}
+    raw = model.get("supported_reasoning_levels") or []
+    advertised = list(dict.fromkeys(
+        str(item.get("effort") or "") if isinstance(item, dict) else str(item)
+        for item in raw
+    ))
+    levels = [level for level in advertised if level in allowed]
+    omitted = [level for level in advertised if level not in allowed]
+    if omitted:
+        print(f"  Catalog effort values not supported by Pal: {', '.join(omitted)} (not mapped to other levels).")
+    same_model = current is not None and current.model_id == model["slug"]
+    if not levels:
+        print("  No usable reasoning levels in the catalog. Enter verified levels; off only omits the effort parameter.")
+        return _prompt_thinking_levels(
+            list(current.thinking_levels) if same_model else ["off"],
+            current.default_thinking_level if same_model else "off", wire_shape="openai_response",
+        )
+    default = str(model.get("default_reasoning_level") or "")
+    if same_model and current.default_thinking_level in levels:
+        default = current.default_thinking_level
+    if default not in levels:
+        default = levels[0]
+    print(f"  Supported thinking levels: {', '.join(levels)}")
+    while True:
+        selected = ask("  Default thinking level", default).strip().lower()
+        if selected in levels:
+            return levels, selected
+        print(f"  Choose one of: {', '.join(levels)}")
+
+
+def prompt_chatgpt_endpoint(runtime_root: Path | None, current: WizardLLMEndpoint | None = None) -> WizardLLMEndpoint | None:
+    from pal.llm.chatgpt import API_URL, PROFILE, ChatGPTAuthService, ChatGPTError, USAGE_URL, credential_ref
+    from pal.llm.secret_store import EncryptedFileSecretStore
+
+    if runtime_root is None:
+        print("Select a runtime with pal wizard --runtime-root <dir> first.")
+        return None
+    store = EncryptedFileSecretStore(runtime_root / "secrets.json")
+    service = ChatGPTAuthService(store)
+    try:
+        accounts = service.accounts()
+        for index, account in enumerate(accounts, 1):
+            print(f"  {index}. {account.get('email') or 'ChatGPT'} [{account['client_id']}]")
+        default_account = next((str(index) for index, account in enumerate(accounts, 1)
+                                if current and current.credential_ref == credential_ref(str(account["client_id"]))),
+                               "1" if accounts else "new")
+        choice = ask("  Account number, new, or cancel", default_account).strip()
+        if not choice or choice.lower() == "cancel":
+            return None
+        if choice == "new":
+            account = _prompt_chatgpt_login(service)
+            if "chatgpt.tokens.use.direct" in (account.get("scopes") or []):
+                print(f"  You're using your ChatGPT plan. Manage usage: {USAGE_URL}")
+        else:
+            index = int(choice) - 1
+            if not 0 <= index < len(accounts):
+                raise ValueError("Invalid account number")
+            account = accounts[index]
+            action = ask("  1) Use account  2) Reauthorize  3) Sign out", "1")
+            if action not in {"1", "2", "3"}:
+                raise ValueError("Invalid account action")
+            if action == "3":
+                if ask_yes_no("  Sign out this ChatGPT account?", False):
+                    confirmed = service.logout(str(account["client_id"]))
+                    print("  Signed out." if confirmed else "  Signed out locally; remote revocation was not confirmed. Disconnect Pal in ChatGPT Settings.")
+                return None
+            if action == "2" or account.get("needs_reauthorization"):
+                account = _prompt_chatgpt_login(service, str(account["client_id"]))
+        client_id = str(account["client_id"])
+        if "chatgpt.tokens.use.direct" not in (account.get("scopes") or []):
+            print("  Signed in without ChatGPT plan permission. Reauthorize to enable it, or configure an API endpoint.")
+            return None
+        models = service.models(client_id)
+        if not models:
+            print("  No selectable models returned for this account.")
+            return None
+        for index, model in enumerate(models, 1):
+            print(f"  {index}. {model.get('display_name') or model['slug']} ({model['slug']})")
+        default = next((str(i) for i, model in enumerate(models, 1) if current and model["slug"] == current.model_id), "1")
+        index = int(ask("  Model", default)) - 1
+        if not 0 <= index < len(models):
+            raise ValueError("Invalid model number")
+        model = models[index]
+        label = ask("  Endpoint ID", current.endpoint_id if current else "chatgpt-" + model["slug"])
+        context = int(ask("  Local context budget (tokens)", str(current.context_window if current else model.get("context_window") or 32768)))
+        budget = int(ask("  Local output budget (not sent as an API limit)", str(current.max_output_tokens if current else 4096)))
+        if context <= 0 or budget <= 0 or budget > context:
+            raise ValueError("Invalid local token budgets")
+        thinking_levels, default_thinking_level = _prompt_chatgpt_thinking(model, current)
+        endpoint = WizardLLMEndpoint(
+            endpoint_id=label, model_id=model["slug"], wire_shape="openai_response", base_url=API_URL,
+            api_key=None, context_window=context, max_output_tokens=budget,
+            thinking_levels=thinking_levels, default_thinking_level=default_thinking_level,
+            supports_tools=True, supports_streaming=True,
+            supports_vision=current.supports_vision if current else "image" in model.get("input_modalities", []),
+            priority=current.priority if current else 0, provider="openai", auth_kind="oauth",
+            credential_ref=credential_ref(client_id), capabilities_blob={"access_profile": PROFILE},
+            notes="Using ChatGPT plan. Switch endpoints manually with /model.",
+        )
+        print("  Checking text and a harmless tool round trip uses your ChatGPT plan.")
+        if not ask_yes_no("  Run checks now?", True):
+            return None
+        result = run_llm_endpoint_preflight(endpoint, timeout_seconds=60, secret_store=store)
+        print(f"  {result.status}: {result.detail}")
+        if result.status != "ok":
+            print("  Endpoint configuration was not changed. The saved account can be reused.")
+            return None
+        return endpoint
+    except (ChatGPTError, ValueError, OSError) as exc:
+        print(f"  ChatGPT setup failed: {exc}")
+        return None
+    except KeyboardInterrupt:
+        print("\n  ChatGPT setup cancelled.")
+        return None

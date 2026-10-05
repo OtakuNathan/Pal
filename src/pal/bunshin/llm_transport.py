@@ -152,6 +152,10 @@ class ManagerProxyTransport:
             )
             if provider_started:
                 control.touch_network()
+            failure = dict(exc.payload or {}).get("chatgpt_failure")
+            if isinstance(failure, Mapping):
+                from pal.llm.chatgpt import ChatGPTError
+                raise ChatGPTError.from_dict(failure) from None
             if exc.kind == "endpoint_spec_stale" and not provider_started:
                 raise LLMEndpointSpecStaleError(str(exc)) from exc
             if provider_started:

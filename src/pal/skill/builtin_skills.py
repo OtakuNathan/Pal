@@ -67,6 +67,7 @@ accepts `plugin`, `provider`, or `builtin`.
 | Command | Purpose and effect |
 | --- | --- |
 | `pal setup` (aliases `wizard`, `wizzard`) | Interactive initial setup or reconfiguration: identity, endpoints, channel, embeddings, and optional OS service registration. It writes multiple surfaces and can start or replace a service. Use the narrow existing operation for a narrow edit; explain the wizard to a user requesting interactive configuration. |
+| `pal wizard --llm` | Manage LLM endpoints and ChatGPT plan authorization in an existing runtime, without reconfiguring identity, channels, embeddings or services. |
 | `pal setup --check`, `pal doctor` | Check local dependencies and report remediation. These are diagnostic entrypoints, not configuration reloads. |
 | `pal setup --upgrade` | Offline runtime upgrade: LLM/browser schema migration, Bunshin cutover and generation-owned memory database separation, potentially archiving old data. Requires the host to be stopped and holds its runtime lock. Re-running preserves the published memory generation and user configuration. It is not a hot refresh or ordinary settings editor. |
 | `pal llm list [--all] [--json]` | Inspect persisted endpoint configuration, optionally including disabled rows; not proof that the running endpoint cache has refreshed. |

@@ -135,10 +135,12 @@ class FailureOrchestrator:
                 report=report,
             )
         if signal.subsystem == "llm":
+            subscription_guidance = str(signal.evidence.get("user_guidance") or "")
             decode_failure = signal.failure_kind == "decode_error"
             verification = VerificationResult(
                 status=FAILURE_VERIFICATION_FAILED,
                 reason=(
+                    subscription_guidance if subscription_guidance else
                     "LLM response decoding failed; inline repair cannot continue with this response."
                     if decode_failure else
                     "LLM provider fallback was exhausted; inline repair cannot continue without a healthy model endpoint."
@@ -154,6 +156,7 @@ class FailureOrchestrator:
                     "current_blocker": draft.primary_blocker,
                     "impact": "LLM-backed reasoning is unavailable for the current turn.",
                     "recommended_next_step": (
+                        subscription_guidance if subscription_guidance else
                         "Inspect the LLM decode diagnostic in the service logs; retry the request, "
                         "or use another endpoint if the error persists."
                         if decode_failure else

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -70,11 +69,11 @@ class LLMCredentialResolver:
             return ResolvedLLMAuth(kind="local_provider_auth")
         secret_ref = self.secret_ref_for_endpoint(endpoint)
         if endpoint.auth_kind == "oauth":
-            raw = self._get_from_secret_ref(secret_ref)
-            if not raw:
-                return ResolvedLLMAuth(kind="oauth", secret_ref=secret_ref)
-            profile = _parse_oauth_profile(raw)
-            access_token = raw.strip() if profile is None else _access_token_from_profile(profile)
+            from pal.llm.chatgpt import ChatGPTAuthService, ChatGPTError, API_URL, is_chatgpt
+            if secret_ref is None or not is_chatgpt(endpoint) or endpoint.base_url.rstrip("/") != API_URL:
+                raise ChatGPTError("reauthorization_required")
+            access_token = ChatGPTAuthService(self.secret_store).access_token(secret_ref)
+            profile = {}  # Never expose renewable tokens in resolved auth metadata.
             return ResolvedLLMAuth(
                 kind="oauth",
                 secret_ref=secret_ref,
@@ -108,19 +107,3 @@ class LLMCredentialResolver:
             if service:
                 return SecretRef(service=service, account=account)
         return SecretRef(service=credential_ref, account=default_account)
-
-
-def _parse_oauth_profile(raw: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _access_token_from_profile(profile: dict[str, Any]) -> str | None:
-    for key in ("access_token", "token", "bearer_token"):
-        value = profile.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None

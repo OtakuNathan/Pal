@@ -2,6 +2,7 @@
 
 Owns:
 - immutable provider-neutral LLM request, message, response, usage, and update IR
+- ChatGPT plan OAuth registration, renewable credentials, and explicit usage-pause recovery
 - endpoint resolution
 - three wire-shape codecs and OpenAI/Anthropic SDK transport boundaries
 - endpoint-declared thinking enums and per-endpoint selection
@@ -16,7 +17,7 @@ Projection sessions are process-local derived state. Recovery restores L1,
 including native replay envelopes, then rebuilds the projection.
 
 Does not own:
-- durable state other than endpoint registry
+- durable conversation state (endpoint configuration and protected OAuth sessions are LLM-owned)
 - durable token, cache, or cost history
 - local side effects
 - tasking state
@@ -55,7 +56,9 @@ Invariants:
 - only successful terminal DeepSeek responses can promote complete DSML to a
   tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
-- credentials are endpoint-local; a missing/rejected key falls back the whole endpoint
+- API credentials are endpoint-local; an opt-in fallback changes the whole endpoint
+- ChatGPT plan credentials may be shared by endpoints; subscription requests never
+  fall back automatically, and a usage pause requires explicit user recovery
 - provider-confirmed item boundaries commit immutable response items into IR;
   open tool drafts are never executable, while a committed tool item survives
   a later length terminal and is executed once through Core's normal tool effect

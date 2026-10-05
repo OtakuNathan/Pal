@@ -163,6 +163,16 @@ class LlmRounds:
         if not consumed:
             state.llm_round_count = max(0, state.llm_round_count - 1)
         if provider_failed:
+            from pal.llm.chatgpt import ChatGPTError
+            metadata = dict(outcome.response.message.metadata)
+            subscription_failure = metadata.get("chatgpt_failure")
+            if subscription_failure:
+                failure = ChatGPTError.from_dict(subscription_failure)
+                if not failure.retryable:
+                    # Quota and authorization require user action, not another
+                    # worker retry of this same logical session.
+                    self.status.block(failure.user_message)
+                    return result
             # Provider exhaustion produced no assistant/tool turn.  Keep the
             # durable checkpoint at the same logical round so a later process
             # attempt retries the exact request instead of projecting phantom

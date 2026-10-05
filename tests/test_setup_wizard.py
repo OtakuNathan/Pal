@@ -803,14 +803,12 @@ class TestDependencyDoctor(unittest.TestCase):
         self.assertEqual(check.status, "warn")
         self.assertFalse(check.required)
 
-    def test_codex_cli_check_is_optional(self) -> None:
+    def test_chatgpt_identity_verification_dependency_is_required(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
-        with patch.object(dep_mod.shutil, "which", return_value=None):
-            check = dep_mod._check_codex_cli()
-
-        self.assertEqual(check.status, "warn")
-        self.assertFalse(check.required)
+        with patch.object(dep_mod.importlib.util, "find_spec", return_value=None):
+            check = dep_mod._check_python_package("PyJWT", "jwt", "ChatGPT identity verification")
+        self.assertTrue(check.blocking)
 
     def test_jieba_package_check_is_required(self) -> None:
         from pal.wizard import dependencies as dep_mod

@@ -66,6 +66,7 @@ from pal.llm.response_hooks import (
     ProviderResponseHookRegistry,
 )
 from pal.llm.usage import LLMUsageLedger
+from pal.llm.chatgpt import QUOTA_CODE, exception_error, is_chatgpt
 from pal.llm.shapes.base import ShapeDecodeError
 from pal.llm.transport import (
     RequestSubmission,
@@ -585,6 +586,13 @@ class LLMRuntime:
             "model_hook_count": len(self.model_hooks.hooks),
             "credentials_refreshed": credentials_refreshed,
         }
+
+    def resume_subscription(self, endpoint_id: str) -> None:
+        """Explicit user action, deliberately separate from endpoint activation."""
+        endpoint = self._endpoint_by_id(endpoint_id)
+        invoker = self._invoker()
+        if endpoint is not None and isinstance(invoker, ShapeEndpointInvoker):
+            invoker.resume_subscription(endpoint)
 
     def set_active_endpoint(self, endpoint_id: str) -> str:
         normalized = str(endpoint_id or "").strip()
@@ -1609,8 +1617,12 @@ class LLMRuntime:
         source = str(preferred_endpoint_source or "").strip().lower()
         policy = str(endpoint_fallback_policy or "").strip().lower()
         explicit_policy = bool(policy)
+        selected_endpoint = self._endpoint_by_id(preferred or self.active_endpoint_id or "")
+        if selected_endpoint is None and not preferred and not self.active_endpoint_id:
+            selected_endpoint = next(iter(self.endpoint_resolver.endpoints), None)
         strict = (
-            policy in _FALLBACK_DISABLED_POLICIES
+            (selected_endpoint is not None and is_chatgpt(selected_endpoint))
+            or policy in _FALLBACK_DISABLED_POLICIES
             or bool(preferred and source in _STRICT_ENDPOINT_PREFERRED_SOURCES)
             or (not explicit_policy and not self.llm_endpoint_fallback_enabled())
         )
@@ -1623,11 +1635,11 @@ class LLMRuntime:
                     if endpoint.endpoint_id == selected
                 ]
             return list(self.endpoint_resolver.endpoints[:1])
-        return self.endpoint_resolver.enabled(
+        return [endpoint for endpoint in self.endpoint_resolver.enabled(
             preferred_endpoint_id=preferred,
             fallback_endpoint_id=self.active_endpoint_id,
             include_remaining=True,
-        )
+        ) if not is_chatgpt(endpoint)]
 
     def llm_endpoint_fallback_enabled(self) -> bool:
         """Whether generic requests may fall back to other enabled endpoints.
@@ -2005,6 +2017,12 @@ def _response_with_failure(
     *,
     partial_output_chars: int = 0,
 ) -> LLMResponseIR:
+    if exception_error(exc) is not None:
+        response = replace(response, message=replace(
+            response.message,
+            parts=tuple(part for part in response.message.parts if not isinstance(part, ToolCallIR)),
+            replay=None,
+        ))
     metadata = dict(response.message.metadata)
     metadata.update(_failure_metadata(exc))
     if partial_output_chars > 0:
@@ -2016,9 +2034,12 @@ def _response_with_failure(
     )
 
 
-def _failure_metadata(exc: Exception | None) -> dict[str, str]:
+def _failure_metadata(exc: Exception | None) -> dict[str, Any]:
     error_kind = _classify_retry_error(exc) if exc is not None else "unknown"
+    subscription = exception_error(exc) if exc is not None else None
     return {
+        **({"chatgpt_failure": subscription.to_dict(), "user_guidance": subscription.user_message}
+           if subscription is not None else {}),
         "failure_subsystem": (
             "persistence" if error_kind == "local_state" else "llm"
         ),
@@ -2028,6 +2049,13 @@ def _failure_metadata(exc: Exception | None) -> dict[str, str]:
 
 
 def _classify_retry_error(exc: Exception) -> str:
+    subscription = exception_error(exc)
+    if subscription is not None:
+        if subscription.code == QUOTA_CODE:
+            return "subscription_usage_limit"
+        if subscription.code in {"reauthorization_required", "plan_permission_missing"}:
+            return "subscription_auth"
+        return "server" if subscription.retryable else "subscription_request"
     if any(isinstance(item, sqlite3.DatabaseError) for item in _exception_chain(exc)):
         return "local_state"
     if isinstance(exc, LLMEndpointSpecStaleError):
@@ -2099,6 +2127,9 @@ def _retryable_error_kind(error_kind: str) -> bool:
 
 
 def _public_failure_text(exc: Exception | None) -> str:
+    subscription = exception_error(exc) if exc is not None else None
+    if subscription is not None:
+        return subscription.user_message
     if exc is None:
         return "LLM invocation failed: kind=unknown type=UnknownError"
     return (

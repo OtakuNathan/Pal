@@ -90,6 +90,14 @@ class LLMEndpointSpec:
                 f"endpoint {endpoint_id} max_output_tokens exceeds context_window"
             )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        access_profile = capabilities.get("access_profile")
+        if access_profile is not None:
+            from pal.llm.chatgpt import API_URL, PROFILE
+            if (access_profile != PROFILE or auth_kind != "oauth"
+                    or wire_shape != "openai_response" or base_url.rstrip("/") != API_URL):
+                raise LLMEndpointSpecError(
+                    "openai_chatgpt requires oauth, openai_response and https://api.openai.com/v1"
+                )
         preservation = capabilities.get("preserved_thinking")
         if preservation is not None:
             expected_shape = {

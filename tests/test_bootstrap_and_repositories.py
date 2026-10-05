@@ -399,7 +399,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
 
 
-    def test_oauth_credential_resolver_uses_oauth_profile_ref(self) -> None:
+    def test_legacy_oauth_profile_requires_new_chatgpt_authorization(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="openai_oauth",
             provider="openai",
@@ -426,13 +426,10 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         resolver = LLMCredentialResolver(secret_store=secret_store)
 
-        auth = resolver.resolve_auth(endpoint)
-
-        self.assertEqual(auth.kind, "oauth")
-        self.assertEqual(auth.secret_ref, SecretRef(service="openai_oauth", account="oauth-profile"))
-        self.assertEqual(auth.access_token, "oauth-access-token")
-        self.assertEqual(auth.profile["refresh_token"], "oauth-refresh-token")
-        self.assertEqual(resolver.resolve_api_key(endpoint), "oauth-access-token")
+        from pal.llm.chatgpt import ChatGPTError
+        with self.assertRaises(ChatGPTError) as failure:
+            resolver.resolve_auth(endpoint)
+        self.assertEqual(failure.exception.code, "reauthorization_required")
 
 
 
@@ -543,10 +540,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         resolver = LLMCredentialResolver(secret_store=secret_store)
 
-        auth = resolver.resolve_auth(endpoint)
-
-        self.assertIsNone(auth.access_token)
-        self.assertIsNone(resolver.resolve_api_key(endpoint))
+        from pal.llm.chatgpt import ChatGPTError
+        with self.assertRaises(ChatGPTError):
+            resolver.resolve_api_key(endpoint)
 
 
 

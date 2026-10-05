@@ -5,7 +5,8 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from types import MethodType
 
 import httpx
 
@@ -177,6 +178,12 @@ class SDKTransportRequest:
     on_submitted: Callable[[], None] | None = None
 
 
+@runtime_checkable
+class CloseableFrameIterator(Protocol):
+    def close(self) -> None:
+        ...
+
+
 @dataclass
 class DirectSDKTransport:
     """Resolve local credentials and execute an encoded request through an SDK."""
@@ -189,28 +196,57 @@ class DirectSDKTransport:
         endpoint: LLMEndpointModel,
         request: EncodedTransportRequest,
     ) -> Iterator[_JSONFrame]:
+        from pal.llm.chatgpt import API_URL, ChatGPTError, QUOTA_CODE, exception_error, is_chatgpt, response_error
+        subscription = is_chatgpt(endpoint)
+        if subscription and (endpoint.base_url.rstrip("/") != API_URL or endpoint.auth_kind != "oauth"):
+            raise ChatGPTError("invalid_subscription_endpoint")
         api_key = str(self.credential_resolver(endpoint) or "")
         if endpoint.auth_kind != "local_provider_auth" and not api_key:
             from pal.llm.credentials import LLMCredentialUnavailableError
+            raise LLMCredentialUnavailableError(f"LLM endpoint {endpoint.endpoint_id} has no usable credential")
+        iterator = self.sdk_transport.frames(SDKTransportRequest(
+            request_id=request.request_id, endpoint_id=str(endpoint.endpoint_id),
+            wire_shape=request.wire_shape, api_key=api_key, base_url=str(endpoint.base_url or ""),
+            timeout_seconds=float(request.timeout_seconds), payload=request.payload,
+            extra_body=request.extra_body, stream=subscription or bool(request.stream),
+            stream_control=request.stream_control, on_submitted=request.on_submitted,
+        ))
+        try:
+            for frame in iterator:
+                # The credential owner records admission state even when a remote
+                # Bunshin owns decoding. Frames themselves remain unmodified.
+                if subscription and frame.payload.get("type") in {"response.failed", "error"}:
+                    failure = response_error(frame.payload.get("response") or frame.payload)
+                    if failure.code == QUOTA_CODE:
+                        self._subscription_state(endpoint, paused=True)
+                yield frame
+        except Exception as exc:
+            failure = exception_error(exc, include_http=True) if subscription else None
+            if subscription and failure is None and isinstance(exc, LLMTransportError):
+                failure = ChatGPTError("network_error")
+            if failure is not None:
+                if failure.code == QUOTA_CODE:
+                    self._subscription_state(endpoint, paused=True)
+                raise failure from None
+            raise
+        finally:
+            if isinstance(iterator, CloseableFrameIterator):
+                iterator.close()
 
-            raise LLMCredentialUnavailableError(
-                f"LLM endpoint {endpoint.endpoint_id} has no usable credential"
-            )
-        yield from self.sdk_transport.frames(
-            SDKTransportRequest(
-                request_id=request.request_id,
-                endpoint_id=str(endpoint.endpoint_id),
-                wire_shape=request.wire_shape,
-                api_key=api_key,
-                base_url=str(endpoint.base_url or ""),
-                timeout_seconds=float(request.timeout_seconds),
-                payload=request.payload,
-                extra_body=request.extra_body,
-                stream=bool(request.stream),
-                stream_control=request.stream_control,
-                on_submitted=request.on_submitted,
-            )
-        )
+    def _subscription_state(self, endpoint: LLMEndpointModel, *, paused: bool) -> None:
+        from pal.llm.chatgpt import ChatGPTAuthService, is_chatgpt
+        if not is_chatgpt(endpoint):
+            return
+        from pal.llm.credentials import LLMCredentialResolver
+        owner = self.credential_resolver.__self__ if isinstance(self.credential_resolver, MethodType) else None
+        if isinstance(owner, LLMCredentialResolver) and owner.secret_store is not None:
+            ref = owner.secret_ref_for_endpoint(endpoint)
+            if ref is not None:
+                service = ChatGPTAuthService(owner.secret_store)
+                (service.pause if paused else service.resume)(ref)
+
+    def resume_subscription(self, endpoint: LLMEndpointModel) -> None:
+        self._subscription_state(endpoint, paused=False)
 
     def refresh_credentials(self) -> bool:
         owner = getattr(self.credential_resolver, "__self__", None)
@@ -327,6 +363,14 @@ class SDKJSONTransport:
     ) -> tuple[tuple[str, ...], "_ClientEntry", FdCapability["_SDKClientGraph"]]:
         key = _client_key(request)
         with self._lock:
+            # A token rotation changes the fingerprint. Retire the old pool
+            # without closing a client while an in-flight request holds it.
+            for old_key, old_entries in tuple(self._clients.items()):
+                if old_key[0] == key[0] and old_key[-1] != key[-1]:
+                    for old_entry in old_entries:
+                        if old_entry.owner.request_retire("credential_rotated"):
+                            self._close_idle_entry(old_entry)
+            self._discard_closed_entries()
             entries = self._clients.setdefault(key, [])
             entry = next(
                 (

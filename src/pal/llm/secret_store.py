@@ -3,8 +3,12 @@ from __future__ import annotations
 import subprocess
 import socket
 import sys
+import os
+import tempfile
+from contextlib import contextmanager
+from threading import RLock
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, ContextManager, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -21,6 +25,12 @@ class SecretStorePort(Protocol):
         ...
 
     def delete_secret(self, ref: SecretRef) -> None:
+        ...
+
+
+@runtime_checkable
+class TransactionalSecretStorePort(SecretStorePort, Protocol):
+    def transaction(self) -> ContextManager[None]:
         ...
 
 
@@ -96,6 +106,12 @@ class KeyringSecretStore:
 @dataclass
 class InMemorySecretStore:
     secrets: dict[tuple[str, str], str] = field(default_factory=dict)
+    _lock: RLock = field(default_factory=RLock, repr=False)
+
+    @contextmanager
+    def transaction(self):
+        with self._lock:
+            yield
 
     def get_secret(self, ref: SecretRef) -> str | None:
         return self.secrets.get((ref.service, ref.account))
@@ -148,25 +164,53 @@ class EncryptedFileSecretStore:
         self._legacy_fernets: list[object] | None = None
         self._cache: dict[tuple[str, str], str] = {}
         self._loaded_mtime_ns: int | None = None
-        self._load()
+        self._lock = RLock()
+        self._transaction_depth = 0
+        with self.transaction():
+            pass
 
     # -- public API (SecretStorePort) ----------------------------------------
 
     def get_secret(self, ref: SecretRef) -> str | None:
-        self._refresh_if_changed()
-        return self._cache.get((ref.service, ref.account))
+        with self.transaction():
+            return self._cache.get((ref.service, ref.account))
 
     def refresh(self) -> None:
-        self._cache.clear()
-        self._load()
+        with self.transaction():
+            self._cache.clear()
+            self._load()
 
     def set_secret(self, ref: SecretRef, secret: str) -> None:
-        self._cache[(ref.service, ref.account)] = secret
-        self._flush()
+        with self.transaction():
+            self._cache[(ref.service, ref.account)] = secret
+            self._flush()
 
     def delete_secret(self, ref: SecretRef) -> None:
-        self._cache.pop((ref.service, ref.account), None)
-        self._flush()
+        with self.transaction():
+            self._cache.pop((ref.service, ref.account), None)
+            self._flush()
+
+    @contextmanager
+    def transaction(self):
+        """Serialize read/modify/write, including rotating OAuth exchanges."""
+        import fcntl
+
+        with self._lock:
+            if self._transaction_depth:
+                yield
+                return
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self._path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                self._transaction_depth = 1
+                self._cache.clear()
+                self._load()
+                yield
+            finally:
+                self._transaction_depth = 0
+                os.close(fd)
 
     # -- internals -----------------------------------------------------------
 
@@ -192,12 +236,10 @@ class EncryptedFileSecretStore:
         if not self._path.exists():
             self._loaded_mtime_ns = None
             return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        os.chmod(self._path, 0o600)
+        raw = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            return
+            raise ValueError("Invalid secret store; refusing to overwrite it")
         dirty = False
         for _key, entry in raw.items():
             if not isinstance(entry, dict):
@@ -213,6 +255,8 @@ class EncryptedFileSecretStore:
                     value, needs_rewrite = decrypted
                     self._cache[(service, account)] = value
                     dirty = dirty or needs_rewrite
+                else:
+                    raise ValueError("Secret store contains unreadable credentials; refusing to overwrite it")
                 continue
             # Legacy plaintext migration
             plaintext = entry.get("value")
@@ -237,7 +281,17 @@ class EncryptedFileSecretStore:
                 "encrypted": encrypted,
             }
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=".secrets-", dir=self._path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         self._mark_loaded()
 
     def _mark_loaded(self) -> None:

@@ -220,8 +220,9 @@ through the same hook instance again.
 - Endpoint schema and thinking enums are locally validated before a request.
 - The persisted endpoint row is the sole source of supported thinking values;
   preflight evaluates the fully hooked request.
-- A missing or rejected credential fails that endpoint as one unit and moves to
-  the next endpoint; credentials are never borrowed across endpoints.
+- A missing or rejected credential fails that endpoint as one unit; credentials
+  are never borrowed across endpoints. API fallback requires an enabled fallback
+  policy. ChatGPT subscription failures never switch endpoints automatically.
 - `finish_reason=error`, including output-recovery errors, is a failed provider
   attempt and never updates successful health or usage state.
 - Request/model quirks are exact-model hooks. Provider-wide branching is
@@ -350,3 +351,52 @@ including failures and output recovery, separately from logical request success.
 Cache profile selection is frozen at turn start. See
 [prompt-cache v2 offline repair](prompt_cache_v2_offline_repair.md) for selection
 precedence, diagnostics, conservative compaction behavior, and offline validation.
+
+## ChatGPT plan access (SIWC)
+
+ChatGPT plan usage is an explicit endpoint capability:
+`auth_kind=oauth`, `wire_shape=openai_response`,
+`base_url=https://api.openai.com/v1`, and
+`capabilities_blob.access_profile=openai_chatgpt`. Provider names do not select
+request semantics. Legacy Codex OAuth material is not converted or accepted;
+configure a new registration in `pal wizard --llm --runtime-root <dir>`.
+
+The LLM-owned public OAuth client uses dynamic registration, PKCE, OIDC identity
+validation and a short-lived loopback listener. Issued client IDs stay paired
+with verified identities, even when emails match. A stable host ID belongs to
+the runtime. The encrypted secret store retains account registrations, rotating
+tokens and quota pauses with owner-only files and locked atomic updates.
+Refresh occurs on demand within two minutes of expiry (respecting the returned
+earliest-refresh time). The host and Bunshin manager retain credential ownership;
+remote runners receive raw inference frames and safe failure metadata only.
+
+Subscription HTTP calls always stream, including aggregate generation,
+compaction and preflight. They send full input history and `store=false`, omit
+unsupported parameters including `max_output_tokens` and `temperature`, project
+system messages to developer messages, and group Pal functions under the `pal`
+namespace. Local token budgets still govern Pal's context planning. Only
+`response.completed` completes a subscription inference; interrupted/incomplete
+streams and failed responses cannot authorize pending tool execution or replay
+acceptance. Ordinary API endpoint behavior remains independent.
+
+Subscription errors never trigger automatic endpoint fallback, even if global
+fallback or a request-level override is enabled. Subscription endpoints are not
+implicit fallback targets for API requests. A usage-limit error, whether HTTP
+or in-stream, pauses all endpoints sharing that registration. Pauses survive
+restart and credential refresh. `/model <subscription_endpoint>` explicitly
+clears the pause; internal activation and `/refresh_llm_endpoint` do not. There
+is no background quota polling and no inferred reset time. Already submitted
+concurrent requests may still finish; new requests are rejected locally.
+
+User feedback distinguishes quota, reauthorization and transient failures, and
+links to https://chatgpt.com/settings/usage. Users may manually select another
+configured endpoint with `/model <endpoint_id>`. Temporary failures retain
+credentials; terminal refresh failures clear tokens while retaining the account
+registration. HTTP error status/code/parameter/request ID and stream error codes
+remain structured through the Bunshin proxy and LLM failure metadata.
+
+References:
+- [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [Accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
+- [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+- [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)

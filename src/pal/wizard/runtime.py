@@ -361,6 +361,85 @@ class WizardService(WizardServicePort):
         finally:
             database.close()
 
+    def save_llm_endpoints(self, runtime_root: Path, endpoints: list, active_endpoint_id: str) -> None:
+        """Persist only LLM configuration; callers own the database transaction."""
+        from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
+        from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
+
+        # 2. LLM endpoints
+        llm_repo = LLMEndpointRepository()
+        secrets_path = runtime_root / "secrets.json"
+        secret_store = EncryptedFileSecretStore(str(secrets_path))
+
+        from pal.llm.endpoint_spec import LLMEndpointSpec
+        from pal.llm.models import LLMEndpointModel
+        if not endpoints or active_endpoint_id not in {ep.endpoint_id for ep in endpoints}:
+            raise ValueError("Choose an active endpoint from the configured endpoints")
+        if len({ep.endpoint_id for ep in endpoints}) != len(endpoints):
+            raise ValueError("Endpoint IDs must be unique")
+        validated = []
+        for ep in endpoints:
+            provider = str(ep.provider or "").strip()
+            base_url = str(ep.base_url or "")
+            if provider:
+                pass
+            elif ep.wire_shape == "anthropic_messages":
+                provider = "anthropic"
+            elif ep.wire_shape in {"openai_completion", "openai_response"}:
+                # Try to infer from base_url
+                if "deepseek" in base_url:
+                    provider = "deepseek"
+                elif "zhipu" in base_url or "z.ai" in base_url or "bigmodel.cn" in base_url:
+                    provider = "zhipu"
+                elif "moonshot" in base_url or "kimi" in base_url:
+                    provider = "moonshot"
+                else:
+                    provider = "openai"
+            else:
+                provider = ep.endpoint_id
+
+            auth_kind = str(ep.auth_kind or "api_key_ref")
+            credential_ref = ep.credential_ref
+            if credential_ref is None:
+                credential_ref = f"{ep.endpoint_id}:api-key" if auth_kind == "api_key_ref" else ""
+
+            payload = {
+                "endpoint_id": ep.endpoint_id,
+                "provider": provider,
+                "model_id": ep.model_id,
+                "display_name": ep.endpoint_id,
+                "wire_shape": ep.wire_shape,
+                "base_url": base_url,
+                "auth_kind": auth_kind,
+                "credential_ref": credential_ref,
+                "context_window": ep.context_window or 8192,
+                "max_output_tokens": ep.max_output_tokens or 4096,
+                "thinking_levels_blob": list(ep.thinking_levels),
+                "default_thinking_level": ep.default_thinking_level,
+                "supports_tools": ep.supports_tools,
+                "supports_streaming": ep.supports_streaming,
+                "supports_vision": ep.supports_vision,
+                "input_modalities_blob": (
+                    ["text", "image"] if ep.supports_vision else ["text"]
+                ),
+                "output_modalities_blob": ["text"],
+                "priority": ep.priority,
+                "enabled": True,
+                "capabilities_blob": dict(ep.capabilities_blob or {}),
+                "notes": ep.notes or "Configured via setup wizard.",
+            }
+            validated.append((ep, LLMEndpointSpec.from_value(payload).to_payload()))
+
+        # Complete validation before touching credentials or publishing rows.
+        with LLMEndpointModel._meta.database.atomic():
+            for ep, payload in validated:
+                llm_repo.upsert(**payload)
+                if ep.api_key:
+                    secret_store.set_secret(
+                        SecretRef(service=ep.endpoint_id, account="api-key"), ep.api_key,
+                    )
+            RuntimeSettingRepository().set_active_llm_endpoint_id(active_endpoint_id)
+
     def seed_from_wizard(self, registration: PalRegistration, collected: object) -> None:
         """Seed the database from wizard-collected data."""
         from pal.wizard.prompts import WizardCollectedData
@@ -409,74 +488,8 @@ class WizardService(WizardServicePort):
             persona.save()
         id_repo.update_user_preferences(timezone=idata.timezone)
 
-        # 2. LLM endpoints
-        llm_repo = LLMEndpointRepository()
-        secrets_path = runtime_root / "secrets.json"
-        secret_store = EncryptedFileSecretStore(str(secrets_path))
-
-        for ep in data.endpoints:
-            provider = str(getattr(ep, "provider", "") or "").strip()
-            base_url = str(ep.base_url or "")
-            if provider:
-                pass
-            elif ep.wire_shape == "anthropic_messages":
-                provider = "anthropic"
-            elif ep.wire_shape in {"openai_completion", "openai_response"}:
-                # Try to infer from base_url
-                if "deepseek" in base_url:
-                    provider = "deepseek"
-                elif "zhipu" in base_url or "z.ai" in base_url or "bigmodel.cn" in base_url:
-                    provider = "zhipu"
-                elif "moonshot" in base_url or "kimi" in base_url:
-                    provider = "moonshot"
-                else:
-                    provider = "openai"
-            else:
-                provider = ep.endpoint_id
-
-            auth_kind = str(getattr(ep, "auth_kind", "") or "api_key_ref")
-            credential_ref = getattr(ep, "credential_ref", None)
-            if credential_ref is None:
-                credential_ref = f"{ep.endpoint_id}:api-key" if auth_kind == "api_key_ref" else ""
-
-            payload = {
-                "endpoint_id": ep.endpoint_id,
-                "provider": provider,
-                "model_id": ep.model_id,
-                "display_name": ep.endpoint_id,
-                "wire_shape": ep.wire_shape,
-                "base_url": base_url,
-                "auth_kind": auth_kind,
-                "credential_ref": credential_ref,
-                "context_window": ep.context_window or 8192,
-                "max_output_tokens": ep.max_output_tokens or 4096,
-                "thinking_levels_blob": list(ep.thinking_levels),
-                "default_thinking_level": ep.default_thinking_level,
-                "supports_tools": ep.supports_tools,
-                "supports_streaming": ep.supports_streaming,
-                "supports_vision": ep.supports_vision,
-                "input_modalities_blob": (
-                    ["text", "image"] if ep.supports_vision else ["text"]
-                ),
-                "output_modalities_blob": ["text"],
-                "priority": ep.priority,
-                "enabled": True,
-                "capabilities_blob": dict(getattr(ep, "capabilities_blob", None) or {}),
-                "notes": getattr(ep, "notes", None) or "Configured via setup wizard.",
-            }
-            llm_repo.upsert(**payload)
-
-            # Store API key in secret store
-            if ep.api_key:
-                secret_store.set_secret(
-                    SecretRef(service=ep.endpoint_id, account="api-key"),
-                    ep.api_key,
-                )
-
-        # 3. Set active endpoint
+        self.save_llm_endpoints(runtime_root, data.endpoints, data.active_endpoint_id)
         settings = RuntimeSettingRepository()
-        settings.ensure_defaults()
-        settings.set_active_llm_endpoint_id(data.active_endpoint_id)
 
         # 4. Channel
         ch = data.channel

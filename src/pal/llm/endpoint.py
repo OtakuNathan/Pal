@@ -69,6 +69,10 @@ class ShapeEndpointInvoker:
         refresh = getattr(self.transport, "refresh_credentials", None)
         return bool(refresh() if callable(refresh) else False)
 
+    def resume_subscription(self, endpoint: LLMEndpointModel) -> None:
+        if isinstance(self.transport, DirectSDKTransport):
+            self.transport.resume_subscription(endpoint)
+
     def activate_endpoint(self, endpoint_id: str) -> None:
         activate = getattr(self.transport, "activate_endpoint", None)
         if callable(activate):
@@ -112,6 +116,8 @@ class ShapeEndpointInvoker:
         native_sink: Callable[["NativeCandidate"], None] | None = None,
         submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
+        from pal.llm.chatgpt import is_chatgpt
+        stream = stream or is_chatgpt(endpoint)
         shape = WireShape(str(endpoint.wire_shape))
         capabilities = dict(endpoint.capabilities_blob or {})
         # Runtime installs the validated turn snapshot; direct invoker callers

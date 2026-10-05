@@ -11,6 +11,17 @@ from pal.shared.json_values import thaw_json
 
 
 def apply_provider_request_hooks(encoded: EncodedRequest, context: ShapeContext) -> EncodedRequest:
+    from pal.llm.chatgpt import UNSUPPORTED_PARAMETERS, is_chatgpt
+    if is_chatgpt(context.capabilities):
+        payload = thaw_json(encoded.payload)
+        extra_body = thaw_json(encoded.extra_body)
+        for parameter in UNSUPPORTED_PARAMETERS:
+            payload.pop(parameter, None)
+            extra_body.pop(parameter, None)
+        payload["store"] = False
+        extra_body.pop("store", None)
+        extra_body.pop("stream", None)
+        encoded = replace(encoded, payload=payload, extra_body=extra_body)
     protocol = context.capabilities.get("preserved_thinking")
     if protocol is None:
         return encoded

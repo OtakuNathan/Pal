@@ -70,8 +70,10 @@ class _ManagerTransportError(RuntimeError):
         *,
         kind: str = "manager_transport",
         provider_started: bool = False,
+        chatgpt_failure: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        self.chatgpt_failure = chatgpt_failure
         self.kind = kind
         self.provider_started = bool(provider_started)
 
@@ -830,6 +832,7 @@ class BunshinManager:
                     "provider_started": bool(
                         getattr(exc, "provider_started", False)
                     ),
+                    "chatgpt_failure": exc.chatgpt_failure if isinstance(exc, _ManagerTransportError) else None,
                 },
             }
         finally:
@@ -1517,9 +1520,12 @@ class BunshinManager:
             record.provider_started = bool(
                 record.provider_started or control.provider_started
             )
+            from pal.llm.chatgpt import exception_error
+            failure = exception_error(exc)
             raise _ManagerTransportError(
                 str(exc),
                 provider_started=record.provider_started,
+                chatgpt_failure=failure.to_dict() if failure else None,
             ) from exc
         finally:
             if pending_acknowledgement is not None:
