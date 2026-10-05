@@ -458,13 +458,6 @@ LlmCapabilitiesLLMIntrospectionProviderShowInput = _strict_model(
     },
 )
 
-LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput = _strict_model(
-    'LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by llm_list.')),
-    },
-)
-
 LspPluginLspManagerPluginProviderPrepareWorkspaceInput = _strict_model(
     'LspPluginLspManagerPluginProviderPrepareWorkspaceInput',
     {

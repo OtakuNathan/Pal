@@ -2053,6 +2053,14 @@ class TurnExecutor:
 
     # ── shared compaction engine ─────────────────────────────────────────
 
+    def compaction_deadline_seconds(self, *, max_attempts: int | None = None) -> float:
+        engine = self._compaction_engine
+        if engine is None:
+            return 180.0
+        attempts = engine.max_attempts if max_attempts is None else max_attempts
+        # The admission ticket also spans prompt preparation and model apply.
+        return engine.timeout_seconds * max(1, attempts) + 30.0
+
     async def compact_memory_async(
         self,
         memory_service: Any,
@@ -2066,6 +2074,7 @@ class TurnExecutor:
         max_attempts: int | None = None,
         timeout_seconds: float | None = None,
         cache_epoch: str = "",
+        commit_guard: Callable[[], bool] | None = None,
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -2120,6 +2129,10 @@ class TurnExecutor:
             or metadata.get("preferred_model_id")
             or (continuation.preferred_llm_model_id if continuation is not None else None)
         )
+        if preferred_endpoint_id:
+            metadata["preferred_endpoint_id"] = preferred_endpoint_id
+        if preferred_model_id:
+            metadata["preferred_model_id"] = preferred_model_id
         try:
             clock_value = max(
                 0,
@@ -2409,6 +2422,7 @@ class TurnExecutor:
                     memory_service=memory_service,
                     after_commit=after_compact,
                     replay_guard=replay_guard if cache_epoch else None,
+                    commit_guard=commit_guard,
                 ),
                 timeout=max(deadline_at - _time.monotonic(), 0.05),
             )

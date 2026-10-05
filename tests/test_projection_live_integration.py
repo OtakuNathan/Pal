@@ -77,8 +77,11 @@ class _Resolver:
 
 
 class _Settings:
+    def __init__(self, active=None):
+        self.active = active
+
     def get_active_llm_endpoint_id(self):
-        return None
+        return self.active
 
     def get_think_level(self, endpoint_id):
         return ""
@@ -90,7 +93,7 @@ class _Settings:
 def _runtime(*endpoints: _Endpoint) -> LLMRuntime:
     return LLMRuntime(
         endpoint_resolver=_Resolver(*endpoints),
-        settings_repository=_Settings(),
+        settings_repository=_Settings(endpoints[0].endpoint_id if endpoints else None),
         endpoint_invoker=SimpleNamespace(),
         config=SimpleNamespace(runtime_root=None, llm_endpoint_retry_attempts=1),
     )

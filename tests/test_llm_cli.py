@@ -300,7 +300,7 @@ class LLMCLITests(unittest.TestCase):
         self.assertEqual(endpoint["priority"], 7)
         self.assertEqual(endpoint["display_name"], "Demo renamed")
 
-    def test_delete_active_endpoint_selects_next_enabled_then_clears_last(self) -> None:
+    def test_delete_active_endpoint_clears_selection_without_fallback(self) -> None:
         first = self._parse(
             "add",
             "first",
@@ -328,14 +328,14 @@ class LLMCLITests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(run_llm_cli(delete_first), 0)
-        self.assertIn("Active endpoint moved to 'second'", output.getvalue())
+        self.assertIn("active endpoint was cleared", output.getvalue())
 
         list_args = self._parse("list", "--runtime-root", str(self.runtime_root), "--json")
         listed = io.StringIO()
         with contextlib.redirect_stdout(listed):
             self.assertEqual(run_llm_cli(list_args), 0)
         payload = json.loads(listed.getvalue())
-        self.assertEqual(payload["active_endpoint_id"], "second")
+        self.assertIsNone(payload["active_endpoint_id"])
         self.assertEqual([item["endpoint_id"] for item in payload["items"]], ["second"])
 
         delete_second = self._parse("delete", "second", "--runtime-root", str(self.runtime_root))

@@ -131,8 +131,8 @@ runtime when that is the available authorized path. A fresh process also loads i
 Do not claim this command reloads all config.toml settings or Python implementation.
 
 Use `llm_list`, `llm_show`, and `llm_active` to verify running endpoint metadata.
-`llm_set_active_endpoint` or `/model ENDPOINT` selects an already loaded enabled
-endpoint; `/think LEVEL` changes the supported thinking choice. These affect future
+`/model ENDPOINT` starts a user-controlled switch to a loaded enabled endpoint.
+Switching requires an idle conversation and may require confirmed compaction; `/think LEVEL` changes the supported thinking choice. These affect future
 requests, not a request already in flight. `/control` lists available controls;
 `/status` reports Pal's current activity (idle, in a turn, queued, or in maintenance),
 active turns, queued messages, and LLM statistics. `/reset` resets the conversation, not the host.
@@ -976,7 +976,6 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             capability_refs=(
                 "llm_list",
                 "llm_show",
-                "llm_set_active_endpoint",
             ),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to tune one exact model or add validated endpoint metadata.",

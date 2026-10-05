@@ -125,6 +125,8 @@ class ShapeEndpointInvoker:
         selection = request.metadata.get("cache_policy_selection")
         if selection is not None:
             capabilities["prompt_cache"] = dict(selection)
+        from pal.llm.replay_compatibility import REPLAY_BINDINGS_KEY
+        capabilities[REPLAY_BINDINGS_KEY] = request.metadata.get(REPLAY_BINDINGS_KEY, ())
         context = ShapeContext(
             wire_shape=shape, endpoint_id=str(endpoint.endpoint_id),
             model_id=str(endpoint.model_id), provider_id=str(endpoint.provider),

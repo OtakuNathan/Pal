@@ -44,7 +44,7 @@ class LLMPreparedPlan:
     """One immutable prepared-generation plan (F1, review af51d74).
 
     Derived BEFORE any projection encodes anything: the resolved endpoint
-    (first in the request's own preference/fallback order), the compiled
+    (the request's explicit preference or active endpoint), the compiled
     EFFECTIVE request (model hooks, effective thinking, output caps, cache
     policy selection), the validated capability profile, and the strong
     projection binding.  A live projection encodes ``effective_request``

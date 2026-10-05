@@ -1,11 +1,10 @@
-"""Endpoint fallback switch: default-off, explicit policy precedence, command registration."""
+"""Legacy settings and request metadata cannot enable endpoint fallback."""
 
 from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
 
-from pal.control.contracts import ControlCommandInvocation
 from pal.control.service import ControlPlane
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.repository import LLM_ENDPOINT_FALLBACK_SETTING_KEY
@@ -50,7 +49,7 @@ class _SwitchSettingsRepository:
         self.values[key] = value
 
     def get_active_llm_endpoint_id(self) -> str | None:
-        return None
+        return self.values.get("active")
 
     def set_active_llm_endpoint_id(self, endpoint_id: str) -> None:
         self.values["active"] = endpoint_id
@@ -61,15 +60,9 @@ class _SwitchSettingsRepository:
     def set_think_level(self, endpoint_id: str, value: str) -> None:
         _ = endpoint_id, value
 
-    def get_llm_endpoint_fallback(self) -> bool:
-        value = str(self.values.get(LLM_ENDPOINT_FALLBACK_SETTING_KEY) or "").strip().lower()
-        return value in {"on", "true", "1", "enabled", "yes"}
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
-        self.values[LLM_ENDPOINT_FALLBACK_SETTING_KEY] = "on" if enabled else "off"
-
 
 def _runtime(repository: _SwitchSettingsRepository, active: str | None = None) -> LLMRuntime:
+    repository.values["active"] = active
     return LLMRuntime(
         endpoint_resolver=EndpointResolver(
             endpoints=(
@@ -83,64 +76,37 @@ def _runtime(repository: _SwitchSettingsRepository, active: str | None = None) -
     )
 
 
-class EndpointFallbackSwitchTests(unittest.TestCase):
-    def test_default_off_restricts_to_active_endpoint(self) -> None:
-        runtime = _runtime(_SwitchSettingsRepository(fallback=None), active="alpha")
-        endpoints = runtime._enabled_endpoints_for_preference()
-        self.assertEqual([item.endpoint_id for item in endpoints], ["alpha"])
+class EndpointFallbackRemovalTests(unittest.TestCase):
+    def test_legacy_settings_and_request_overrides_cannot_enable_fallback(self) -> None:
+        for setting in (None, False, True):
+            for policy in (None, "none", "enabled", "on", "anything"):
+                with self.subTest(setting=setting, policy=policy):
+                    runtime = _runtime(_SwitchSettingsRepository(setting), active="alpha")
+                    endpoints = runtime._enabled_endpoints_for_preference(endpoint_fallback_policy=policy)
+                    self.assertEqual([item.endpoint_id for item in endpoints], ["alpha"])
 
-    def test_switch_on_restores_full_fallback_order(self) -> None:
-        runtime = _runtime(_SwitchSettingsRepository(fallback=True), active="alpha")
-        endpoints = runtime._enabled_endpoints_for_preference()
-        self.assertEqual(
-            [item.endpoint_id for item in endpoints],
-            ["alpha", "beta"],
-        )
+    def test_missing_selection_does_not_choose_the_first_endpoint(self) -> None:
+        for active in (None, "deleted"):
+            runtime = _runtime(_SwitchSettingsRepository(True), active=active)
+            self.assertIsNone(runtime.active_endpoint())
+            self.assertEqual(runtime._enabled_endpoints_for_preference(), [])
+            self.assertEqual(runtime._enabled_endpoints_for_preference(preferred_endpoint_id="deleted"), [])
 
-    def test_explicit_policy_beats_global_switch_in_both_directions(self) -> None:
-        off_runtime = _runtime(_SwitchSettingsRepository(fallback=True))
-        endpoints = off_runtime._enabled_endpoints_for_preference(
-            endpoint_fallback_policy="none"
+    def test_explicit_request_target_is_the_only_endpoint(self) -> None:
+        runtime = _runtime(_SwitchSettingsRepository(True), active="alpha")
+        endpoints = runtime._enabled_endpoints_for_preference(
+            preferred_endpoint_id="beta", endpoint_fallback_policy="enabled",
         )
-        # Explicit "none" wins even though the global switch is on.
-        self.assertEqual(len(endpoints), 1)
+        self.assertEqual([item.endpoint_id for item in endpoints], ["beta"])
+        self.assertEqual(runtime.active_endpoint_id, "alpha")
 
-    def test_runtime_setter_flips_live_behavior(self) -> None:
-        repository = _SwitchSettingsRepository(fallback=None)
-        runtime = _runtime(repository, active="alpha")
-        self.assertFalse(runtime.llm_endpoint_fallback_enabled())
-        runtime.set_llm_endpoint_fallback(True)
-        self.assertTrue(runtime.llm_endpoint_fallback_enabled())
-        self.assertEqual(
-            [item.endpoint_id for item in runtime._enabled_endpoints_for_preference()],
-            ["alpha", "beta"],
-        )
-        runtime.set_llm_endpoint_fallback(False)
-        self.assertEqual(
-            [item.endpoint_id for item in runtime._enabled_endpoints_for_preference()],
-            ["alpha"],
-        )
-
-    def test_command_registered_with_on_off_args(self) -> None:
+    def test_fallback_setter_and_commands_are_removed(self) -> None:
+        runtime = _runtime(_SwitchSettingsRepository(), active="alpha")
+        self.assertFalse(hasattr(runtime, "set_llm_endpoint_fallback"))
         plane = ControlPlane()
-        invocation = ControlCommandInvocation(
-            command_name="llm_fallback",
-            argv=["on"],
-            route=None,
-        )
-        action = plane._handle_llm_fallback(invocation)  # noqa: SLF001 - direct handler test
-        self.assertEqual(action.action_kind, "set_llm_fallback")
-        self.assertTrue(action.args["enabled"])
-
-        status = plane._handle_llm_fallback(
-            ControlCommandInvocation(command_name="llm_fallback", argv=[], route=None)
-        )
-        self.assertEqual(status.action_kind, "show_llm_fallback")
-
-        invalid = plane._handle_llm_fallback(
-            ControlCommandInvocation(command_name="llm_fallback", argv=["maybe"], route=None)
-        )
-        self.assertEqual(invalid.action_kind, "invalid_command")
+        names = {item.name for item in plane.list_panel_commands()}
+        self.assertNotIn("llm_fallback", names)
+        self.assertNotIn("fallback", names)
 
 
 if __name__ == "__main__":

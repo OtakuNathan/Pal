@@ -154,7 +154,7 @@ The scheduler derives runtime state from bunshin-owned facts, not from the proje
 
 Module completion, parent spawn, manager startup recovery, retry, and explicit DAG tick are scheduling signals. `tick_parent_dag` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_BUNSHIN_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit DAG tick. When the DAG completes, the parent writes a mechanical `completion_report.md` artifact under the work-order artifact directory; user-facing notifications should point to that artifact rather than paste the full report.
 
-Concurrency is intentionally global at the bunshin scheduler layer. Per-endpoint request limits belong to the shared LLM runtime and transport because endpoint fallback can change the actual provider/model used by a child run. The parent module scheduler should not pre-resolve endpoint identity or duplicate LLM fallback policy.
+Concurrency is intentionally global at the bunshin scheduler layer. Per-endpoint request limits belong to the shared LLM runtime and transport. Each child request stays on its explicitly selected endpoint; an unavailable endpoint fails without automatic fallback. The parent module scheduler should not duplicate LLM request admission.
 
 ## Runner Sandbox
 

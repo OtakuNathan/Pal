@@ -94,7 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tools_eval_parser.add_argument(
         "--endpoint-id",
         default=None,
-        help="Require one enabled LLM endpoint and disable endpoint fallback",
+        help="Select one enabled LLM endpoint for the evaluation",
     )
 
     # -- bunshin --------------------------------------------------------------

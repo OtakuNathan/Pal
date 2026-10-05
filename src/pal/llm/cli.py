@@ -352,21 +352,11 @@ def _run_delete(args: argparse.Namespace) -> int:
         raise RuntimeError(f"endpoint {endpoint_id!r} could not be deleted")
     settings.delete_think_level(endpoint_id)
 
-    next_active: str | None = None
     if was_active:
-        replacement = repository.get_primary_enabled()
-        if replacement is None:
-            settings.delete_active_llm_endpoint_id()
-        else:
-            next_active = str(replacement.endpoint_id)
-            settings.set_active_llm_endpoint_id(next_active)
-
+        settings.delete_active_llm_endpoint_id()
     print(f"LLM endpoint {endpoint_id!r} deleted. Stored credential material was preserved.")
     if was_active:
-        if next_active is None:
-            print("No enabled endpoints remain; the active endpoint setting was cleared.")
-        else:
-            print(f"Active endpoint moved to {next_active!r}.")
+        print("The active endpoint was cleared. Select another endpoint explicitly with /model.")
     print("A running Pal can load the change with /refresh_llm_endpoint; a new process loads it automatically.")
     return 0
 

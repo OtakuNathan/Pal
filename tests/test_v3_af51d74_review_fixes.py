@@ -270,7 +270,7 @@ class F2SendReceiptTests(unittest.TestCase):
         session = runtime.endpoint_projection_session("pal:resident")
         self.assertEqual(len(session.chunks), 1)
 
-    def test_fallback_send_does_not_commit_projection(self):
+    def test_failed_endpoint_cannot_fall_back_or_commit_projection(self):
         memory = MemoryService()
         memory.begin_l1_turn("T", user_message=user("Q1", "q1"))
         primary = _endpoint("trace-endpoint", "trace-model", priority=0)
@@ -287,16 +287,14 @@ class F2SendReceiptTests(unittest.TestCase):
                       "preferred_endpoint_id": "trace-endpoint",
                       "endpoint_fallback_policy": "enabled"},
         )
+        async def failed(*args, **kwargs):
+            return SimpleNamespace(user_feedback=None)
+        ex._handle_failure_async = failed
+        ex._render_failure_feedback_text = lambda _: "Selected endpoint failed."
         outcome = _drive(ex, request)
-        self.assertEqual(
-            outcome.status.value if hasattr(outcome.status, "value") else str(outcome.status),
-            "ok")
-        receipt = getattr(outcome.payload, "projection_receipt", None)
-        self.assertIsNotNone(receipt)
-        self.assertFalse(receipt.applied,
-                         "the projection was prepared for the primary endpoint "
-                         "but the fallback endpoint actually served")
-        self.assertEqual(receipt.resolved_endpoint_id, "fallback-endpoint")
+        self.assertEqual(outcome.payload.text, "Selected endpoint failed.")
+        self.assertIsNone(getattr(outcome.payload, "projection_receipt", None))
+        self.assertEqual([name for name, _ in transport.captured], ["trace-endpoint"])
         session = runtime.endpoint_projection_session("pal:resident")
         self.assertEqual(len(session.chunks), 0,
                          "an unapplied projection must never freeze a chunk")

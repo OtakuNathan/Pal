@@ -10,18 +10,22 @@ from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.core.memory_maintenance import MemoryMaintenanceMixin, SLEEP_REPLY
+from pal.core.model_switch import ModelSwitchMixin
 from pal.core.compaction_coordinator import (
     CompactionGate,
     CompactionPhase,
     CompactionTrigger,
+    CompactionTicket,
     compaction_gate_active,
 )
+from pal.core.compaction import CompactionRunResult
+from pal.memory.contracts import MemoryCompactResult
 
 RESIDENT_COMPACTION_SCOPE = "pal:resident"
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
@@ -491,7 +495,7 @@ class CoreTurnIOPort:
 
 
 @dataclass
-class PalCore(MemoryMaintenanceMixin):
+class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     context: MainContext = field(default_factory=MainContext)
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
@@ -1196,11 +1200,8 @@ class PalCore(MemoryMaintenanceMixin):
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
                 return
-            if action.action_kind == "show_llm_fallback":
-                await self._handle_show_llm_fallback_async(action)
-                return
-            if action.action_kind == "set_llm_fallback":
-                await self._handle_set_llm_fallback_async(action)
+            if action.action_kind == "model_switch_step":
+                await self._handle_model_switch_action_async(action)
                 return
             if action.action_kind == "show_model":
                 await self._handle_show_model_async(action)
@@ -1294,7 +1295,7 @@ class PalCore(MemoryMaintenanceMixin):
         for scope_state in list(self.state.control_scopes.values()):
             expired: list[Any] = []
             for request_kind, request in list(scope_state.pending_requests.items()):
-                if _parse_utc_timestamp(request.expires_at) <= now:
+                if request.payload.get("stage") != "executing" and _parse_utc_timestamp(request.expires_at) <= now:
                     expired.append((request_kind, request))
                     scope_state.pending_requests.pop(request_kind, None)
             for _, request in expired:
@@ -1382,41 +1383,9 @@ class PalCore(MemoryMaintenanceMixin):
             "This applies to new turns only.",
         )
 
-    async def _handle_show_llm_fallback_async(self, action: ControlAction) -> None:
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        getter = getattr(llm_runtime, "llm_endpoint_fallback_enabled", None)
-        enabled = bool(getter()) if callable(getter) else False
-        state = "on" if enabled else "off"
-        summary = (
-            "Endpoint fallback is ON: requests may continue on other enabled endpoints "
-            "when the preferred one fails."
-            if enabled
-            else "Endpoint fallback is OFF: the preferred endpoint fails honestly; "
-            "no silent model switching. Use /llm_fallback on to enable."
-        )
-        await self._complete_action_reply_async(action, f"Endpoint fallback: {state}.\n{summary}")
-
-    async def _handle_set_llm_fallback_async(self, action: ControlAction) -> None:
-        enabled = bool(action.args.get("enabled"))
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        setter = getattr(llm_runtime, "set_llm_endpoint_fallback", None)
-        if not callable(setter):
-            await self._complete_action_reply_async(action, "Endpoint fallback switch is unavailable.")
-            return
-        try:
-            setter(enabled)
-        except Exception as exc:
-            await self._complete_action_reply_async(
-                action, f"Failed to update endpoint fallback: {exc}"
-            )
-            return
-        state = "on" if enabled else "off"
-        await self._complete_action_reply_async(
-            action,
-            f"Endpoint fallback set to {state}. This applies to new requests only.",
-        )
-
     async def _handle_show_model_async(self, action: ControlAction) -> None:
+        if action.route is not None:
+            self._discard_model_selection_draft(action.route.control_scope_key)
         llm_runtime = self.context.require_port(LLM_RUNTIME)
         self._refresh_llm_runtime_settings(llm_runtime)
         endpoints = self._llm_model_endpoints(llm_runtime)
@@ -1425,70 +1394,13 @@ class PalCore(MemoryMaintenanceMixin):
             control_interactions.model_panel_delivery(action.route, endpoints, active_endpoint_id)
         )
 
-    async def _handle_set_model_async(self, action: ControlAction) -> None:
-        requested = str(action.args.get("endpoint_id") or "").strip()
-        if not requested:
-            await self._complete_action_reply_async(action, "Use /model <endpoint_id>.")
-            return
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        self._refresh_llm_runtime_settings(llm_runtime)
-        endpoints = self._llm_model_endpoints(llm_runtime)
-        endpoint = next(
-            (item for item in endpoints if self._llm_endpoint_field(item, "endpoint_id") == requested),
-            None,
-        )
-        if endpoint is None:
-            known = ", ".join(self._llm_endpoint_field(item, "endpoint_id") for item in endpoints)
-            message = f"Unknown enabled model endpoint: {requested}."
-            if known:
-                message = f"{message}\nAvailable endpoints: {known}"
-            await self._complete_action_reply_async(action, message)
-            return
-        set_active_endpoint = getattr(llm_runtime, "set_active_endpoint", None)
-        if callable(set_active_endpoint):
-            from pal.llm.runtime import LLMRuntime
-            if isinstance(llm_runtime, LLMRuntime):
-                llm_runtime.resume_subscription(requested)
-            set_active_endpoint(requested)
-        else:
-            settings_repository = getattr(llm_runtime, "settings_repository", None)
-            set_active_setting = getattr(settings_repository, "set_active_llm_endpoint_id", None)
-            if not callable(set_active_setting):
-                await self._complete_action_reply_async(action, "Model switching is unavailable.")
-                return
-            set_active_setting(requested)
-        self._refresh_llm_runtime_settings(llm_runtime)
-        model_message = (
-            f"Model updated to {self._llm_model_label(endpoint)}. "
-            "This applies to new turns only."
-        )
-        status_builder = getattr(llm_runtime, "thinking_status", None)
-        think_status = (
-            status_builder(requested)
-            if callable(status_builder)
-            else {"available": False, "choices": []}
-        )
-        if control_interactions.is_interaction_action(action) and list(think_status.get("choices") or []):
-            await self._deliver_control_delivery_async(
-                control_interactions.think_panel_delivery(
-                    action.route,
-                    think_status,
-                    banner=model_message,
-                    back_to_models=True,
-                )
-            )
-            return
-        await self._complete_action_reply_async(
-            action,
-            model_message,
-        )
-
     async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:
         # A confirmed endpoint/settings switch revokes any live
         # compaction ticket's commit eligibility first, so a warm generate
         # candidate can never install onto — or carry native cache
         # toward — the new endpoint (X07).
         async with self.state.channel_turn_transition_lock:
+            self._invalidate_model_selections()
             self._compaction_gate().cancel_all(reason="llm_endpoint_refresh")
         llm_runtime = self.context.require_port(LLM_RUNTIME)
         refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
@@ -1574,18 +1486,7 @@ class PalCore(MemoryMaintenanceMixin):
 
     @staticmethod
     def _effective_llm_endpoint_id(llm_runtime: Any, endpoints: list[Any]) -> str:
-        active = str(getattr(llm_runtime, "active_endpoint_id", "") or "").strip()
-        if active:
-            return active
-        primary = getattr(getattr(llm_runtime, "endpoint_resolver", None), "primary", None)
-        if callable(primary):
-            endpoint = primary()
-            endpoint_id = PalCore._llm_endpoint_field(endpoint, "endpoint_id")
-            if endpoint_id:
-                return endpoint_id
-        if endpoints:
-            return PalCore._llm_endpoint_field(endpoints[0], "endpoint_id")
-        return ""
+        return str(getattr(llm_runtime, "active_endpoint_id", "") or "").strip()
 
     @staticmethod
     def _llm_endpoint_field(endpoint: Any, field_name: str) -> str:
@@ -1777,6 +1678,7 @@ class PalCore(MemoryMaintenanceMixin):
             if self.state.resident_quiescing:
                 return False
             self.state.resident_quiescing = True
+            self._invalidate_model_selections()
             # Two-segment admission: a confirmed reset seizes the history
             # root's live run first (X04/X05); the owner cancels it before
             # any history is cleared, so a late summary cannot publish into
@@ -1866,6 +1768,9 @@ class PalCore(MemoryMaintenanceMixin):
             else:
                 ticket = gate.claim(
                     RESIDENT_COMPACTION_SCOPE,
+                    deadline_seconds=self.turn_executor.compaction_deadline_seconds(
+                        max_attempts=3 if cache_epoch else None,
+                    ),
                     trigger=(
                         CompactionTrigger.MANUAL_HOT
                         if cache_epoch
@@ -1906,19 +1811,9 @@ class PalCore(MemoryMaintenanceMixin):
             if not l1_items:
                 await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
                 return
-            async with self.state.channel_turn_transition_lock:
-                gate.advance(ticket, CompactionPhase.GENERATING)
-            run_result = await self.turn_executor.compact_memory_async(
-                memory_service,
-                # Resolve the actual endpoint budget during compaction preflight.
-                target_input_budget=0,
-                reserved_output_tokens=0,
-                max_attempts=3 if cache_epoch else None,
-                cache_epoch=cache_epoch,
+            run_result = await self._run_control_compaction_async(
+                ticket, max_attempts=3 if cache_epoch else None, cache_epoch=cache_epoch,
             )
-            if run_result.success:
-                async with self.state.channel_turn_transition_lock:
-                    gate.advance(ticket, CompactionPhase.COMMITTED)
         finally:
             # Identity-checked: this ticket can never release a successor's
             # gate, and cancellation cannot skip this release (F07/Q14).
@@ -1958,6 +1853,40 @@ class PalCore(MemoryMaintenanceMixin):
             action,
             reply_text,
         )
+        await self._deliver_compact_candidates_async(action, result)
+
+    async def _run_control_compaction_async(
+        self, ticket: CompactionTicket, *, target_input_budget: int = 0,
+        reserved_output_tokens: int = 0, preferred_endpoint_id: str | None = None,
+        max_attempts: int | None = None, cache_epoch: str = "",
+        commit_guard: Callable[[], bool] | None = None,
+    ) -> CompactionRunResult:
+        gate = self._compaction_gate()
+
+        def eligible() -> bool:
+            current = gate.ticket_for(ticket.scope)
+            return (current is not None and current.op_id == ticket.op_id
+                    and not current.cancelled and not current.expired
+                    and (commit_guard is None or commit_guard()))
+        async with self.state.channel_turn_transition_lock:
+            if not eligible():
+                return CompactionRunResult(status="ticket_cancelled")
+            gate.advance(ticket, CompactionPhase.GENERATING)
+        run_result = await self.turn_executor.compact_memory_async(
+            self.context.require_port(MEMORY), target_input_budget=target_input_budget,
+            reserved_output_tokens=reserved_output_tokens,
+            preferred_endpoint_id=preferred_endpoint_id,
+            max_attempts=max_attempts, cache_epoch=cache_epoch, commit_guard=eligible,
+        )
+        if run_result.success:
+            async with self.state.channel_turn_transition_lock:
+                gate.advance(ticket, CompactionPhase.COMMITTED)
+        return run_result
+
+    async def _deliver_compact_candidates_async(
+        self, action: ControlAction, result: MemoryCompactResult,
+    ) -> None:
+        normalization_diagnostics = compact_normalization_diagnostics(result)
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:
             source_ref = f"compact_{uuid4().hex[:12]}"
@@ -2042,8 +1971,8 @@ class PalCore(MemoryMaintenanceMixin):
             control_interactions.terminal_delivery_for_interaction(
                 request.route,
                 interaction_id=request.request_id,
-                interaction_kind="reset_confirm",
-                text="This reset request expired.",
+                interaction_kind="control_panel" if request.request_kind == "model_switch" else "reset_confirm",
+                text="This model selection expired." if request.request_kind == "model_switch" else "This reset request expired.",
                 delivery_kind="interactive_expire",
             )
         )

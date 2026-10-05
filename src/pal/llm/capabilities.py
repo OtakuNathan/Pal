@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from pal.execution.tool_semantics import (
-    INDIRECT_LOCAL_WRITE,
-)
 from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pydantic import Field
 
 from pal.execution.generated_tool_models import (
-    LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
     LlmCapabilitiesLLMIntrospectionProviderShowInput,
 )
 
@@ -20,7 +16,6 @@ from pal.llm.contracts import LLM_RUNTIME, LLM_QUERY
 from pal.llm.runtime import LLMRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
-    OPERATION_NAMESPACE,
     IntrospectionCall,
     IntrospectionResult,
     RuntimeStatus,
@@ -98,13 +93,6 @@ class LLMThinkLevelSnapshot:
 
 
 @capability_node(
-    namespace=OPERATION_NAMESPACE,
-    scope="module",
-    kind="module",
-    source="builtin:llm",
-    target_kind="module",
-)
-@capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="module",
     kind="module",
@@ -164,7 +152,7 @@ class LLMIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show the current active LLM model metadata.",
             use_when="Checking which model endpoint is currently selected for requests.",
-            do_not_use_when="Listing all endpoints (use llm_list). Switching endpoints (use llm_set_active_endpoint).",
+            do_not_use_when="Listing all endpoints (use llm_list). Switching endpoints (the user must use /model).",
             failure_next_steps="Read-only. If no active model, check llm_list for available endpoints.",
         ),
         aliases=("llm_active",),
@@ -223,7 +211,7 @@ class LLMIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show the active endpoint's thinking level choices and current selection.",
             use_when="Checking or deciding which reasoning level (e.g. low/medium/high) the active model uses.",
-            do_not_use_when="Checking token usage (use llm_usage). Switching endpoints (use llm_set_active_endpoint).",
+            do_not_use_when="Checking token usage (use llm_usage). Switching endpoints (the user must use /model).",
             failure_next_steps="Read-only. Thinking levels are provider-declared; if empty, the endpoint may not support thinking.",
         ),
         aliases=("llm_think_level",),
@@ -304,46 +292,6 @@ class LLMIntrospectionProvider:
             "usage": payload["usage"],
             "active_model": payload["active_model"],
         }
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="set_active_endpoint",
-        guidance=ToolGuidance(
-            purpose="Switch the active LLM endpoint for future requests. Recommend completing compact on the current model first to reduce history replay cost; switching does not automatically compact.",
-            use_when="The user asks to switch models (e.g. to a different provider, a faster/cheaper model, or one with vision).",
-            do_not_use_when="Checking the current model (use llm_active). Listing endpoints (use llm_list).",
-            failure_next_steps="If NOT_FOUND, verify the endpoint name with llm_list. Only enabled endpoints can be activated.",
-        ),
-        InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
-        aliases=("llm_set_active_endpoint",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
-        endpoint_id = str(call.args.get("name") or "").strip()
-        if not endpoint_id:
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text="name is required",
-                llm_text="name is required",
-            )
-        endpoint = next((item for item in self.runtime.endpoint_resolver.enabled() if item.endpoint_id == endpoint_id), None)
-        if endpoint is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="unknown enabled llm endpoint",
-                structured={"active_endpoint_id": endpoint_id},
-                llm_text="unknown enabled llm endpoint",
-            )
-        self.runtime.set_active_endpoint(endpoint_id)
-        snapshot = inspect_llm(self)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="llm active endpoint updated",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("LLM active model", snapshot.__dict__),
-        )
 
     def _find_endpoint(self, endpoint_id: str) -> LLMEndpointModel | None:
         return next(

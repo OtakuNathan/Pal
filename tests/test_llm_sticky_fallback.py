@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from pal.core import PalCore
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
+from pal.llm.repository import LLM_ENDPOINT_FALLBACK_SETTING_KEY
 from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
 from pal.llm.capabilities import LLMIntrospectionProvider, register_with_core as register_llm_with_core
 from pal.runtime_app import open_runtime
@@ -57,9 +58,9 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
 
 
 class _MemorySettingsRepository:
-    def __init__(self) -> None:
+    def __init__(self, active: str | None = None) -> None:
         self.think_levels: dict[str, str] = {}
-        self.active_endpoint_id: str | None = None
+        self.active_endpoint_id: str | None = active
 
     def get_think_level(self, endpoint_id: str) -> str | None:
         return self.think_levels.get(endpoint_id)
@@ -79,17 +80,10 @@ class _MemorySettingsRepository:
     def set_active_llm_endpoint_id(self, endpoint_id: str) -> None:
         self.active_endpoint_id = str(endpoint_id)
 
-    # These tests exercise fallback behavior, which is opt-in since the
-    # honest-by-default switch landed: the repository reports it enabled.
-    def get_llm_endpoint_fallback(self) -> bool:
-        return True
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
-        self.fallback_enabled = bool(enabled)
 
 
-class PalV2LLMStickyFallbackTests(unittest.TestCase):
-    def test_fallback_sticks_to_working_endpoint(self) -> None:
+class PalLLMNoFallbackTests(unittest.TestCase):
+    def test_legacy_fallback_setting_cannot_change_selected_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handle = open_runtime(Path(tmpdir))
             try:
@@ -101,17 +95,18 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     settings_repository=RuntimeSettingRepository(),
                     endpoint_invoker=invoker,
                 )
-                runtime.set_llm_endpoint_fallback(True)
+                runtime.set_active_endpoint("broken")
+                RuntimeSettingRepository().set(LLM_ENDPOINT_FALLBACK_SETTING_KEY, "on")
                 request = request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
 
                 first = runtime.generate(request)
                 second = runtime.generate(request)
 
-                self.assertEqual(first.text, "ok:working")
-                self.assertEqual(second.text, "ok:working")
-                self.assertEqual(invoker.calls, ["broken", "broken", "broken", "working", "working"])
-                self.assertEqual(runtime.active_endpoint_id, "working")
-                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
+                self.assertEqual(first.finish_reason, LLMFinishReason.ERROR)
+                self.assertEqual(second.finish_reason, LLMFinishReason.ERROR)
+                self.assertEqual(invoker.calls, ["broken"] * 6)
+                self.assertEqual(runtime.active_endpoint_id, "broken")
+                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "broken")
             finally:
                 asyncio.run(handle.stop_async())
 
@@ -136,7 +131,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("no enabled endpoints", outcome.text)
+        self.assertIn("unavailable", outcome.text)
         self.assertEqual(invoker.calls, [])
         self.assertEqual(runtime.active_endpoint_id, "active")
 
@@ -215,7 +210,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         self.assertEqual(facts["output_modalities"], ["text"])
         self.assertEqual(facts["capabilities"], {"image_detail": "high"})
 
-    def test_image_request_filters_text_only_fallback_once_before_invocation(self) -> None:
+    def test_image_request_does_not_fall_back_to_another_vision_endpoint(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -261,8 +256,8 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
         result = runtime.generate(request)
 
-        self.assertEqual(result.text, "vision fallback")
-        self.assertEqual(invoker.calls, ["vision-primary", "vision-fallback"])
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["vision-primary"])
 
     def test_image_request_fails_without_invoking_text_only_endpoint(self) -> None:
         settings = _MemorySettingsRepository()
@@ -292,7 +287,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         result = runtime.generate(request)
 
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("no enabled endpoints", result.text)
+        self.assertIn("unavailable", result.text)
         self.assertEqual(invoker.calls, [])
 
     def test_endpoint_fallback_policy_none_uses_only_selected_endpoint(self) -> None:
@@ -322,7 +317,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         self.assertNotIn("broken endpoint", outcome.text)
         self.assertEqual(invoker.calls, ["broken"])
 
-    def test_timeout_error_exhausts_endpoint_and_falls_back(self) -> None:
+    def test_timeout_error_exhausts_retries_on_selected_endpoint(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -343,7 +338,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         events: list[dict[str, object]] = []
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=(slow, working)),
-            settings_repository=_MemorySettingsRepository(),
+            settings_repository=_MemorySettingsRepository("slow"),
             endpoint_invoker=invoker,
             endpoint_retry_attempts=3,
             event_sink=events.append,
@@ -351,15 +346,15 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
         outcome = runtime.generate(request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
 
-        self.assertEqual(outcome.text, "ok:working")
-        self.assertEqual(invoker.calls, ["slow", "slow", "slow", "working"])
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["slow", "slow", "slow"])
         self.assertEqual(events[0]["phase"], "llm_endpoint_attempt_failed")
         self.assertEqual(events[0]["error_kind"], "timeout")
         self.assertEqual(events[3]["phase"], "llm_endpoint_exhausted")
         self.assertEqual(events[3]["reason"], "timeout")
-        self.assertIn("llm_endpoint_fallback_succeeded", [event["phase"] for event in events])
+        self.assertNotIn("llm_endpoint_fallback_succeeded", [event["phase"] for event in events])
 
-    def test_bad_request_skips_identical_retry_and_falls_back(self) -> None:
+    def test_bad_request_skips_identical_retry_without_fallback(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -380,7 +375,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         events: list[dict[str, object]] = []
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=(malformed, working)),
-            settings_repository=_MemorySettingsRepository(),
+            settings_repository=_MemorySettingsRepository("malformed"),
             endpoint_invoker=invoker,
             endpoint_retry_attempts=3,
             event_sink=events.append,
@@ -393,13 +388,13 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(outcome.text, "ok:working")
-        self.assertEqual(invoker.calls, ["malformed", "working"])
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["malformed"])
         self.assertEqual(events[0]["error_kind"], "bad_request")
         self.assertEqual(events[1]["phase"], "llm_endpoint_exhausted")
         self.assertEqual(events[1]["reason"], "bad_request")
 
-    def test_agenerate_falls_back_when_primary_blocks_past_attempt_timeout(self) -> None:
+    def test_agenerate_timeout_never_switches_endpoint(self) -> None:
         class _BlockingInvoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -419,7 +414,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         invoker = _BlockingInvoker()
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=(blocked, working)),
-            settings_repository=_MemorySettingsRepository(),
+            settings_repository=_MemorySettingsRepository("blocked"),
             endpoint_invoker=invoker,
             endpoint_retry_attempts=1,
         )
@@ -431,10 +426,10 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
         outcome = asyncio.run(runtime.agenerate(request))
 
-        self.assertEqual(outcome.text, "ok:working")
-        self.assertEqual(invoker.calls[:2], ["blocked", "working"])
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["blocked"])
 
-    def test_set_active_endpoint_switches_runtime_preference(self) -> None:
+    def test_runtime_selection_remains_available_to_control_plane(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handle = open_runtime(Path(tmpdir))
             try:
@@ -445,17 +440,15 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     settings_repository=RuntimeSettingRepository(),
                     endpoint_invoker=_FailoverInvoker(),
                 )
+                runtime.set_active_endpoint("beta")
                 provider = LLMIntrospectionProvider(runtime=runtime)
-                result = provider.set_active_endpoint(type("Call", (), {"args": {"name": "beta"}})())
-
-                self.assertEqual(result.status, "ok")
-                self.assertEqual(result.structured["active_endpoint_id"], "beta")
-                self.assertEqual(result.structured["endpoint_id"], "beta")
+                self.assertFalse(hasattr(provider, "set_active_endpoint"))
+                self.assertEqual(runtime.active_endpoint_id, "beta")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
             finally:
                 asyncio.run(handle.stop_async())
 
-    def test_set_active_endpoint_is_discoverable_and_callable_by_llm(self) -> None:
+    def test_set_active_endpoint_is_not_discoverable_or_callable_by_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handle = open_runtime(Path(tmpdir))
             try:
@@ -477,13 +470,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 )
                 self.assertEqual(search.status, "ok")
                 hit_names = [item["alias"] for item in search.structured["hits"]]
-                self.assertIn("llm_set_active_endpoint", hit_names)
+                self.assertNotIn("llm_set_active_endpoint", hit_names)
 
                 read = core.context.execution_runtime.execute(
                     CapabilityCall(name="op_tool_read", args={"name": "llm_set_active_endpoint"})
                 )
-                self.assertEqual(read.status, "ok")
-                self.assertEqual(read.structured["input_schema"]["required"], ["name"])
+                self.assertNotEqual(read.status, "ok")
 
                 call = core.context.execution_runtime.execute(
                     CapabilityCall(
@@ -491,9 +483,8 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                         args={"name": "llm_set_active_endpoint", "args": {"name": "beta"}},
                     )
                 )
-                self.assertEqual(call.status, "ok")
-                self.assertEqual(call.structured["active_endpoint_id"], "beta")
-                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
+                self.assertNotEqual(call.status, "ok")
+                self.assertIsNone(RuntimeSettingRepository().get_active_llm_endpoint_id())
             finally:
                 asyncio.run(handle.stop_async())
 

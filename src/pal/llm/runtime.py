@@ -42,6 +42,7 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.prompt_cache import CacheProfileError
+from pal.llm.replay_compatibility import REPLAY_BINDINGS_KEY, accepts_replay, compatible_replay_bindings
 from pal.llm.projection_contracts import (
     EndpointBinding,
     LogicalSessionId,
@@ -85,10 +86,6 @@ _DEFAULT_TIMEOUT_SECONDS = 600.0
 _CALL_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
     "llm_call_event_sink", default=None,
 )
-_STRICT_ENDPOINT_PREFERRED_SOURCES = frozenset({"profile"})
-_FALLBACK_DISABLED_POLICIES = frozenset(
-    {"disabled", "none", "off", "strict", "strict_preferred", "no_fallback"}
-)
 
 
 def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
@@ -110,6 +107,13 @@ class LLMEndpointResponseError(LLMEndpointInvocationError):
 
 class LLMRequestPreparationError(LLMEndpointInvocationError):
     pass
+
+
+@dataclass(frozen=True)
+class ModelSwitchAdvice:
+    compact_required: bool
+    target_input_budget: int = 0
+    reserved_output_tokens: int = 0
 
 
 @dataclass
@@ -138,13 +142,12 @@ class EndpointResolver:
         self,
         *,
         preferred_endpoint_id: str | None = None,
-        fallback_endpoint_id: str | None = None,
         include_remaining: bool = True,
     ) -> list[LLMEndpointModel]:
         items = list(self.endpoints)
         ordered: list[LLMEndpointModel] = []
         seen: set[str] = set()
-        for endpoint_id in (preferred_endpoint_id, fallback_endpoint_id):
+        for endpoint_id in (preferred_endpoint_id,):
             normalized = str(endpoint_id or "").strip()
             if not normalized or normalized in seen:
                 continue
@@ -154,19 +157,14 @@ class EndpointResolver:
                 seen.add(normalized)
         if include_remaining:
             ordered.extend(item for item in items if item.endpoint_id not in seen)
-        return ordered if ordered else (items if include_remaining else items[:1])
+        return ordered
 
     def primary(
         self,
         *,
         preferred_endpoint_id: str | None = None,
-        fallback_endpoint_id: str | None = None,
     ) -> LLMEndpointModel | None:
-        enabled = self.enabled(
-            preferred_endpoint_id=preferred_endpoint_id,
-            fallback_endpoint_id=fallback_endpoint_id,
-        )
-        return enabled[0] if enabled else None
+        return next((item for item in self.endpoints if item.endpoint_id == preferred_endpoint_id), None)
 
 
 class LLMEndpointInvokerPort(Protocol):
@@ -223,7 +221,6 @@ class LLMRuntime:
     last_projection_receipt: Any = None
     think_level: str = ""
     active_endpoint_id: str | None = None
-    _endpoint_fallback_enabled: bool | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
     cache_profile_generation: int = field(default=1, init=False)
@@ -266,7 +263,7 @@ class LLMRuntime:
         self.refresh_runtime_settings()
 
     def active_endpoint(self) -> LLMEndpointModel | None:
-        return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+        return self._endpoint_by_id(self.active_endpoint_id)
 
     @property
     def projection_port(self) -> LLMProjectionPort:
@@ -328,7 +325,7 @@ class LLMRuntime:
         """Derive the immutable prepared-generation plan for one request.
 
         F1 (review af51d74): the plan resolves the endpoint exactly the way
-        ``_generate`` will (preference, fallback policy, vision filtering)
+        ``_generate`` will (explicit selection and vision validation)
         and compiles the effective request ONCE — model hooks, effective
         thinking settings, endpoint output caps, and the validated cache
         policy selection.  The live projection encodes THIS request; a
@@ -387,6 +384,7 @@ class LLMRuntime:
         )
         if isinstance(selection, Mapping):
             capabilities["prompt_cache"] = thaw_json(dict(selection))
+        capabilities[REPLAY_BINDINGS_KEY] = compatible_replay_bindings(endpoint, self.endpoint_resolver.endpoints)
         return capabilities
 
     def _endpoint_identity_fields(self, endpoint: LLMEndpointModel) -> dict[str, Any]:
@@ -404,6 +402,9 @@ class LLMRuntime:
             "wire_shape": str(endpoint.wire_shape),
             "provider": str(endpoint.provider),
             "base_url": str(endpoint.base_url or ""),
+            "auth_kind": str(endpoint.auth_kind),
+            "credential_ref": str(endpoint.credential_ref or ""),
+            "replay_compatible_bindings": compatible_replay_bindings(endpoint, self.endpoint_resolver.endpoints),
             "context_window": int(getattr(endpoint, "context_window", 0) or 0),
             "max_output_tokens": int(getattr(endpoint, "max_output_tokens", 0) or 0),
             "supports_tools": bool(endpoint.supports_tools),
@@ -540,9 +541,7 @@ class LLMRuntime:
     def refresh_runtime_settings(self) -> None:
         previous = self.active_endpoint()
         configured = self.settings_repository.get_active_llm_endpoint_id()
-        endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
-        self.active_endpoint_id = configured if configured in endpoint_ids else None
-        self._endpoint_fallback_enabled = None
+        self.active_endpoint_id = configured
         endpoint = self.active_endpoint()
         self.think_level = self._effective_thinking_level(endpoint) or ""
         if endpoint is not None and (
@@ -606,6 +605,59 @@ class LLMRuntime:
             activate(normalized)
         return normalized
 
+    def apply_model_selection(self, endpoint_id: str, think_level: str) -> None:
+        """Commit the control plane's validated selection as one settings write."""
+        endpoint = self._endpoint_by_id(endpoint_id)
+        if endpoint is None or think_level not in self._thinking_levels(endpoint):
+            raise ValueError("Model endpoint or thinking level is no longer available.")
+        previous, previous_think = self.active_endpoint_id, self.think_level
+        try:
+            with self.settings_repository.selection_transaction():
+                if self.settings_repository.get_active_llm_endpoint_id() != previous:
+                    raise ValueError("Active model configuration changed during selection.")
+                self.set_think_level(think_level, endpoint_id=endpoint_id)
+                self.set_active_endpoint(endpoint_id)
+                self.resume_subscription(endpoint_id)
+        except Exception:
+            self.active_endpoint_id, self.think_level = previous, previous_think
+            activate = getattr(self.endpoint_invoker, "activate_endpoint", None)
+            if previous and callable(activate):
+                with suppress(Exception):
+                    activate(previous)
+            raise
+
+    def model_switch_advice(self, endpoint_id: str, request: LLMRequestIR) -> ModelSwitchAdvice:
+        """Read-only compatibility and capacity check; never sends a request."""
+        from pal.llm.replay_acceptance import has_opaque_continuation
+        from pal.llm.ir import PromptRegionIR
+
+        endpoint = self._endpoint_by_id(endpoint_id)
+        if endpoint is None:
+            raise ValueError("Target model endpoint is unavailable.")
+        prepared = self._compile_request(endpoint, request, check_replay=False)
+        capabilities = {REPLAY_BINDINGS_KEY: prepared.request.metadata[REPLAY_BINDINGS_KEY]}
+        incompatible = any(
+            has_opaque_continuation(message) and (
+                message.replay is None or not accepts_replay(
+                    message.replay, wire_shape=WireShape(endpoint.wire_shape),
+                    endpoint_id=endpoint.endpoint_id, model_id=endpoint.model_id,
+                    capabilities=capabilities,
+                )
+            ) for message in (*request.messages, *prepared.request.messages)
+        )
+        base = replace(prepared.request, messages=tuple(
+            m for m in prepared.request.messages if m.prompt_region != PromptRegionIR.SETTLED_HISTORY
+        ))
+        base_tokens = _estimate_request_tokens(base)
+        target = prepared.target_input_budget
+        if target > 0 and base_tokens >= target:
+            raise ValueError("The target model cannot fit Pal's fixed prompt and tools; Compact cannot help.")
+        return ModelSwitchAdvice(
+            compact_required=incompatible or prepared.compact_required,
+            target_input_budget=max(0, target - base_tokens) if target else 0,
+            reserved_output_tokens=prepared.request.policy.max_output_tokens,
+        )
+
     def close(self) -> None:
         close = getattr(self.endpoint_invoker, "close", None)
         if callable(close):
@@ -632,7 +684,7 @@ class LLMRuntime:
             "available": bool(levels),
             "endpoint_id": endpoint.endpoint_id,
             "model_id": endpoint.model_id,
-            "current": self._effective_thinking_level(endpoint),
+            "current": self._effective_thinking_level(endpoint, persist=False),
             "choices": [{"id": level, "label": level.replace("xhigh", "extra high").title()} for level in levels],
         }
 
@@ -661,7 +713,7 @@ class LLMRuntime:
         endpoints = self._enabled_endpoints(request.request)
         endpoint = endpoints[0] if endpoints else None
         if endpoint is None:
-            raise LLMEndpointInvocationError("no enabled endpoints are available")
+            raise LLMEndpointInvocationError("Selected LLM endpoint is unavailable or not configured. Select one with /model.")
         prepared = self._compile_request(endpoint, request.request)
         return LLMPreflightAdvice(
             status=(
@@ -670,7 +722,7 @@ class LLMRuntime:
                 else LLMPreflightStatus.READY
             ),
             active_model=endpoint.model_id,
-            fallback_chain=[item.model_id for item in endpoints[1:]],
+            fallback_chain=[],
             target_input_budget=prepared.target_input_budget,
             reserved_output_tokens=prepared.request.policy.max_output_tokens,
             breakdown={
@@ -785,10 +837,9 @@ class LLMRuntime:
             self.usage_ledger.record_failed_request()
             return _failure_result(str(exc), exc=exc)
         if not endpoints:
-            return _failure_result("no enabled endpoints are available")
+            return _failure_result("Selected LLM endpoint is unavailable or not configured. Select one with /model.")
         last_error: Exception | None = None
-        requested_preferred = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
-        for endpoint_index, endpoint in enumerate(endpoints):
+        for endpoint in endpoints:
             # F1: when the prepared plan resolved THIS endpoint, reuse its
             # compiled request verbatim — the projected payload is the
             # encoding of exactly this effective request, not a parallel
@@ -867,10 +918,6 @@ class LLMRuntime:
                             native_box.clear()
                     if response.finish_reason == LLMFinishReason.ERROR:
                         raise _accounted_response_error(endpoint, response)
-                    if requested_preferred is None and endpoint.endpoint_id != self.active_endpoint_id:
-                        self.set_active_endpoint(endpoint.endpoint_id)
-                    if endpoint_index > 0:
-                        self._emit("llm_endpoint_fallback_succeeded", endpoint=endpoint)
                     receipt = self._projection_send_receipt(
                         attempt_id=projection_attempt_id,
                         endpoint=endpoint,
@@ -900,7 +947,7 @@ class LLMRuntime:
                         # re-validates its binding against the live config and
                         # drops it when anything drifted.
                         return self._generate(
-                            request,
+                            replace(request, metadata={**dict(request.metadata), "preferred_endpoint_id": endpoint.endpoint_id}),
                             allow_stale_refresh=False,
                             projection=projection,
                             projection_binding=projection_binding,
@@ -978,7 +1025,7 @@ class LLMRuntime:
     ) -> "EncodedRequest | None":
         """W3 (review): a projection is usable only on the endpoint it was
         prepared against.  The owner prepared it for ``binding``; if THIS
-        resolved endpoint (including fallback) differs, drop the projection
+        resolved endpoint differs, drop the projection
         and let the codec encode cold — correct, just without the cached
         prefix benefit.
 
@@ -1068,7 +1115,7 @@ class LLMRuntime:
             )
             return
         if not endpoints:
-            response = _failure_result("no enabled endpoints are available").response
+            response = _failure_result("Selected LLM endpoint is unavailable or not configured. Select one with /model.").response
             yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
             return
         last_error: Exception | None = None
@@ -1196,7 +1243,7 @@ class LLMRuntime:
                         # re-derives the effective request from the live
                         # config and re-validates the projection's binding.
                         yield from self._iter_stream_updates(
-                            request,
+                            replace(request, metadata={**dict(request.metadata), "preferred_endpoint_id": endpoint.endpoint_id}),
                             stream_control=stream_control,
                             allow_stale_refresh=False,
                             projection=projection,
@@ -1503,6 +1550,8 @@ class LLMRuntime:
         self,
         endpoint: LLMEndpointModel,
         request: LLMRequestIR,
+        *,
+        check_replay: bool = True,
     ) -> PreparedLLMRequest:
         LLMEndpointSpec.from_value(endpoint)
         endpoint_request = replace(request, model_hint=endpoint.model_id)
@@ -1538,7 +1587,7 @@ class LLMRuntime:
             level = next(item for item in ThinkingLevel if item.value in levels)
             budget = None
         elif level is None:
-            effective = self._effective_thinking_level(endpoint)
+            effective = self._effective_thinking_level(endpoint, persist=check_replay)
             level = ThinkingLevel(effective) if effective else None
         elif level.value not in levels:
             raise LLMRequestPreparationError(
@@ -1565,12 +1614,18 @@ class LLMRuntime:
             thinking_budget_tokens=budget,
             reasoning_context=reasoning_context,
         )
-        prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id)
+        replay_bindings = compatible_replay_bindings(endpoint, self.endpoint_resolver.endpoints)
+        prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id, metadata={
+            **dict(hooked.metadata), REPLAY_BINDINGS_KEY: replay_bindings,
+        })
         from pal.llm.replay_acceptance import has_opaque_continuation, validate_native_for_send
 
-        for message in prepared.messages:
+        # Hooks may transform the wire projection, but cannot erase the original
+        # history's model binding and thereby bypass the replay guard.
+        for message in (*request.messages, *prepared.messages):
             replay = message.replay
-            if replay is not None and has_opaque_continuation(message) and not replay.matches(
+            if check_replay and replay is not None and has_opaque_continuation(message) and not accepts_replay(replay,
+                capabilities={REPLAY_BINDINGS_KEY: replay_bindings},
                 wire_shape=WireShape(endpoint.wire_shape),
                 endpoint_id=endpoint.endpoint_id, model_id=endpoint.model_id,
             ):
@@ -1578,7 +1633,8 @@ class LLMRuntime:
                     "History contains reasoning/replay bound to another model. "
                     "Complete /compact on the previous model before switching, or use /reset."
                 )
-            if replay is not None and has_opaque_continuation(message):
+        for message in prepared.messages:
+            if message.replay is not None and has_opaque_continuation(message):
                 validate_native_for_send(message)
         target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)
         return PreparedLLMRequest(
@@ -1613,66 +1669,12 @@ class LLMRuntime:
         preferred_endpoint_source: str | None = None,
         endpoint_fallback_policy: str | None = None,
     ) -> list[LLMEndpointModel]:
-        preferred = str(preferred_endpoint_id or "").strip() or None
-        source = str(preferred_endpoint_source or "").strip().lower()
-        policy = str(endpoint_fallback_policy or "").strip().lower()
-        explicit_policy = bool(policy)
-        selected_endpoint = self._endpoint_by_id(preferred or self.active_endpoint_id or "")
-        if selected_endpoint is None and not preferred and not self.active_endpoint_id:
-            selected_endpoint = next(iter(self.endpoint_resolver.endpoints), None)
-        strict = (
-            (selected_endpoint is not None and is_chatgpt(selected_endpoint))
-            or policy in _FALLBACK_DISABLED_POLICIES
-            or bool(preferred and source in _STRICT_ENDPOINT_PREFERRED_SOURCES)
-            or (not explicit_policy and not self.llm_endpoint_fallback_enabled())
-        )
-        if strict:
-            selected = preferred or self.active_endpoint_id
-            if selected:
-                return [
-                    endpoint
-                    for endpoint in self.endpoint_resolver.endpoints
-                    if endpoint.endpoint_id == selected
-                ]
-            return list(self.endpoint_resolver.endpoints[:1])
-        return [endpoint for endpoint in self.endpoint_resolver.enabled(
-            preferred_endpoint_id=preferred,
-            fallback_endpoint_id=self.active_endpoint_id,
-            include_remaining=True,
-        ) if not is_chatgpt(endpoint)]
+        # Legacy metadata is accepted but cannot enable endpoint fallback.
+        selected = str(preferred_endpoint_id or self.active_endpoint_id or "").strip()
+        endpoint = self._endpoint_by_id(selected)
+        return [endpoint] if endpoint is not None else []
 
-    def llm_endpoint_fallback_enabled(self) -> bool:
-        """Whether generic requests may fall back to other enabled endpoints.
-
-        Disabled by default: failing the preferred endpoint honestly surfaces
-        the failure instead of silently continuing on a different model.
-        Explicit per-request ``endpoint_fallback_policy`` metadata overrides
-        this global setting in both directions.
-        """
-
-        if self._endpoint_fallback_enabled is None:
-            getter = getattr(self.settings_repository, "get_llm_endpoint_fallback", None)
-            self._endpoint_fallback_enabled = bool(getter()) if callable(getter) else False
-        return bool(self._endpoint_fallback_enabled)
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> dict[str, Any]:
-        setter = getattr(self.settings_repository, "set_llm_endpoint_fallback", None)
-        if not callable(setter):
-            raise LLMEndpointInvocationError(
-                "settings repository does not support the endpoint fallback switch"
-            )
-        setter(bool(enabled))
-        self._endpoint_fallback_enabled = bool(enabled)
-        return {
-            "endpoint_fallback_enabled": bool(enabled),
-            "note": (
-                "Future requests may fall back to other enabled endpoints."
-                if enabled
-                else "Future requests fail on the preferred endpoint instead of falling back."
-            ),
-        }
-
-    def _effective_thinking_level(self, endpoint: LLMEndpointModel | None) -> str | None:
+    def _effective_thinking_level(self, endpoint: LLMEndpointModel | None, *, persist: bool = True) -> str | None:
         if endpoint is None:
             return None
         levels = self._thinking_levels(endpoint)
@@ -1686,7 +1688,7 @@ class LLMRuntime:
         )
         if effective not in levels:
             effective = levels[0]
-        if persisted != effective:
+        if persist and persisted != effective:
             self.settings_repository.set_think_level(endpoint.endpoint_id, effective)
         return effective
 

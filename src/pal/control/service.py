@@ -195,6 +195,14 @@ class ControlPlane(ControlPlanePort):
                 args={"think_level": requested},
             )
             return _with_interaction_context(action, result)
+        if action_key in {"control.model.confirm", "control.model.think", "control.model.cancel"}:
+            action = ControlAction(
+                action_kind="model_switch_step", target_scope="runtime", route=result.route,
+                args={"operation": action_key.rsplit(".", 1)[-1],
+                      "request_id": str(result.action_args.get("request_id") or ""),
+                      "think_level": str(result.action_args.get("think_level") or "")},
+            )
+            return _with_interaction_context(action, result)
         if action_key == "control.model.set":
             requested_endpoint_id = str(result.action_args.get("endpoint_id") or "").strip()
             if not requested_endpoint_id:
@@ -407,23 +415,6 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
-                name="llm_fallback",
-                handler=self._handle_llm_fallback,
-                aliases=("fallback",),
-                description=(
-                    "Show or toggle endpoint fallback for future requests. "
-                    "Default is off: the preferred endpoint fails honestly instead of "
-                    "silently continuing on a different model."
-                ),
-                usage="/llm_fallback [on|off]",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Fallback",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
                 name="model",
                 handler=self._handle_model,
                 description="Show or update the active LLM model for future turns.",
@@ -564,38 +555,23 @@ class ControlPlane(ControlPlanePort):
             args={"think_level": requested},
         )
 
-    def _handle_llm_fallback(self, invocation: ControlCommandInvocation) -> ControlAction:
-        if not invocation.argv:
-            return ControlAction(
-                action_kind="show_llm_fallback",
-                target_scope="runtime",
-                route=invocation.route,
-            )
-        requested = str(invocation.argv[0] or "").strip().lower()
-        if requested not in {"on", "off"}:
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "invalid fallback value",
-                },
-                notes="Use /llm_fallback on or /llm_fallback off.",
-            )
-        return ControlAction(
-            action_kind="set_llm_fallback",
-            target_scope="runtime",
-            route=invocation.route,
-            args={"enabled": requested == "on"},
-        )
-
     def _handle_model(self, invocation: ControlCommandInvocation) -> ControlAction:
         if not invocation.argv:
             return ControlAction(
                 action_kind="show_model",
                 target_scope="runtime",
                 route=invocation.route,
+            )
+        operation = invocation.argv[0].lower()
+        if operation in {"confirm", "think", "cancel"} and len(invocation.argv) > 1:
+            expected = 3 if operation == "think" else 2
+            if len(invocation.argv) != expected:
+                return ControlAction(action_kind="invalid_command", target_scope="control", route=invocation.route,
+                                     notes="Use /model confirm|cancel <request_id> or /model think <request_id> <level>.")
+            return ControlAction(
+                action_kind="model_switch_step", target_scope="runtime", route=invocation.route,
+                args={"operation": operation, "request_id": invocation.argv[1],
+                      "think_level": invocation.argv[2] if operation == "think" else ""},
             )
         endpoint_id = str(invocation.argv[0] or "").strip()
         if not endpoint_id:

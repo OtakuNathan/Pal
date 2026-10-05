@@ -15,6 +15,26 @@ The optional `@BotName` suffix is stripped before command lookup.
 
 `/refresh_llm_endpoint` is a built-in control command. It refreshes LLM endpoint topology from the local database for future turns. It is available in the textual `/control` list, the Telegram command catalog, and the inline control panel as `Refresh LLM`.
 
+`/model` switches endpoints only between turns. Active turns, unfinished teardown,
+pending input, compaction, and maintenance reject the switch immediately. Selecting
+the current endpoint opens its thinking menu and explicitly resumes a paused
+subscription, as before.
+
+Selecting a different endpoint creates a source-scoped, 60-second draft. Pal checks
+the actual L1 replay and the target context budget. Incompatible replay or oversized
+history opens a Compact confirmation before the thinking menu, warning that summary
+loss may reduce task performance and that rebuilding the target cache may cost more.
+The text equivalents are `/model confirm <token>`, `/model think <token> <level>`,
+and `/model cancel <token>`. Reopening the model list or selecting another model
+invalidates the old draft; reset and endpoint refresh invalidate all drafts.
+
+Submitting a thinking level rechecks idle state, endpoint metadata, and history.
+When needed, the same compaction engine as `/compact` runs on the old endpoint.
+One admission ticket holds incoming messages until Compact and the model/thinking
+settings commit finish. Failure keeps the old selection and resumes normal input;
+a summary already committed remains in effect and is reported. The agent has no
+`llm_set_active_endpoint` tool. `/llm_fallback` and `/fallback` are removed.
+
 /memory_review [batch_id] restores a host-owned memory proposal batch on its bound endpoint. Each candidate is marked or edited separately; only the final batch-submit action authorizes writes. Editing, navigation, retries and field replies remain deterministic control traffic outside L1 and conversational LLM requests.
 
 The control panel includes **Memory proposals**. Review cards show one candidate at a time with **Accept**, **Reject**, and **Edit**. Accept/reject advances to the next pending candidate; editing affects only the displayed candidate and saving returns to it for confirmation. Reopening resumes at the first pending candidate. After all decisions, a compact final review offers batch submission and individual revisit buttons. Every card includes the exact recovery command. Review interface labels and validation messages are English; candidate content retains its original language. Telegram providers must support interaction `items`, revision tokens and input forms; updating resident Pal alone leaves older installed providers unable to render candidate bodies and buttons. Update and reload the Telegram provider as well.

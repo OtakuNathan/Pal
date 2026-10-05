@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from pal.llm.replay_compatibility import accepts_replay
 from pal.llm.ir import (
     ImagePartIR,
     LLMFinishReason,
@@ -54,7 +55,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
                 if (
                     message.role == MessageRole.ASSISTANT
                     and message.replay is not None
-                    and message.replay.matches(
+                    and accepts_replay(message.replay,
+                        capabilities=context.capabilities,
                         wire_shape=self.wire_shape,
                         endpoint_id=context.endpoint_id,
                         model_id=context.model_id,

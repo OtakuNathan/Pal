@@ -92,7 +92,7 @@ ON channel_endpoints(channel_kind, binding_key);
 
 -- Local model capability truth source.
 -- Not relying on provider online discovery.
--- Priority drives fallback order.
+-- Priority drives endpoint display order; selection is explicit.
 -- Lower numbers are tried first. This is a routing priority, not a
 -- quality weight. Keep values non-negative and small unless there is a
 -- concrete migration reason to do otherwise.

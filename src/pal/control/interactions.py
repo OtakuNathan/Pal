@@ -212,7 +212,7 @@ def render_model_status_text(endpoints: list[Any] | tuple[Any, ...], active_endp
     lines = [
         f"Model: {active or '-'}",
         "Select an endpoint for new turns.",
-        "Before switching models, consider completing /compact to reduce history replay cost.",
+        "Switching requires an idle conversation. Incompatible reasoning requires confirmed Compact first.",
         "",
         "Models:",
     ]
@@ -221,6 +221,38 @@ def render_model_status_text(endpoints: list[Any] | tuple[Any, ...], active_endp
         marker = ">" if endpoint_id == active else " "
         lines.append(f"{marker} {_format_model_endpoint(endpoint)}")
     return "\n".join(lines).rstrip()
+
+
+def model_switch_delivery(request: Any, think_status: dict[str, Any]) -> ControlDelivery:
+    target = request.payload["target_id"]
+    token = request.request_id
+    if request.payload["stage"] == "confirm":
+        text = (
+            f"Switch to {target}?\n"
+            "The current reasoning/replay is incompatible or the target context is too small. "
+            "Pal must Compact on the current model before switching. Compact summarizes history "
+            "and may lose details or reduce subsequent task performance. The new model's cache "
+            "must be rebuilt; initial requests may be slower or cost more.\n"
+            f"Continue: /model confirm {token}"
+        )
+        buttons = [(InteractionButtonSpec("Continue to thinking level", "control.model.confirm", {"request_id": token}),)]
+    else:
+        text = f"Select thinking level for {target}. The active model has not changed."
+        buttons = []
+        for choice in think_status.get("choices", ()):
+            level = choice["id"]
+            buttons.append((InteractionButtonSpec(
+                str(choice.get("label") or level), "control.model.think",
+                {"request_id": token, "think_level": level},
+            ),))
+            text += f"\n/model think {token} {level}"
+    text += f"\nCancel: /model cancel {token}"
+    buttons.append((InteractionButtonSpec("Back to models", "control.model.cancel", {"request_id": token}),))
+    spec = InteractionMessageSpec(
+        interaction_id=token, interaction_kind="control_panel", route=request.route,
+        text=text, buttons=tuple(buttons), expires_at=request.expires_at,
+    )
+    return delivery_for_interaction(request.route, "interactive_update", spec)
 
 
 def build_model_panel_interaction(

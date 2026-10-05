@@ -54,12 +54,9 @@ def _endpoint(endpoint_id: str, *, model_id: str | None = None) -> LLMEndpointMo
 
 
 class _Settings:
-    def __init__(self) -> None:
-        self.active: str | None = None
+    def __init__(self, active=None) -> None:
+        self.active: str | None = active
         self.thinking: dict[str, str] = {}
-        # These contract tests exercise failover semantics; fallback is
-        # opt-in since the honest-by-default switch landed.
-        self.fallback: bool = True
 
     def get_active_llm_endpoint_id(self) -> str | None:
         return self.active
@@ -73,11 +70,6 @@ class _Settings:
     def set_think_level(self, endpoint_id: str, level: str) -> None:
         self.thinking[endpoint_id] = level
 
-    def get_llm_endpoint_fallback(self) -> bool:
-        return self.fallback
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
-        self.fallback = bool(enabled)
 
 
 class _Completions:
@@ -425,7 +417,7 @@ class LLMErrorSemanticsTests(unittest.TestCase):
     def _runtime(self, invoker, endpoints, *, attempts: int = 2) -> LLMRuntime:
         return LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=tuple(endpoints)),
-            settings_repository=_Settings(),  # type: ignore[arg-type]
+            settings_repository=_Settings(endpoints[0].endpoint_id),  # type: ignore[arg-type]
             endpoint_invoker=invoker,
             endpoint_retry_attempts=attempts,
             config=RuntimeConfig(
@@ -456,13 +448,13 @@ class LLMErrorSemanticsTests(unittest.TestCase):
             request_ir_from_prompt(messages=[{"role": "user", "content": "work"}], max_output_tokens=100)
         )
 
-        self.assertEqual(result.text, "ok")
-        self.assertEqual(invoker.calls, ["bad", "bad", "good"])
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["bad", "bad"])
         usage = runtime.usage_snapshot()
-        self.assertEqual(usage["successful_request_count"], 1)
+        self.assertEqual(usage["successful_request_count"], 0)
         self.assertEqual(usage["failed_attempt_count"], 2)
 
-    def test_output_recovery_error_falls_back_without_false_success(self) -> None:
+    def test_output_recovery_error_fails_without_false_success(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.bad_calls = 0
@@ -496,13 +488,13 @@ class LLMErrorSemanticsTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.text, "recovered elsewhere")
-        self.assertEqual(invoker.calls, ["bad", "bad", "good"])
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["bad", "bad"])
         usage = runtime.usage_snapshot()
-        self.assertEqual(usage["successful_request_count"], 1)
+        self.assertEqual(usage["successful_request_count"], 0)
         self.assertEqual(usage["failed_attempt_count"], 1)
 
-    def test_invalid_key_skips_same_endpoint_retry_and_falls_back(self) -> None:
+    def test_invalid_key_skips_same_endpoint_retry_without_fallback(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -521,8 +513,8 @@ class LLMErrorSemanticsTests(unittest.TestCase):
             request_ir_from_prompt(messages=[{"role": "user", "content": "work"}], max_output_tokens=100)
         )
 
-        self.assertEqual(result.text, "ok")
-        self.assertEqual(invoker.calls, ["bad-key", "good"])
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual(invoker.calls, ["bad-key"])
 
 
 if __name__ == "__main__":

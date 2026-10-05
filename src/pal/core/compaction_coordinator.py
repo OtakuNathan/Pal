@@ -27,6 +27,7 @@ class CompactionPhase(str, Enum):
 
 
 class CompactionTrigger(str, Enum):
+    MODEL_SWITCH = "model_switch"
     MANUAL = "manual"
     MANUAL_HOT = "manual_hot"
     AUTO = "auto"

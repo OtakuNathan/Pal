@@ -2783,6 +2783,10 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
+  "src/pal/llm/runtime.py:LLMRuntime.apply_model_selection:getattr(self.endpoint_invoker, 'activate_endpoint', None)": {
+    "count": 1,
+    "reason": "Optional transport activation hook, matching set_active_endpoint; restore the prior transport after a failed settings transaction."
+  },
   "src/pal/llm/runtime.py:LLMRuntime.cache_policy_snapshot:getattr(endpoint, 'capabilities_blob', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."

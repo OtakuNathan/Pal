@@ -10,6 +10,7 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 ACTIVE_LLM_ENDPOINT_SETTING_KEY = "active_llm_endpoint_id"
 LEGACY_THINK_LEVEL_SETTING_KEY = "think_level"
 THINK_LEVEL_SETTING_PREFIX = "think_level:"
+# Retained only to identify legacy data; this setting has no runtime effect.
 LLM_ENDPOINT_FALLBACK_SETTING_KEY = "llm.endpoint_fallback_enabled"
 
 
@@ -82,6 +83,9 @@ class LLMEndpointRepository:
 
 
 class RuntimeSettingRepository:
+    def selection_transaction(self):
+        return PalRuntimeSettingModel._meta.database.atomic()
+
     def get(self, setting_key: str) -> str | None:
         setting = PalRuntimeSettingModel.get_or_none(PalRuntimeSettingModel.setting_key == setting_key)
         if setting is None:
@@ -140,15 +144,6 @@ class RuntimeSettingRepository:
         normalized = str(endpoint_id).strip()
         return self.set(ACTIVE_LLM_ENDPOINT_SETTING_KEY, normalized)
 
-    def get_llm_endpoint_fallback(self) -> bool:
-        """Endpoint fallback is opt-in; an absent setting means disabled."""
-
-        value = str(self.get(LLM_ENDPOINT_FALLBACK_SETTING_KEY) or "").strip().lower()
-        return value in {"on", "true", "1", "enabled", "yes"}
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> PalRuntimeSettingModel:
-        return self.set(LLM_ENDPOINT_FALLBACK_SETTING_KEY, "on" if enabled else "off")
-
     def ensure_defaults(self) -> None:
         return None
 
@@ -167,10 +162,22 @@ class RuntimeSettingSnapshot:
     def refresh(self) -> None:
         keys = [
             ACTIVE_LLM_ENDPOINT_SETTING_KEY,
-            LLM_ENDPOINT_FALLBACK_SETTING_KEY,
             *(_think_level_setting_key(item) for item in self.endpoint_ids),
         ]
         self._values = {key: self.source.get(key) for key in keys}
+
+    def selection_transaction(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def transaction():
+            previous = dict(self._values)
+            try:
+                yield
+            except BaseException:
+                self._values = previous
+                raise
+        return transaction()
 
     def get(self, setting_key: str) -> str | None:
         if setting_key not in self._values:
@@ -201,13 +208,6 @@ class RuntimeSettingSnapshot:
 
     def set_active_llm_endpoint_id(self, endpoint_id: str) -> str:
         return self.set(ACTIVE_LLM_ENDPOINT_SETTING_KEY, str(endpoint_id).strip())
-
-    def get_llm_endpoint_fallback(self) -> bool:
-        value = str(self.get(LLM_ENDPOINT_FALLBACK_SETTING_KEY) or "").strip().lower()
-        return value in {"on", "true", "1", "enabled", "yes"}
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> str:
-        return self.set(LLM_ENDPOINT_FALLBACK_SETTING_KEY, "on" if bool(enabled) else "off")
 
 
 def _think_level_setting_key(endpoint_id: str) -> str:

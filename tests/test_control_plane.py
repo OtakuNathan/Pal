@@ -96,6 +96,13 @@ class _FakeSettingsRepository:
 class _FakeLLMEndpoint:
     endpoint_id: str
     model_id: str
+    base_url: str = "https://example.test/v1"
+    auth_kind: str = "api_key_ref"
+    credential_ref: str = "TEST_API_KEY"
+    capabilities_blob: object = None
+    supports_tools: bool = True
+    supports_streaming: bool = True
+    supports_vision: bool = False
     display_name: str = ""
     provider: str = "test"
     wire_shape: str = "openai_completion"
@@ -164,6 +171,9 @@ class _FakeLLMRuntime(NonStreamingLLM):
 
     def thinking_status(self, endpoint_id: str | None = None) -> dict[str, object]:
         selected_endpoint_id = endpoint_id or self.active_endpoint_id
+        if selected_endpoint_id == "backup":
+            return {"available": True, "endpoint_id": "backup", "current": "high",
+                    "choices": [{"id": x, "label": x} for x in ("off", "low", "high")]}
         current = (
             self.settings_repository.get_think_level(selected_endpoint_id)
             if selected_endpoint_id is not None
@@ -180,6 +190,14 @@ class _FakeLLMRuntime(NonStreamingLLM):
                 {"id": "deep", "label": "deep"},
             ],
         }
+
+    def model_switch_advice(self, endpoint_id, request):
+        from pal.llm.runtime import ModelSwitchAdvice
+        return ModelSwitchAdvice(False)
+
+    def apply_model_selection(self, endpoint_id, think_level):
+        self.set_active_endpoint(endpoint_id)
+        self.settings_repository.set_think_level(endpoint_id, think_level)
 
     def thinking_levels_snapshot(self) -> dict[str, str]:
         return dict(self.settings_repository.think_levels)
@@ -1019,9 +1037,15 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        self.assertEqual(self.settings_repository.get_active_llm_endpoint_id(), "stub")
+        request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
+        await self.core.handle_control_action_async(ControlAction(
+            action_kind="model_switch_step", target_scope="runtime", route=self.route,
+            args={"request_id": request.request_id, "operation": "think", "think_level": "high"},
+        ))
         self.assertEqual(self.settings_repository.get_active_llm_endpoint_id(), "backup")
         self.assertEqual(self.llm_runtime.active_endpoint_id, "backup")
-        self.assertIn("Model updated to Backup LLM (backup).", self.endpoint.outbox[-1].text)
+        self.assertIn("Model updated to backup.", self.endpoint.outbox[-1].text)
 
     async def test_button_model_selection_opens_endpoint_think_level_submenu(self) -> None:
         await self.core.handle_control_action_async(
@@ -1042,15 +1066,15 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_update")
         spec = statuses[-2].payload["spec"]
-        self.assertIn("Model updated to Backup LLM (backup).", spec.text)
-        self.assertIn("Think level for backup: balanced", spec.text)
+        self.assertEqual(self.llm_runtime.active_endpoint_id, "stub")
+        self.assertIn("Select thinking level for backup", spec.text)
         flattened = [button for row in spec.buttons for button in row]
         self.assertEqual(
             [button.action_args.get("think_level") for button in flattened[:-1]],
-            ["off", "low", "deep"],
+            ["off", "low", "high"],
         )
         self.assertEqual(flattened[-1].label, "Back to models")
-        self.assertEqual(flattened[-1].action_key, "control.model.open")
+        self.assertEqual(flattened[-1].action_key, "control.model.cancel")
 
     async def test_set_model_rejects_unknown_endpoint(self) -> None:
         await self.core.handle_control_action_async(

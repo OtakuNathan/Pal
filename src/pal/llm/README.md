@@ -3,14 +3,14 @@
 Owns:
 - immutable provider-neutral LLM request, message, response, usage, and update IR
 - ChatGPT plan OAuth registration, renewable credentials, and explicit usage-pause recovery
-- endpoint resolution
+- explicit endpoint selection; no automatic fallback or implicit first endpoint
 - three wire-shape codecs and OpenAI/Anthropic SDK transport boundaries
 - endpoint-declared thinking enums and per-endpoint selection
 - exact-model request hooks loaded from `<runtime_root>/llm/models`
 - built-in provider response hooks that recover leaked provider text protocols
   before Core, L1, or Channel can observe them
 - provider-neutral, resident-process usage accounting
-- endpoint retry, fallback, timeout, preflight, and usage accounting reused by
+- endpoint retry, timeout, preflight, and usage accounting reused by
   ordinary and compaction requests
 
 Projection sessions are process-local derived state. Recovery restores L1,
@@ -56,7 +56,7 @@ Invariants:
 - only successful terminal DeepSeek responses can promote complete DSML to a
   tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
-- API credentials are endpoint-local; an opt-in fallback changes the whole endpoint
+- API credentials are endpoint-local; requests retry only the selected endpoint
 - ChatGPT plan credentials may be shared by endpoints; subscription requests never
   fall back automatically, and a usage pause requires explicit user recovery
 - provider-confirmed item boundaries commit immutable response items into IR;

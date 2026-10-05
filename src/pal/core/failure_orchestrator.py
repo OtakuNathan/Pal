@@ -143,7 +143,7 @@ class FailureOrchestrator:
                     subscription_guidance if subscription_guidance else
                     "LLM response decoding failed; inline repair cannot continue with this response."
                     if decode_failure else
-                    "LLM provider fallback was exhausted; inline repair cannot continue without a healthy model endpoint."
+                    "The selected LLM endpoint failed; inline repair cannot continue without a healthy model endpoint."
                 ),
                 evidence={"origin": origin, **context_payload},
             )

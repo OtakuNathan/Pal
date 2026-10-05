@@ -10,7 +10,7 @@ wire JSON.
 
 - `LLMRequestIR`, `LLMMessageIR`, content parts, `LLMResponseIR`, usage, and
   stream updates;
-- endpoint selection, retry, fallback, timeout, and output-limit recovery;
+- explicit endpoint selection, retry, timeout, and output-limit recovery;
 - exactly three wire shapes: `openai_completion`, `openai_response`, and
   `anthropic_messages`;
 - JSON-frame normalization for streaming and single-shot SDK responses;
@@ -77,7 +77,7 @@ Each `llm_endpoints` row declares:
 - tool, streaming, vision, and modality capabilities, including optional
   rejected generation fields in
   `capabilities_blob.unsupported_request_parameters`;
-- ascending fallback priority and enabled state.
+- ascending display priority and enabled state.
 
 `/refresh_llm_endpoint` is the explicit reload boundary. It refreshes the
 resident Core runtime and, when Bunshin's host broker runtime is already loaded,
@@ -206,7 +206,7 @@ call is parsed into reasoning/text/tool-call parts and assigned internal call
 IDs at this Pal-owned adapter boundary. Raw DSML and echoed historical
 tool-projection markers are discarded. Malformed, unsuccessful, filtered, or
 unterminated DSML fails the provider attempt and follows normal bounded
-retry/fallback handling. A length-truncated DSML block stays hidden while
+same-endpoint retry handling. A length-truncated DSML block stays hidden while
 output recovery joins its continuation, then the complete response passes
 through the same hook instance again.
 
@@ -214,19 +214,41 @@ through the same hook instance again.
 
 - IR is the only internal LLM contract.
 - L1 is the only active-turn and compaction truth source.
-- Provider data is confined to an active replay envelope and retired on close.
+- Settled L1 preserves replay envelopes and reasoning until explicit compaction.
 - Every executable tool call has complete parsed object arguments.
 - Tool calls from truncated or unterminated responses are never executable.
 - Endpoint schema and thinking enums are locally validated before a request.
 - The persisted endpoint row is the sole source of supported thinking values;
   preflight evaluates the fully hooked request.
 - A missing or rejected credential fails that endpoint as one unit; credentials
-  are never borrowed across endpoints. API fallback requires an enabled fallback
-  policy. ChatGPT subscription failures never switch endpoints automatically.
+  are never borrowed across endpoints. Automatic endpoint fallback is unsupported
+  for all providers. Legacy fallback settings and request overrides are ignored.
 - `finish_reason=error`, including output-recovery errors, is a failed provider
   attempt and never updates successful health or usage state.
 - Request/model quirks are exact-model hooks. Provider-wide branching is
   limited to response-syntax normalization and cannot alter behavior policy.
+
+## Model switching and reasoning replay
+
+The active endpoint must be explicitly configured. A missing, disabled, or deleted
+selection is an error; the runtime never chooses the first available endpoint.
+Deleting the active endpoint clears the selection. All retries, including a
+stale-spec refresh, stay on the selected endpoint.
+
+Replay compatibility is computed from loaded endpoint metadata and existing
+`ReplayEnvelope` bindings; L1 gains no new provenance fields. The initial built-in
+allowlist is the documented OpenAI API family `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`, using `openai_response`, the official API URL, API-key auth, and
+the same nonempty credential reference. Provider labels, model prefixes,
+subscription endpoints, and OpenAI-compatible gateways do not establish compatibility.
+See [OpenAI's reasoning reuse contract](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-across-calls).
+
+Every opaque historical binding must be accepted. Compatible replay retains its
+original source identity and native bytes; the new endpoint rebuilds its own
+projection and cache. Projection binding and receipt checks remain strict. Empty
+history or history without incompatible reasoning does not require Compact unless
+it exceeds the target budget. Other switches require confirmed Compact on the old
+endpoint through the idle-only [control flow](pal_control_plane.md).
 
 ## Thinking selection, validation, and wire encoding
 
@@ -379,9 +401,8 @@ namespace. Local token budgets still govern Pal's context planning. Only
 streams and failed responses cannot authorize pending tool execution or replay
 acceptance. Ordinary API endpoint behavior remains independent.
 
-Subscription errors never trigger automatic endpoint fallback, even if global
-fallback or a request-level override is enabled. Subscription endpoints are not
-implicit fallback targets for API requests. A usage-limit error, whether HTTP
+All requests stay on the selected endpoint, including subscription requests.
+No setting or request override can enable automatic fallback. A usage-limit error, whether HTTP
 or in-stream, pauses all endpoints sharing that registration. Pauses survive
 restart and credential refresh. `/model <subscription_endpoint>` explicitly
 clears the pause; internal activation and `/refresh_llm_endpoint` do not. There

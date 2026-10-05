@@ -85,8 +85,8 @@ def _request(text: str = "hello") -> LLMRequestIR:
 
 
 class _Settings:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
+    def __init__(self, active="ep") -> None:
+        self.values: dict[str, str] = {"active": active}
 
     def get_active_llm_endpoint_id(self) -> str | None:
         return self.values.get("active")
@@ -100,11 +100,6 @@ class _Settings:
     def set_think_level(self, endpoint_id: str, value: str) -> None:
         self.values[f"think:{endpoint_id}"] = value
 
-    def get_llm_endpoint_fallback(self) -> bool:
-        return self.values.get("endpoint_fallback", "") in {"on", "true", "1"}
-
-    def set_llm_endpoint_fallback(self, enabled: bool) -> None:
-        self.values["endpoint_fallback"] = "on" if enabled else "off"
 
 
 class _Invoker:
@@ -576,7 +571,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         self.assertEqual(settings.values, before)
         self.assertEqual(runtime._compile_request(first, _request()).request.policy.thinking_level.value, "high")
 
-    def test_lowest_thinking_survives_generation_endpoint_fallback(self) -> None:
+    def test_lowest_thinking_stays_on_selected_endpoint_after_failure(self) -> None:
         class FallbackInvoker(_Invoker):
             def invoke(self, endpoint, request, **kwargs):
                 if endpoint.endpoint_id == "first":
@@ -589,20 +584,17 @@ class LLMRuntimeIRTests(unittest.TestCase):
         second.thinking_levels_blob = ["high", "off", "low"]
         invoker = FallbackInvoker()
         runtime = LLMRuntime(
-            EndpointResolver(endpoints=(first, second)), _Settings(),
+            EndpointResolver(endpoints=(first, second)), _Settings("first"),
             endpoint_invoker=invoker,
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp()), llm_endpoint_retry_attempts=1),
         )
-        # This test exercises endpoint fallback, which is opt-in since the
-        # honest-by-default switch landed.
-        runtime.set_llm_endpoint_fallback(True)
         request = replace(_request(), policy=GenerationPolicyIR(
             max_output_tokens=6144, thinking_selection="lowest_supported",
         ))
         advice = runtime.preflight(LLMPreflightRequest(request=request))
         result = runtime.generate(request)
-        self.assertEqual(result.text, "ok")
-        self.assertEqual([r.policy.thinking_level.value for r in invoker.requests], ["low", "off"])
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertEqual([r.policy.thinking_level.value for r in invoker.requests], ["low"])
         self.assertEqual(advice.reserved_output_tokens, invoker.requests[0].policy.max_output_tokens)
 
     def test_manual_budget_checks_actual_endpoint_cap_and_shape(self) -> None:
@@ -642,7 +634,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         invoker = _Invoker()
         runtime = LLMRuntime(
             EndpointResolver(endpoints=(_endpoint("first"), _endpoint("second"))),
-            _Settings(),  # type: ignore[arg-type]
+            _Settings("first"),  # type: ignore[arg-type]
             endpoint_invoker=invoker,
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp()), llm_endpoint_retry_attempts=3),
         )
@@ -659,7 +651,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         invoker = _StartedFailingShapeInvoker()
         runtime = LLMRuntime(
             EndpointResolver(endpoints=(_endpoint("first"), _endpoint("second"))),
-            _Settings(),  # type: ignore[arg-type]
+            _Settings("first"),  # type: ignore[arg-type]
             endpoint_invoker=invoker,
             config=RuntimeConfig(
                 runtime_root=Path(tempfile.mkdtemp()),
@@ -687,7 +679,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         invoker = _StartedFailingShapeInvoker(wait_for_cancel=True)
         runtime = LLMRuntime(
             EndpointResolver(endpoints=(_endpoint("first"), _endpoint("second"))),
-            _Settings(),  # type: ignore[arg-type]
+            _Settings("first"),  # type: ignore[arg-type]
             endpoint_invoker=invoker,
             config=RuntimeConfig(
                 runtime_root=Path(tempfile.mkdtemp()),
@@ -710,7 +702,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         invoker = _StartedFailingShapeInvoker(wait_for_cancel=True)
         runtime = LLMRuntime(
             EndpointResolver(endpoints=(_endpoint("first"),)),
-            _Settings(),  # type: ignore[arg-type]
+            _Settings("first"),  # type: ignore[arg-type]
             endpoint_invoker=invoker,
             config=RuntimeConfig(
                 runtime_root=Path(tempfile.mkdtemp()),

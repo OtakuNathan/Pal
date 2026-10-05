@@ -89,7 +89,7 @@
 
 ## `src/pal/llm/*`
 
-- 当前职责：provider-neutral IR、wire-shape codec、endpoint fallback
+- 当前职责：provider-neutral IR、wire-shape codec、显式 endpoint 选择与同 endpoint 重试
 - 当前问题：旧版 provider adapter 与 canonical DTO 已由 immutable IR 和统一 JSON-frame decoder 取代
 - 目标归属：`llm`
 - 迁移方式：以 OpenAI/Anthropic SDK 承载三个固定 wire shape；本地 `llm_endpoints` 是模型路由与能力真相源；streaming 与 single-shot 均先归一化为 JSON frame
