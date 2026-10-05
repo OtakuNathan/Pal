@@ -80,7 +80,6 @@ class BunshinScopeGateTests(unittest.TestCase):
             core.turn_executor.state = AgentTurnRuntimeState()
 
             effect = MemoryCompactEffect(
-                assembly_context=None,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
             )
@@ -181,7 +180,6 @@ class BunshinCheckpointRecoveryTests(unittest.TestCase):
                         interrupted=False, interrupt_reason="",
                     ),
                     MemoryCompactEffect(
-                        assembly_context=None,
                         target_input_budget=8_192,
                         reserved_output_tokens=2_048,
                     ),
@@ -243,7 +241,6 @@ class CancellationTests(unittest.TestCase):
             core.turn_executor._compaction_engine = engine
             stamp_before = service.l1_source_stamp()
             effect = MemoryCompactEffect(
-                assembly_context=None,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
             )

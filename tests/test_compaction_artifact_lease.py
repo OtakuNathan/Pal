@@ -72,7 +72,7 @@ def _effect():
     from pal.core.turns import MemoryCompactEffect
 
     return MemoryCompactEffect(
-        assembly_context=None, target_input_budget=8_192, reserved_output_tokens=2_048,
+        target_input_budget=8_192, reserved_output_tokens=2_048,
     )
 
 

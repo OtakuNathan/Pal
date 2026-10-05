@@ -402,7 +402,7 @@ def test_a04_unknown_mutation_rejected_as_reconcile_required():
             interrupted=False, interrupt_reason="",
         )
         effect = MemoryCompactEffect(
-            assembly_context=None, target_input_budget=512, reserved_output_tokens=64,
+            target_input_budget=512, reserved_output_tokens=64,
         )
         result = await core.turn_executor.execute_turn_effect_async(
             continuation, effect,
