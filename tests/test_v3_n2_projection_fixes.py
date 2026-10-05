@@ -3,7 +3,8 @@ full wire contract on PreparedRequest (W2).
 
 Drafts ported from the review packages (test_review_regressions.py /
 NEXT_STEPS §3.3) plus contract assertions for the new fields.  Red run on
-the pre-N2 tree (7cf1d2d) captured in logs_n2_prefix_red.txt.
+the pre-N2 tree (7cf1d2d) captured in logs_n2_prefix_red.txt; recovery details
+and checksums are recorded in docs/archive/session_compaction/test_log_summary.md.
 """
 from __future__ import annotations
 

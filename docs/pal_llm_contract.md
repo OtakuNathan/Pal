@@ -371,7 +371,7 @@ field presence, raw numeric evidence, and protocol-specific input accounting;
 missing cost is distinct from zero. Every started provider attempt settles once,
 including failures and output recovery, separately from logical request success.
 Cache profile selection is frozen at turn start. See
-[prompt-cache v2 offline repair](prompt_cache_v2_offline_repair.md) for selection
+[prompt-cache v2 offline repair](archive/prompt_cache/prompt_cache_v2_offline_repair.md) for selection
 precedence, diagnostics, conservative compaction behavior, and offline validation.
 
 ## ChatGPT plan access (SIWC)

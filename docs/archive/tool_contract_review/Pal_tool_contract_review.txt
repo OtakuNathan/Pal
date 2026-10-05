@@ -1,0 +1,1265 @@
+Pal 与 pal-shell-native 工具契约工程评审
+
+执行摘要
+
+1. 最高优先级是把自有公共 alias 统一为“动词 + 准确对象”。本次完整列出 223 个不同固定候选名称，逐项给出改名或保留建议；包含 Bunshin 角色限定工具，不代表同一会话同时暴露 223 个工具。命名要表达真实动作，不能把混合读写入口一律改成 get。
+2. 搜索收益需要区分“词序一致”和“关键词覆盖”。现有 alias 词匹配不看顺序，纯重排不会提升这一层级；补全动作词、对象词才可能改变覆盖。精确匹配、前缀匹配和同分排序也会受改名影响。尚未执行搜索或模型行为基准，不能承诺命中率提升。
+3. 第二优先级是让诊断事实真正到达模型正文。本次确认 10 类具体损失，另有 1 个条件性恢复提示缺口。先修 native 阻塞会话与 normalization 覆盖、write_file/delete_path 原因丢失等路径；保留有界诊断和安全恢复指针，不应将全部内部 structured 无条件回灌上下文。
+4. 参数关系必须按实际实现写清，区分硬拒绝、静默优先级/忽略、运行状态前提。shell_session 的 action 白名单与标识符互斥尤其需要完整描述；多个 Bunshin task 字段现有说明与实际 actor 唯一活跃 Task 选择不一致。附录列出 43 个检查项，包含已正确说明的规则和正常组合，不等于 43 个缺陷；各项给出现状、建议描述和依据。
+5. 成功路径的解释应放在稳定描述或成功结果里。remote_start 的动作完成不证明目标已就绪；remote_power 的 accepted/unknown 不证明关机完成。空结果解释、有效目标边界、usage unknown 等也不应只依赖失败指导触发。已经在 schema、skill、context_messages 或成功 payload 可见的语义另行标明，避免误报。
+
+阅读顺序
+
+- 附录 A：命名与搜索机制、完整当前 alias → 建议名称清单、shell_session 拆分选项及动态名称边界
+- 附录 B：诊断信息在哪一层丢失、模型实际可见内容、最小修复；成功语义的确认项与反例
+- 附录 C：参数组合与状态约束全清单、可直接使用的描述建议、应保留的自由组合
+
+评审性质
+
+这是固定源码版本上的只读静态评审。未改项目源码、未安装或运行项目、未运行测试，也未测量模型实际表现。所有改名、拆分、描述和渲染修改都是待实施建议。落地时应以最终模型正文和实际导出目录为验收对象。
+
+版本与公共候选范围
+
+源版本固定：
+- Pal (https://github.com/OtakuNathan/Pal/tree/b76358fb1a8488abae4745d0826564d75e2415a1)：b76358fb1a8488abae4745d0826564d75e2415a1
+- pal-shell-native (https://github.com/OtakuNathan/pal-shell-native/tree/f307c9614634dd62a97bd1429d967a1c55489896)：f307c9614634dd62a97bd1429d967a1c55489896
+
+清单计数：
+- Pal 常规 capability：194 处字面量声明，185 个不同 alias。9 个 memory-provider alias 同时出现在 sqlite 与 stub 实现中，按名称去重
+- Pal Bunshin scoped-worker：33 个额外、可静态确定的 alias，其中 24 个字面量，9 个由固定映射推导
+- Pal 合计：218 个可静态确定的不同 alias
+- native：6 个固定 alias；run_shell 与 Pal 重叠。因此两个项目联合为 223 个不同固定名称
+- 以上不包含运行时配置才能枚举的 MCP 工具/提示、remote shortcut，以及未提供源码的外部插件
+
+这是源码候选公开面，不是宣称 223 个工具在同一个会话同时可用。仅做文件读取与静态 AST 分析；未运行项目、安装器或测试。native 未取得完整目录树，相关结论限于已核查的公共注册链。
+
+可见性：注册器将已挂载 descriptor 的全部 alias 放进 search_records；只有 direct alias 进入模型原生 provider_specs，indirect 由 call_tool 调用。此路径未见 llm_enabled 字段过滤。插件是否挂载、target 是否存在，以及 Bunshin role allowlist/overlay，都会缩小实际集合；无目标的节点在编译时跳过。scoped alias 只在相应工作流角色投影中出现，不能当作主会话目录。
+
+附录 A 命名与搜索完整清单
+
+搜索评分：改名能做什么、不能做什么
+
+依据 runtime.py (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1003-L1096) 和 discovery_terms.py (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/discovery_terms.py#L10-L29)：
+
+1. query/alias 小写；分词后按下划线、点、连字符拆分；轻量单复数归一；使用集合，不考虑词序。不做通用语义向量检索或词义理解
+2. tier 5：query 与完整 alias 精确相等
+3. tier 4：query 词集合与 alias 词集合相等
+4. tier 3：query 所有词都在 alias 中，或无空格 query 是 alias 前缀
+5. tier 2：alias 与 purpose 合并能覆盖全部 query 词
+6. tier 1：至少一个词被 alias 或 purpose 覆盖；无覆盖的不返回
+7. score = tier × 10000 + 总覆盖词数 × 100 + alias覆盖词数 × 10 + purpose覆盖词数；实际排序按这些分量降序，最后按 alias 字典序
+8. namespace/family/module/tags 是过滤条件，不是正向任务匹配词。虽然编译 search_document 包含更多字段，当前评分代码只用 alias 和 purpose；use_when、failure_next_steps、schema 等也不参与正向评分
+9. 默认返回上限 3；未显式传上限且最高 tier ≥ 2 时只保留最高 tier。改名可能改变被返回的结果，也可能改变字典序tie-break，但不是无条件更好
+
+例如 browser_read → read_browser_page，加入 page 能直接覆盖“read browser page”；browser_read → read_browser 仅重排，对“browser read”无排序层级收益。browser_history → navigate_browser_history、shell_session 拆分成动作 alias，能使真实动作进入 alias；而把混合读写工具统一叫 get_* 会误导调用决策。
+
+迁移注意：当前 capability 强制“恰好一个公共 alias”，不能简单在 aliases 中同时添加新旧名字。若要兼容旧名，需另行设计解析/迁移机制；本次没有建议修改内部地址。还需同步 guidance、next-tool hints、返回 affordance、示例、角色白名单中实际使用 alias 的部分以及测试/文档，防止出现仍提示旧名的恢复路径。
+
+A1 Pal 常规 capability
+
+格式为 当前 → 建议；说明指出行为边界。每组给出固定commit源码链接。inspect/read 不自动意味着无副作用：以执行语义和实现为准；已知写入边界在条目中保留。
+
+src/pal/checklist/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/checklist/capabilities.py)
+
+- checklist_upsert → upsert_checklist：创建或替换完整执行清单（L104）
+- checklist_check → complete_checklist_step：完成精确步骤；最后一步会自动关闭清单（L159）
+- checklist_show → read_checklist：读取活动清单（L225）
+- checklist_clear → close_checklist：关闭并保留进度，不是假定清空历史（L270）
+- checklist_inspect → inspect_checklist_state：检查模块状态（L309）
+
+src/pal/plugins/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/capabilities.py)
+
+- package_install → install_package：安装依赖并激活，有写入与执行（L95）
+- package_prepare → prepare_package：修复私有依赖环境（L104）
+- plugin_uninstall → uninstall_plugin：卸载注册；默认保留数据（L114）
+- package_status → inspect_package_status：查看安装与激活结果（L125）
+- plugins_show → inspect_plugin_host：查看宿主概况（L136）
+- plugins_list → list_plugins：列出已知插件（L153）
+- plugin_attach → attach_plugin：加载运行实例（L178）
+- plugin_reattach → reload_plugin：重载代码和实例，恢复依赖方（L202）
+- plugin_detach → detach_plugin：脱离运行实例，不禁用配置（L226）
+- plugin_enable → enable_plugin：同时启用并挂载（L250）
+- plugin_disable → disable_plugin：脱离且持久禁用（L274）
+- plugin_rescan → rescan_plugins：刷新发现结果（L298）
+- plugin_rescan_and_attach_new_first_party → rescan_and_attach_first_party_plugins：同时发现并挂载新的一方插件，名称不能暗示只读（L319）
+
+src/pal/failure/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/failure/capabilities.py)
+
+- failure_show → inspect_failure_state：查看失败模块状态（L31）
+- failure_recent_reports → list_failure_reports：列出最近报告（L48）
+
+src/pal/llm/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/llm/capabilities.py)
+
+- llm_list → list_llm_endpoints：仅启用端点，按优先级（L122）
+- llm_active → inspect_active_llm：查看当前模型元数据（L160）
+- llm_show → inspect_llm_endpoint：查看指定端点元数据（L182）
+- llm_think_level → inspect_llm_thinking_level：查看选择范围和当前值，不是设置（L219）
+- llm_usage → inspect_llm_usage：驻留进程用量（L256）
+- llm_set_active_endpoint → set_active_llm_endpoint：改变后续请求模型，不自动压缩历史（L308）
+
+src/pal/proactive/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/proactive/capabilities.py)
+
+- proactive_status → inspect_proactive_status：查看模块状态（L150）
+- proactive_list → list_proactive_tasks：列出计划任务（L172）
+- proactive_show → read_proactive_task：读取一个任务配置（L212）
+- proactive_last_run → read_latest_proactive_run：读取最近一次运行结果（L252）
+- proactive_list_runs → list_proactive_runs：列出一个任务的运行历史（L299）
+- proactive_create → upsert_proactive_task：当前可创建或替换，应明确替换语义（L340）
+- proactive_delete → delete_proactive_task：永久删除任务定义（L421）
+- proactive_enable → enable_proactive_task：恢复触发（L460）
+- proactive_disable → disable_proactive_task：停止触发并保留定义（L478）
+- proactive_set_output_channel → set_proactive_output_channel：同时设置目的地，或清除输出（L496）
+- proactive_set_output_target → set_proactive_output_target：修改或清除渠道内目的地（L557）
+- proactive_update_schedule → update_proactive_schedule：修改计划（L601）
+
+src/pal/execution/file_capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_capabilities.py)
+
+已符合动词＋对象，保留：read_file, edit_file, write_file, delete_path
+
+- file_state → inspect_file_cache：检查读后编辑缓存，并非任意文件stat（L307）
+
+src/pal/execution/shell_exec.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/shell_exec.py)
+
+已符合动词＋对象，保留：run_shell
+
+
+src/pal/execution/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/capabilities.py)
+
+- exec_show → inspect_execution_state：查看执行模块状态（L72）
+
+src/pal/execution/tool_search.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/tool_search.py)
+
+已符合动词＋对象，保留：call_tool, search_tools, read_tool
+
+- exec_tools → list_tools：列出注册工具目录（L33）
+
+src/pal/mcp/plugin.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/mcp/plugin.py)
+
+- mcp_show → inspect_mcp_state：查看管理器状态（L116）
+- mcp_server_list → list_mcp_servers：配置的服务器（L133）
+- mcp_server_read → read_mcp_server：读取元数据与发现快照（L145）
+- mcp_rescan → rescan_mcp_servers：重新读取配置并刷新投影（L185）
+- mcp_attach → attach_mcp_server：挂载配置的服务器（L203）
+- mcp_detach → detach_mcp_server：脱离服务器（L228）
+- mcp_image_prepare → prepare_mcp_image：可生成或转换图像表示，有本地写入（L252）
+
+src/pal/skill/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/capabilities.py)
+
+- skill_show → inspect_skill_state：查看技能状态和待提交候选（L88）
+- skill_assimilate → prepare_skill_candidate：创建净化候选，不提交（L131）
+- skill_commit → commit_skill_candidate：将候选提交到库（L155）
+- skill_update → update_skill：修改元数据或手册（L174）
+- skill_disable → disable_skill：停止匹配，保留历史（L193）
+- skill_search → search_skills：搜索元数据，不注入正文（L212）
+- skill_read → read_skill：可读取完整手册（L233）
+- skill_inject → inject_skill：向上下文注入引用，别改成get（L252）
+
+src/pal/channel/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/channel/capabilities.py)
+
+已符合动词＋对象，保留：send_channel_attachment
+
+- channel_list → list_channel_endpoints：列出配置的端点（L198）
+- channel_send_message → send_channel_message：外发普通文本（L263）
+- channel_enable → enable_channel_endpoint：允许接收新消息（L389）
+- channel_disable → disable_channel_endpoint：停止接收新消息（L407）
+- channel_attach → attach_channel_endpoint：连接实例，可收发（L425）
+- channel_detach → detach_channel_endpoint：断开实例，保留配置（L443）
+- channel_provider_rescan → rescan_channel_providers：发现提供方目录增删（L461）
+- channel_reload_provider → reload_channel_provider：卸载并重载代码和实例（L493）
+- channel_restart_endpoint → restart_channel_endpoint：重启端点，不重载提供方代码（L520）
+- channel_endpoint_inspect → inspect_channel_endpoint：查看完整状态（L538）
+- channel_endpoint_auth_state → inspect_channel_endpoint_auth：查看认证授权状态（L560）
+- channel_endpoint_set_auth_material → set_channel_endpoint_auth_material：修改认证材料，不能get（L582）
+- channel_endpoint_backlog → inspect_channel_endpoint_backlog：查看待交付消息（L614）
+- channel_endpoint_health → inspect_channel_endpoint_health：查看网络与交付健康（L636）
+
+src/pal/lsp/plugin.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/lsp/plugin.py)
+
+- lsp_show → inspect_lsp_provider：查看提供方状态（L186）
+- lsp_status → inspect_lsp_status：查看准备记录和健康（L198）
+- lsp_prepare_workspace → prepare_lsp_workspace：配置项目环境，可预热语言服务器，有写入（L229）
+- lsp_doctor → diagnose_lsp_server：检查二进制与初始化准备（L252）
+- lsp_diagnostics → read_lsp_diagnostics：读取文件诊断（L262）
+- lsp_hover → read_lsp_hover：读取位置的类型和文档（L272）
+- lsp_definition → find_lsp_definitions：查找定义（L282）
+- lsp_implementation → find_lsp_implementations：查找实现（L292）
+- lsp_references → find_lsp_references：查找引用（L302）
+- lsp_prepare_call_hierarchy → prepare_lsp_call_hierarchy：准备层次查询项，与workspace准备区别（L312）
+- lsp_incoming_calls → find_lsp_incoming_calls：查找调用方（L329）
+- lsp_outgoing_calls → find_lsp_outgoing_calls：查找被调用方（L339）
+- lsp_document_symbols → list_lsp_document_symbols：列出文件符号（L349）
+- lsp_workspace_symbols → search_lsp_workspace_symbols：按名称搜索workspace符号（L359）
+- lsp_rescan → rescan_lsp_servers：刷新配置与健康（L382）
+
+src/pal/identity/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/identity/capabilities.py)
+
+- identity_show → refresh_identity：读取持久身份并刷新驻留投影；get会弱化刷新语义（L45）
+
+src/pal/artifact/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/capabilities.py)
+
+已符合动词＋对象，保留：list_artifacts, read_artifact, search_artifacts
+
+- artifact_import → import_artifact：导入并注册当前会话附件，有写入（L83）
+- artifact_show → inspect_artifact_state：查看管理器状态（L104）
+- artifact_info → inspect_artifact_info：声明LOCAL_WRITE，检查表示可能涉及派生或缓存，不应宣传纯get（L152）
+- artifact_select → select_artifact：刷新短期热状态，有写入（L218）
+- artifact_grep → grep_artifact：搜索已存在文本表示；声明LOCAL_WRITE（L240）
+- artifact_transcribe → transcribe_artifact：请求音频转录，有写入（L262）
+
+src/pal/control/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/control/capabilities.py)
+
+- control_show → inspect_control_state：查看控制模块状态（L58）
+
+src/pal/memory/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/memory/capabilities.py)
+
+已符合动词＋对象，保留：commit_memory_candidates, recall_memory, remember_memory, update_memory, forget_memory
+
+- memory_dreaming → manage_memory_dreaming：混合状态、配置、调度、启动、恢复；不能统一叫get（L130）
+- memory_history → read_memory_history：读取归档原文和后继引用（L166）
+- memory_show → inspect_memory_state：查看内存模块状态（L246）
+- memory_list_providers → list_memory_providers：列出L3提供方（L263）
+- memory_active_provider → inspect_active_memory_provider：查看当前提供方（L295）
+- memory_set_active_provider → set_active_memory_provider：改变L3提供方（L579）
+
+src/pal/core/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/core/capabilities.py)
+
+- core_observe → observe_core：查看核心队列、回合、模式等（L46）
+- core_configure → configure_core：修改核心模式标签（L68）
+- core_cache_warm_deadline → inspect_core_cache_warm_deadline：查看提醒配置和内存截止时间（L93）
+- core_configure_cache_warm_deadline → configure_core_cache_warm_deadline：启停或调节提醒（L118）
+
+src/pal/web_search/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_search/capabilities.py)
+
+已符合动词＋对象，保留：search_web
+
+- web_search_show → inspect_web_search_state：查看模块状态（L100）
+- web_search_list_providers → list_web_search_providers：列出提供方（L117）
+- web_search_active_provider → inspect_active_web_search_provider：查看当前提供方（L140）
+- web_search_provider_show → inspect_web_search_provider：查看指定提供方元数据（L165）
+- web_search_provider_auth_state → inspect_web_search_provider_auth：查看认证状态（L189）
+- web_search_provider_health → inspect_web_search_provider_health：查看健康（L214）
+- web_search_set_active_provider → set_active_web_search_provider：改变当前提供方（L239）
+- web_search_provider_enable → enable_web_search_provider：启用提供方（L331）
+- web_search_provider_disable → disable_web_search_provider：禁用提供方（L348）
+- web_search_provider_set_auth_material → set_web_search_provider_auth_material：修改认证材料（L365）
+- web_search_provider_set_config → configure_web_search_provider：合并配置，不是完整覆盖（L400）
+
+src/pal/web_fetch/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/capabilities.py)
+
+- browser_status → inspect_browser_status：查看CLI、sidecar、profile和会话健康（L149）
+- browser_navigate → navigate_browser：页面导航并读取；可能触发站点行为（L168）
+- browser_read → read_browser_page：读取当前渲染文本（L195）
+- browser_snapshot → capture_browser_snapshot：捕获无障碍树与元素引用（L217）
+- browser_find → find_browser_text：搜索快照文本或正则（L236）
+- browser_click → click_browser_target：会触发页面动作（L259）
+- browser_fill → fill_browser_field：可选择同时提交表单（L263）
+- browser_type → type_browser_text：向当前焦点输入（L267）
+- browser_press → press_browser_key：向页面发送按键（L271）
+- browser_hover → hover_browser_target：改变页面交互状态（L275）
+- browser_select → select_browser_option：设置下拉选项（L279）
+- browser_check → set_browser_checked_state：设置勾选状态，不是只检查（L283）
+- browser_scroll → scroll_browser：页面滚动（L287）
+- browser_resize → resize_browser_viewport：改变viewport（L291）
+- browser_history → navigate_browser_history：后退、前进或重载，不是读取历史（L295）
+- browser_tabs → manage_browser_tabs：含列表、创建、选择和关闭，不应命名get（L299）
+- browser_dialog → handle_browser_dialog：接受或关闭对话框（L303）
+- browser_inspect_layout → inspect_browser_layout：查看计算布局和几何（L307）
+- browser_evaluate → evaluate_browser_script：任意页面函数可有写入，不应命名get（L311）
+- browser_network → manage_browser_network_capture：可安装监控hook、清空记录或read时消费记录，不是纯网络状态读取（L315）
+- browser_screenshot → capture_browser_screenshot：捕获PNG并注册artifact，有本地写入（L319）
+- browser_extensions → inspect_browser_extensions：检查配置扩展和观察到的worker（L333）
+- browser_extension_manage → manage_browser_extension：挂载、重载或卸载本地扩展（L347）
+- browser_clear_cache → clear_browser_cache：删除HTTP缓存，保留cookie和站点存储（L362）
+- browser_close → close_browser：关闭活实例，保留profile（L377）
+- browser_reset → reset_browser：删除会话profile，不可恢复（L381）
+
+src/pal/plugins/l3/sqlite_vec.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/l3/sqlite_vec.py)
+
+- memory_provider_show → inspect_memory_provider_state：两个实现共享此alias（L186）
+- memory_provider_inventory → inspect_memory_provider_inventory：库存与索引状态（L203）
+- memory_provider_recall → recall_provider_memory：查询仍声明LOCAL_WRITE，不能承诺无副作用（L220）
+- memory_provider_write → write_provider_memory：提交持久记录（L268）
+- memory_provider_update → update_provider_memory：更新后端记录（L337）
+- memory_provider_delete → delete_provider_memory：按精确引用删除（L389）
+- memory_provider_attach → attach_memory_provider：挂载提供方（L421）
+- memory_provider_detach → detach_memory_provider：脱离提供方（L441）
+- memory_provider_refresh_indexes → refresh_memory_provider_indexes：刷新索引与embedding状态（L461）
+
+src/pal/plugins/l3/stubs.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/l3/stubs.py)
+
+- memory_provider_show → inspect_memory_provider_state：两个实现共享此alias（L115）
+- memory_provider_inventory → inspect_memory_provider_inventory：库存与索引状态（L137）
+- memory_provider_recall → recall_provider_memory：查询仍声明LOCAL_WRITE，不能承诺无副作用（L160）
+- memory_provider_write → write_provider_memory：提交持久记录（L207）
+- memory_provider_update → update_provider_memory：更新后端记录（L272）
+- memory_provider_delete → delete_provider_memory：按精确引用删除（L323）
+- memory_provider_attach → attach_memory_provider：挂载提供方（L354）
+- memory_provider_detach → detach_memory_provider：脱离提供方（L371）
+- memory_provider_refresh_indexes → refresh_memory_provider_indexes：刷新索引与embedding状态（L388）
+
+src/pal/bunshin/v2/capabilities.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/capabilities.py)
+
+- bunshin_catalog_read → read_bunshin_catalog：读取有效profile和family（L291）
+- bunshin_catalog_set_profile_override → set_bunshin_profile_override：patch覆盖配置（L322）
+- bunshin_catalog_reset_profile_override → reset_bunshin_profile_override：移除覆盖并恢复内置值（L352）
+- bunshin_catalog_set_family_override → set_bunshin_family_override：patch覆盖配置（L377）
+- bunshin_catalog_reset_family_override → reset_bunshin_family_override：移除覆盖并恢复内置值（L402）
+- bunshin_catalog_refresh → refresh_bunshin_catalog：重载内置项并验证覆盖项（L427）
+- bunshin_start_workflow → start_bunshin_workflow：启动工作流，不是查询（L449）
+- bunshin_submit_artifact → submit_bunshin_artifact：发布当前actor持久artifact（L488）
+- bunshin_task_search → search_bunshin_tasks：搜索当前actor账本（L519）
+- bunshin_task_status → read_bunshin_task_status：返回task与当前workflow关联信息；不是重新启动workflow（L573）
+- bunshin_resume_workflow → resume_bunshin_workflow：恢复暂停工作或规范化孤立任务（L618）
+- bunshin_restart_execution → restart_bunshin_execution：丢弃当前尝试并从已接受架构重启（L654）
+- bunshin_resolve_triage → resolve_bunshin_triage：标记手工处理并恢复（L691）
+- bunshin_submit_human_decision → submit_bunshin_human_decision：提交接受、编辑或拒绝（L729）
+- bunshin_rebind_task_delivery → rebind_bunshin_task_delivery：修改回复目的地（L772）
+- bunshin_answer_question → answer_bunshin_question：回答挂起的问题（L813）
+- bunshin_control_workflow → control_bunshin_workflow：异步请求暂停或取消（L852）
+- bunshin_archive_workflow → archive_bunshin_workflow：归档终态工作流（L890）
+
+已合规 alias 的副作用提醒：read_artifact 声明 LOCAL_WRITE；recall_memory 声明 LOCAL_WRITE；commit_memory_candidates、remember_memory、update_memory、forget_memory 有持久写入；send_channel_attachment 外发附件。保持动词＋对象不等于将它们视为纯读取。
+
+A2 Bunshin 角色限定 alias
+
+以下33个名称只在相应role/workspace投影出现。propose_memories 是提交待用户审核候选，不直接提交持久记忆；ask_question 会发起提问/控制流程；update_checklist 和 add_finding 会写入工作记录。
+
+src/pal/bunshin/scoped_execution.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/scoped_execution.py)
+
+已符合动词＋对象，保留：propose_memories
+
+- artifact_write → write_workflow_artifact：写role声明产物，不是任意文件（L148）
+- artifact_edit → edit_workflow_artifact：追加或完整替换产物（L158）
+
+src/pal/bunshin/v2/ask_question.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/ask_question.py)
+
+已符合动词＋对象，保留：ask_question
+
+
+src/pal/bunshin/v2/work_items.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/work_items.py)
+
+已符合动词＋对象，保留：update_checklist, add_finding
+
+
+src/pal/bunshin/v2/review_submission.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/review_submission.py)
+
+- review_submit → submit_review：提交review结果（L27）
+
+src/pal/bunshin/v2/verification_builder.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/verification_builder.py)
+
+- verification_scratch_write → write_verification_scratch：创建或完整替换probe文件（L211）
+- verification_run_lsp_check → run_verification_lsp_check：运行并持久登记诊断证据（L257）
+- verification_check_unavailable → record_unavailable_verification：记录必需证据不可用，不是执行检查（L276）
+- verification_set_summary → set_verification_summary：替换摘要，不能代替证据（L289）
+- verification_draft_status → read_verification_draft_status：读取当前证据、义务和下一步（L299）
+- verification_remove_case → remove_verification_case：撤回指定case及其findings，不可掩盖合法失败（L309）
+- verification_submit → submit_verification：提交不可变证据，影响后续路由（L319）
+- verification_run_historical_regression → run_verification_historical_regression：运行并持久登记对应验证case，不是只读探测；固定映射生成（L59）
+- verification_run_diff_risk → run_verification_diff_risk：运行并持久登记对应验证case，不是只读探测；固定映射生成（L60）
+- verification_run_adversarial_case → run_verification_adversarial_case：运行并持久登记对应验证case，不是只读探测；固定映射生成（L61）
+- verification_run_focused_test → run_verification_focused_test：运行并持久登记对应验证case，不是只读探测；固定映射生成（L62）
+- verification_run_compile_check → run_verification_compile_check：运行并持久登记对应验证case，不是只读探测；固定映射生成（L63）
+- verification_run_warning_check → run_verification_warning_check：运行并持久登记对应验证case，不是只读探测；固定映射生成（L64）
+- verification_run_consumer_probe → run_verification_consumer_probe：运行并持久登记对应验证case，不是只读探测；固定映射生成（L65）
+- verification_run_dogfood → run_verification_dogfood：运行并持久登记对应验证case，不是只读探测；固定映射生成（L66）
+- verification_run_platform_probe → run_verification_platform_probe：运行并持久登记对应验证case，不是只读探测；固定映射生成（L67）
+
+src/pal/bunshin/v2/candidate_builder.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/candidate_builder.py)
+
+- candidate_submit → submit_candidate：提交独立验证（L46）
+- candidate_report_architecture_defect → report_candidate_architecture_defect：终止当前路径并报告架构缺陷（L67）
+- candidate_request_module_split → request_candidate_module_split：终态请求架构侧拆分（L90）
+
+src/pal/bunshin/v2/swe_verification.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/swe_verification.py)
+
+- verification_pass → submit_verification_pass：提交成功结论，不是运行检查（L248）
+- verification_request_module_repair → request_verification_module_repair：提交复现缺陷，申请修复（L267）
+- verification_request_contract_revision → request_verification_contract_revision：提交contract缺陷并请求修改（L285）
+- verification_request_architecture_revision → request_verification_architecture_revision：提交拓扑或责任归属缺陷并请求修改（L298）
+- verification_request_requirements_revision → request_verification_requirements_revision：提交需求冲突并请求修改（L311）
+- verification_unknown → submit_verification_unknown：提交证据不可用结论，不是读取状态（L324）
+
+src/pal/bunshin/v2/contract_submission.py
+
+源码 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/contract_submission.py)
+
+- contract_submit → submit_contract：提交已准备的contract（L27）
+
+A3 pal-shell-native 固定 alias
+
+来源：capabilities.py (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/capabilities.py)、tools.py (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/tools.py)
+
+已符合动词＋对象，保留：run_shell、list_remote。后者虽已verb-first，可选改为 list_execution_targets，因为结果也含target 0本机；这是语义精确化，不计作结构不合规。
+
+- shell_session → manage_shell_session：若保留单一action入口，应用manage而不是get；包含读输出、输入、resize、终止、释放、watch等
+- shell_status → inspect_shell_status：返回当前session与最后观察状态；异步实现还同步target状态，不是宣称实时进程快照
+- remote_start → start_remote_target：调用明确配置的启动动作；动作完成不证明就绪
+- remote_power → shutdown_remote_target：目前action仅支持shutdown；不要暗示支持重启或任意电源管理
+
+shell_session拆分：设计选项，尚未实现
+
+“action + shell_session”的拆分建议可完整对应现有八个 action。下列是设计选项，尚未实现：
+- read → read_shell_session：可带wait_ms；失败输出可重试导出，但不会重跑命令
+- write → write_shell_session：必须带text；PTY输入有64KiB上限
+- resize → resize_shell_session：必须带rows、columns
+- terminate → terminate_shell_session：请求终止，不等价于已经终止
+- release → release_shell_session：丢弃已完成的保留输出；不允许release正在运行的session，不等价于terminate
+- watch → watch_shell_session：必须有正wait_ms，可带extend_by_ms
+- extend → extend_shell_session：必须有正extend_by_ms；只延长已有有限deadline，无deadline时无需扩展；不是单纯等待
+- unwatch → unwatch_shell_session：禁用后续主动通知，不等价于停止进程
+
+NativeSessionInput要求session_id与output_ref二选一。output_ref仅支持read/release，且不允许wait_ms。因此拆分时必须保留这条互斥约束和输出恢复入口；read/ release可保留output_ref或另设输出专用alias。现有统一入口是INDIRECT_CONTROL；拆分需要独立schema/执行语义/affordance设计，不能靠改名自动得到正确的只读或重试属性。
+
+注册链补充：plugin.toml (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/plugin.toml)、plugin.py (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/plugin.py)、skills.py (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/skills.py)。skills provider只提供技能描述；工具引用不是新alias声明。
+
+A4 运行时生成且未计入固定数量的 alias
+
+- Native：run_shell_<shortcut>，由remote.toml中实际target.shortcut生成，target固定；已经verb-first。无当前配置，无法列出具体后缀。不要把这些误计成静态固定工具
+- MCP工具：mcp_<server_key>_<tool_key>；外部服务器发现结果生成，当前不符合统一verb-first。不能机械改成get。若推进统一，可设计call_mcp_<server_key>_<tool_key>保留身份，再依外部语义审查其真实效果；call只表示调用，不承诺只读。名称长度/规范化/冲突处理及旧名恢复affordance都须验证
+- MCP提示：mcp_<server_key>_<prompt_key>_render → 可考虑render_mcp_<server_key>_<prompt_key>；这是生成规则建议，不是已枚举的名称
+- Bundled memory-provider目标由绑定参数区分，同名alias不应因provider数量重复计数
+- Pal扫描范围为src、plugins、providers下Python声明；排除测试fixture、文档中的demo_echo示例、CLI子命令别名、控制命令别名、语言缩写、artifact自然语言名字，因为它们不是此处的公共LLM工具alias
+- 其他外部插件/额外MCP服务器没有源码和当前注册快照，不能声称已经审计。native额外追踪了plugin.toml→plugin.py的注册入口，以及skills.py中的NativePluginProvider（仅声明skill，不添加工具alias）；执行provider为capabilities.py。仍未拿到远端完整树，因此结论限于这条已核查注册链的公共面
+
+附录 B 模型可见诊断与成功语义
+
+范围与结论口径
+
+范围是 Pal 内置工具、仓库内声明，以及 native 的 Python 宿主/remote 桥接和相关 C++ 拒绝生产点。不覆盖用户部署的自定义插件、独立 eye 实现或其他未取得源码的第三方工具。
+
+结论来自静态源码路径。没有把“可能误判/多调用一次”写成已测得的模型行为；没有把 structured 中存在但正文没有的每个字段一律当成缺陷。执行状态、失败正文、恢复提示、输入契约、独立 context_messages、可按需读取的 detail/skill 都纳入判断。
+
+摘要：清单一列出 10 类具体诊断信息损失，另列 1 个条件性恢复提示缺口。清单二区分 确定的默认成功路径语义缺口、声明位置不佳但别处已有语义、低优先级空结果解释/下一步建议。各项按成因归类，不能把类数当成缺陷调用点数量。
+
+共同渲染链：为什么 structured 不等于模型看到了
+
+- 默认描述只编译 purpose/use_when/do_not_use_when、执行语义、example、next-tool hints，不编译 failure_next_steps：src/pal/execution/tool_facade.py:264-291 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/tool_facade.py#L264-L291)
+- 普通 CapabilityResult 失败会把 raw.text 放入 error，把 raw.llm_text 放入 llm_text，把 raw.structured 放入 details：src/pal/execution/runtime.py:1409-1454 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1409-L1454)
+- 最后模型正文是 llm_text + 元数据尾巴；尾巴只列 kind/effect/error_code/retry/recovery/affordances，不列 error 或 details：src/pal/execution/runtime.py:1585-1660 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1585-L1660)
+- turn executor 优先直接采用 llm_text：src/pal/core/turn_executor.py:1704-1709 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/core/turn_executor.py#L1704-L1709)
+- failure_next_steps 只在普通失败且 handler 没有 recovery_hint/affordances 时作为 fallback；成功不触发；ToolRejectedError 也不自动补 descriptor fallback：src/pal/execution/result_guidance.py:112-130 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/result_guidance.py#L112-L130)、src/pal/execution/runtime.py:789-792 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L789-L792)、src/pal/execution/runtime.py:1532-1541 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1532-L1541)
+
+这是一种合理的单正文设计。应修 producer 的事实投影或有界诊断接口，不应简单把整个 structured/details 无条件塞回 prompt。
+
+清单一：真实诊断损失
+
+A1 · native 非空 blocking_sessions 被隐藏，反而取消了恢复入口 · P1
+
+生产信息： ShellRejected 的 write_busy/result_capacity 分支把本地已跟踪 session_id、latest_status、watching 收集进 details.blocking_sessions。只有列表为空才添加 shell_status affordance：pal_plugin/pal_shell_native/runtime.py:456-479 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/runtime.py#L456-L479)
+
+模型实际看到： 原始异常字符串 + rejected/error_code/retry 元数据。非空列表的 IDs/状态/watching 不出现在正文，且没有 shell_status affordance；该 rejection 分支不会补 run_shell/session 的 failure fallback。
+
+具体不能一概而论：
+- 宿主 runtime.py423 的 write_busy 原文只是“shell results are not ready yet”，没有 ID；这里 ID 和状态确实全部丢失：pal_plugin/pal_shell_native/runtime.py:422-423 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/runtime.py#L422-L423)
+- C++ begin/acquire_write 的 write_busy 文本已经包含 writer id，所以不能说这些路径的阻塞 ID 全丢了；不过结构化列表中的状态/watching 和其他 session 信息仍未投影：runtime.cpp:476-483 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/runtime.cpp#L476-L483)、runtime.cpp:673-677 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/runtime.cpp#L673-L677)
+- result_capacity 的 C++ 文本只说 acknowledge/release completed results，没有具体 session：runtime.cpp:480-483 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/runtime.cpp#L480-L483)
+- blocking_sessions 是已跟踪本地 session 的集合，不证明每个条目都是当前真实阻塞者，修复时也不应把它们全叫“确证 blocker”。
+
+最小修复： 在正文显示有界的 tracked_sessions 列表及其观测时间/非因果说明，或无论列表是否为空都保留 shell_status 读取入口。不要凭列表自动 terminate/release，也不要把 writer lease ID 无条件当成 session ID。
+
+A2 · native 耗尽 normalization 恢复后，用泛化文本覆盖原始详细失败 · P1
+
+生产信息： Pal 的普通 output_validation_failed 正文包含 Validation error、未验证 output、原始 llm_text；native 收到非 CompleteResult 后，仅重试 normalization 两次；仍失败就替换 llm_text 为 “The command result could not be delivered. Do not rerun the command to retrieve output.”：src/pal/execution/runtime.py:1493-1510 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1493-L1510)、pal_plugin/pal_shell_native/runtime.py:530-555 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/runtime.py#L530-L555)
+
+模型实际看到： 泛化投递失败 + 原 error_code/retry/effect 元数据。原 error/details 不会由公共 renderer 重新显示；保留在内部不等于可见。此前若曾生成快照也不保证替换后的正文仍给出可用读取指针。
+
+丢失： 具体哪个字段/类型验证失败、原始命令结果正文、用于修复契约的输出证据。禁止重跑命令的保护仍可见，不能说该保护也丢了。
+
+最小修复： 保留原详细失败正文，追加投递失败警告；保证 retained output 的 session_id 或 output_ref 及安全重新导出入口仍可见。不要重复运行 handler。
+
+A3 · write_file 把具体文件系统错误缩成“Failed to write file.” · P1
+
+生产信息： resolve、mkdir、atomic create/overwrite 捕获 OSError/ValueError，原异常存于 structured.details；_err 固定使用 _ERROR_LLMS：src/pal/execution/file_write.py:75-79 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_write.py#L75-L79)、src/pal/execution/file_write.py:91-111 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_write.py#L91-L111)、src/pal/execution/file_write.py:126-137 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_write.py#L126-L137)、src/pal/execution/file_write.py:179-183 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_write.py#L179-L183)
+
+模型实际看到： “Failed to write file.”、WRITE_FAILED 和 effect/retry，外加文件工具的一般 fallback；看不到 errno、权限/只读/磁盘满/具体失败位置等异常文本。
+
+最小修复： 正文补有界、适当脱敏的操作阶段 + 异常类型/errno/消息，并在可能已完成 replace 的持久化错误上明确“提交结果不确定，先读当前文件”。不能因通用 error 就断言未写入。
+
+A4 · delete_path 隐藏失败根因；目录 SHA 校验还显示了错误的修正方向 · P1/P2
+
+生产信息： resolve/read/unlink/rmtree 失败把 str(exc) 放 structured.details；SHA mismatch 放当前与期望 digest；对目录传 expected_sha256 时 details 明确 “sha256 is only supported for files”：src/pal/execution/path_delete.py:55-104 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/path_delete.py#L55-L104)
+
+模型实际看到： “Failed to delete path.” 或 “Failed to read file before deleting.”；目录 SHA 分支却显示“expected_sha256 must be a 64-character hexadecimal SHA-256 digest.”，即使传入 digest 本来合法。具体 filesystem 异常、目录不支持该参数、当前 digest 都未渲染：src/pal/execution/path_delete.py:28-38 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/path_delete.py#L28-L38)、src/pal/execution/path_delete.py:125-128 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/path_delete.py#L125-L128)
+
+最小修复： 区分 invalid_digest_format 与 digest_not_supported_for_directory；错误正文显示有界原因。当前 digest 可作为诊断呈现，但不要暗示盲目替换 digest 并删除，仍需核对文件身份/内容。digest 本身的遗漏优先级低于错误原因误报。
+
+A5 · channel_enable/channel_disable 持久化失败吞掉具体 exception · P2
+
+生产信息： 回滚运行时 enabled 状态后，text 含 “channel endpoint state update failed: {exc}”，structured 有 endpoint_id/previous_enabled；llm_text 只说未能提交持久状态：src/pal/channel/capabilities.py:730-745 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/channel/capabilities.py#L730-L745)
+
+模型实际看到： “Channel endpoint state was not changed because its durable state could not be committed.” + 一般恢复。raw.text 虽进入 FailedResult.error，却不渲染。
+
+丢失： 具体 repository/I/O 失败原因、endpoint 已消失等细节，以及回滚后的 enabled 值。请求中 endpoint 名称已有，不把其重复省略计为主要损失。
+
+最小修复： 把有界 exception 原因和最终 enabled 状态加入 llm_text；保留当前“未提交、已回滚”语义。
+
+A6 · 内建工具输出验证失败只剩一句标题 · P2
+
+生产信息： _complete_builtin 捕获 ValidationError/TypeError，保存 error=str(exc)、details.output_schema，但 llm_text 只有 “Built-in output failed validation for {alias}.”：src/pal/execution/runtime.py:1114-1135 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1114-L1135)
+
+模型实际看到： 标题与 output_validation_failed/effect/retry，不知道失败字段、类型或要求。区别于普通 handler 分支，后者已把验证异常和原始结果显式写进正文。
+
+最小修复： 复用普通 output-validation renderer，至少投影字段路径、期望/实际类型与有界原因，并保留原始 output 的安全读取方式。此项是条件分支的静态证明，不表示当前正常 builtin 已在生产中触发该错误。
+
+A7 · unknown_target 的有效 target 名单不进入模型正文 · P2
+
+生产信息： _resolve_record_binding 计算 target_argument、available_names，放 details；正文只写未知名称。若存在合适 discovery 工具，会提供列表工具 affordance：src/pal/execution/runtime.py:875-920 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L875-L920)
+
+模型实际看到： 未知 target 错误；有 discovery 时还可再调一次，没 discovery 时无直接修正名单。与 _target_name_required_result 不同，后者已经把 Available names 写进 llm_text，不能一起报为缺陷：src/pal/execution/runtime.py:2025-2038 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L2025-L2038)
+
+最小修复： 正文显示有界合法值列表/目标参数名；名单过长则提供明确分页/列表入口。已有 discovery 时是额外 round trip，不是绝对无法恢复。
+
+A8 · output_schema 正常精简合理，但契约错误时没有模型可用的完整修复视图 · P2
+
+生产信息： read_tool 的内部 payload 确实包含 output_schema；render_tool_definition 明确移除 output_schema/example：src/pal/execution/runtime.py:1098-1111 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1098-L1111)、src/pal/execution/tool_presentation.py:42-46 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/tool_presentation.py#L42-L46)
+
+模型实际看到： alias/mode/description/input_schema；description 已含 valid example，因此 example 去除通常是去重。正常调用不需要完整 output_schema，不能把这项一概算有害。
+
+具体缺口： output_validation_failed 的修复建议要求修 provider/output contract，而其 details.output_schema 和随后 read_tool 的 output_schema 都不显示。普通验证异常可能已包含失败局部 schema，因此不能说“所有验证规则都消失”，丢的是完整规范及未在异常中列出的相关字段/约束。
+
+最小修复： 增加 read_tool 的 output/detail 视图，或验证错误时输出相关 schema 子树及读取完整契约入口；不把每次普通工具发现恢复成全量输出 schema。
+
+A9 · remote 异常包装把更具体的连接/准备原因变成泛化恢复文案 · P2
+
+生产信息和损失位置：
+- slot._request 把连接阶段 OSError/TimeoutError/ValueError 链接为 connection_unavailable，但 message 不含原异常：pal_plugin/pal_shell_remote/slot.py:201-216 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_remote/slot.py#L201-L216)
+- router 的 run/privileged 准备阶段把未分类 exception 链接为 remote_prepare_failed/privilege_prepare_failed：pal_plugin/pal_shell_native/router.py:178-185 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/router.py#L178-L185)、pal_plugin/pal_shell_native/router.py:253-261 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/router.py#L253-L261)
+- runtime 对 effect=unknown 的 RemoteFailure 又以固定“可能已生效、不要自动重试”取代 str(exc)：pal_plugin/pal_shell_native/runtime.py:432-455 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/runtime.py#L432-L455)
+
+模型实际看到： 稳定 error_code、effect/retry、泛化原因/list_remote affordance；具体 OS/协议/兼容失败原因和 cause chain 不可见。内部 operation_id 不自动算损失：它是协调凭据，不是任意让模型重放命令的入口。
+
+最小修复： 稳定错误分类 + 有界脱敏的原始诊断原因/阶段并存；unknown-effect 警告追加而非替换具体原因。不要透出凭据、认证材料或无限 traceback。
+
+A10 · remote SSH/start 子进程 stderr 被送往 DEVNULL，根本没有可供后续呈现的证据 · P2
+
+生产信息： SSH tunnel 使用 stderr=DEVNULL，退出后只抛泛化 authentication/forwarding failed；显式 start action 的 stdout/stderr 也为 DEVNULL，返回仅 start_action_completed/returncode/target：pal_plugin/pal_shell_remote/slot.py:103-123 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_remote/slot.py#L103-L123)、pal_plugin/pal_shell_remote/slot.py:266-281 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_remote/slot.py#L266-L281)
+
+模型实际看到： SSH 大类失败，或启动动作退出码。无法区分 host-key/identity/forwarding/网络具体报错，也看不到启动脚本失败原因。
+
+最小修复： 保留有上限、脱敏的 stderr 尾部/诊断文件，在失败时给出引用；不要无限抓取长驻 tunnel stdout。此处是采集层主动丢弃，不是 llm_text renderer 的二次遗漏。
+
+A11 · 条件性缺口：先选 handler affordance，再过滤，可能把 fallback 一并丢掉 · P2，未证明普通部署一定触发
+
+resolve_failure_guidance 看到任意可解析 handler action 就不选 descriptor fallback；之后 finalizer 才按 captured generation/schema/target/role 过滤该 action。若全部被过滤且没有 handler hint，最终为空，没有第二次 fallback 选择：src/pal/execution/result_guidance.py:124-130 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/result_guidance.py#L124-L130)、src/pal/execution/runtime.py:1250-1289 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1250-L1289)
+
+这证明一个组合分支的空洞，不证明任意内置成功/失败都会遇到。最小修复是过滤后再择优，或过滤后提供适用于当前 role 的文本性恢复提示。不能通过恢复提示扩大角色权限。不要把被过滤的不可用工具重新展示为可执行操作。
+
+清单二：成功路径语义放错层
+
+下表的“模型可见”均指默认 descriptor + 当前成功结果；若还有 skill/context 则单独注明。修复原则：永久语义放 purpose/use_when/input field；本次事实触发的建议放成功 payload/affordance；失败恢复仍留 failure_next_steps。
+
+B1 · 核心确认项
+
+- 工具/来源：native list_remote，pal_plugin/pal_shell_native/capabilities.py:212-242 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/capabilities.py#L212-L242)
+  当前成功时看得到什么：targets、reachable、needs_wake、start_actions 等
+  成功时缺少的解释：offline 仍是有效 target；只能使用已配置的显式 start action。detail 入口已在 use_when，不计丢失
+  最小修复/优先级：use_when 补离线身份/启动边界；P2
+
+- 工具/来源：native remote_start，pal_plugin/pal_shell_native/capabilities.py:244-259 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/capabilities.py#L244-L259)
+  当前成功时看得到什么：start_action_completed + returncode + target
+  成功时缺少的解释：动作完成不证明目标已 ready，仍需刷新 metadata。非零 returncode 也走 OK 返回，所以尤其不应把 wrapper success 当 ready
+  最小修复/优先级：成功结果显式 readiness=unverified，并给 list_remote(target,refresh=true)；P1
+
+- 工具/来源：native remote_power，pal_plugin/pal_shell_native/capabilities.py:261-281 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/capabilities.py#L261-L281)、pal_plugin/pal_shell_native/router.py:226-236 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/router.py#L226-L236)
+  当前成功时看得到什么：accepted 或 unknown 的业务 status；宿主为 OK
+  成功时缺少的解释：accepted 不证明 power-off；unknown 不是成功。busy 部分属于失败指导，应保留原处
+  最小修复/优先级：descriptor/业务结果补 outcome 语义；P1
+
+- 工具/来源：LSP 10 个查询，src/pal/lsp/plugin.py:261-365 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/lsp/plugin.py#L261-L365)
+  当前成功时看得到什么：status 与 result/diagnostics/items 空值；_capability_from_rpc 完整渲染实际 payload
+  成功时缺少的解释：空成功不是 readiness 故障；prepare_call_hierarchy 的空值可能是位置不是 callable；definition/document_symbols/workspace_symbols 的替代读取/搜索建议
+  最小修复/优先级：将“空成功”的解释放稳定描述，或仅空结果追加；P2。十工具：diagnostics、hover、definition、implementation、references、prepare_call_hierarchy、incoming_calls、outgoing_calls、document_symbols、workspace_symbols
+
+- 工具/来源：llm_usage，src/pal/llm/capabilities.py:258-297 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/llm/capabilities.py#L258-L297)
+  当前成功时看得到什么：scope、cost_complete、unknown counts、usage_reporting_rate；描述已说 resident-process lifetime
+  成功时缺少的解释：缺失/不完整 usage 或 cost 应解释为 unknown，而非零。重启重置基本已被 process lifetime 表达，不算全部隐藏
+  最小修复/优先级：描述/返回值增加 accounting interpretation；P2
+
+- 工具/来源：llm_think_level，src/pal/llm/capabilities.py:221-253 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/llm/capabilities.py#L221-L253)
+  当前成功时看得到什么：available_levels/current 等
+  成功时缺少的解释：choices 是 provider 声明，空列表可能不支持 thinking
+  最小修复/优先级：use_when 说明空值语义；P3
+
+- 工具/来源：artifact_grep，src/pal/artifact/capabilities.py:243-249 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/capabilities.py#L243-L249)、src/pal/artifact/tools.py:204-228 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/tools.py#L204-L228)
+  当前成功时看得到什么：匹配项，或成功 results=[]
+  成功时缺少的解释：查询是大小写不敏感词匹配，不是 regex；regex/逐行应改走 rg。输入 query 没有该语义，错用 regex 可以静默得到空结果
+  最小修复/优先级：query 字段描述补匹配语义；P1/P2
+
+- 工具/来源：artifact_select，src/pal/artifact/capabilities.py:221-227 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/capabilities.py#L221-L227)、src/pal/artifact/service.py:613-620 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/service.py#L613-L620)
+  当前成功时看得到什么：ttl_refreshed=false 和 hot_state
+  成功时缺少的解释：read-only 可选择但不能续 TTL 的明确解释只在 fallback；purpose 的 “when runtime has write authority” 已部分表达
+  最小修复/优先级：对 ttl_refreshed=false 输出简短 reason；P3，部分重复而非 TTL 状态丢失
+
+- 工具/来源：failure_recent_reports，src/pal/failure/capabilities.py:50-69 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/failure/capabilities.py#L50-L69)
+  当前成功时看得到什么：items 列表
+  成功时缺少的解释：只保留最近16项的窗口说明只在失败指导；可能把返回集误当完整历史
+  最小修复/优先级：purpose 或 payload 加 limit=16/truncated；P2
+
+- 工具/来源：control_show，src/pal/control/capabilities.py:61-77 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/control/capabilities.py#L61-L77)
+  当前成功时看得到什么：control snapshot
+  成功时缺少的解释：resident implementation 变更要求 host restart
+  最小修复/优先级：稳定 description 中表达重启边界；P2
+
+- 工具/来源：core_cache_warm_deadline，src/pal/core/capabilities.py:95-115 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/core/capabilities.py#L95-L115)、src/pal/core/cache_warm_deadline.py:266-297 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/core/cache_warm_deadline.py#L266-L297)
+  当前成功时看得到什么：timer_scheduled=false、cache/settings 等原始状态
+  成功时缺少的解释：没有 timer 时检查 A confirmed、provider TTL、minimum prefix 的判定路径
+  最小修复/优先级：返回 disabled_reason/unscheduled_reason 更好；P2
+
+
+LSP 特别注意：诊断超时可能由 producer 标为 pending/timed_out，这不是“成功空结果”，不能用一段统一解释抹平真实状态。_capability_from_rpc 渲染 payload 的路径在 src/pal/lsp/plugin.py:706-718 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/lsp/plugin.py#L706-L718)。
+
+B2 · 确有成功建议放在失败字段，但不应夸大为“唯一渠道”
+
+- 声明：browser hover/scroll/resize/history 要重新 snapshot；network hook 导航后重装；extensions 验证行为，src/pal/web_fetch/capabilities.py:275-353 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/capabilities.py#L275-L353)
+  核对后的结论：默认单工具描述/成功结果没有这些完整下一步；hover/scroll/history 返回空 payload，resize 只返 viewport。但 browser skill 的步骤4和 hook/extension 段已明确说明：src/pal/web_fetch/capabilities.py:62-96 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/capabilities.py#L62-L96)。属于“未加载 skill 时默认契约缺口”，不能写成仓库中只存在失败字段。可把重要 hook 生命周期移入 browser_network use_when；一般 snapshot 建议留 skill 即可
+
+- 声明：browser_extension_manage “成功后 navigate test page”
+  核对后的结论：不丢失。 browser_service 成功 payload 自带 next_step，并由 _action 完整渲染：src/pal/web_fetch/browser_service.py:838 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/browser_service.py#L838)、src/pal/web_fetch/capabilities.py:389-415 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/capabilities.py#L389-L415)。Unmount 源目录删除仍可用这一边界可独立放稳定描述，但不能把整个 fallback 算隐藏
+
+- 声明：artifact_import “registration 不等于 vision / OCR 不等于视觉”
+  核对后的结论：最重要语义已通过成功 context_messages 明确“Import alone is not visual inspection”，并提醒只有 inline+vision 才看像素：src/pal/artifact/tools.py:80-94 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/tools.py#L80-L94)。OCR 替代边界还在 fallback，可移 descriptor；不把视觉能力整项判成丢失
+
+- 声明：recall_memory/remember_memory 的 limit 3–5、summary/search_text、mem_ref 前缀
+  核对后的结论：输入 schema 已明确 limit 默认、完整 mem_ref、summary/search_text 各自用途：src/pal/execution/generated_tool_models.py:638-665 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/generated_tool_models.py#L638-L665)、src/pal/execution/generated_tool_models.py:685-696 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/generated_tool_models.py#L685-L696)。声明位置混杂但不是模型不知道这些输入规则
+
+- 声明：file_state 的 stale 重新 read
+  核对后的结论：成功正文已明确 stale/no snapshot/partial/complete：src/pal/execution/file_state.py:512-527 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_state.py#L512-L527)。不丢失
+
+- 声明：skill_assimilate 需 review + skill_commit
+  核对后的结论：purpose 已说 “without committing”，但具体下一工具位于 fallback；这是关系发现上的小缺口，而不是伪称已持久化。建议 NextToolHint(skill_commit)，P3：src/pal/skill/capabilities.py:133-140 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/capabilities.py#L133-L140)
+
+- 声明：skill_inject 不可覆盖用户指令/政策
+  核对后的结论：purpose 已说 reference observation；完整“do not override”在 fallback，但 context wrapper/宿主提示也可能提供信任边界。不把这当已证明安全绕过。可在稳定 skill wrapper 明确一次，P2：src/pal/skill/capabilities.py:255-261 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/capabilities.py#L255-L261)、src/pal/skill/tools.py:282-309 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/tools.py#L282-L309)
+
+- 声明：stub memory “不是持久真实后端”
+  核对后的结论：purpose/use_when/do_not_use_when 已明确 stub/testing/not real；不把 failure 字段重复写了这句话当实际隐藏：src/pal/plugins/l3/stubs.py:209-217 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/l3/stubs.py#L209-L217)
+
+
+B3 · 其余成功空值、健康状态和操作后关系：低优先级完整盘点
+
+以下不是异常信息被吞，而是 fallback-only 的解释/导航建议不会在 OK 状态自动显示。可择要移到 description、NextToolHint 或条件性 payload；不建议把它们全量重播。源中的既有结果通常已经显示空值/状态，风险是少一条解释或多一次发现，而不是事实完全不可见。
+
+- llm_list 无 endpoints；llm_active 无 active 时查 llm_list：src/pal/llm/capabilities.py:130 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/llm/capabilities.py#L130)、src/pal/llm/capabilities.py:168 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/llm/capabilities.py#L168)
+- web_search_show/list/active 的无 provider 解释和发现路线；provider_auth_state 非 authorized、provider_health unhealthy 都可以作为成功诊断结果返回，因此修复/切换建议不该只按 invocation failure 触发：src/pal/web_search/capabilities.py:105-148 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_search/capabilities.py#L105-L148)、src/pal/web_search/capabilities.py:197-222 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_search/capabilities.py#L197-L222)
+- mcp_server_list 为空时无配置及 rescan 路线：src/pal/mcp/plugin.py:138 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/mcp/plugin.py#L138)
+- memory_show 无 active 时查列表；memory_list_providers 空列表；memory_active_provider 无 active 时不能存取：src/pal/memory/capabilities.py:251-303 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/memory/capabilities.py#L251-L303)
+- channel_list 空 endpoint；channel_attach already-attached no-op；channel_detach 后如何 attach；endpoint stats 大 backlog 可能要重附着，health unhealthy 建议 restart：src/pal/channel/capabilities.py:206 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/channel/capabilities.py#L206)、src/pal/channel/capabilities.py:434-452 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/channel/capabilities.py#L434-L452)、src/pal/channel/capabilities.py:622-644 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/channel/capabilities.py#L622-L644)
+- plugins_show/plugins_list 缺插件时的目录/rescan 导航；detach 后可 attach、disable 后可 enable；rescan 的 scan_errors、attach_errors 可能在汇总返回中出现，因此应按 payload 而非 wrapper OK 决定是否给诊断：src/pal/plugins/capabilities.py:141-158 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/capabilities.py#L141-L158)、src/pal/plugins/capabilities.py:235-328 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/capabilities.py#L235-L328)。本项不声称所有底层 rescan 都返回 OK
+- sqlite-vec show/index status 的 not mounted/embeddings missing 诊断路线，以及 detach 后 reattach：src/pal/plugins/l3/sqlite_vec.py:191-208 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/l3/sqlite_vec.py#L191-L208)、src/pal/plugins/l3/sqlite_vec.py:446 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/plugins/l3/sqlite_vec.py#L446)
+- exec_show counts 不对查 core_observe；core_observe queue backlog/lifecycle 解释；failure_show 查 recent_reports：src/pal/execution/capabilities.py:80 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/capabilities.py#L80)、src/pal/core/capabilities.py:54 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/core/capabilities.py#L54)、src/pal/failure/capabilities.py:36 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/failure/capabilities.py#L36)
+- skill_show 无 active 查 search，skill_search 空结果拓宽 query，disable 后恢复需 status=active 且 enabled=true：src/pal/skill/capabilities.py:96 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/capabilities.py#L96)、src/pal/skill/capabilities.py:202-221 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/skill/capabilities.py#L202-L221)
+- proactive_list 空结果、未执行任务可能新建、disable 后 enable：src/pal/proactive/capabilities.py:180 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/proactive/capabilities.py#L180)、src/pal/proactive/capabilities.py:260 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/proactive/capabilities.py#L260)、src/pal/proactive/capabilities.py:487 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/proactive/capabilities.py#L487)
+- identity_show 无 persona 时使用默认 prompt fragments：src/pal/identity/capabilities.py:53 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/identity/capabilities.py#L53)
+- artifact list/search 空结果可能已过期或尚未发送，后续 resend/widen/list 路线：src/pal/artifact/capabilities.py:139 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/capabilities.py#L139)、src/pal/artifact/capabilities.py:205 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/artifact/capabilities.py#L205)。不能把“空列表”推成必然过期
+- checklist show/progress inactive、finish inactive 幂等 no-op；其中 no active checklist 的正文已在部分路径直说，因此主要是声明整理：src/pal/checklist/capabilities.py:234-318 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/checklist/capabilities.py#L234-L318)
+- bunshin profile/family override reset 的“无 override 则 no-op”，task_search 空结果拓宽 query：src/pal/bunshin/v2/capabilities.py:360 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/capabilities.py#L360)、src/pal/bunshin/v2/capabilities.py:410 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/capabilities.py#L410)、src/pal/bunshin/v2/capabilities.py:527 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/bunshin/v2/capabilities.py#L527)
+- browser_close already closed 幂等、browser_clear_cache 后仅必要时 reload、browser_reset 后重新导航。reset 的永久删除在 purpose 已明确，不把这项说成隐瞒不可逆性：src/pal/web_fetch/capabilities.py:368-381 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/web_fetch/capabilities.py#L368-L381)
+
+明确排除的误报与建议验证
+
+1. 普通 invalid_arguments 不缺验证原因。 details 中有错误结构，但正文已经是完整 str(exc)，且提供 read_tool(input_schema)；wrong_invocation_mode 的正确 mode 也在正文和 affordance 中。src/pal/execution/runtime.py:800-870 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L800-L870)
+2. edit_file 批次失败细节通常可见。 failed_edits 被 JSON 序列化到正文；重叠 indices/partial read 等随之显示。WRITE_FAILED 已显式给原始 exception 和 commit uncertainty。src/pal/execution/file_edit.py:154-168 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_edit.py#L154-L168)、src/pal/execution/file_edit.py:262-276 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/file_edit.py#L262-L276)
+3. 普通输出验证不是只剩标题。 普通 handler 分支已输出验证原因和未验证结果；主要缺口是 builtin 分支与 native 后续覆盖。
+4. LSP evidence.result 相同副本删除是去重。 payload.result 保留；不应报证据丢失。src/pal/lsp/plugin.py:711-718 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/lsp/plugin.py#L711-L718)
+5. 搜索摘要去 search_text/input_shape、inventory 去冗余字段、schema title 去除是正常紧缩。 read_tool 完整 input contract 仍在；example 已进 description。src/pal/execution/tool_presentation.py:13-65 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/tool_presentation.py#L13-L65)
+6. native output_result 不公开 epoch/cursor/journal/control receipt 是有意边界。 session/target/status/returncode/signal/error/stdout/stderr/watch/deadline/output_error 可见；没有证明内部协调 IDs 是模型完成任务所必需。pal_plugin/pal_shell_native/runtime.py:29-42 (https://github.com/OtakuNathan/pal-shell-native/blob/f307c9614634dd62a97bd1429d967a1c55489896/pal_plugin/pal_shell_native/runtime.py#L29-L42)
+7. 大输出预算通常是可恢复的省略。 完整 pre-budget llm_text 存快照，正文给路径；不能把正常 head-tail 截断等同永久吞输出。只有保存失败才真正失去完整恢复能力，而且正文明确说明。src/pal/execution/runtime.py:1291-1380 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1291-L1380)
+8. 旧 execute/execute_async facade 确有仅 exception class 的分支，但所见调用包括控制面/内部调用，不等同已证明标准模型工具链会经过它，因此不混入 A1–A10 的默认模型链结论。src/pal/execution/runtime.py:1881-1953 (https://github.com/OtakuNathan/Pal/blob/b76358fb1a8488abae4745d0826564d75e2415a1/src/pal/execution/runtime.py#L1881-L1953)
+9. 修复测试应断言最终模型正文/context，而不只断言 structured 字段存在。优先用 A1 的两种 producer（宿主无 ID/C++已有 writer id）、A2 验证失败、A3/A4 不同 errno、A5 rollback、A6 builtin contract、A7 无 discovery、B1 空成功/accepted/unknown/nonzero-start 构造定向用例。未运行这些用例，不声称模型调用次数已经改善。
+
+附录 C 参数组合与状态约束
+
+范围与结论
+
+下文 P 表示 Pal 固定源码 (https://github.com/OtakuNathan/Pal/tree/b76358fb1a8488abae4745d0826564d75e2415a1)，N 表示 native 固定源码 (https://github.com/OtakuNathan/pal-shell-native/tree/f307c9614634dd62a97bd1429d967a1c55489896)。路径后的行号对应这两个版本。N 的 capabilities.py、tools.py、guidance.py、adapter.py、router.py 均在 pal_plugin/pal_shell_native/ 下。P 中 generated_tool_models.py 均指 src/pal/execution/generated_tool_models.py；同一章节内省略的 browser 文件路径基于 src/pal/web_fetch/，proactive 基于 src/pal/proactive/，v2 基于 src/pal/bunshin/v2/，lsp 基于 src/pal/lsp/；其他省略文件沿用紧邻上一条完整目录。
+
+清单覆盖模型声明、公开 alias 注册、相关 handler/service 分支，包含作用域内的 Bunshin 工具。不能把以下三类混为一谈：
+- 硬约束：组合不合法，调用被拒绝
+- 选择/忽略：组合被接受，但某字段覆盖另一字段或根本不生效
+- 状态前提：合法性取决于已选 session、任务、文件或目标的当前状态
+
+结论：确有“schema 展示了单字段，却没展示组合规则”的缺口。最明显的是 shell_session、bunshin_start_workflow、proactive schedule、mcp_image_prepare，以及几个按 operation 复用的 browser/memory 工具。与此同时，browser_find 的 XOR、read_file 的 ranges 优先级、case memory 的 STAR 要求等已经说明，不能重复算成缺陷。
+
+范围边界：不包含任意第三方动态 MCP/provider 自定义 schema；不穷举架构 artifact 文档与任意 policy/config 字典的递归语义；native C++ reactor、独立远端 worker 的全部平台状态机不在本附录的穷举声明内。以下为已检查工具表面的完整确认项，不代表所有可安装插件的约束全集。
+
+A. Native shell 与 target
+
+A1. shell_session：action 对应的精确参数矩阵
+
+类型：硬约束。现状：部分说明，关键白名单缺失。
+
+除 action、session_id/output_ref 外，允许的非 null 控制字段如下：
+
+- action：read
+  必填：无
+  可选：wait_ms
+
+- action：write
+  必填：text，允许空字符串
+  可选：无
+
+- action：resize
+  必填：rows、columns 同时填写
+  可选：无
+
+- action：terminate
+  必填：无
+  可选：无
+
+- action：release
+  必填：无
+  可选：无
+
+- action：watch
+  必填：wait_ms > 0
+  可选：extend_by_ms，可为 0
+
+- action：extend
+  必填：extend_by_ms > 0
+  可选：无
+
+- action：unwatch
+  必填：无
+  可选：无
+
+
+其余非 null 字段全部拒绝。因此 write+wait_ms、resize+wait_ms、read+extend_by_ms 都不是自由组合。nullable 控制字段的显式 null 视为未提供。watch 的 wait_ms=0、extend 的 extend_by_ms=0 虽通过字段 ge=0，仍被 model_validator 拒绝。
+
+当前 guidance 解释动作含义，但没有完整允许/禁止矩阵；字段描述也未补齐。validator 没有变成条件 JSON Schema。
+
+建议 desc：
+“read: optional wait_ms; write: text; resize: rows+columns; watch: positive wait_ms, optional extend_by_ms; extend: positive extend_by_ms; terminate/release/unwatch: no controls. Omit controls not listed for the action.”
+
+组合必要性：这是多个不同动作共用一张字段表，适合拆 action 工具，或改成 discriminated union；不是有价值的任意组合。
+
+证据：N pal_plugin/pal_shell_native/tools.py:22-43；guidance.py:36-61。
+
+A2. shell_session：session_id/output_ref 与恢复分支
+
+类型：硬约束。现状：output_ref 用途已说，XOR 和禁止等待没说全。
+
+session_id 与 output_ref 必须恰好一个非 null。output_ref 只支持 read/release，禁止 wait_ms，连 wait_ms=0 也拒绝；结合 A1，此分支不接受任何其他控制字段。output_ref 还必须指向可用、已交付且导出失败的保留结果，否则 invalid_output_ref。
+
+建议 desc：
+“Supply exactly one of session_id or output_ref. With output_ref, use read or release and omit all controls, including wait_ms.”
+
+组合必要性：可将 retained_output_read/release 与活 session 控制分开。
+
+证据：N capabilities.py:62-73,139-151。
+
+A3. run_shell / run_shell_<shortcut>：sudo、target、tty
+
+类型：硬约束。现状：部分说明。
+
+- target=0 是本地；sudo=true+target=0 拒绝 sudo_unsupported
+- 远端 sudo=true+tty=true 拒绝 privilege_pty_unsupported
+- guidance 已说明 Linux remote sudo 的 apt/apt-get update/install PACKAGE... 语法、禁止额外 flags/operators、逐次授权，但未明确 tty=false
+- 配置生成的 run_shell_<shortcut> 固定 target，输入模型没有 target；传 target 是未知字段错误，不能覆盖目标
+
+建议 sudo desc：
+“Remote targets only; requires tty=false and an approved supported management command.”
+
+组合必要性：普通 cmd/cwd/tty/wait/timeout 可自然组合；sudo 的命令语法、授权、PTY 能力不同，可考虑单列 privileged 工具。
+
+证据：N capabilities.py:18-35,284-325；router.py:127-136；guidance.py:64-87。
+
+A4. run_shell：wait 与 timeout 独立，不应杜撰不等式
+
+类型：正常组合。现状：已充分说明。
+
+wait_ms 控制本次返回等待，不控制进程寿命；timeout_ms 是可选硬截止。省略 wait 时，PTY 默认 1000，其他默认 300000。Python 边界没有 wait_ms <= timeout_ms 要求。cwd 属于执行 target；导出的输出快照路径在 Pal 本地主机。
+
+建议：保留现有 guidance，不新增伪约束。
+
+证据：N tools.py:14-19；adapter.py:129-147；router.py:147-157；guidance.py:8-17。
+
+A5. shell_session：状态前提，不是本次字段 XOR
+
+write/resize 要求活 PTY；release 用于完成后的输出；extend、watch 正增量扩展要求已有可扩展、未到期的有限 deadline，不会凭空创建 deadline。无 deadline 返回 no_deadline，过期/终止中不能续期；受签名管理操作可能返回 deadline_not_extendable。
+
+现有 guidance 已说明大部分。建议补一句：
+“Deadline extension requires an unexpired, extendable finite deadline.”
+
+证据：N guidance.py:39-55；README “Session observation and deadlines (0.4.0)”。此处为公开状态契约，未声称穷举 C++ 状态机。
+
+A6. list_remote、remote_start、remote_power
+
+list_remote 的 target/refresh/view 可正常组合；省略 target 列全部，选 target 限定刷新范围，0 为本地；未知 target 拒绝。remote_start 的 action 必须来自该 target 的配置。remote_power 仅接受 shutdown 和正 target，并受管理能力/授权限制；本地 0 不通过 schema。
+
+建议 remote_start.action desc：
+“Exact start action advertised for this target by list_remote.”
+
+证据：N capabilities.py:23-40,217-276。远端后台对 action 的具体配置校验不在本次逐项验证边界内。
+
+B. 文件、artifact、发现与图片输入
+
+B1. read_file：ranges 优先，不是 XOR
+
+类型：选择/忽略。现状：已说明。
+
+非空 ranges 使用多区块读取，忽略顶层 offset/limit；ranges 每项有自己的默认值，不要求每项必须显式提供两个键。顶层字段即使最终被忽略，仍先经过 schema 校验。
+
+建议：无需重复修补；若集中写，可用 “When supplied, ranges replaces top-level offset and limit.”
+
+证据：P src/pal/execution/generated_tool_models.py FileReadRangeItem/ReadInput；src/pal/execution/file_read.py:515-529,546-570。
+
+B2. edit_file：批次内的关联规则
+
+类型：逐项/批次拒绝。现状：大部分已有说明。
+
+old_string==new_string 拒绝 NO_CHANGE；多处匹配需 replace_all=true；所有受影响匹配必须在已交付且当前有效的读取范围内。全部 edits 针对同一原始快照，不是顺序执行。重叠项失败并排除，其他合法项仍可成功；整体净变化为零也拒绝。
+
+现有 edits desc/guidance 已说明原始快照、重叠、部分成功、唯一匹配与先读后改；字段中未明说新旧文本不能相同。
+
+建议补充：
+“old_string must differ from new_string. Batch items match the same original snapshot; overlapping items fail.”
+
+组合必要性：批次编辑有实际价值，不应因此拆掉。
+
+证据：P src/pal/execution/file_capabilities.py:83-99；file_edit.py:120-148,280-307。
+
+B3. delete_path：文件类型决定合法选项
+
+目录要求 recursive=true，同时拒绝非空 expected_sha256。普通文件可带摘要；不匹配拒绝删除。普通文件带 recursive=true 并不被禁止，所以不是 recursive/expected_sha256 XOR。
+
+现有描述说明 recursive 的目录用途和摘要面向文件，未明说目录不能带摘要。
+
+建议 expected_sha256 desc：
+“Regular files only; omit for directories. Rejects deletion if bytes differ.”
+
+证据：P src/pal/execution/path_delete.py:46-90；generated_tool_models.py DeleteInput。
+
+B4. read_artifact：page/chunk 与 representation
+
+page、chunk 互斥，handler 返回 INVALID。page 强制选 page_text，chunk 强制选 chunk_text，覆盖显式 representation；不是要求调用者再填写匹配 representation。不存在所选表示时返回 representation_unavailable。
+
+当前字段已说 XOR 和对应表示，覆盖显式 representation 可更直接。
+
+建议：
+“Use at most one of page or chunk; either overrides representation.”
+
+证据：P src/pal/artifact/service.py:507-525,957-984；tools.py:145-164；generated_tool_models.py ArtifactReadInput。
+
+B5. search_tools：优先级已说明，filters 正常组合
+
+top_k 与 limit 同时出现时 top_k 优先。namespace/family/module_name/tags 联合缩小范围；tags 是全部匹配。不是 XOR，现有字段描述已说明。
+
+建议：不改，不把正交筛选项拆成动作。
+
+证据：P generated_tool_models.py SearchInput；src/pal/execution/tool_search.py search 注册与 handler。
+
+B6. call_tool：args 依赖 name 指向的契约
+
+name 必须是可调用的 indirect alias，args 必须符合所选工具 schema；dict 不是自由内容。这是间接调用固有依赖，read_tool/search_tools 可发现目标输入契约，不适合造一个覆盖全部工具的巨大 union。
+
+建议 args desc：
+“Arguments matching the selected alias's input schema.”
+
+证据：P src/pal/execution/tool_search.py:51-80 及 registry 分派。
+
+B7. mcp_image_prepare：source/mode 的隐藏优先级
+
+类型：选择/忽略，缺失可用 source 才拒绝。现状：明显缺失。
+
+实际顺序：
+1. url 非空且 mode=auto/url：直接返回 URL，忽略 artifact_id/path
+2. 否则 artifact_id 非空：用 artifact metadata 中的本地路径覆盖 path
+3. 否则用 path；没有可用本地路径则报 artifact_id, path, or url is required
+4. mode=path 返回路径；mode=data_url 返回 data_url kind；artifact_id+auto/url 也返回 data_url kind；其他本地分支返回 base64 kind，payload 同时含 base64/data_url
+
+所以 url 单独配 path/base64/data_url 不会先下载转换，会因无本地 source 失败。三种 source 同填不是 XOR，可能静默选错预期 source。
+
+建议：
+“Choose one source for clarity. url is used only with auto/url and takes precedence. Otherwise artifact_id overrides path; path/base64/data_url need a local file or artifact. auto uses URL as-is, artifact as data URL, or path as base64.”
+
+组合必要性：宜分 source union 与输出格式；如新增 source XOR，属于行为变更，不能冒充已有规则。
+
+证据：P src/pal/mcp/plugin.py:459-525；generated_tool_models.py ImagePrepareInput。
+
+C. Browser 动作分支
+
+C1. browser_find
+
+必须恰好一个非空 text/regex。字段描述、guidance、validator、oneOf JSON Schema 都已说明。无需作为缺失 desc 的问题重复列报。
+
+建议保持：“Supply exactly one of text or regex.”
+
+证据：P src/pal/web_fetch/tool_models.py:49-64；capabilities.py:237-249；browser_service.py:514-524。
+
+C2. browser_tabs
+
+select 必须有非负 index；close 可省略 index，关闭当前 tab。只有 new 使用 url；list/select/close 忽略 url；list/new 忽略 index。select 的要求已有 desc/if-then/validator，其他分支的忽略规则未说。
+
+建议：
+“list: no selectors; new: optional url; select: required index; close: optional index, default current tab. Other branch fields are ignored.”
+
+组合必要性：适合按动作拆分或 union，避免无效字段组合。
+
+证据：P src/pal/web_fetch/tool_models.py:133-146；browser_service.py:588-605。
+
+C3. browser_dialog
+
+prompt 仅 accept 使用；dismiss 静默忽略，不拒绝。字段当前未说明。
+
+建议 prompt desc：“Prompt response for accept; ignored for dismiss.”
+
+证据：P browser tool_models.py:149-156；browser_service.py:606-616。
+
+C4. browser_network
+
+url_filter/since/limit/clear_on_read 仅 read 生效；start/clear 忽略它们。当前已说明 cursor/clear 的读取语义，未说明动作范围。
+
+建议：
+“url_filter, since, limit and clear_on_read apply only to read; omit them for start/clear.”
+
+组合必要性：start/read/clear 的工作不同，拆分合理。
+
+证据：P browser tool_models.py:167-176；browser_service.py:652-675。
+
+C5. browser_extension_manage
+
+mount 要非空 path；reload/unmount 要非空 extension_id。现有字段、guidance、条件 schema、validator 已充分说明这两个硬条件。mount 忽略 extension_id；reload/unmount 忽略 path，不是 XOR。另需持久会话 profile；临时 Bunshin scope 不支持；未知 extension_id 失败。
+
+建议只补忽略规则：
+“Omit extension_id for mount and path for reload/unmount; those fields are ignored.”
+
+证据：P browser tool_models.py:198-216；capabilities.py:347-357；browser_service.py:800-825。
+
+C6. browser_read
+
+非空 url 先导航，省略则读当前页；它与 timeout/max_chars/max_links 正常组合。不是无效组合，但改变操作性质。
+
+建议 url desc：“Omit to read current page; supplying a URL navigates first.”
+
+证据：P browser tool_models.py:30-38；browser_service.py:482-501。
+
+C7. 不应编造的 browser target 冲突
+
+browser_screenshot 将 target/full_page/hires 一起传给 CLI，未发现 Pal 层 XOR；未检查下游 CLI，不能武断说 target+full_page 无效。browser_evaluate 的 func+target、snapshot 的 target/depth/boxes、click 的 target/button/modifiers/double、fill 的 target/text/submit、select 的 target/value、check 的 target/checked、scroll 的 dx/dy、resize 的 width/height 都是自然组合。stale target/DOM 类型不适合属于状态前提。
+
+证据：P browser_service.py:502-513,525-586,629-650,676-694。
+
+D. Memory 与 skill
+
+D1. recall_memory
+
+mem_ref 走直接读取，忽略 queries/topic_scope/limit；kind/task_id 仍约束可见性。已在 mem_ref 描述准确写出，不能新增 queries XOR。可以为简化理解拆 get/search，但不是紧急缺陷。
+
+证据：P generated_tool_models.py RecallInput；src/pal/memory/capabilities.py:368-383。
+
+D2. remember_memory / update_memory
+
+remember：kind=case 要完整 star，kind=fact 禁止 star；已有描述。source_event_id 只在 case 使用，fact 下忽略，这一点可以补。update：star 只能用于 case ref，是四字段完整替换，fact ref 带 star 返回 INVALID，已有描述。
+
+建议 source_event_id desc：“Case memories only; ignored for facts.”
+
+证据：P src/pal/memory/capabilities.py:423-457,506-525；generated_tool_models.py 对应 WriteInput/UpdateInput。
+
+D3. memory_history
+
+非空 mem_ref 直接读历史，忽略 query 与 limit；否则 query/limit 搜索归档。不是 XOR，现有描述未说明优先级。
+
+建议：
+“Exact history lookup; when supplied, query and limit are ignored. Omit for archive search.”
+
+证据：P src/pal/memory/dreaming/tool_models.py:13-17；memory/capabilities.py:175-185。
+
+D4. memory_dreaming
+
+status/report 使用可选 run_id；resume 使用 run_id 或最新 run；start 只用 dry_run，忽略 run_id。configure 必须 config dict；其他操作忽略 config。enable/disable 直接改 enabled；config 只读配置。dry_run 仅 start 生效，所以 resume+dry_run 会静默忽略 dry_run。configure 缺 config 返回 INVALID。
+
+现有字段只局部解释用途，缺整个分支矩阵。
+
+建议：
+“status/report/resume: optional run_id; start: optional dry_run; configure: required config object; config/enable/disable: no other fields. Unlisted fields are ignored.”
+
+组合必要性：查询、改配置、启动、恢复宜拆开，或至少用分支 schema。
+
+证据：P memory/dreaming/tool_models.py:5-10；memory/capabilities.py:142-159；dreaming/service.py:34-36。
+
+D5. skill_commit
+
+有效 candidate_id 优先；ID 未找到时，可回退 inline candidate；都无可用值则 candidate_id_or_candidate_required。不是 XOR。候选具有 exact_skill_id duplicate 时，没有 replace=true 会拒绝；replace 现存 skill 会弃用旧条目并增加版本。
+
+当前描述说明优先使用 ID，但没说全必选其一、fallback、replace 的效果。
+
+建议：
+“Supply a valid candidate_id or an inline candidate. A known ID takes precedence; inline candidate is fallback. Exact-ID replacement requires replace=true; prefer skill_update for edits.”
+
+证据：P src/pal/skill/service.py:77-91,292-299；generated_tool_models.py CommitInput。
+
+D6. skill_update：enabled/status 的效果合取
+
+只有 enabled=true 且 status=active 才 active；省略 patch 字段保留原值。只修一个可能仍不可用，不是非法输入。skill_disable 的 failure guidance 说了恢复时两者都设置，但这段不进入常规默认 description。
+
+建议：
+“Available only when enabled=true and status=active; set both to reactivate a disabled skill.”
+
+证据：P src/pal/skill/contracts.py:81-83；service.py:100-134；capabilities.py:202；tool_models.py:24-25。
+
+E. Proactive 与 package
+
+E1. proactive_create / proactive_update_schedule
+
+schedule schema 是 dict，handler 却有分支硬约束：
+- 只允许 cadence/timezone/cron/run_at_utc，提供的值必须非空字符串
+- manual 只允许 cadence/timezone
+- cron 必須 cron，禁止 run_at_utc
+- once 必须 run_at_utc，禁止 cron
+- 有 cron/run_at_utc 时必须显式有 cadence
+- create 省略 schedule 默认 manual/UTC；update 必须 schedule
+- timezone 为有效 IANA；once 的无时区时间按 timezone 解释，有 offset 的保留其含义再转 UTC；最终必须未来时间
+
+当前 desc 给示例形状和未来要求，但未完整说明禁止键/显式 cadence/naive datetime。
+
+建议：
+“manual: cadence plus optional timezone; cron: cadence=cron + cron; once: cadence=once + run_at_utc. Do not mix cron/run_at_utc or supply either without cadence. timezone defaults UTC and interprets naive once times.”
+
+组合必要性：typed discriminated schedule union 优于继续堆 dict 说明。
+
+证据：P src/pal/proactive/capabilities.py:713-793；generated_tool_models.py 对应 CreateInput/UpdateScheduleInput。
+
+E2. proactive_create：out_channel_name/out_reply_target
+
+两者都省略：现有同名任务保留 destination；新会话任务解析当前 conversation；部分非会话/内部场景可无输出。指定 channel 未给 target：解析该 channel 默认。显式 target 可结合 requested/existing/current channel 解析。create 没有“一旦给 target 就必须显式给 channel”的通用约束。现有描述基本充分。
+
+证据：P proactive/capabilities.py:376-396。
+
+E3. proactive_set_output_channel
+
+省略/空 out_channel_name 表示清空输出，但此时非空 out_reply_target 拒绝；空 target 可以。换 channel 时 target 一起解析，不沿用旧 channel target。当前部分说明，缺明确禁止组合。
+
+建议：
+“To clear output, omit/empty the channel and omit/empty the target. A nonempty target requires out_channel_name.”
+
+证据：P proactive/capabilities.py:527-543。
+
+E4. package_status
+
+非零 wait_ms 要 truthy job_id；wait_ms=0 且无 ID 可以列最近 jobs。字段已说明，非隐藏缺陷。
+
+证据：P src/pal/packages/tool_models.py:18-20；jobs.py:92-101。
+
+E5. package_prepare / plugin_uninstall
+
+kind 决定 name 的查找命名空间；purge_data=true 要第三方 plugin manifest 已声明 uninstall data_paths，否则 purge 在 detach 前拒绝。是目标对象元数据前提，不是字段 XOR。wait 不是任务 deadline。现有描述已经说明。
+
+证据：P packages/tool_models.py:12-26 及 service/uninstall。
+
+F. Bunshin 公开工具
+
+F1. bunshin_start_workflow：已有 task 与新建/复用
+
+非空 task 选已有 actor-owned active Task；同时给 truthy workspace 或非空 profile 被拒绝，因为两者属 Task。省略 task 时，profile 必须可解析，workspace 必须提供；title 默认 goal 再兜底。profile 已说省略 task 时必填，workspace 没有等价说明。复用匹配基于 workspace/objective/profile/owner，不仅是 title。同 Task 不允许另有 active workflow，属于状态限制。
+
+建议：
+“Existing task: supply task and omit profile/workspace. Otherwise supply profile and workspace to create or reuse the task.”
+
+组合必要性：已有/新建两个分支适合 union 或独立入口。
+
+证据：P src/pal/bunshin/v2/capabilities.py:119-149,458-480；service.py:343-387,587-631。
+
+F2. bunshin_start_workflow：operation payload
+
+new_requirement 必须非空 goal 与非空 task_spec，或 task_spec_file 生成 task_spec。其他四种 operation 必须 artifact，禁止 task_spec/task_spec_file。execute_trusted 要内部可信 artifact；review_then_execute 要外部 architecture；software_engineering review_and_repair 要单 produce-module 的有界 ContractArtifact。
+
+当前 guidance 说明用途，但硬组合规则不全。错误返回 INVALID；不能承诺所有这类错误都全局无副作用，因为 service 可在后续 task_spec 检查前已创建/复用 Task。
+
+建议：
+“new_requirement requires goal and task_spec or task_spec_file. All other operations require artifact and forbid task_spec/task_spec_file. execute_trusted requires trusted architecture; software review_and_repair requires one implementation module.”
+
+组合必要性：从需求启动与路由已有 artifact 宜分开；artifact 内容约束仍必须说明。
+
+证据：P v2/service.py:321-450；capabilities.py:133-183,206-209。
+
+F3. bunshin_start_workflow：task_spec_file 并非与整个 task_spec XOR
+
+可同时传 task_spec_file 与 task_spec 的额外结构字段，但 task_spec 不能含 authoritative_text 或 authoritative_source。已有描述十分明确，不应缩写成错误的“只能一个”。
+
+证据：P v2/capabilities.py:150-183；task_ledger.py:28-48。
+
+F4. bunshin_start_workflow：workspace 别名优先级
+
+非空 repo_path 优先；repo_root 只在 repo_path 缺失/空白时补入。字段文字说必须同一个精确 repository，但 normalizer 没校验两者相等，不能声称冲突会报错。existing_repo/new_project 另有路径存在性/创建意图。
+
+建议 repo_root desc：
+“Legacy fallback when repo_path is omitted; prefer repo_path and do not supply both.”
+
+如要强制等值，应新增校验，属于实现变更。
+
+证据：P v2/capabilities.py:88-115；workflow_request_values.py:7-19。
+
+F5. Bunshin 可选 task selector：当前描述有实质偏差
+
+涉及 bunshin_task_status、bunshin_resume_workflow、bunshin_restart_execution、bunshin_resolve_triage、bunshin_submit_human_decision、bunshin_answer_question、bunshin_control_workflow、bunshin_archive_workflow。
+
+实现省略 task 后在 actor 的 active Tasks 中找唯一一个；多于一个要求 title，零个失败。没有按当前 channel 绑定选择。多个 generated desc 却说省略后使用当前 channel 绑定 Task。human decision 的 desc 则正确地说多 Task 时必填。显式 title 优先大小写不敏感 exact match，否则唯一候选；模糊多个失败。
+
+建议共用 task desc：
+“Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.”
+
+证据：P v2/service.py:720-774；capabilities.py:590-598 及各控制 handler；generated_tool_models.py 相应 Task 输入。
+
+F6. bunshin_submit_human_decision
+
+decision=edit 要非空 edit_instruction；accept/reject 不作为编辑内容使用。字段已经说 edit 必填，但可进一步说其他动作省略。另要求当前 review 状态匹配。
+
+建议：“Required only for edit; omit for accept/reject.”
+
+证据：P v2/capabilities.py:213-227；service.py:1463-1467。
+
+F7. bunshin_resolve_triage
+
+仅恰好一个 TRIAGE_REQUIRED item 时 subject 可省略，否则要当前状态给出的 exact subject；resolution 非空。已在字段准确说明，不需拆。
+
+证据：P generated_tool_models.py ResolveTriageInput；v2/service.py:1247-1260 及 triage selector。
+
+F8. bunshin_catalog_set_family_override：嵌套 role 关系
+
+合并后的每个 binding：participant=profile 要 profile；participant=null 要非空 reason 且无 profile。有效 role map 必须恰好 architect/reviewer/implementation/verifier；前两个必须 profile，后两个必须同时 profile 或同时 null。
+
+这是 merge patch 后的对象约束，不是要求每次 patch 提供全部键。只改 participant 可能保留旧 profile，形成冲突。当前工具模型仅列 nested 字段，缺组合说明；handler 构造并验证后再写。
+
+建议 changes.role_bindings desc：
+“Patch the four-role map. profile participants require profile; null requires reason and no profile. Architect/reviewer stay profile; implementation/verifier switch together. Null removes optional fields.”
+
+证据：P src/pal/bunshin/families.py:23-43；catalog.py:226-260,377-379；v2/role_contracts.py:101-137。
+
+G. Bunshin 作用域工具
+
+G1. candidate_report_architecture_defect / candidate_request_module_split
+
+path 是 locations 锚点；无 path 时 symbol/contract_section 静默丢弃。source_file 是独立 defect metadata，不替代 path。source_file/path 不是 XOR。summary 必填，_validate_defect_args 没有其他组合检查。
+
+建议：“symbol and contract_section annotate path; without path they are ignored.”
+
+证据：P src/pal/bunshin/v2/candidate_builder.py:223-229,367-370,405-408；generated_tool_models.py 对应候选输入。
+
+G2. verification_run_* 的共用证据参数
+
+涉及该 scope 暴露的 historical_regression、diff_risk、adversarial_case、focused_test、compile_check、warning_check、consumer_probe、dogfood、platform_probe 等共用 shell evidence 分支。
+
+- symbol/contract_section 仅在 path 存在时进入 location；否则忽略
+- probe_path 必须是绑定 verifier scratch 中已存在的安全相对文件；不会自动插入/重写 command
+- sink guidance 要求 command 使用 scratch_path 且 probe_path 指同一个相对 scratch 文件，但未发现证明 command 实际消费该文件的等值/内容校验，不能当作已强制的组合规则
+- expected_exit_codes 省略或空列表均默认 [0]
+- description 省略/空值通常用 name 兜底；submit 的“每条 case 至少有描述/location/invariant”不等于调用时三个 optional 字段有必选一项
+- bound policy 决定允许的 evidence action/obligation；有历史回归时须先记录再跑 adversarial/diff-risk，这是动态状态门，不是静态参数 XOR
+
+建议：
+“path anchors symbol/contract_section. probe_path identifies an existing scratch input used by command; it is not inserted into command. Empty expected_exit_codes uses [0].”
+
+证据：P v2/verification_builder.py:59-67,1047-1100,1180-1200；semantic_evidence.py:30-48,431-445,542-554。
+
+H. LSP
+
+H1. lsp_doctor：至少一个 selector
+
+必须非空 name 或 file 或 path；workspace_root 单独不选 server，返回 unavailable/server_id_or_file_required。内部 server_id 对应公开 name。server 选择 name 优先，文件选择 file 优先 path；不是 XOR，name/file/workspace_root 可共用。
+
+现有 desc 只说查一个 server，没有明确最少 selector。
+
+建议：
+“Supply name or file/path to select one server. name selects the server; file takes precedence over path. workspace_root alone is insufficient.”
+
+证据：P src/pal/lsp/plugin.py:527-535；manager.py:241-249,989-1011。
+
+H2. LSP query / lsp_prepare_workspace：正常组合与配置优先级
+
+file+line+character 是自然坐标组合。name 固定 server，workspace_root 固定 root，均不与 file 互斥。prepare 的显式/发现到的 compilation database、现有 compile_flags.txt、.clangd 优先于生成的 fallback 配置；没有 primary_language/languages 必须一起传的证据。
+
+建议可选补句：
+“name pins server; workspace_root pins root. Fallback compile flags apply only when usable project compilation configuration is absent.”
+
+证据：P lsp/manager.py:989-1022；environment.py:294-343；generated_tool_models.py 对应 LSP 输入。
+
+I. 单字段限制：不要与组合约束混列
+
+- Native cmd 非空；wait 0..300000；timeout 1..2147483647；session_id >0 且 <=2^63-1；rows/columns 1..65535。text 的 UTF-8 字节数 <=65536 是 validator-only 限制，不是 schema 字符 maxLength。证据 N tools.py:14-43
+- Browser 的 URL/target/text 长度、timeout/preview 上下界、enum；browser_reset.confirm 必须 true，都是单字段条件
+- evaluate 的 func/target 不能以 '-' 开头，必填 target 不能空白，是隐藏内容校验但不是字段组合。证据 P browser_service.py:629-637,700-704
+- offset/limit 正整数、ranges/edits 非空、SHA-256 格式、memory/package limits 都是单字段规则
+- Proactive cron/时区/日期格式是单字段语义；cadence 决定键是否合法、timezone 解释 naive 时间才是关联规则
+- StrictToolModel 禁止未知键；一些历史 omit-only 字段可以省略但不能显式 null。不能把“optional”一概理解成 nullable。证据 P src/pal/execution/tool_facade.py:22-40
+
+建议优先级
+
+1. 立即补 shell_session 精确矩阵、identifier XOR/output_ref 无等待、sudo remote-only/tty=false
+2. 修正 Bunshin optional task 的错误描述，补已有/新建和 operation payload 分支
+3. 将 proactive schedule 改 typed union；补模式禁止键和时间解释
+4. 补 MCP image、browser multiplexers、memory history/dreaming、skill commit、LSP doctor 的静默选择规则
+5. 补 role binding 与 scoped path 注释的 nested 关系
+6. 保留已经清楚的 desc，不把所有字段都拆开；预算、筛选器、坐标、普通 run 选项可以自然组合
+
+统一一句“省略不适用于当前动作的字段”可作惯例，但不能替代每个工具的规则：当前有的严格拒绝，有的静默忽略，有的允许补充结构字段。应明确描述这些差异，或者有意统一实现。
+
+落地验收建议
+
+- 先导出各目标运行时和角色的实际工具目录，核对固定候选、动态名称与可见性；不要用 223 作为任何单会话工具数量断言
+- 命名迁移验证恰好一个公共 alias 的现有限制、注册冲突、direct/indirect 路由、角色投影，以及描述、恢复提示、返回 affordance、示例和文档中的旧名
+- 搜索回归同时覆盖纯重排和新增关键词，检查精确匹配、前缀、tier、默认 top-k 与同分排序；报告实测结果后再判断收益
+- 参数回归分别断言接受、硬拒绝、优先级、忽略字段、状态前提；不能以文档建议替代真实 validator
+- 诊断回归断言最终模型正文/context 中的原因和安全恢复入口，而不只断言 structured/details 存在
+- 成功语义回归覆盖空成功、unknown、accepted、非零 start returncode，以及已有 schema/skill/context/payload 的替代说明；避免重复注入
+
+本评审没有声称上述验收已经执行。

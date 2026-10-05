@@ -79,7 +79,7 @@ behavior. Neither hybrid nor eager explicit is claimed to fix the reported
 upstream tool-output caching issue or guarantee lower spend.
 
 The ideal linear-cost argument and its assumptions are recorded in the
-[design plan](prompt_cache_strategy_modes_plan.md). The runtime does not estimate
+[design plan](archive/prompt_cache/prompt_cache_strategy_modes_plan.md). The runtime does not estimate
 continuation probability or switch modes based on cache-hit percentages.
 
 Diagnostics remain in local logs. With prompt logging enabled, `prompt_cache_tail`

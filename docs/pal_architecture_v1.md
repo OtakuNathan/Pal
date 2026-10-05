@@ -278,4 +278,4 @@ flowchart LR
 - `pal_control_plane.md`
 - `pal_memory_contract.md`
 - `pal_failure_reporting_contract.md`
-- `pal_migration_map.md`
+- [Historical migration map](archive/migrations/pal_migration_map.md)

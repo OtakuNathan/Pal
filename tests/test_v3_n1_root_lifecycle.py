@@ -5,7 +5,8 @@ proposals F1/F2/F5/F6 plus the N05 negative control (left content truly
 mutated without a revision bump must still be rejected at commit).
 
 Pre-fix evidence: every test in this module failed on 2014db4 (see
-logs_n1_prefix_red.txt in the commit message for the captured run).
+logs_n1_prefix_red.txt; recovery details and checksums are recorded in
+docs/archive/session_compaction/test_log_summary.md).
 """
 from __future__ import annotations
 

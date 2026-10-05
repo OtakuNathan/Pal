@@ -3,7 +3,9 @@
 This directory contains Pal's user guides, product-level explanation, and
 current V1/V2 architecture contracts.
 
-Older design notes are historical references. These docs are the active baseline for the current implementation.
+Use the guides and subsystem contracts below for current behavior. Historical
+plans, audits and delivery reports live in [the archive](archive/README.md);
+their implementation and deployment statements describe the original work.
 
 ## Suggested Reading Order
 
@@ -29,22 +31,36 @@ Continue with the contract for the subsystem you are changing:
 - [pal_introspection_contract.md](pal_introspection_contract.md)
 - [pal_tasking_contract.md](pal_tasking_contract.md)
 - [pal_bunshin_v1.md](pal_bunshin_v1.md)
-- [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md)
-- [pal_reviewer_gate_plan.md](pal_reviewer_gate_plan.md)
-- [bunshin_repair_bill_replay.md](bunshin_repair_bill_replay.md)
-- [bunshin_layered_architect_planning.md](bunshin_layered_architect_planning.md)
 - [bunshin_v2_contract_orchestration.md](bunshin_v2_contract_orchestration.md)
 - [pal_proactive_contract.md](pal_proactive_contract.md)
 - [pal_memory_contract.md](pal_memory_contract.md)
 - [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
-- [pal_migration_map.md](pal_migration_map.md)
 - [pal_web_search_contract.md](pal_web_search_contract.md)
 - [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
 - [pal_tool_surface.md](pal_tool_surface.md)
 - [pal_mcp_contract.md](pal_mcp_contract.md)
 - [capability_forest_structure.md](capability_forest_structure.md)
 - [turn_runtime_structure.md](turn_runtime_structure.md)
-- [pal_approval_access_design.md](pal_approval_access_design.md)
+
+## Design Notes
+
+These describe design direction or planned work; they do not establish current
+implementation status.
+
+- [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md): engineering-quality design baseline.
+- [bunshin_repair_bill_replay.md](bunshin_repair_bill_replay.md): planned repair propagation.
+- [pal_approval_access_design.md](pal_approval_access_design.md): deferred approval/access design.
+
+## Historical Records and Validation Evidence
+
+- [Archive index](archive/README.md): past plans, migration decisions, audits and delivery reports.
+- [Historical test log summary](archive/session_compaction/test_log_summary.md): original results and checksums; raw logs remain available locally and in Git history.
+- [Public proof evidence](evidence/2026-08-14-public-proof/README.md): reproducible demonstration evidence.
+- `spec/` and `llm_projection_refactor/formal/`: retain formal models and their validation resources alongside their owning subsystem.
+
+Write new test output under the ignored repository-root `test-logs/` directory
+or outside the checkout. Keep commands, results and material limitations in the
+relevant validation report; do not add raw test logs to version control.
 
 ## Document Map
 
@@ -69,13 +85,10 @@ Continue with the contract for the subsystem you are changing:
 - `pal_tasking_contract.md`: tasking, bunshins, checkpoints, ledgers, and workspace governance.
 - `pal_bunshin_v1.md`: implemented bunshin sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
 - `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and bunshin engineering-quality hardening.
-- `pal_reviewer_gate_plan.md`: historical hardening plan for strict plan and checkpoint reviewer gates; use `pal_bunshin_v1.md#gate-loop` as the current implementation sync point.
 - `bunshin_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
-- `bunshin_layered_architect_planning.md`: planned layered architect flow that separates global architecture sketches, per-module detail fill, and implementation milestone planning.
 - `pal_proactive_contract.md`: proactive tasks, schedules, run history, and output-channel constraints.
 - `pal_memory_contract.md`: L1/L2/L3 memory and memory lifecycle.
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.
-- `pal_migration_map.md`: current code migration map.
 - `pal_web_search_contract.md`: web search provider registry, fallback chain, and capability integration.
 - `pal_web_fetch_contract.md`: Plugin Hub-managed stateful browser, pinned Playwright CLI, session/profile isolation, and Bunshin boundary.
 - `pal_tool_surface.md`: descriptor `invocation_mode`-driven LLM tool exposure, failure surface selection, and discovery-first design.

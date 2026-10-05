@@ -16,4 +16,4 @@ On runtime startup, provisioning removes the obsolete managed behavior manifest.
 Existing `behavior_affordances` records are left untouched for archival recovery;
 they are not queried or projected. Historical L1 content is not rewritten.
 
-See [advisor removal](advisor_removal.md) for backup and activation notes.
+See [advisor removal](archive/migrations/advisor_removal.md) for backup and activation notes.

@@ -24,6 +24,10 @@ runtime.db
 dist/
 build/
 
+# Local test output; retain validation conclusions in documentation.
+/test-logs/
+/logs_*.txt
+
 # Packaging artifacts
 *.egg-info/
 

@@ -225,8 +225,8 @@ class OfflineVerticalPathTests(unittest.TestCase):
         )
         # Presence, count, and ordering assertions against the trusted
         # whole-history reference (review's acceptance level).  KNOWN LIMIT
-        # (documented in DELIVERY.md): when an accepted native assistant turn
-        # directly follows an already-frozen assistant item, a whole-history
+        # (docs/archive/session_compaction/DELIVERY.md): when an accepted native
+        # assistant turn directly follows an already-frozen assistant item, a whole-history
         # encode merges them into ONE message while the incremental path
         # keeps two adjacent same-role messages.  Content blocks, their
         # order, and their counts are identical; the wire item partition

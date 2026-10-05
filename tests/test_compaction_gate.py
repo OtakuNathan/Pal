@@ -4,7 +4,8 @@ Barrier-driven (asyncio.Event), zero real sleeps. Maps to TEST_MATRIX IDs:
 A06/A07/A08/A09/A10/A11, Q01/Q02/Q03/Q04/Q05/Q06/Q07/Q10/Q11/Q13/Q14,
 X01(idle)/X04/X05 plus the round-safety predicate (A01-A05 unit level).
 
-Honest boundaries recorded in P1_DESIGN.md: A04's effect-unknown ledger and
+Honest boundaries recorded in docs/archive/session_compaction/P1_DESIGN.md:
+A04's effect-unknown ledger and
 the full crash matrix (R-class) are P4; Bunshin lanes are P4.
 """
 from __future__ import annotations
