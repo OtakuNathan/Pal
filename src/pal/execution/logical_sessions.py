@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterable
 from pal.execution.session_state import (
     InMemoryLogicalExecutionState, LogicalExecutionContext, LogicalExecutionStateBackend,
     DEFAULT_RESULT_RETENTION_USER_TURNS,
@@ -15,7 +16,20 @@ class LogicalExecutionSessions:
         default_factory=InMemoryLogicalExecutionState
     )
     _turn_contexts: dict[str, LogicalExecutionContext] = field(default_factory=dict)
+    _visible_results: dict[str, frozenset[str]] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def set_visible_results(self, turn_id: str, result_ids: Iterable[str]) -> None:
+        with self._lock:
+            self._visible_results[str(turn_id)] = frozenset(result_ids)
+
+    def visible_results(self, turn_id: str) -> frozenset[str]:
+        with self._lock:
+            return self._visible_results.get(str(turn_id), frozenset())
+
+    def clear_visible_results(self, turn_id: str) -> None:
+        with self._lock:
+            self._visible_results.pop(str(turn_id), None)
 
     def begin_turn(
         self,

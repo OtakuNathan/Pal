@@ -36,3 +36,11 @@ History is traversed when a request needs it, not on each streaming fragment.
 Tests cover 100 frozen rounds followed by 1,000 updates (one-message protocol
 validation per update), immutable snapshots, duplicate rejection, rollback,
 restoration, scoped visibility and view reuse in `test_l1_context_index.py`.
+
+Execution records the visible tool-result IDs per active request. File-read
+suppression uses only grants backed by those visible results (including visible
+parents for inherited edit coverage), while file version and mutation checks
+retain their shared lifetime ownership. Unknown model visibility is treated as
+empty; direct host calls keep their explicit logical context. This derived
+visibility is cleared on turn exit and runtime restoration/reset, then rebuilt
+from the next model request.

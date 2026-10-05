@@ -84,6 +84,7 @@ class ExecutionRuntimeStatePort:
         with self.runtime.execution_sessions._lock:
             self.runtime.execution_sessions.state_backend = prepared.backend
             self.runtime.execution_sessions._turn_contexts = prepared.turn_contexts
+            self.runtime.execution_sessions._visible_results.clear()
 
     def finish_restore_state(self, ports) -> None:
         self.runtime.result_snapshots.detach_histories()
@@ -98,6 +99,7 @@ class ExecutionRuntimeStatePort:
         self._backend().reset_state()
         with self.runtime.execution_sessions._lock:
             self.runtime.execution_sessions._turn_contexts.clear()
+            self.runtime.execution_sessions._visible_results.clear()
 
     def _backend(self) -> InMemoryLogicalExecutionState:
         backend = self.runtime.logical_state

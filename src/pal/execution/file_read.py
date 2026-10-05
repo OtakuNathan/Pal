@@ -161,6 +161,7 @@ class FileVisibilityCache:
 class SessionFileVisibilityCache:
     backend: LogicalExecutionStateBackend
     context: LogicalExecutionContext
+    visible_result_ids: frozenset[str] | None = None
 
     def covers(
         self,
@@ -176,6 +177,7 @@ class SessionFileVisibilityCache:
             execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(file_path),
             digest=version,
+            visible_result_ids=self.visible_result_ids,
         )
         if grant is None:
             return False

@@ -253,7 +253,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return None
 
     def prepare_model_context(self, memory, continuation, *, context_view=None):
-        """Project already prepared observations; never wait for execution or network."""
+        """Record file-result visibility for this request, not the whole lifetime."""
+        result_ids = (
+            (call_id for turn in context_view.turns.values() for call_id in turn.tool_results)
+            if context_view is not None else ()
+        )
+        self.execution_sessions.set_visible_results(continuation.turn_id, result_ids)
 
     def model_response_received(self, continuation):
         """Allow an optional execution owner to refresh outside request assembly."""

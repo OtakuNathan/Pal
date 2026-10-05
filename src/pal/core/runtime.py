@@ -329,6 +329,7 @@ class TurnManager:
         return turn_id in self.state.active_turns
 
     def _mark_turn_exited(self, turn_id: str) -> None:
+        self.context.execution_runtime.execution_sessions.clear_visible_results(turn_id)
         if self.state.active_turn_id == turn_id:
             self.state.active_turn_id = None
             self.state.resident_drained_event.set()

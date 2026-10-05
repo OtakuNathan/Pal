@@ -392,6 +392,7 @@ class LogicalExecutionStateBackend(Protocol):
         execution_lifetime_id: str,
         file_key: str,
         digest: str,
+        visible_result_ids: frozenset[str] | None = None,
     ) -> FileGrant | None:
         ...
 
@@ -496,12 +497,14 @@ class InMemoryLogicalExecutionState:
         execution_lifetime_id: str,
         file_key: str,
         digest: str,
+        visible_result_ids: frozenset[str] | None = None,
     ) -> FileGrant | None:
         with self._lock:
             state = self._sessions.get(execution_lifetime_id)
             if state is None or state.retired:
                 return None
-            active = state.file_results
+            active = {key: lease for key, lease in state.file_results.items()
+                      if visible_result_ids is None or lease.result_id in visible_result_ids}
             candidates = [
                 lease
                 for lease in active.values()

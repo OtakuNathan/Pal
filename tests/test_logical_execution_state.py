@@ -812,6 +812,8 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertTrue(state_result.output["valid"])
             self.assertTrue(state_result.output["full_view"])
 
+            runtime.prepare_model_context(memory, SimpleNamespace(turn_id=turn_id),
+                context_view=memory.l1_context_view(turn_id, ()))
             repeated_read = runtime.execute_tool(
                 new_tool_call(
                     name="read_file",
@@ -1220,6 +1222,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertIsNotNone(grant)
             self.assertTrue(grant.complete)
+            runtime.execution_sessions.set_visible_results("turn-pager-compact", ("read-pager-compact",))
             reread = runtime.execute_tool(
                 new_tool_call(
                     name="read_file",
@@ -1259,6 +1262,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 result_id="read-before-retirement",
             )
 
+            runtime.execution_sessions.set_visible_results(turn_id, ("read-before-retirement",))
             still_visible = runtime.execute_tool(
                 new_tool_call(
                     name="read_file",

@@ -202,7 +202,8 @@ class TurnExecutor:
             continuation.budget_failure_feedback_text = self._render_failure_feedback_text(failure_result.user_feedback)
             advice = replace(advice, status=LLMPreflightStatus.READY)
         elif (
-            self._inject_pending is not None
+            effect.assembly_context.turn_kind != "proactive_trigger"
+            and self._inject_pending is not None
             and str(advice.status) == LLMPreflightStatus.READY
             and continuation.llm_round_index >= 1
             and self.state.pending_channel_turns
@@ -290,6 +291,11 @@ class TurnExecutor:
 
     @_dispatch_effect.register(MemoryCompactEffect)
     async def _handle_memory_compact(self, effect, continuation):
+        if effect.assembly_context.turn_kind == "proactive_trigger":
+            return EffectResult(status=RuntimeStatus.ERROR, text=(
+                "This proactive run exceeds its independent context budget. "
+                "Stopping with its work recorded; resident conversation history was not compacted."
+            ))
         settled = await self._ensure_l1_turn_async(
             continuation,
             effect.assembly_context,
@@ -1243,6 +1249,8 @@ class TurnExecutor:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         logical_scope_id = str(metadata.get("prompt_cache_scope_id") or "").strip()
+        if assembly_context.turn_kind == "proactive_trigger":
+            logical_scope_id = f"pal:proactive:{continuation.turn_id}"
         if not logical_scope_id:
             logical_scope_id = (
                 f"bunshin:{assembly_context.work_order_id or continuation.turn_id}"
@@ -1250,7 +1258,8 @@ class TurnExecutor:
                 else "pal:resident"
             )
         artifact_scope_key = str(
-            metadata.get("artifact_scope_key") or logical_scope_id
+            metadata.get("artifact_scope_key")
+            or ("pal:resident" if assembly_context.turn_kind == "proactive_trigger" else logical_scope_id)
         ).strip()
         metadata["artifact_scope_key"] = artifact_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
@@ -1433,6 +1442,7 @@ class TurnExecutor:
             prompt_messages = project_continuity(prompt_messages)
         metadata = dict(prompt.metadata)
         metadata["continuity_id"] = continuity_id
+        metadata["history_visibility"] = "active_turn" if assembly_context.turn_kind == "proactive_trigger" else "resident"
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
@@ -2492,6 +2502,11 @@ class TurnExecutor:
         touches the session (J5).
         """
 
+        # Proactive requests deliberately exclude resident history. The shared
+        # history root (including its left bootstrap) cannot encode this view.
+        # Use the ordinary codec with the complete, isolated current request.
+        if request.metadata.get("history_visibility") == "active_turn":
+            return None
         projection = llm_runtime.projection_port
         if projection is None:
             return None

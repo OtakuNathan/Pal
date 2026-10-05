@@ -205,7 +205,9 @@ def _session_file_tools(owner: object, call: IntrospectionCall):
     backend = runtime.logical_state
     return (
         SessionFileStateCache(backend=backend, context=context),
-        SessionFileVisibilityCache(backend=backend, context=context),
+        SessionFileVisibilityCache(backend=backend, context=context,
+            visible_result_ids=(runtime.execution_sessions.visible_results(turn_id)
+                if call.meta.get("turn_id") else None)),
         context,
         bool(str(call.meta.get("turn_id") or "").strip()),
     )
