@@ -7,7 +7,7 @@ from pal.bunshin.runner_components.prompt_values import _bunshin_prompt_context
 from pal.bunshin.runner_components.prompt_values import _BUNSHIN_TOOL_RESULT_RETENTION_CALLS
 from pal.bunshin.runner_components.result_values import _memory_candidates_from_sink
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from pal.core.runtime_state import RuntimeSnapshotIdentity
@@ -49,6 +49,10 @@ class AgentSession:
     pack: BunshinInvocationPack
     run_id: str
     runtime_root: Path
+    runtime_initialized: bool = field(default=False, init=False, repr=False)
+    completed_loop_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    completed_loop_binding: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    completed_loop_bundle: BunshinRuntimeBundle | None = field(default=None, init=False, repr=False)
 
     async def run_agent_loop(self, bundle: BunshinRuntimeBundle, *, forced_retry_note: str = "") -> str:
         if self.tool_session.execution_sessions is None:
@@ -180,6 +184,14 @@ class AgentSession:
                 )
                 await self.control.raise_if_cancel_requested()
                 await self.control.raise_if_restart_requested()
+                # Completion feedback stays in this process, including when
+                # live resources forbid a restart-safe durable checkpoint.
+                self.completed_loop_state = self.session_checkpoints.capture_coroutine_state(
+                    state, continuation, initial_instruction=initial_instruction,
+                    response_keys=response_keys,
+                )
+                self.completed_loop_binding = self.in_process_binding(bundle, session_id)
+                self.completed_loop_bundle = bundle
                 return outcome.final_reply
             current = await self.llm_rounds.execute_bunshin_agent_effect(
                 executor,
@@ -343,7 +355,34 @@ class AgentSession:
             )
         return channel_envelope, current_channel_envelope, initial_instruction, response_key, response_keys, semantic_input_is_new
 
+    def in_process_binding(self, bundle: BunshinRuntimeBundle, session_id: str) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "session_metadata": dict((self.pack.metadata or {}).get("agent_session") or {}),
+            "static_identity": (
+                self.session_checkpoints.agent_session_static_identity(bundle)
+                if session_id else {}
+            ),
+        }
+
     async def restore_runtime(self, bundle: BunshinRuntimeBundle, session_id: Any, workspace: Any) -> Any:
+        if self.runtime_initialized:
+            if not self.completed_loop_state:
+                raise AgentSessionCheckpointError(
+                    "in-process continuation has no completed loop handoff"
+                )
+            if (
+                self.completed_loop_bundle is not bundle
+                or self.completed_loop_binding != self.in_process_binding(bundle, session_id)
+            ):
+                raise AgentSessionCheckpointError(
+                    "in-process continuation has an incompatible runtime or session binding"
+                )
+            # Keep the actual runtime and live handles. Reinstalling either the
+            # immutable attempt input or an older safe point would erase work.
+            state = self.completed_loop_state
+            self.completed_loop_state = {}
+            return {"coroutine_state": state}
         restored = self.session_checkpoints.load_agent_session_checkpoint(
             workspace,
             session_id=session_id,
@@ -366,6 +405,7 @@ class AgentSession:
                 raise AgentSessionCheckpointError(
                     "manager-selected agent continuation contains invalid runtime module state"
                 ) from exc
+        self.runtime_initialized = True
         return restored
 
     def build_workspace(self, ) -> Any:

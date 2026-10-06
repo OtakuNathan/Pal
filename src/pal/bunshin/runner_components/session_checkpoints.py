@@ -145,6 +145,68 @@ class SessionCheckpoints:
             "runtime_spec_hash": spec_hash,
         }
 
+    def capture_coroutine_state(
+        self,
+        state: BunshinAgentLoopState,
+        continuation: TurnContinuation,
+        *,
+        initial_instruction: str,
+        response_keys: list[str],
+    ) -> dict[str, Any]:
+        """Capture loop state; this alone does not authorize durable restart."""
+        return {
+            "initial_instruction": str(initial_instruction),
+            "response_keys": list(response_keys),
+            "active_input_id": str(
+                getattr(
+                    getattr(continuation, "opening_event", None),
+                    "event_id",
+                    "",
+                )
+                or ""
+            ),
+            "llm_round_count": int(state.llm_round_count),
+            "tool_call_count": int(state.tool_call_count),
+            "output_length_recovery_count": int(
+                getattr(state, "output_length_recovery_count", 0) or 0
+            ),
+            "pending_output_length_recovery_note": str(
+                getattr(state, "pending_output_length_recovery_note", "") or ""
+            ),
+            "tool_batch_count": int(continuation.tool_batch_count),
+            "preferred_llm_endpoint_id": str(
+                continuation.preferred_llm_endpoint_id or ""
+            ),
+            "preferred_llm_model_id": str(
+                continuation.preferred_llm_model_id or ""
+            ),
+            "active_response_key": (
+                str(response_keys[-1]) if response_keys else ""
+            ),
+            "invocation_state": {
+                "produced_artifacts": [
+                    dict(item) for item in self.artifacts.produced_artifacts
+                ],
+                "memory_candidate_records": [
+                    dict(item)
+                    for item in list(
+                        getattr(state.memory_candidate_sink, "records", ()) or ()
+                    )
+                    if isinstance(item, Mapping)
+                ],
+                "review_tool_evidence_refs": [
+                    dict(item) for item in self.review_evidence.review_tool_evidence_refs
+                ],
+                "web_research_usage": {
+                    str(key): max(0, int(value))
+                    for key, value in self.research_budget.web_research_usage.items()
+                },
+                "manager_submission_receipt_observed": bool(
+                    self.completion.manager_submission_receipt_observed
+                ),
+            },
+        }
+
     async def persist_agent_session_checkpoint(
         self,
         bundle: BunshinRuntimeBundle,
@@ -179,58 +241,10 @@ class SessionCheckpoints:
         runtime_snapshot = await bundle.runtime_state_coordinator.snapshot(identity)
         private_payload = {
             **identity.to_dict(),
-            "coroutine_state": {
-                "initial_instruction": str(initial_instruction),
-                "response_keys": list(response_keys),
-                "active_input_id": str(
-                    getattr(
-                        getattr(continuation, "opening_event", None),
-                        "event_id",
-                        "",
-                    )
-                    or ""
-                ),
-                "llm_round_count": int(state.llm_round_count),
-                "tool_call_count": int(state.tool_call_count),
-                "output_length_recovery_count": int(
-                    getattr(state, "output_length_recovery_count", 0) or 0
-                ),
-                "pending_output_length_recovery_note": str(
-                    getattr(state, "pending_output_length_recovery_note", "") or ""
-                ),
-                "tool_batch_count": int(continuation.tool_batch_count),
-                "preferred_llm_endpoint_id": str(
-                    continuation.preferred_llm_endpoint_id or ""
-                ),
-                "preferred_llm_model_id": str(
-                    continuation.preferred_llm_model_id or ""
-                ),
-                "active_response_key": (
-                    str(response_keys[-1]) if response_keys else ""
-                ),
-                "invocation_state": {
-                    "produced_artifacts": [
-                        dict(item) for item in self.artifacts.produced_artifacts
-                    ],
-                    "memory_candidate_records": [
-                        dict(item)
-                        for item in list(
-                            getattr(state.memory_candidate_sink, "records", ()) or ()
-                        )
-                        if isinstance(item, Mapping)
-                    ],
-                    "review_tool_evidence_refs": [
-                        dict(item) for item in self.review_evidence.review_tool_evidence_refs
-                    ],
-                    "web_research_usage": {
-                        str(key): max(0, int(value))
-                        for key, value in self.research_budget.web_research_usage.items()
-                    },
-                    "manager_submission_receipt_observed": bool(
-                        self.completion.manager_submission_receipt_observed
-                    ),
-                },
-            },
+            "coroutine_state": self.capture_coroutine_state(
+                state, continuation, initial_instruction=initial_instruction,
+                response_keys=response_keys,
+            ),
             "runtime_snapshot": runtime_snapshot,
         }
         payload = seal_agent_session_checkpoint(self.runtime_root, private_payload)
