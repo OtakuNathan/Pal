@@ -35,6 +35,7 @@ models=(
     ResidentMailboxLifecycle
     TaskDeliveryLifecycle
     ActiveLineageTriage
+    OperatorTriageRecovery
 )
 
 cd "${repo_root}"
@@ -62,5 +63,22 @@ set -e
 if [[ ${unsafe_status} -eq 0 ]] || [[ "${unsafe_output}" != *"Invariant FreshStartNeverForgetsInitialization is violated"* ]]; then
     echo "StartupRecoveryLifecycleUnsafe did not reproduce FreshStartNeverForgetsInitialization" >&2
     echo "${unsafe_output}" >&2
+    exit 1
+fi
+
+# UNKNOWN recovery must not silently restore an equivalent older receipt.
+echo "==> TLC OperatorTriageRecoveryUnsafe (expected counterexample)"
+set +e
+unknown_unsafe_output="$({
+    java -XX:+UseParallelGC -jar "${tla_jar}" \
+        -workers "${workers}" -cleanup \
+        -config spec/bunshin_v2/OperatorTriageRecoveryUnsafe.cfg \
+        spec/bunshin_v2/OperatorTriageRecovery.tla
+} 2>&1)"
+unknown_unsafe_status=$?
+set -e
+if [[ ${unknown_unsafe_status} -eq 0 ]] || [[ "${unknown_unsafe_output}" != *"Invariant NoOldUnknownReplay is violated"* ]]; then
+    echo "OperatorTriageRecoveryUnsafe did not reproduce NoOldUnknownReplay" >&2
+    echo "${unknown_unsafe_output}" >&2
     exit 1
 fi

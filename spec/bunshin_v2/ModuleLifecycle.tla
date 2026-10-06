@@ -1,7 +1,7 @@
 -------------------------- MODULE ModuleLifecycle --------------------------
 EXTENDS Naturals, TLC
 
-CONSTANT MaxCandidate
+CONSTANTS MaxCandidate, MaxEvaluationGeneration
 
 NodeStates == {
     "CoderReady", "Coding", "VerifierReady", "Verifying",
@@ -23,13 +23,18 @@ VARIABLES
     corpusVersion,
     coderCorpusVersion,
     workflowState,
-    managerUp
+    managerUp,
+    verifierEvaluationGeneration,
+    regressionGeneration,
+    deltaReviewGeneration,
+    triageKind
 
 vars == <<
     nodeState, coderSession, verifierSession, activeRole,
     candidateVersion, verifiedVersion, regressionVersion, deltaReviewVersion,
     corpusVersion, coderCorpusVersion,
-    workflowState, managerUp
+    workflowState, managerUp,
+    verifierEvaluationGeneration, regressionGeneration, deltaReviewGeneration, triageKind
 >>
 
 Init ==
@@ -45,6 +50,10 @@ Init ==
     /\ coderCorpusVersion = 0
     /\ workflowState = "Running"
     /\ managerUp = TRUE
+    /\ verifierEvaluationGeneration = 0
+    /\ regressionGeneration = 0
+    /\ deltaReviewGeneration = 0
+    /\ triageKind = "None"
 
 StartCoder ==
     /\ managerUp
@@ -58,6 +67,8 @@ StartCoder ==
     /\ UNCHANGED <<verifierSession, candidateVersion, verifiedVersion,
         regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 SubmitCandidate ==
     /\ managerUp
@@ -72,6 +83,8 @@ SubmitCandidate ==
     /\ UNCHANGED <<verifiedVersion, regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion,
         workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 StartVerifier ==
     /\ managerUp
@@ -84,6 +97,8 @@ StartVerifier ==
     /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
         regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 ReplayRegressions ==
     /\ managerUp
@@ -93,23 +108,30 @@ ReplayRegressions ==
     /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
         candidateVersion, verifiedVersion, deltaReviewVersion, corpusVersion,
         coderCorpusVersion, workflowState, managerUp>>
+    /\ regressionGeneration' = verifierEvaluationGeneration
+    /\ UNCHANGED <<verifierEvaluationGeneration, deltaReviewGeneration, triageKind>>
 
 ReviewCandidateDelta ==
     /\ managerUp
     /\ nodeState = "Verifying"
     /\ activeRole = "Verifier"
     /\ regressionVersion = candidateVersion
+    /\ regressionGeneration = verifierEvaluationGeneration
     /\ deltaReviewVersion' = candidateVersion
     /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
         candidateVersion, verifiedVersion, regressionVersion, corpusVersion,
         coderCorpusVersion, workflowState, managerUp>>
+    /\ deltaReviewGeneration' = verifierEvaluationGeneration
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration, triageKind>>
 
 VerifierPass ==
     /\ managerUp
     /\ nodeState = "Verifying"
     /\ activeRole = "Verifier"
     /\ regressionVersion = candidateVersion
+    /\ regressionGeneration = verifierEvaluationGeneration
     /\ deltaReviewVersion = candidateVersion
+    /\ deltaReviewGeneration = verifierEvaluationGeneration
     /\ corpusVersion < MaxCandidate
     /\ nodeState' = "Accepted"
     /\ verifierSession' = "Suspended"
@@ -119,13 +141,17 @@ VerifierPass ==
     /\ UNCHANGED <<coderSession, candidateVersion, regressionVersion,
         deltaReviewVersion, coderCorpusVersion,
         workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 VerifierFail ==
     /\ managerUp
     /\ nodeState = "Verifying"
     /\ activeRole = "Verifier"
     /\ regressionVersion = candidateVersion
+    /\ regressionGeneration = verifierEvaluationGeneration
     /\ deltaReviewVersion = candidateVersion
+    /\ deltaReviewGeneration = verifierEvaluationGeneration
     /\ candidateVersion < MaxCandidate
     /\ corpusVersion < MaxCandidate
     /\ nodeState' = "RepairReady"
@@ -136,6 +162,8 @@ VerifierFail ==
     /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
         regressionVersion, deltaReviewVersion,
         workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 ReopenAccepted ==
     /\ managerUp
@@ -146,6 +174,8 @@ ReopenAccepted ==
     /\ UNCHANGED <<coderSession, verifierSession, activeRole,
         candidateVersion, corpusVersion, coderCorpusVersion,
         regressionVersion, deltaReviewVersion, workflowState, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 EnterTriage ==
     /\ nodeState \notin {"Cancelled", "Triage"}
@@ -159,15 +189,59 @@ EnterTriage ==
     /\ UNCHANGED <<candidateVersion, verifiedVersion, regressionVersion,
         deltaReviewVersion, corpusVersion,
         coderCorpusVersion, workflowState, managerUp>>
+    /\ triageKind' = "Interrupted"
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration>>
 
 ResumeTriage ==
     /\ managerUp
     /\ nodeState = "Triage"
+    /\ triageKind = "Interrupted"
     /\ nodeState' = IF candidateVersion = 0 THEN "CoderReady" ELSE "VerifierReady"
     /\ UNCHANGED <<coderSession, verifierSession, activeRole,
         candidateVersion, verifiedVersion, corpusVersion,
         regressionVersion, deltaReviewVersion, coderCorpusVersion,
         workflowState, managerUp>>
+    /\ triageKind' = "None"
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration>>
+
+\* A settled UNKNOWN is not an interrupted snapshot. Only the explicit
+\* operator transition below permits a new evaluation of the same Candidate.
+VerifierUnknown ==
+    /\ managerUp
+    /\ nodeState = "Verifying"
+    /\ activeRole = "Verifier"
+    \* Conservative lifecycle/recovery abstraction: successful/completed phase
+    \* evidence is not required here for environmental UNKNOWN. The actual
+    \* semantic submission still requires classified obligation/gap records,
+    \* work-item completion, and an environmental reason; this action does
+    \* not authorize an empty draft. PASS/FAIL successful-evidence, generation,
+    \* and history gates remain unchanged.
+    /\ nodeState' = "Triage"
+    /\ verifierSession' = "Suspended"
+    /\ activeRole' = "None"
+    /\ triageKind' = "BlockingUnknown"
+    /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
+        regressionVersion, deltaReviewVersion, corpusVersion, coderCorpusVersion,
+        workflowState, managerUp, verifierEvaluationGeneration,
+        regressionGeneration, deltaReviewGeneration>>
+
+ResolveVerifierUnknown ==
+    /\ managerUp
+    /\ workflowState = "Running"
+    /\ nodeState = "Triage"
+    /\ triageKind = "BlockingUnknown"
+    /\ verifierEvaluationGeneration < MaxEvaluationGeneration
+    /\ nodeState' = "VerifierReady"
+    /\ verifierEvaluationGeneration' = verifierEvaluationGeneration + 1
+    /\ triageKind' = "None"
+    \* Session identity and Candidate survive; old evidence remains auditable,
+    \* but its generation cannot satisfy the next verifier verdict.
+    /\ UNCHANGED <<coderSession, verifierSession, activeRole,
+        candidateVersion, verifiedVersion, regressionVersion, deltaReviewVersion,
+        corpusVersion, coderCorpusVersion, workflowState, managerUp,
+        regressionGeneration, deltaReviewGeneration>>
 
 CompleteWorkflow ==
     /\ managerUp
@@ -180,6 +254,8 @@ CompleteWorkflow ==
         verifiedVersion, corpusVersion, coderCorpusVersion, managerUp>>
         \* Regression and delta evidence remain auditable after closure.
     /\ UNCHANGED <<regressionVersion, deltaReviewVersion>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 CancelWorkflow ==
     /\ workflowState = "Running"
@@ -191,6 +267,8 @@ CancelWorkflow ==
     /\ UNCHANGED <<candidateVersion, verifiedVersion, regressionVersion,
         deltaReviewVersion, corpusVersion,
         coderCorpusVersion, managerUp>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 CrashManager ==
     /\ managerUp
@@ -203,6 +281,8 @@ CrashManager ==
     /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion,
         regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 RestartManager ==
     /\ ~managerUp
@@ -211,6 +291,8 @@ RestartManager ==
         candidateVersion, verifiedVersion, corpusVersion,
         regressionVersion, deltaReviewVersion, coderCorpusVersion,
         workflowState>>
+    /\ UNCHANGED <<verifierEvaluationGeneration, regressionGeneration,
+                    deltaReviewGeneration, triageKind>>
 
 Next ==
     \/ StartCoder
@@ -220,6 +302,8 @@ Next ==
     \/ ReviewCandidateDelta
     \/ VerifierPass
     \/ VerifierFail
+    \/ VerifierUnknown
+    \/ ResolveVerifierUnknown
     \/ ReopenAccepted
     \/ EnterTriage
     \/ ResumeTriage
@@ -243,6 +327,10 @@ TypeOK ==
     /\ coderCorpusVersion \in 0..MaxCandidate
     /\ workflowState \in WorkflowStates
     /\ managerUp \in BOOLEAN
+    /\ verifierEvaluationGeneration \in 0..MaxEvaluationGeneration
+    /\ regressionGeneration \in 0..MaxEvaluationGeneration
+    /\ deltaReviewGeneration \in 0..MaxEvaluationGeneration
+    /\ triageKind \in {"None", "Interrupted", "BlockingUnknown"}
 
 SingleRunnableRole ==
     /\ activeRole = "Coder" => coderSession = "Active" /\ verifierSession # "Active"
@@ -273,9 +361,16 @@ WorkflowTerminalClosesSessions ==
 VerdictCoversCurrentCandidate ==
     nodeState \in {"Accepted", "RepairReady"} =>
         /\ regressionVersion = candidateVersion
+        /\ regressionGeneration = verifierEvaluationGeneration
         /\ deltaReviewVersion = candidateVersion
+        /\ deltaReviewGeneration = verifierEvaluationGeneration
 
 DeltaReviewFollowsRegression ==
     deltaReviewVersion <= regressionVersion
+
+\* This cursor is independent of product/Candidate and architecture generations.
+EvaluationAdvanceRequiresOperator ==
+    [][verifierEvaluationGeneration' # verifierEvaluationGeneration =>
+        ResolveVerifierUnknown]_vars
 
 =============================================================================

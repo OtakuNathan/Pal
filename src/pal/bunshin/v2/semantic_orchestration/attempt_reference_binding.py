@@ -137,15 +137,11 @@ class ReferenceBinding:
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
         mandatory_inputs: list[str] = []
-        evaluation_generation = (
-            int(snapshot.payload.get("architecture_review_generation") or 0)
-            if activation
-            == RoleActivation(
-                OrchestrationRole.REVIEWER,
-                RoleMode.ARCHITECTURE,
-            )
-            else 0
-        )
+        evaluation_generation = 0
+        if activation == RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE):
+            evaluation_generation = int(snapshot.payload.get("architecture_review_generation") or 0)
+        elif activation == RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE):
+            evaluation_generation = int(snapshot.payload.get("verifier_evaluation_generation") or 0)
         return BoundRoleReferences(
             evaluation_generation=evaluation_generation, invocation_acceptance=invocation_acceptance,
             profile_group=profile_group, profile_name=profile_name, references=references,
