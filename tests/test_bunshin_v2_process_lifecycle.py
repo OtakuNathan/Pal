@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import os
 import signal
 import shutil
@@ -10,13 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.v2.contracts import LeaseConflict
 from pal.bunshin.v2.coroutine_runtime import CoroutineRunSemaphore
 from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
-from pal.bunshin.v2.process_lifecycle import RoleProcessShell, WorkerProcessOwner
+from pal.bunshin.v2.process_lifecycle import RoleProcessShell, WorkerProcessOwner, WorkerProcessReapError
 from pal.shared import BunshinInvocationPack
 
 
@@ -209,6 +210,131 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [(pid, signal.SIGKILL)])
         self.assertEqual(owner.pid, 0)
         self.assertTrue(owner.resources_released)
+
+
+    def attach_memory_lease(self, owner, events):
+        @contextmanager
+        def lease():
+            self.assertEqual(owner.pid, 0)
+            events.append("memory-acquired")
+            try:
+                yield
+            finally:
+                self.assertTrue(owner.process_group_reaped)
+                self.assertIsNone(owner._stdin)
+                self.assertIsNone(owner._stdout)
+                if owner._stderr_task is not None:
+                    self.assertTrue(owner._stderr_task.done())
+                events.append("memory-released")
+        owner.memory_read_lease_factory = lease
+
+    async def test_memory_lease_precedes_spawn_and_outlives_pipes(self):
+        events = []
+        owner = self.owner(invocation_id="memory-normal", script="pass", events=events)
+        self.attach_memory_lease(owner, events)
+        async with owner:
+            self.assertEqual(events, ["memory-acquired", "started", "registered"])
+            await owner.wait()
+            self.assertNotIn("memory-released", events)
+        self.assertEqual(events, ["memory-acquired", "started", "registered", "memory-released", "unregistered"])
+        await owner.close()
+        self.assertEqual(events.count("memory-released"), 1)
+
+    async def test_memory_lease_released_on_spawn_failure(self):
+        events = []
+        owner = self.owner(invocation_id="memory-spawn-fail", script="pass", events=events)
+        self.attach_memory_lease(owner, events)
+        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=OSError("spawn failed"))):
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                await owner.__aenter__()
+        self.assertEqual(events, ["memory-acquired", "memory-released"])
+        self.assertTrue(owner.resources_released)
+        self.assertFalse(self.locks.is_held(owner.lock_key))
+
+    async def test_failed_memory_acquisition_does_not_spawn_or_hold_capacity(self):
+        events = []
+        owner = self.owner(invocation_id="memory-acquire-fail", script="pass", events=events)
+        @contextmanager
+        def lease():
+            raise OSError("lease failed")
+            yield
+        owner.memory_read_lease_factory = lease
+        semaphore = CoroutineRunSemaphore(1)
+        shell = RoleProcessShell(owner, semaphore, owner.run_id)
+        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+            with self.assertRaisesRegex(OSError, "lease failed"):
+                await shell.__aenter__()
+            spawn.assert_not_called()
+        self.assertTrue(owner.resources_released)
+        self.assertEqual(semaphore.active_count, 0)
+        self.assertFalse(self.locks.is_held(owner.lock_key))
+
+    async def test_cancelled_worker_releases_memory_after_reap(self):
+        events = []
+        owner = self.owner(invocation_id="memory-cancel", script="import time; time.sleep(60)", events=events)
+        self.attach_memory_lease(owner, events)
+        started = asyncio.Event()
+        async def run():
+            async with owner:
+                started.set()
+                await asyncio.Event().wait()
+        task = asyncio.create_task(run())
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(owner.resources_released)
+        self.assertEqual(events, ["memory-acquired", "started", "registered", "memory-released", "unregistered"])
+
+    async def test_partial_start_reap_failure_retains_memory_until_child_exits(self):
+        events = []
+        exited = asyncio.Event()
+        class Process:
+            pid = 12345
+            returncode = None
+            stdin = stdout = stderr = None
+            async def wait(self):
+                await exited.wait()
+                self.returncode = -9
+                return self.returncode
+        owner = self.owner(invocation_id="memory-reap-fail", script="pass", events=events)
+        self.attach_memory_lease(owner, events)
+        owner.reap_timeout_seconds = .01
+        def fail_start(_owner):
+            raise RuntimeError("start callback failed")
+        owner.on_started = fail_start
+        semaphore = CoroutineRunSemaphore(1)
+        shell = RoleProcessShell(owner, semaphore, owner.run_id)
+        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(return_value=Process())), patch("pal.bunshin.v2.process_lifecycle.os.killpg") as kill:
+            with self.assertRaises(WorkerProcessReapError):
+                await shell.__aenter__()
+            self.assertEqual(events, ["memory-acquired"])
+            self.assertEqual(semaphore.active_count, 1)
+            self.assertTrue(self.locks.is_held(owner.lock_key))
+            self.assertFalse(owner.resources_released)
+            retry = asyncio.create_task(shell.close())
+            await asyncio.sleep(.02)
+            self.assertFalse(retry.done())
+            self.assertEqual(events, ["memory-acquired"])
+            self.assertFalse(owner.process_group_reaped)
+            exited.set()
+            await asyncio.wait_for(retry, 1)
+            kill.assert_called_once()
+        self.assertEqual(events, ["memory-acquired", "memory-released"])
+        self.assertTrue(owner.resources_released)
+        self.assertEqual(semaphore.active_count, 0)
+
+    async def test_workspace_acquire_failure_releases_shell_capacity_only(self):
+        existing = self.owner(invocation_id="same-owner", script="import time; time.sleep(60)", events=[])
+        async with existing:
+            blocked = self.owner(invocation_id="same-owner", script="pass", events=[])
+            semaphore = CoroutineRunSemaphore(1)
+            shell = RoleProcessShell(blocked, semaphore, blocked.run_id)
+            with self.assertRaisesRegex(RuntimeError, "already holds a lock"):
+                await shell.__aenter__()
+            self.assertTrue(blocked.resources_released)
+            self.assertEqual(semaphore.active_count, 0)
+            self.assertTrue(self.locks.is_held(existing.lock_key))
 
 
 class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):

@@ -14,6 +14,7 @@ from pal.bunshin.v2.contracts import LeaseConflict, StaleFencingToken
 from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.v2.worker_processes import WorkerProcesses
 from pal.bunshin.v2.process_lifecycle import WorkerProcessOwner
+from pal.memory.storage import MemoryStorage
 from pal.bunshin.v2.semantic_orchestration.role_leases import RoleLeases
 from pal.bunshin.v2.semantic_orchestration.attempt_models import ClaimedRoleAttempt, ExitedRoleProcess, PreparedRoleWorkspace, PublishedRoleAttempt, RoleAttemptRequest
 
@@ -85,6 +86,7 @@ class WorkerExecution:
                 )
 
         workspace_path = str(pack.workspace.get("repo_path") or "").strip()
+        memory_storage = MemoryStorage(self.repository.runtime_root)
         owner = WorkerProcessOwner(
             argv=tuple(argv),
             env=env,
@@ -108,6 +110,9 @@ class WorkerExecution:
                 ),
             ),
             reap_timeout_seconds=5.0,
+            memory_read_lease_factory=(
+                lambda: memory_storage.worker_read_lease(snapshot.workflow_id)
+            ) if memory_storage.catalog_path.exists() else None,
         )
         events: list[dict[str, Any]] = []
         worker_error = ""

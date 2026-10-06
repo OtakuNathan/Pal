@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import fcntl
 from functools import wraps
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -330,6 +330,42 @@ class MemoryStorage:
         if row is None:
             raise RuntimeError("logical workflow has no live memory generation pin")
         return str(row[0])
+
+    @contextmanager
+    def worker_read_lease(self, workflow_id: str):
+        """Keep WAL sidecars available to a recursively read-only worker.
+
+        Host-only, query-only handles materialize and retain the catalog and
+        pinned generation sidecars. No read transaction is held: worker reads
+        must still observe live catalog changes. The generation reader lock
+        outlives its SQLite handle so collection cannot race handle cleanup.
+        """
+        if self.read_only:
+            raise PermissionError("worker memory read leases require host storage")
+        with ExitStack() as resources:
+            def retain(path):
+                connection = resources.enter_context(closing(sqlite3.connect(
+                    path.resolve().as_uri() + "?mode=rw", uri=True, timeout=30,
+                )))
+                with closing(connection.execute("PRAGMA query_only=ON")):
+                    pass
+                return connection
+
+            catalog = retain(self.catalog_path)
+            with closing(catalog.execute(
+                "SELECT generation_id FROM workflow_pins WHERE workflow_id=? AND released=0",
+                (workflow_id,),
+            )) as cursor:
+                row = cursor.fetchone()
+            if row is None:
+                raise RuntimeError("logical workflow has no live memory generation pin")
+            path = self.path(str(row[0]))
+            reader = resources.enter_context((path.parent / "readers.lock").open("rb"))
+            fcntl.flock(reader, fcntl.LOCK_SH)
+            generation = retain(path)
+            with closing(generation.execute("SELECT 1 FROM sqlite_schema LIMIT 1")) as cursor:
+                cursor.fetchall()
+            yield
 
     def deleted_refs(self) -> set[str]:
         with self.connection() as connection:

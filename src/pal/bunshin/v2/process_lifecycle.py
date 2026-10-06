@@ -43,6 +43,8 @@ class WorkerProcessOwner:
     on_unregistered: WorkerOwnerCallback
     heartbeat_factories: tuple[WorkerHeartbeatFactory, ...] = ()
     reap_timeout_seconds: float = 5.0
+    memory_read_lease_factory: Callable[[], contextlib.AbstractContextManager[None]] | None = None
+    _memory_read_lease: contextlib.AbstractContextManager[None] | None = field(default=None, init=False, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, init=False, repr=False)
     lock_path: Path | None = field(default=None, init=False)
     stderr: bytes = field(default=b"", init=False)
@@ -110,12 +112,16 @@ class WorkerProcessOwner:
     async def __aenter__(self) -> "WorkerProcessOwner":
         if self._closed or self._process is not None:
             raise RuntimeError("worker process owner cannot be entered twice")
-        if self.workspace is not None:
-            self.lock_path = self.workspace_locks.acquire(
-                self.lock_key,
-                self.workspace,
-            )
         try:
+            if self.workspace is not None:
+                self.lock_path = self.workspace_locks.acquire(
+                    self.lock_key,
+                    self.workspace,
+                )
+            if self.memory_read_lease_factory is not None:
+                lease = self.memory_read_lease_factory()
+                lease.__enter__()
+                self._memory_read_lease = lease
             process = await asyncio.create_subprocess_exec(
                 *self.argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -127,6 +133,13 @@ class WorkerProcessOwner:
             self._process = process
             self._stdin = process.stdin
             self._stdout = process.stdout
+            # Preserve the reap witness even when a startup callback fails.
+            self._leader_exit_task = asyncio.create_task(
+                self._reap_after_leader_exit(process),
+                name=f"bunshin-worker-owner-{self.invocation_id}",
+            )
+            if process.stderr is not None:
+                self._stderr_task = asyncio.create_task(process.stderr.read())
             self.on_started(self)
             # Mark registration before invoking the callback so a partially
             # completed callback is always paired with an unregister attempt.
@@ -136,12 +149,6 @@ class WorkerProcessOwner:
                 asyncio.create_task(factory())
                 for factory in self.heartbeat_factories
             ]
-            if process.stderr is not None:
-                self._stderr_task = asyncio.create_task(process.stderr.read())
-            self._leader_exit_task = asyncio.create_task(
-                self._reap_after_leader_exit(process),
-                name=f"bunshin-worker-owner-{self.invocation_id}",
-            )
             return self
         except BaseException:
             await self._close_shielded()
@@ -230,10 +237,15 @@ class WorkerProcessOwner:
                 )
             self._heartbeat_tasks.clear()
 
+            # Keep host memory sidecars alive until the worker and its pipes
+            # are gone. Failed reaping deliberately retains this ownership.
+            if self._memory_read_lease is not None:
+                self._memory_read_lease.__exit__(None, None, None)
+                self._memory_read_lease = None
             if self._registered:
                 self.on_unregistered(self)
                 self._registered = False
-            if self.workspace is not None:
+            if self.lock_path is not None:
                 self.workspace_locks.release(self.lock_key)
             self._closed = True
 
