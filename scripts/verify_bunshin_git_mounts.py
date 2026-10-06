@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from pal.bunshin.harnesses import pal_harness_spec
 from pal.bunshin.sandbox import build_sandboxed_runner_invocation
 from pal.shared import BunshinInvocationPack
 
@@ -34,11 +35,16 @@ def main() -> None:
                 "scratch_dir": str(root / "scratch"),
             }},
         )
+        harness = pal_harness_spec()
         code = r'''
-import errno, json, os, pathlib, subprocess, sys
+import encodings, errno, json, os, pathlib, sqlite3, ssl, subprocess, sys, sysconfig
 import msgpack
 import pal.foundation.sidecar
+import pal.bunshin.v2.worker_main
 host_net = sys.argv[1]
+assert str(pathlib.Path(sys.executable).resolve()) == sys.argv[2], 'wrong worker interpreter'
+for runtime_path in (sys.executable, sysconfig.get_path('stdlib')):
+    assert os.statvfs(runtime_path).f_flag & os.ST_RDONLY, ('writable Python runtime', runtime_path)
 assert os.readlink('/proc/self/ns/net') != host_net, 'network namespace was not isolated'
 assert 'API_KEY' not in os.environ, 'secret-shaped variable was not scrubbed'
 cores = [pathlib.Path(p) for p in ('/usr/lib/git-core', '/usr/libexec/git-core') if pathlib.Path(p).is_dir()]
@@ -68,17 +74,25 @@ for core in cores:
         helpers.append(str(helper))
 assert helpers, 'no Git helpers checked'
 assert subprocess.run(['unshare', '-Ur', 'true'], capture_output=True).returncode != 0, 'nested user namespace unexpectedly allowed'
-print(json.dumps({'result': 'PASS', 'sandbox_startup': True, 'imports': True, 'network_isolated': True, 'nested_userns_blocked': True, 'git_direct_helpers_blocked': helpers, 'gateway_without_token_fails_closed': [str(p) for p in gateways], 'git_mounts_read_only': True}))
+print(json.dumps({'result': 'PASS', 'worker_executable': sys.executable, 'python_runtime_read_only': True, 'sandbox_startup': True, 'imports': True, 'network_isolated': True, 'nested_userns_blocked': True, 'git_direct_helpers_blocked': helpers, 'gateway_without_token_fails_closed': [str(p) for p in gateways], 'git_mounts_read_only': True}))
 '''
         argv, env = build_sandboxed_runner_invocation(
             runtime_root=runtime, pack=pack,
-            argv=["/usr/bin/python3", "-c", code, os.readlink("/proc/self/ns/net")],
+            argv=[harness.worker_argv[0], "-c", code, os.readlink("/proc/self/ns/net"), harness.worker_argv[0]],
             env={"PATH": "/usr/bin:/bin", "API_KEY": "non-secret-test-marker"},
         )
         result = subprocess.run(argv, env=env, cwd=workspace, capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise SystemExit(f"FAIL: bwrap exit {result.returncode}\n{result.stderr}\n{result.stdout}")
         print(result.stdout.strip())
+        worker_argv, worker_env = build_sandboxed_runner_invocation(
+            runtime_root=runtime, pack=pack,
+            argv=[*harness.worker_argv, "--help"], env={"PATH": "/usr/bin:/bin"},
+        )
+        worker = subprocess.run(worker_argv, env=worker_env, cwd=workspace, capture_output=True, text=True, timeout=60)
+        if worker.returncode or "Run one isolated Bunshin V2 worker invocation" not in worker.stdout:
+            raise SystemExit(f"FAIL: real worker --help exit {worker.returncode}\n{worker.stderr}\n{worker.stdout}")
+        print("PASS: actual harness worker --help; no pack read, socket listener, or model call")
         assert not (workspace / ".git").exists()
         print("Disposable runtime removed on exit; no Pal service, socket, credentials, or model used")
 

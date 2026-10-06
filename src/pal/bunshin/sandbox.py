@@ -481,6 +481,10 @@ def _build_bwrap_invocation(
         if host_path.exists():
             args.extend(["--dir", str(host_path)])
             args.extend(["--ro-bind", str(host_path), str(host_path)])
+    # The harness runs the resolved current interpreter, which may live outside
+    # /usr. Project its code before narrower runtime/dependency/workspace binds.
+    for python_path in _python_runtime_paths():
+        _append_bind_path(args, python_path, read_only=True)
     _append_dir_scaffold(args, Path(runtime_root))
     _append_runtime_root_binds(args, Path(runtime_root), pack, env=env)
     source_root = _pal_source_root()
@@ -784,6 +788,41 @@ def _workspace_path_from_pack(pack: BunshinInvocationPack) -> Path | None:
 def _safe_component(value: str) -> str:
     safe = [char if char.isalnum() or char in {"-", "_", "."} else "_" for char in str(value or "")]
     return ("".join(safe).strip("._") or "run")[:120]
+
+
+def _python_runtime_paths() -> tuple[Path, ...]:
+    """Expose the selected Python executable and standard library, not its prefix.
+
+    The harness resolves sys.executable, so virtualenv executable aliases do not
+    need additional mounts. Use the base interpreter's installed paths rather
+    than build-time LIBDIR/DESTSHARED (which can be stale after relocation).
+    """
+    executable = Path(sys.executable)
+    if not executable.is_absolute():
+        raise RuntimeError("sandbox Python executable must be an absolute path")
+    executable = executable.resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(f"sandbox Python executable is unavailable: {executable}")
+    installed = sysconfig.get_paths(vars={
+        "base": sys.base_prefix,
+        "platbase": sys.base_exec_prefix,
+    })
+    expected_name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    libraries: list[Path] = []
+    for key in ("stdlib", "platstdlib"):
+        value = str(installed.get(key) or "")
+        path = Path(value)
+        # Fail closed on missing paths or unexpected broad roots. In particular
+        # never turn an incomplete Python installation into a /opt/prefix bind.
+        if not value or not path.is_absolute():
+            raise RuntimeError(f"sandbox Python {key} path is invalid: {value}")
+        path = path.resolve(strict=True)
+        if not path.is_dir() or path.name != expected_name:
+            raise RuntimeError(f"sandbox Python {key} is not a versioned library directory: {path}")
+        libraries.append(path)
+    if not (libraries[0] / "encodings" / "__init__.py").is_file():
+        raise RuntimeError(f"sandbox Python standard library is incomplete: {libraries[0]}")
+    return tuple(dict.fromkeys([*libraries, executable]))
 
 
 def _python_dependency_paths() -> list[str]:
