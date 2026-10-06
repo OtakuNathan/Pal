@@ -923,6 +923,22 @@ class BunshinSandboxTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(sentinel.exists())
 
+    def test_verifier_execution_discipline_without_references(self) -> None:
+        # Prompt obligations do not depend on bubblewrap being usable.
+        prompt = render_bunshin_task_prompt(BunshinInvocationPack(
+            invocation_id="verifier_no_references",
+            goal="verify the bound Candidate",
+            workspace={"reference_paths": []},
+            metadata={"bunshin_v2": {"role": "verifier"}},
+        ))
+        self.assertIn("## Execution Discipline — High Priority", prompt)
+        self.assertIn("Verification: follow the Role Contract completion rule", prompt)
+        self.assertIn("Manager's outcome-specific readiness", prompt)
+        self.assertIn("Required history precedes current-delta", prompt)
+        self.assertIn("final-corpus validation, findings, and checklist gates", prompt)
+        self.assertIn("Preserve every phase in the bound playbook", prompt)
+        self.assertNotIn("## Reference Access Efficiency", prompt)
+
     def test_reference_projection_uses_stable_read_only_sandbox_path(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
@@ -1066,19 +1082,6 @@ class BunshinSandboxTests(unittest.TestCase):
             )
             self.assertIn("once the owned contract, edit path", implementation_prompt)
             self.assertIn("call submit_candidate immediately", implementation_prompt)
-
-            no_reference_pack_value = pack.to_dict()
-            no_reference_pack_value["workspace"] = {
-                **dict(no_reference_pack_value.get("workspace") or {}),
-                "reference_paths": [],
-            }
-            no_reference_pack_value["metadata"] = {"bunshin_v2": {"role": "verifier"}}
-            no_reference_prompt = render_bunshin_task_prompt(
-                BunshinInvocationPack.from_dict(no_reference_pack_value)
-            )
-            self.assertIn("## Execution Discipline — High Priority", no_reference_prompt)
-            self.assertIn("Verification: treat VerificationPolicy", no_reference_prompt)
-            self.assertNotIn("## Reference Access Efficiency", no_reference_prompt)
 
             result = subprocess.run(
                 argv,
