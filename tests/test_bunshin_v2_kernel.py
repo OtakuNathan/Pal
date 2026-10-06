@@ -2024,6 +2024,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
                 "MEMORY_CANDIDATE_PUBLISHED",
                 "REOPEN_DEPENDENCY",
                 "REOPEN_VERIFICATION",
+                "SETTLE_DEPENDENCY_REPAIR",
             ),
             (AggregateType.STANDALONE_REVIEW, str(StandaloneReviewState.COMPLETED)): (),
         }

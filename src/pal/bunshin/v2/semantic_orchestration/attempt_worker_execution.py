@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pal.bunshin.failure_diagnostics import append_failure_diagnostic
 from dataclasses import dataclass
+from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
 from pathlib import Path
 from typing import Any
 from pal.bunshin.v2.repository import BunshinV2Repository
@@ -46,6 +47,14 @@ class WorkerExecution:
         role = stage_workspace_preparation.role
         run_id = stage_workspace_preparation.run_id
         snapshot = command.snapshot
+        business_lease = semantic_business_lease(
+            snapshot, owner_id=invocation_id, resource_key=lease_resource, fencing_token=fencing_token,
+        )
+        if business_lease:
+            self.repository.role_assignments.assert_semantic_admission(
+                workflow_id=snapshot.workflow_id, aggregate_type=snapshot.aggregate_type.value,
+                aggregate_id=snapshot.aggregate_id, business_lease=business_lease,
+            )
         def process_started(owner: WorkerProcessOwner) -> None:
             process_metadata = {
                 "workflow_id": snapshot.workflow_id,
@@ -92,9 +101,15 @@ class WorkerExecution:
             env=env,
             invocation_id=invocation_id,
             run_id=run_id,
+            effect_key=str(command.effect.get("effect_key") or command.effect.get("effect_id") or ""),
+            assignment_id=str(attempt["assignment_id"]),
+            attempt_id=str(attempt["attempt_id"]),
+            business_lease_resource_key=lease_resource,
+            business_fencing_token=fencing_token,
             workspace=Path(workspace_path) if workspace_path else None,
             workspace_locks=self.workspace_locks,
             on_started=process_started,
+            on_reserved=self.processes.register,
             on_registered=register_process,
             on_unregistered=unregister_process,
             heartbeat_factories=(

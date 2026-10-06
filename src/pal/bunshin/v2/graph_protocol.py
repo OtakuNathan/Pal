@@ -258,6 +258,26 @@ class GraphIR:
 
         return self._descendants(node_name, execution_only=False)
 
+    def repair_descendants(self, node_name: str) -> tuple[str, ...]:
+        """Actual affected closure, including synthetic checker dependencies.
+
+        Semantic contracts invalidate consumers but never become producer
+        execution prerequisites. The software sink consumes every produced
+        module even when there is no authored edge to that sink.
+        """
+        seen: set[str] = set()
+        pending = [node_name]
+        while pending:
+            producer = pending.pop()
+            consumers = {edge.consumer for edge in self.outgoing(producer)}
+            consumers.update(name for name in self.nodes
+                             if producer in self.checker_predecessors(name))
+            for consumer in consumers - seen:
+                seen.add(consumer)
+                pending.append(consumer)
+        seen.discard(node_name)
+        return tuple(sorted(seen))
+
     def _descendants(
         self,
         node_name: str,

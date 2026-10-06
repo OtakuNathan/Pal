@@ -38,6 +38,8 @@ from pal.bunshin.v2.semantic_orchestration.implementation_snapshot import Implem
 from pal.bunshin.v2.semantic_orchestration.node_admission import NodeAdmission
 from pal.bunshin.v2.semantic_orchestration.verification_completion import VerificationCompletion
 from pal.bunshin.v2.semantic_orchestration.verification_settlement import VerificationSettlement
+from pal.bunshin.v2.semantic_orchestration.dependency_repair_capture import DependencyRepairCapture
+from pal.bunshin.v2.semantic_orchestration.dependency_repair_runtime import DependencyRepairRuntime
 from pal.bunshin.v2.semantic_orchestration.architecture_authoring import ArchitectureAuthoring
 from pal.bunshin.v2.semantic_orchestration.architecture_review import ArchitectureReview
 from pal.bunshin.v2.semantic_orchestration.assignment_execution import AssignmentExecution
@@ -129,11 +131,20 @@ def build_semantic_components(
         requests, role_cleanup, role_leases, role_reports, service, verification_completion, verification_settlement,
         workflow_facts, workspace_locks,
     )
+    dependency_repairs = DependencyRepairRuntime(
+        artifacts=service.artifacts, repository=service.repository, effect_reads=effect_reads,
+        cleanup=role_cleanup, leases=role_leases, workspace_locks=workspace_locks,
+        collector=DependencyRepairCapture(verification_settlement, role_checkpoints),
+    )
+    verification_settlement.dependency_repair_registration = dependency_repairs.register
+    node_control.dependency_repairs = dependency_repairs
     aggregate_control, role_control, effect_dispatch = build_dispatch(
         architecture_review, architecture_snapshot, architecture_stage, assignment_execution, background, effect_reads,
         final_delivery, human_review, implementation_run, implementation_snapshot, node_admission, node_control,
         review_delivery, role_cleanup, service, standalone_review, verification_run, verification_snapshot,
     )
+    effect_dispatch.handlers = {**effect_dispatch.handlers,
+                                "reconcile_dependency_repairs": dependency_repairs.reconcile}
     return SemanticComponents(
         assignment_retries=assignment_retries,
         attempt_inputs=attempt_inputs,
@@ -202,6 +213,7 @@ def build_support(
     role_cleanup = RoleCleanup(
         processes=processes,
         runtime_root=service.runtime_root,
+        background=background,
     )
     role_reports = RoleReports(
         artifacts=service.artifacts,

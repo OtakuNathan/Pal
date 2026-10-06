@@ -16,6 +16,12 @@ models=(
     ProduceCheckCycle
     GraphGenerationLifecycle
     GraphExecutionLifecycle
+    DependencyRepairCohort
+    DependencyRepairSetupOwnership
+    DependencyRepairPartialOverlap
+    DependencyRepairObligationCarry
+    DependencyRepairLaterCohort
+    DependencyRepairControlOverlay
     ProcessCapacityLifecycle
     DagLifecycle
     ArchitectureLifecycle
@@ -45,6 +51,29 @@ for model in "${models[@]}"; do
         -workers "${workers}" \
         -cleanup \
         -config "spec/bunshin_v2/${model}.cfg" \
+        "spec/bunshin_v2/${model}.tla"
+done
+
+# Additional bounded peer-report classifications and the two-scope overlap.
+for entry in \
+    DependencyRepairCohort:DependencyRepairCohortPass \
+    DependencyRepairCohort:DependencyRepairCohortInvalidScope \
+    DependencyRepairCohort:DependencyRepairCohortContractOnly \
+    DependencyRepairPartialOverlap:DependencyRepairPartialOverlapTwo \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayPass \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayLocal \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayCorrection \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayTerminalSource \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayTerminalPeer \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayChangedCandidate \
+    DependencyRepairControlOverlay:DependencyRepairControlOverlayChangedFinding; do
+    model="${entry%%:*}"
+    config="${entry#*:}"
+    echo "==> TLC ${config}"
+    java -XX:+UseParallelGC -jar "${tla_jar}" \
+        -workers "${workers}" \
+        -cleanup \
+        -config "spec/bunshin_v2/${config}.cfg" \
         "spec/bunshin_v2/${model}.tla"
 done
 

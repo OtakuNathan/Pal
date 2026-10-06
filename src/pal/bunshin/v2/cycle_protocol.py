@@ -86,6 +86,8 @@ class CycleAction(StrEnum):
     HUMAN_REJECTED = "human_rejected"
     HUMAN_EDITED = "human_edited"
     MARK_STALE = "mark_stale"
+    REQUEST_STALE = "request_stale"
+    STALE_CONFIRMED = "stale_confirmed"
     WAIT_EXTERNAL = "wait_external"
     EXTERNAL_RESUMED = "external_resumed"
     REQUEST_PAUSE = "request_pause"
@@ -476,6 +478,20 @@ def _transition_node(
     verdict: CycleVerdict | None,
 ) -> NodeCycle:
     state = cycle.state.value
+    if action == CycleAction.REQUEST_STALE and state not in {"CANCELLED", "CANCEL_REQUESTED"}:
+        # Preserve the exact admitted assignment until its owner is retired.
+        # resume_state distinguishes dependency invalidation from user cancel.
+        return replace(cycle, state=NodeCycleState.CANCEL_REQUESTED,
+                       resume_state=NodeCycleState.STALE)
+    if action == CycleAction.STALE_CONFIRMED:
+        if (state != "CANCEL_REQUESTED" or cycle.resume_state != NodeCycleState.STALE
+                or assignment != cycle.active_assignment):
+            raise CycleTransitionError("stale acknowledgement does not match the pending assignment")
+        return replace(cycle, state=NodeCycleState.STALE, active_assignment=None,
+                       resume_state=None, last_verdict=None)
+    if action == CycleAction.REQUEST_CANCEL and state == "CANCEL_REQUESTED":
+        # A terminal user cancellation dominates an earlier repair request.
+        return replace(cycle, resume_state=None)
     if action == CycleAction.UNBLOCK and state == "BLOCKED":
         return replace(cycle, state=NodeCycleState.PRODUCER_READY)
     if action == CycleAction.MARK_STALE and state == "ACCEPTED":

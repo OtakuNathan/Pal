@@ -20,6 +20,11 @@ class EffectDispatch:
         route = SEMANTIC_EFFECT_ROUTES.get(effect_type)
         if route is None:
             raise RuntimeError(f"semantic effect is not implemented: {effect_type}")
+        if effect_type == "reconcile_dependency_repairs":
+            # This effect owns a durable prepared receipt/cohort, not the
+            # transient source aggregate cursor. The handler validates that
+            # immutable authority and exact graph generation before replay.
+            return dict(await self.handlers[effect_type](effect))
         snapshot = self.effect_reads.effect_snapshot(effect)
         causal = self.effect_reads.effect_causal_context(effect)
         target_state = str(causal.get("target_state") or "")

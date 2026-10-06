@@ -1,5 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from pal.bunshin.v2.background_assignments import BackgroundAssignments
+from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.contracts import SubmissionInvariantError
 from pal.bunshin.v2.semantic_orchestration.assignment_retries import AssignmentRetries
@@ -16,6 +18,7 @@ from pal.bunshin.v2.semantic_orchestration.attempt_models import (
 class RoleSession:
     assignment_retries: AssignmentRetries
     repository: BunshinV2Repository
+    background: BackgroundAssignments | None = None
 
     async def execute(
         self, command: RoleAttemptRequest, stage_assignment_reuse: AssignmentReuse,
@@ -37,6 +40,15 @@ class RoleSession:
         role = stage_workspace_preparation.role
         snapshot = command.snapshot
         submission_kind = stage_assignment_reuse.submission_kind
+        business_lease = semantic_business_lease(
+            snapshot, owner_id=command.invocation_id, resource_key=command.lease_resource,
+            fencing_token=command.fencing_token,
+        )
+        if business_lease:
+            self.repository.role_assignments.assert_semantic_admission(
+                workflow_id=snapshot.workflow_id, aggregate_type=snapshot.aggregate_type.value,
+                aggregate_id=snapshot.aggregate_id, business_lease=business_lease,
+            )
         session_scope_kind, session_subject_key = _role_session_scope(snapshot, activation)
         role_session = self.repository.role_sessions.ensure_role_session(
             session_id=invocation_id,
@@ -84,6 +96,7 @@ class RoleSession:
                             "role": role,
                             "payload": dict(effect.get("payload") or {}),
                             "evaluation_generation": evaluation_generation,
+                            **({"business_lease": business_lease} if business_lease else {}),
                         },
                         submission_kind=submission_kind,
                     )
@@ -111,6 +124,12 @@ class RoleSession:
                 raise SubmissionInvariantError(
                     "expired active role assignment could not be made retryable"
                 )
+        if self.background is not None:
+            effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+            if effect_key:
+                # Bind before the next awaited stage, not merely when the
+                # fully prepared assignment eventually signals readiness.
+                self.background.bind(effect_key, str(assignment["assignment_id"]))
         return PreparedRoleSession(
             assignment=assignment, durable_prompt_reused=durable_prompt_reused, role_session=role_session,
             session_scope_kind=session_scope_kind, session_subject_key=session_subject_key,

@@ -25,6 +25,7 @@ from pal.bunshin.v2.graph_executor import (
     diff_graphs,
 )
 from pal.bunshin.v2.graph_protocol import GraphIR
+from pal.bunshin.v2.dependency_repair_protocol import RepairIncarnation
 from pal.bunshin.v2.repository import BunshinV2Repository
 
 
@@ -329,6 +330,16 @@ class WorkflowCoordinator:
                         "a prior GraphIR generation has no GraphExecution projection"
                     )
                 diff = diff_graphs(previous_graph, graph)
+                if previous_execution.dependency_repairs.pending is not None:
+                    previous_execution = replace(
+                        previous_execution,
+                        state=GraphExecutionState.REPLAN_REQUIRED,
+                        published_sink_ref="",
+                    )
+                    (connection or self.repository).cycles.store_graph_execution(
+                        workflow_id=workflow_id,
+                        execution=previous_execution,
+                    )
                 execution = _replanned_execution(
                     previous_execution,
                     graph,
@@ -425,6 +436,10 @@ class WorkflowCoordinator:
             raise RuntimeError(
                 f"{node_name} already runs a different {slot.value} assignment"
             )
+        if node_name not in execution.runnable_nodes():
+            raise RuntimeError(
+                f"{node_name} is not runnable: graph admission or dependency readiness is fenced"
+            )
         assignment = CycleAssignment(
             slot=slot,
             kind=kind,
@@ -497,6 +512,10 @@ class WorkflowCoordinator:
                     f"{node_name} is already accepted with another product"
                 )
             return cycle
+        if (node_name not in execution.runnable_nodes()
+                or any(execution.cycles[name].state != NodeCycleState.ACCEPTED
+                       for name in execution.graph.checker_predecessors(node_name))):
+            raise RuntimeError(f"{node_name} null admission or checker inputs are fenced")
         if cycle.state not in {
             NodeCycleState.PRODUCER_READY,
             NodeCycleState.REPAIR_READY,
@@ -699,6 +718,11 @@ class WorkflowCoordinator:
         )
         if execution is None or node_name not in execution.cycles:
             return
+        if node_name in execution.pending_scope:
+            # Aggregate pause/cleanup confirmation cannot replace a frozen
+            # repair cursor. Only its exact RepairClosure retires that cursor;
+            # terminal cancellation first archives the cohort above this layer.
+            return
         cycle = execution.cycles[node_name]
         expected = (
             NodeCycleState.CANCEL_REQUESTED
@@ -731,10 +755,11 @@ class WorkflowCoordinator:
         plan: bool = False,
         pending_checker_input_fingerprint: str = "",
         pending_checker_generation: int = 0,
+        pending_repair: RepairIncarnation | None = None,
         unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
         if plan:
-            if pending_checker_input_fingerprint:
+            if pending_checker_input_fingerprint or pending_repair is not None:
                 raise ValueError("pending node checker settlement cannot restore a plan cycle")
             self._control_plan(
                 workflow_id,
@@ -746,10 +771,48 @@ class WorkflowCoordinator:
             workflow_id=workflow_id,
         )
         if execution is None or node_name not in execution.cycles:
-            if pending_checker_input_fingerprint:
+            if pending_checker_input_fingerprint or pending_repair is not None:
                 raise ValueError("pending checker settlement has no current graph cycle")
             return
         cycle = execution.cycles[node_name]
+        cohort = execution.dependency_repairs.pending
+        member = next((item for item in cohort.frontier.values() if item.node_name == node_name), None) if cohort else None
+        if pending_repair is not None or member is not None:
+            if (pending_checker_input_fingerprint or pending_repair is None
+                    or pending_repair != member or cohort is None
+                    or execution.state != GraphExecutionState.RUNNING
+                    or cycle.cycle_id != pending_repair.cycle_id
+                    or cycle.generation != pending_repair.generation):
+                raise ValueError("dependency repair recovery does not own the frozen graph cursor")
+            if pending_repair.key in cohort.closures:
+                raise ValueError("dependency repair recovery cannot restore a closed incarnation")
+            slot = CycleSlot(pending_repair.slot)
+            assignment = CycleAssignment(slot, AssignmentKind.RESUME,
+                                         pending_repair.generation, pending_repair.input_fingerprint)
+            if cycle.state != NodeCycleState.TRIAGE_REQUIRED:
+                if (cycle.active_assignment is None
+                        or cycle.active_assignment.slot != slot
+                        or cycle.active_assignment.input_fingerprint != assignment.input_fingerprint):
+                    raise ValueError("dependency repair recovery lost its current graph cursor")
+                return
+            ready = NodeCycleState.CHECKER_READY if slot == CycleSlot.CHECKER else NodeCycleState.PRODUCER_READY
+            allowed = {ready, NodeCycleState.CANCEL_REQUESTED}
+            if slot == CycleSlot.PRODUCER:
+                allowed.add(NodeCycleState.REPAIR_READY)
+            if cycle.active_assignment is not None or cycle.resume_state not in allowed:
+                raise ValueError("dependency repair recovery has an incompatible triaged cursor")
+            resumed = cycle.transition(CycleAction.RESOLVE_TRIAGE)
+            # This is the original admitted setup/cleanup cursor, not a role
+            # start. No failure budget, candidate, admission, or outbox changes.
+            resumed = replace(resumed, active_assignment=assignment,
+                state=(NodeCycleState.CANCEL_REQUESTED if resumed.state == NodeCycleState.CANCEL_REQUESTED
+                       else NodeCycleState.CHECKING if slot == CycleSlot.CHECKER else NodeCycleState.PRODUCING),
+                resume_state=NodeCycleState.STALE if resumed.state == NodeCycleState.CANCEL_REQUESTED else None)
+            restored = replace(execution, cycles={**execution.cycles, node_name: resumed})
+            restored._validate_repair_frontier(cohort)
+            (unit_of_work or self.repository).cycles.store_graph_execution(
+                workflow_id=workflow_id, execution=restored)
+            return
         if cycle.state != NodeCycleState.TRIAGE_REQUIRED:
             if pending_checker_input_fingerprint and not (
                 cycle.state == NodeCycleState.CHECKING
@@ -861,9 +924,16 @@ class WorkflowCoordinator:
         )
         if execution is None:
             return
+        if action == CycleAction.REQUEST_CANCEL:
+            execution = replace(execution, state=GraphExecutionState.CANCELLED,
+                                published_sink_ref="")
         cycles = dict(execution.cycles)
-        changed = False
+        changed = action == CycleAction.REQUEST_CANCEL
         for name, current in tuple(cycles.items()):
+            if action in {CycleAction.REQUEST_PAUSE, CycleAction.RESUME} and name in execution.pending_scope:
+                # Workflow/node aggregates own pause intent. Keep the cohort's
+                # original admitted cursors and evidence intact for recovery.
+                continue
             if current.state in {
                 NodeCycleState.ACCEPTED,
                 NodeCycleState.CANCELLED,
@@ -875,17 +945,14 @@ class WorkflowCoordinator:
                     NodeCycleState.PAUSED,
                 }:
                     continue
-                was_running = current.is_running
+                was_running = current.is_running or current.active_assignment is not None
                 updated = current.transition(action)
                 if not was_running:
                     updated = updated.transition(CycleAction.PAUSED)
             elif action == CycleAction.REQUEST_CANCEL:
-                if current.state in {
-                    NodeCycleState.CANCEL_REQUESTED,
-                    NodeCycleState.CANCELLED,
-                }:
+                if current.state == NodeCycleState.CANCELLED:
                     continue
-                was_running = current.is_running
+                was_running = current.is_running or current.active_assignment is not None
                 updated = current.transition(action)
                 if not was_running:
                     updated = updated.transition(CycleAction.CANCELLED)
@@ -933,12 +1000,17 @@ def _replanned_execution(
     diff: GraphDiff,
 ) -> GraphExecution:
     cycles: dict[str, NodeCycle] = {}
+    invalidated = set(source.pending_scope)
+    for cohort in source.dependency_repairs.history:
+        if cohort.status == "superseded":
+            invalidated.update(cohort.scope)
     for name in target.nodes:
         decision = diff.decisions[name]
         previous = source.cycles.get(name)
         cycle_id = f"{target.graph_id}:g{target.generation}:{name}"
         if (
             decision.kind == NodeReuseKind.REUSE_ACCEPTED
+            and name not in invalidated
             and previous is not None
             and previous.state == NodeCycleState.ACCEPTED
         ):

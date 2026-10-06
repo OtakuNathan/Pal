@@ -1,7 +1,9 @@
 """Offline regressions for verifier ownership and durable route correction.
 
 The architecture is compiled through the software Family's real contract and
-GraphCompiler, including its contract-only non-sink and assembled sink edges.
+GraphCompiler, then explicitly restored from the serialized legacy policy
+with CONTRACT non-sink edges. These recovery cases cover persisted old graphs;
+newly compiled graphs gate every produced dependency at verification.
 No live provider, runtime database, or external architecture artifact is used.
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ from pal.bunshin.v2.contract_protocol import validate_contract_payload
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
 from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_protocol import EdgeKind, RoleBinding
+from pal.bunshin.v2.graph_protocol import EdgeKind, RoleBinding, graph_ir_from_mapping
 from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result, empty_review_draft, structured_findings
 from pal.bunshin.v2.role_protocol import stable_hash
@@ -47,7 +49,7 @@ from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import EffectOutcome, RejectedResult, RetryDirective, new_tool_call
 
 
-def _compiled_graph(workflow_id: str):
+def _compiled_graph(workflow_id: str, *, legacy_contract_edges: bool = False):
     definition = ArchitectureTemplateCompiler().compile("software_engineering.v1")
     payload = copy.deepcopy(definition.example)
     provider = payload["modules"]["decoder"]
@@ -79,7 +81,7 @@ def _compiled_graph(workflow_id: str):
     scenario = payload["scenarios"]["decode_one_frame"]
     scenario["modules"] = list(payload["modules"])
     scenario["entrypoint"]["module"] = "backup_cli"
-    return GraphCompiler().compile(
+    graph = GraphCompiler().compile(
         validate_contract_payload(payload, definition=definition),
         graph_id=workflow_id,
         generation=1,
@@ -95,6 +97,19 @@ def _compiled_graph(workflow_id: str):
         source_ref="representative-architecture.yaml",
         workspace_authority_rules=definition.workspace_authority_rules,
     )
+    if not legacy_contract_edges:
+        return graph
+    # Model a persisted pre-verification-gates graph, not current compiler
+    # policy. Keeping the serialized edge kinds preserves negative recovery
+    # coverage: a visible contract stub is not an accepted checker product.
+    legacy = replace(
+        graph, edges=tuple(
+            replace(edge, kind=EdgeKind.CONTRACT)
+            if edge.consumer != graph.sink else edge
+            for edge in graph.edges
+        ),
+    )
+    return graph_ir_from_mapping(legacy.to_dict())
 
 
 def _finding(kind: str, path: str, *, identity: str = "finding_stub", summary: str | None = None):
@@ -119,7 +134,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.coordinator = WorkflowCoordinator(self.repository)
         self.worker = SemanticOrchestrator(self.service)
         self.workflow_id = "workflow-scope"
-        self.graph = _compiled_graph(self.workflow_id)
+        self.graph = _compiled_graph(self.workflow_id, legacy_contract_edges=True)
         self.coordinator.install_graph(workflow_id=self.workflow_id, graph=self.graph)
         self.repo = self.root / "repo"
         self.repo.mkdir()
@@ -248,7 +263,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         record_verification_execution(workspace, call, result, verification_corpus_snapshot(workspace))
         return workspace
 
-    def test_compiled_graph_keeps_visible_stub_out_of_checker_products(self):
+    def test_legacy_graph_keeps_visible_stub_out_of_checker_products(self):
         self._accept_provider()
         node = self._node()
         self.assertEqual(self.graph.checker_predecessors("archive_verify"), ())
@@ -432,6 +447,10 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self._node().payload["verification_correction_attempts"], 1)
 
     def test_valid_mixed_batch_routes_only_bound_providers_and_projects_owner_views(self):
+        # This legacy handler fixture deliberately has no admitted worker or
+        # durable role receipt. Full cohort/public-outbox ownership is covered
+        # in test_bunshin_dependency_repair_runtime, rather than fabricated here.
+        self.worker.components.verification_settlement.dependency_repair_registration = None
         from pal.bunshin.v2.verification import repair_bill_semantic_view
 
         self._accept_provider("manifest_model")
@@ -800,6 +819,10 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.repository.queries.list_workflow_snapshots(self.workflow_id), reaccepted)
 
     def test_current_finding_survives_stale_requeue_and_only_its_coder_task_is_required(self):
+        # This legacy handler fixture deliberately has no admitted worker or
+        # durable role receipt. Full cohort/public-outbox ownership is covered
+        # in test_bunshin_dependency_repair_runtime, rather than fabricated here.
+        self.worker.components.verification_settlement.dependency_repair_registration = None
         from pal.bunshin.v2.catalog import BunshinV2Catalog
         from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
         from pal.bunshin.v2.semantic_orchestration.attempt_models import RoleAttemptRequest

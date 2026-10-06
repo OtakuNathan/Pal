@@ -79,7 +79,7 @@ def build_attempt_execution(
             artifacts=artifacts, assignment_identity=assignment_identity, assignment_retries=assignment_retries,
             background=background, repository=repository, role_checkpoints=role_checkpoints,
         ),
-        role_session=RoleSession(assignment_retries=assignment_retries, repository=repository),
+        role_session=RoleSession(assignment_retries=assignment_retries, repository=repository, background=background),
         harness_binding=HarnessBinding(artifacts=artifacts, repository=repository, role_checkpoints=role_checkpoints),
         assignment_replay=AssignmentReplay(artifacts=artifacts, background=background, role_checkpoints=role_checkpoints),
         attempt_admission=AttemptAdmission(repository=repository, supervisor=supervisor),
@@ -96,4 +96,5 @@ def build_attempt_execution(
         repository=repository,
         role_leases=role_leases,
         supervisor=supervisor,
+        background=background,
     )

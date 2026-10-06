@@ -114,9 +114,9 @@ def test_real_parse_and_process_result_preserve_metadata_in_failure_artifact(mon
     repository.role_assignments.read_role_assignment.return_value = {}
     supervisor = SimpleNamespace(process_shell=shell)
     execution = WorkerExecution(MagicMock(), None, None, repository, MagicMock(), supervisor, None, MagicMock())
-    command = SimpleNamespace(fencing_token=1, invocation_id="i", lease_resource="l", snapshot=MagicMock())
+    command = SimpleNamespace(effect={"effect_key": "diagnostic-effect"}, fencing_token=1, invocation_id="i", lease_resource="l", snapshot=MagicMock())
     admission = SimpleNamespace(assignment_lease=SimpleNamespace(fencing_token=1),
-                                assignment_lease_resource="a", attempt={"attempt_id": "a"})
+                                assignment_lease_resource="a", attempt={"assignment_id": "assignment-a", "attempt_id": "a"})
     publication = SimpleNamespace(argv=[], env={}, pack=SimpleNamespace(workspace={}))
     exited = asyncio.run(execution.execute(command, admission, publication,
                                             SimpleNamespace(role="coder", run_id="r")))
@@ -243,10 +243,10 @@ def test_nonzero_cleanup_preserves_terminal_policy_and_diagnostics(
         MagicMock(), None, None, repository, MagicMock(),
         SimpleNamespace(process_shell=shell), None, MagicMock(),
     )
-    command = SimpleNamespace(fencing_token=1, invocation_id="i", lease_resource="l", snapshot=MagicMock())
+    command = SimpleNamespace(effect={"effect_key": "diagnostic-effect"}, fencing_token=1, invocation_id="i", lease_resource="l", snapshot=MagicMock())
     admission = SimpleNamespace(
         assignment_lease=SimpleNamespace(fencing_token=1),
-        assignment_lease_resource="a", attempt={"attempt_id": "a"},
+        assignment_lease_resource="a", attempt={"assignment_id": "assignment-a", "attempt_id": "a"},
     )
     publication = SimpleNamespace(argv=[], env={}, pack=SimpleNamespace(workspace={}))
     exited = asyncio.run(execution.execute(

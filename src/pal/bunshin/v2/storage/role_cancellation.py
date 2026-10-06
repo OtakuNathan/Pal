@@ -24,6 +24,7 @@ class RoleCancellationStore:
         aggregate_id: str,
         reason: str,
         exclude_assignment_id: str = "",
+        assignment_ids: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Terminate nonterminal invocations bound to one aggregate.
 
@@ -31,6 +32,8 @@ class RoleCancellationStore:
         session remains resumable unless the caller separately closes it.
         """
 
+        if assignment_ids is not None and not assignment_ids:
+            return ()
         aggregate_type_value = (
             aggregate_type.value
             if isinstance(aggregate_type, AggregateType)
@@ -61,6 +64,9 @@ class RoleCancellationStore:
                     *cancellable_states,
                 ),
             ).fetchall()
+            if assignment_ids is not None:
+                exact_ids = frozenset(str(item) for item in assignment_ids)
+                rows = [row for row in rows if str(row["assignment_id"]) in exact_ids]
             now = utc_now()
             for assignment in rows:
                 if str(assignment["state"]) == RoleAssignmentState.RESULT_RECORDED.value:

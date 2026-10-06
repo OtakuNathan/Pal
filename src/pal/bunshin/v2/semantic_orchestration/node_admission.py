@@ -4,7 +4,7 @@ from pal.bunshin.v2.semantic_orchestration.role_inputs import _node_role_session
 import hashlib
 from dataclasses import dataclass
 from typing import Any, Mapping
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken
+from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken
 from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot
 from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.v2.repository import BunshinV2Repository
@@ -118,6 +118,10 @@ class NodeAdmission:
                     )
                 )
             return {"status": "suppressed_by_replan"}
+        execution = self.repository.cycles.read_graph_execution(workflow_id=node.workflow_id)
+        name = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
+        if execution is not None and name in execution.pending_scope:
+            raise DeferredEffectError("pending dependency repair fences role admission")
         implementation = activation.role == OrchestrationRole.IMPLEMENTATION
         target_state = {
             "START_PRODUCING": "PRODUCING",
@@ -203,10 +207,10 @@ class NodeAdmission:
             or ""
         )
         coordinator = WorkflowCoordinator(self.repository)
-        cycle = coordinator.execution(
-            workflow_id=node.workflow_id,
-            unit_of_work=unit_of_work,
-        ).cycles[module_name]
+        execution = coordinator.execution(workflow_id=node.workflow_id, unit_of_work=unit_of_work)
+        if module_name in execution.pending_scope:
+            raise DeferredEffectError("pending dependency repair fences role admission")
+        cycle = execution.cycles[module_name]
         coordinator.start_assignment(
             workflow_id=node.workflow_id,
             node_name=module_name,

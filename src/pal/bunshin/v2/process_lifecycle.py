@@ -42,10 +42,19 @@ class WorkerProcessOwner:
     on_registered: WorkerOwnerCallback
     on_unregistered: WorkerOwnerCallback
     heartbeat_factories: tuple[WorkerHeartbeatFactory, ...] = ()
+    effect_key: str = ""
+    assignment_id: str = ""
+    attempt_id: str = ""
+    business_lease_resource_key: str = ""
+    business_fencing_token: int = 0
+    on_reserved: WorkerOwnerCallback | None = None
     reap_timeout_seconds: float = 5.0
     memory_read_lease_factory: Callable[[], contextlib.AbstractContextManager[None]] | None = None
     _memory_read_lease: contextlib.AbstractContextManager[None] | None = field(default=None, init=False, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, init=False, repr=False)
+    _spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = field(default=None, init=False, repr=False)
+    _spawn_adopted: bool = field(default=False, init=False)
+    _closing: bool = field(default=False, init=False)
     lock_path: Path | None = field(default=None, init=False)
     stderr: bytes = field(default=b"", init=False)
     process_group_reaped: bool = field(default=False, init=False)
@@ -110,9 +119,12 @@ class WorkerProcessOwner:
             yield line
 
     async def __aenter__(self) -> "WorkerProcessOwner":
-        if self._closed or self._process is not None:
+        if self._closed or self._process is not None or self._spawn_task is not None:
             raise RuntimeError("worker process owner cannot be entered twice")
         try:
+            if self.on_reserved is not None:
+                self._registered = True
+                self.on_reserved(self)
             if self.workspace is not None:
                 self.lock_path = self.workspace_locks.acquire(
                     self.lock_key,
@@ -122,24 +134,21 @@ class WorkerProcessOwner:
                 lease = self.memory_read_lease_factory()
                 lease.__enter__()
                 self._memory_read_lease = lease
-            process = await asyncio.create_subprocess_exec(
+            # Keep the spawn future owned even when cancellation arrives before
+            # asyncio returns the child object. Cleanup joins it and adopts/reaps
+            # the child before releasing workspace or process capacity.
+            self._spawn_task = asyncio.create_task(asyncio.create_subprocess_exec(
                 *self.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
                 env=dict(self.env),
                 start_new_session=True,
-            )
-            self._process = process
-            self._stdin = process.stdin
-            self._stdout = process.stdout
-            # Preserve the reap witness even when a startup callback fails.
-            self._leader_exit_task = asyncio.create_task(
-                self._reap_after_leader_exit(process),
-                name=f"bunshin-worker-owner-{self.invocation_id}",
-            )
-            if process.stderr is not None:
-                self._stderr_task = asyncio.create_task(process.stderr.read())
+            ))
+            process = await asyncio.shield(self._spawn_task)
+            self._adopt_spawned_process(process)
+            if self._closing:
+                raise WorkerProcessReapError("worker was retired during process startup")
             self.on_started(self)
             # Mark registration before invoking the callback so a partially
             # completed callback is always paired with an unregister attempt.
@@ -157,15 +166,33 @@ class WorkerProcessOwner:
     async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
         await self._close_shielded()
 
+    def _adopt_spawned_process(self, process: asyncio.subprocess.Process) -> None:
+        if self._spawn_adopted:
+            return
+        self._spawn_adopted = True
+        self._process = process
+        self._stdin = process.stdin
+        self._stdout = process.stdout
+        self._leader_exit_task = asyncio.create_task(
+            self._reap_after_leader_exit(process),
+            name=f"bunshin-worker-owner-{self.invocation_id}",
+        )
+        if process.stderr is not None:
+            self._stderr_task = asyncio.create_task(process.stderr.read())
+
     async def _close_shielded(self) -> None:
         close_task = asyncio.create_task(self.close())
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError:
-            # Process cleanup is a cancellation boundary.  Preserve the
-            # caller's cancellation only after the owned resources are closed.
-            await close_task
-            raise
+        cancelled = False
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                # Repeated cancellation must not detach the only spawn/reap
+                # owner and falsely advertise that this task is quiescent.
+                cancelled = True
+        close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _reap_after_leader_exit(
         self,
@@ -187,6 +214,17 @@ class WorkerProcessOwner:
         async with self._close_lock:
             if self._closed:
                 return
+            self._closing = True
+            if self._spawn_task is not None and not self._spawn_adopted:
+                try:
+                    spawned = await asyncio.shield(self._spawn_task)
+                except Exception:
+                    # A failed native spawn produced no child. If it produced
+                    # one, its successful result must be reaped below.
+                    if not self._spawn_task.done():
+                        raise
+                else:
+                    self._adopt_spawned_process(spawned)
             process = self._process
             # Withdraw the only published authority before signalling.  The
             # local reference below exists solely to issue one terminal signal

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pal.foundation import utc_now
 from pal.bunshin.v2.cycle_protocol import NodeCycle, PlanCycle, node_cycle_from_mapping, plan_cycle_from_mapping
 from pal.bunshin.v2.graph_executor import GraphExecution
+from pal.bunshin.v2.dependency_repair_protocol import DependencyRepairLedger
 from pal.bunshin.v2.graph_protocol import GraphIR, graph_ir_from_mapping
 from pal.bunshin.v2.storage.connection_contracts import DatabasePort
 
@@ -245,7 +246,7 @@ class CyclesStore:
         transaction = self.database.write_connection() if _connection is None else nullcontext(_connection)
         with transaction as connection:
             graph_row = connection.execute(
-                "SELECT workflow_id, generation_hash "
+                "SELECT workflow_id, generation_hash, execution_json "
                 "FROM bunshin_v2_graph_generations "
                 "WHERE graph_id = ? AND generation = ?",
                 (execution.graph.graph_id, execution.graph.generation),
@@ -258,6 +259,14 @@ class CyclesStore:
                 != execution.graph.generation_hash
             ):
                 raise ValueError("GraphExecution is bound to another workflow generation")
+            previous_runtime = json.loads(str(graph_row["execution_json"] or "{}"))
+            if not isinstance(previous_runtime, dict):
+                raise ValueError("graph execution metadata must be an object")
+            if "dependency_repairs" in previous_runtime and previous_runtime["dependency_repairs"] is None:
+                raise ValueError("dependency repair section cannot be null")
+            DependencyRepairLedger.from_mapping(
+                previous_runtime.get("dependency_repairs"),
+            ).assert_successor(execution.dependency_repairs)
             for cycle in execution.cycles.values():
                 payload = _cycle_payload(cycle)
                 connection.execute(
@@ -298,6 +307,7 @@ class CyclesStore:
                                 name: list(providers)
                                 for name, providers in execution.repair_barriers.items()
                             },
+                            "dependency_repairs": execution.dependency_repairs.to_dict(),
                         }
                     ),
                     execution.graph.graph_id,
@@ -316,38 +326,56 @@ class CyclesStore:
             self.database.ensure_schema()
         connection_scope = self.database.read_connection() if _connection is None else nullcontext(_connection)
         with connection_scope as connection:
-            if generation is None:
-                row = connection.execute(
-                    "SELECT graph_ir_json, status, execution_json "
-                    "FROM bunshin_v2_graph_generations "
-                    "WHERE workflow_id = ? ORDER BY generation DESC LIMIT 1",
-                    (workflow_id,),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT graph_ir_json, status, execution_json "
-                    "FROM bunshin_v2_graph_generations "
-                    "WHERE workflow_id = ? AND generation = ?",
-                    (workflow_id, int(generation)),
-                ).fetchone()
-        if row is None:
-            return None
-        graph = graph_ir_from_mapping(json.loads(str(row["graph_ir_json"])))
-        cycles = self.read_node_cycles(
-            workflow_id=workflow_id,
-            graph_generation=graph.generation,
-            _connection=_connection,
-        )
+            # Execution metadata and cycle projections are one read snapshot.
+            # A caller-owned write transaction is borrowed without committing
+            # it; plain readers own only this short read transaction.
+            owns_read = not connection.in_transaction
+            if owns_read:
+                connection.execute("BEGIN")
+            try:
+                if generation is None:
+                    row = connection.execute(
+                        "SELECT graph_ir_json, status, execution_json "
+                        "FROM bunshin_v2_graph_generations "
+                        "WHERE workflow_id = ? ORDER BY generation DESC LIMIT 1",
+                        (workflow_id,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        "SELECT graph_ir_json, status, execution_json "
+                        "FROM bunshin_v2_graph_generations "
+                        "WHERE workflow_id = ? AND generation = ?",
+                        (workflow_id, int(generation)),
+                    ).fetchone()
+                if row is None:
+                    return None
+                graph = graph_ir_from_mapping(json.loads(str(row["graph_ir_json"])))
+                cycles = self.read_node_cycles(
+                    workflow_id=workflow_id, graph_generation=graph.generation,
+                    _connection=connection,
+                )
+            finally:
+                if owns_read:
+                    connection.rollback()
         if not cycles:
             return None
         from pal.bunshin.v2.graph_executor import GraphExecutionState
 
         runtime = json.loads(str(row["execution_json"] or "{}"))
+        if not isinstance(runtime, dict):
+            raise ValueError("graph execution metadata must be an object")
+        if "dependency_repairs" in runtime and runtime["dependency_repairs"] is None:
+            raise ValueError("dependency repair section cannot be null")
+        repairs = DependencyRepairLedger.from_mapping(runtime.get("dependency_repairs"))
         raw_status = str(
             runtime.get("state") or row["status"] or ""
         ).upper()
         state = (
-            GraphExecutionState.COMPLETED
+            GraphExecutionState(raw_status)
+            if raw_status in {GraphExecutionState.CANCELLED.value, GraphExecutionState.REPLAN_REQUIRED.value}
+            else GraphExecutionState.RUNNING
+            if repairs.pending is not None
+            else GraphExecutionState.COMPLETED
             if cycles[graph.sink].state.value == "ACCEPTED"
             and all(cycle.state.value == "ACCEPTED" for cycle in cycles.values())
             else GraphExecutionState(raw_status)
@@ -359,7 +387,7 @@ class CyclesStore:
             state=state,
             cycles=cycles,
             published_sink_ref=(
-                str(runtime.get("published_sink_ref") or "")
+                "" if repairs.pending is not None else str(runtime.get("published_sink_ref") or "")
                 or (
                     cycles[graph.sink].accepted_product_ref
                     if state == GraphExecutionState.COMPLETED
@@ -372,4 +400,5 @@ class CyclesStore:
                     runtime.get("repair_barriers") or {}
                 ).items()
             },
+            dependency_repairs=repairs,
         )

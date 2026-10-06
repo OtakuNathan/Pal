@@ -21,6 +21,9 @@ class BackgroundAssignments:
     _ready: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
     _assignments: dict[str, str] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
+    _retired: set[str] = field(default_factory=set, init=False)
+    _lease_identities: dict[str, tuple[str, str, int]] = field(default_factory=dict, init=False)
+    _retiring: dict[str, asyncio.Task[Effect]] = field(default_factory=dict, init=False)
 
     @property
     def stopping(self) -> bool:
@@ -42,7 +45,54 @@ class BackgroundAssignments:
     def assignment_id(self, effect_key: str, default: str = '') -> str:
         return self._assignments.get(effect_key, default)
 
+    def assert_not_retired(self, effect_key: str) -> None:
+        if effect_key in self._retired:
+            raise DeferredEffectError("role effect incarnation has been retired")
+
+    def bind_lease(self, effect_key: str, owner: str, resource: str, token: int) -> None:
+        self.assert_not_retired(effect_key)
+        self._lease_identities[effect_key] = (owner, resource, token)
+
+    async def retire(
+        self, effect_key: str, *, lease_identity: tuple[str, str, int] | None = None,
+    ) -> str:
+        """Fence, cancel and join the exact effect, including pre-row setup.
+
+        The retired key remains fenced for this manager's lifetime. Persistent
+        aggregate/admission fences cover recovery into a different manager.
+        """
+        if not effect_key:
+            raise ValueError("retiring an assignment requires its immutable effect key")
+        bound_lease = self._lease_identities.get(effect_key)
+        if lease_identity is not None and bound_lease is not None and bound_lease != lease_identity:
+            return ""
+        self._retired.add(effect_key)
+        task = self._retiring.get(effect_key) or self._tasks.get(effect_key)
+        if task is asyncio.current_task():
+            raise RuntimeError("an assignment cannot acknowledge its own retirement")
+        if task is not None:
+            self._retiring[effect_key] = task
+            if not task.done():
+                task.cancel()
+            # Caller cancellation must not cancel the joined task a second time
+            # or detach its spawn cleanup. A failed cleanup remains retryable.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not task.done():
+                        continue
+                except Exception:
+                    if not task.done():
+                        raise
+                    break
+            self._retiring.pop(effect_key, None)
+            if not task.cancelled():
+                task.result()
+        return self.assignment_id(effect_key)
+
     def bind(self, effect_key: str, assignment_id: str) -> None:
+        self.assert_not_retired(effect_key)
         self._assignments[effect_key] = assignment_id
 
     def signal_ready(self, effect: Effect, assignment_id: str) -> None:
@@ -55,10 +105,22 @@ class BackgroundAssignments:
             event.set()
 
     def track(self, effect_key: str, task: asyncio.Task[Effect]) -> None:
+        if effect_key in self._retired:
+            task.cancel()
+            raise DeferredEffectError("role effect incarnation has been retired")
+        previous = self._tasks.get(effect_key)
+        if previous is not None and previous is not task and not previous.done():
+            task.cancel()
+            raise DeferredEffectError("role effect already has an owned execution task")
+        if previous is not task:
+            self._lease_identities.pop(effect_key, None)
         self._tasks[effect_key] = task
         task.add_done_callback(lambda done: self._done(effect_key, done))
 
     def recover(self, effect_key: str, assignment_id: str, task: asyncio.Task[Effect]) -> None:
+        if effect_key in self._retired:
+            task.cancel()
+            return
         self.bind(effect_key, assignment_id)
         ready = asyncio.Event()
         ready.set()
@@ -95,12 +157,20 @@ class BackgroundAssignments:
         effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "").strip()
         if not effect_key:
             raise ValueError("background worker effect requires an effect key")
+        self.assert_not_retired(effect_key)
         existing = self._tasks.get(effect_key)
         if existing is not None and not existing.done():
             return {
                 "provider_request_id": self._assignments.get(effect_key, effect_key),
                 "status": "already_running",
             }
+        self._lease_identities.pop(effect_key, None)
+        causal = dict(dict(effect.get("payload") or {}).get("_causal_context") or {})
+        resource = str(causal.get("lease_resource_key") or "")
+        owner = str(causal.get("active_worker_id") or "")
+        token = int(causal.get("fencing_token") or 0)
+        if resource and owner and token:
+            self.bind_lease(effect_key, owner, resource, token)
         ready = asyncio.Event()
         self._ready[effect_key] = ready
         task = asyncio.create_task(

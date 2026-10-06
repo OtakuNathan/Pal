@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -87,6 +88,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             ("CREATE_NODE_RUN", {
                 "unit_contract_ref": self.candidate.to_dict(), "epoch_id": "epoch",
                 "module_name": "router", "role_session_generation": 3,
+                "graph_generation": 1,
                 "execution_adapter": "software_git.v2",
                 "architecture_review_generation": 17, "candidate_cycle": 2,
                 "failure_history": [{"finding_fingerprint": "historical"}],
@@ -99,13 +101,14 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             ("CANDIDATE_SNAPSHOTTED", {"candidate_ref": self.candidate.to_dict(),
                                       "candidate_digest": "candidate-digest", "workspace_fingerprint": "candidate-tree"}),
             ("VERIFICATION_DEPENDENCIES_ACCEPTED", {"accepted_dependency_node_ids": [], "epoch_frozen": False}),
-            ("START_REVIEW", {"fencing_token": 2}),
-            ("SUBMIT_SEMANTIC_VERIFICATION", {"pending_verification_ref": self.pending.to_dict()}),
-            ("VERIFIER_QUIESCED", {"fencing_token": 2, "process_group_reaped": True,
-                                  "exclusive_workspace_lock": True, "workspace_fingerprint": "review-tree",
-                                  "workspace_lock_path": "/old/review.lock"}),
         ):
             self.dispatch(action, payload)
+        # Role setup belongs to a live admitted verifier, before its submitted
+        # receipt moves the aggregate through quiescing and snapshotting.
+        owner = _node_role_session_id(self.node(), VERIFIER)
+        lease = self.repository.leases.claim_lease("node:node-router:review", owner, ttl_seconds=120)
+        self.dispatch("START_REVIEW", {"active_worker_id": owner, "lease_resource_key": lease.resource_key,
+                                       "fencing_token": lease.fencing_token})
 
     def node(self):
         return self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "node-router")
@@ -123,11 +126,24 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value, "aggregate_id": "node-router"}
 
     def block_unknown(self):
+        self.finish_review()
         self.coordinator.require_node_triage(workflow_id="wf-unknown", node_name="router")
         return VerificationService(self.repository, self.service.artifacts).submit_verdict(
             node=self.node(), verification_ref=self.report, status=VerificationStatus.UNKNOWN,
             actor="verifier",
         )
+
+    def finish_review(self, receipt_binding=None):
+        if self.node().state == "REVIEWING":
+            self.dispatch("SUBMIT_SEMANTIC_VERIFICATION", {
+                "pending_verification_ref": self.pending.to_dict(), **(receipt_binding or {}),
+            })
+        if self.node().state == "REVIEW_QUIESCING":
+            self.dispatch("VERIFIER_QUIESCED", {
+                "fencing_token": self.node().payload["fencing_token"], "process_group_reaped": True,
+                "exclusive_workspace_lock": True, "workspace_fingerprint": "review-tree",
+                "workspace_lock_path": "/old/review.lock",
+            })
 
     def resolve(self):
         return self.service.resolve_triage(
@@ -136,9 +152,12 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
         )
 
     async def prepare(self, node, key):
+        resource = str(node.payload.get("lease_resource_key") or "node:node-router:review")
+        lease = self.repository.leases.read_lease(resource)
+        self.assertIsNotNone(lease)
         command = RoleAttemptRequest(
             effect=self.effect(key), snapshot=node, invocation_id=_node_role_session_id(node, VERIFIER),
-            lease_resource="node:node-router:review", fencing_token=2,
+            lease_resource=resource, fencing_token=int(node.payload.get("fencing_token") or lease["fencing_token"]),
             profile="software_engineering.v2_verifier", activation=VERIFIER,
             instruction="Verify this candidate", reference_refs={}, workspace_override=None,
             prepare_workspace=False,
@@ -227,6 +246,12 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
                     "SELECT effect_type FROM bunshin_v2_outbox WHERE effect_id = ?", (effect_id,),
                 ).fetchone()[0] for effect_id in result.outbox_effect_ids]
             self.assertEqual(effects, ["quiesce_role_for_triage"])
+            with self.repository.database.read_connection() as connection:
+                cleanup_effect = dict(connection.execute(
+                    "SELECT * FROM bunshin_v2_outbox WHERE effect_id = ?", (result.outbox_effect_ids[0],),
+                ).fetchone())
+            cleanup_effect["payload"] = json.loads(cleanup_effect.pop("payload_json"))
+            await self.worker.execute_semantic_effect(cleanup_effect)
             self.assertEqual(await self.worker.components.node_control.resume_node(self.effect("no-auto-retry")), {})
             self.assertNotIn("verifier_evaluation_generation", self.node().payload)
             # The old receipt really is reusable until the operator starts a
@@ -321,6 +346,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             "role_assignment_id": pending["role_assignment_id"],
             "role_submission_payload_hash": pending["role_submission_payload_hash"],
         }
+        self.finish_review(receipt_binding)
         original = replace(self.node(), payload={
             **receipt_binding,
             **self.node().payload, "pending_verification_ref": self.pending.to_dict(),

@@ -16,6 +16,14 @@ from pal.bunshin.v2.cycle_protocol import (
     NodeCycleState,
 )
 from pal.bunshin.v2.graph_protocol import EdgeKind, GraphIR
+from pal.bunshin.v2.dependency_repair_protocol import (
+    DependencyRepairCohort,
+    DependencyRepairDeferred,
+    DependencyRepairLedger,
+    RepairClosure,
+    RepairIncarnation,
+    RepairIntent,
+)
 
 
 class GraphExecutionState(StrEnum):
@@ -87,6 +95,7 @@ class GraphExecution:
     cycles: Mapping[str, NodeCycle]
     published_sink_ref: str = ""
     repair_barriers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    dependency_repairs: DependencyRepairLedger = field(default_factory=DependencyRepairLedger)
 
     def __post_init__(self) -> None:
         if set(self.cycles) != set(self.graph.nodes):
@@ -109,6 +118,47 @@ class GraphExecution:
             "repair_barriers",
             MappingProxyType(barriers),
         )
+        for cohort in (*self.dependency_repairs.history,
+                       *((self.dependency_repairs.pending,) if self.dependency_repairs.pending else ())):
+            if set(cohort.scope) - set(self.graph.nodes):
+                raise ValueError("dependency repair scope contains unknown graph nodes")
+            expected_scope: set[str] = set()
+            by_node = {item.node_name: item for item in cohort.frontier.values()}
+            for intent in cohort.intents.values():
+                if (intent.graph_id, intent.generation, intent.generation_hash) != (
+                    self.graph.graph_id, self.graph.generation, self.graph.generation_hash,
+                ):
+                    raise ValueError("dependency repair belongs to another graph generation")
+                eligible = set(self.graph.checker_predecessors(intent.source_node))
+                if any(name not in eligible
+                       or self.graph.nodes[name].producer_binding.participant != "profile"
+                       or self.graph.nodes[name].execution_adapter != "software_git.v2"
+                       for name in intent.provider_nodes):
+                    raise ValueError("stored dependency repair has an ineligible provider")
+                for provider in intent.provider_nodes:
+                    expected_scope.add(provider)
+                    expected_scope.update(self._dependency_consumers(intent.source_node, provider))
+                source = by_node.get(intent.source_node)
+                if (source is None or source.cycle_id != intent.source_cycle_id
+                        or source.aggregate_id != intent.source_aggregate_id
+                        or source.role_assignment_id != intent.source_assignment_id
+                        or source.input_fingerprint != intent.source_input_fingerprint
+                        or source.fencing_token != intent.source_fencing_token
+                        or source.slot != CycleSlot.CHECKER.value):
+                    raise ValueError("stored repair source does not match its frozen receipt")
+            if set(cohort.scope) != expected_scope:
+                raise ValueError("stored dependency repair scope omits its actual closure")
+        if self.dependency_repairs.pending:
+            if self.state in {GraphExecutionState.CANCELLED, GraphExecutionState.REPLAN_REQUIRED}:
+                object.__setattr__(self, "dependency_repairs", self.dependency_repairs.archive(
+                    status="superseded", reason=self.state.value,
+                ))
+            elif self.state == GraphExecutionState.COMPLETED or self.published_sink_ref:
+                raise ValueError("pending dependency repair forbids terminal publication")
+
+    @property
+    def pending_scope(self) -> frozenset[str]:
+        return self.dependency_repairs.fenced_nodes
 
     @classmethod
     def start(cls, graph: GraphIR) -> "GraphExecution":
@@ -136,6 +186,8 @@ class GraphExecution:
             return ()
         ready: list[str] = []
         for name, cycle in self.cycles.items():
+            if name in self.pending_scope:
+                continue
             if cycle.state not in {
                 NodeCycleState.PRODUCER_READY,
                 NodeCycleState.REPAIR_READY,
@@ -160,6 +212,13 @@ class GraphExecution:
     def with_cycle(self, cycle: NodeCycle) -> "GraphExecution":
         if cycle.node_name not in self.cycles:
             raise ValueError(f"unknown graph node: {cycle.node_name}")
+        previous = self.cycles[cycle.node_name]
+        if cycle.node_name in self.pending_scope and cycle != previous:
+            if (cycle.state in {NodeCycleState.ACCEPTED, NodeCycleState.CHECKER_READY,
+                               NodeCycleState.REPAIR_READY, NodeCycleState.PRODUCER_READY}
+                    or (cycle.active_assignment is not None
+                        and cycle.active_assignment != previous.active_assignment)):
+                raise ValueError("pending dependency repair fences this graph admission or verdict")
         cycles = dict(self.cycles)
         cycles[cycle.node_name] = cycle
         result = replace(self, cycles=cycles)
@@ -241,9 +300,193 @@ class GraphExecution:
     ) -> set[str]:
         return {
             current_node,
-            *self.graph.semantic_descendants(current_node),
-            *self.graph.semantic_descendants(provider),
+            *self.graph.repair_descendants(current_node),
+            *self.graph.repair_descendants(provider),
         } - {provider}
+
+    def register_dependency_repair(
+        self, intent: RepairIntent, *, frontier: tuple[RepairIncarnation, ...] = (),
+    ) -> "GraphExecution":
+        """Freeze an actual scope and join eligible reports before any repair.
+
+        The caller supplies every admitted runtime/setup owner in the newly
+        affected scope under the admission write lock. A logical CHECKING
+        source is kept intact until its exact closure proof arrives.
+        """
+        previous = self.dependency_repairs.find_intent(intent.key)
+        if previous is not None:
+            if previous != intent:
+                raise ValueError("repair intent identity is already bound to changed content")
+            return self
+        if self.state != GraphExecutionState.RUNNING:
+            raise ValueError("dependency repair cannot register in a terminal graph")
+        if (intent.graph_id, intent.generation, intent.generation_hash) != (
+            self.graph.graph_id, self.graph.generation, self.graph.generation_hash,
+        ):
+            raise ValueError("dependency repair intent belongs to another graph generation")
+        if intent.source_node not in self.cycles:
+            raise ValueError("dependency repair source is not a graph node")
+        source = self.cycles[intent.source_node]
+        if (source.cycle_id != intent.source_cycle_id or source.generation != intent.generation
+                or source.product_ref != intent.source_product_ref):
+            raise ValueError("dependency repair source candidate or cycle identity changed")
+        eligible = set(self.graph.checker_predecessors(intent.source_node))
+        if any(name not in eligible or self.graph.nodes[name].producer_binding.participant != "profile"
+               or self.graph.nodes[name].execution_adapter != "software_git.v2"
+               for name in intent.provider_nodes):
+            raise ValueError("dependency repair requires a software-produced checker execution provider")
+        scope = set(intent.provider_nodes)
+        for provider in intent.provider_nodes:
+            scope.update(self._dependency_consumers(intent.source_node, provider))
+        pending = self.dependency_repairs.pending
+        if pending is not None:
+            if (intent.source_node not in pending.scope
+                    and not ((scope & set(pending.scope)) - {self.graph.sink})):
+                raise DependencyRepairDeferred("independent outside-scope report requires a later cohort")
+            if any(item.key not in pending.frontier and item.node_name in pending.scope
+                   for item in frontier):
+                raise ValueError("repair frontier was already frozen for this node")
+            pending = replace(pending, intents={**pending.intents, intent.key: intent},
+                              scope=tuple(sorted(scope | set(pending.scope))))
+        else:
+            pending = DependencyRepairCohort(intents={intent.key: intent}, scope=tuple(sorted(scope)))
+        pending = pending.with_frontier(frontier)
+        self._validate_repair_frontier(pending)
+        sources = [item for item in pending.frontier.values() if item.node_name == intent.source_node]
+        if len(sources) != 1 or (
+            sources[0].cycle_id != intent.source_cycle_id
+            or sources[0].aggregate_id != intent.source_aggregate_id
+            or sources[0].role_assignment_id != intent.source_assignment_id
+            or sources[0].input_fingerprint != intent.source_input_fingerprint
+            or sources[0].fencing_token != intent.source_fencing_token
+            or sources[0].slot != CycleSlot.CHECKER.value
+        ):
+            raise ValueError("repair source receipt does not match its frozen incarnation")
+        if source.active_assignment is None and sources[0].key not in pending.closures:
+            raise ValueError("repair source has no admitted checker or exact closed receipt")
+        cycles = dict(self.cycles)
+        for item in pending.frontier.values():
+            cycle = cycles[item.node_name]
+            if item.key in pending.closures or item.node_name == intent.source_node:
+                continue
+            if cycle.state != NodeCycleState.CANCEL_REQUESTED:
+                cycles[item.node_name] = cycle.transition(CycleAction.REQUEST_STALE)
+            elif cycle.resume_state != NodeCycleState.STALE:
+                raise ValueError("terminal user cancellation dominates dependency repair")
+        return replace(self, cycles=cycles, published_sink_ref="",
+                       dependency_repairs=replace(self.dependency_repairs, pending=pending))
+
+    def _validate_repair_frontier(self, pending: DependencyRepairCohort) -> None:
+        by_node = {item.node_name: item for item in pending.frontier.values()}
+        for name in pending.scope:
+            cycle = self.cycles[name]
+            item = by_node.get(name)
+            if (cycle.active_assignment is not None or not cycle.is_quiescent) and item is None:
+                raise ValueError(f"repair frontier omitted admitted node {name}")
+            if item is None:
+                continue
+            if item.cycle_id != cycle.cycle_id or item.generation != cycle.generation:
+                raise ValueError("repair frontier belongs to another cycle incarnation")
+            if item.key in pending.closures:
+                if cycle.state != NodeCycleState.STALE:
+                    raise ValueError("closed repair incarnation was replaced")
+            elif cycle.active_assignment is not None and (
+                cycle.active_assignment.input_fingerprint != item.input_fingerprint
+                or cycle.active_assignment.slot.value != item.slot
+            ):
+                raise ValueError("repair frontier does not match the admitted graph assignment")
+            elif cycle.state == NodeCycleState.CANCELLED:
+                raise ValueError("terminal user cancellation dominates dependency repair")
+
+    def update_dependency_repair_frontier(
+        self, frontier: tuple[RepairIncarnation, ...],
+    ) -> "GraphExecution":
+        pending = self._pending_dependency_repair()
+        if any(item.key not in pending.frontier for item in frontier):
+            raise ValueError("repair frontier cannot admit another incarnation after freeze")
+        updated = pending.with_frontier(frontier)
+        # Updating binds ownership discovered while retiring an already
+        # admitted setup. Scope expansion is only allowed by registration.
+        self._validate_repair_frontier(updated)
+        return replace(self, dependency_repairs=replace(self.dependency_repairs, pending=updated))
+
+    def capture_dependency_repair(
+        self, incarnation_key: str, *, receipt_refs: tuple[Mapping[str, Any], ...] = (),
+    ) -> "GraphExecution":
+        pending = self._pending_dependency_repair().capture(incarnation_key, receipt_refs)
+        return replace(self, dependency_repairs=replace(self.dependency_repairs, pending=pending))
+
+    def close_dependency_repair(self, proof: RepairClosure) -> "GraphExecution":
+        pending = self._pending_dependency_repair()
+        self._validate_repair_frontier(pending)
+        updated = pending.close(proof)
+        if proof.incarnation.key in pending.closures:
+            return self
+        cycle = self.cycles[proof.incarnation.node_name]
+        if cycle.state != NodeCycleState.CANCEL_REQUESTED:
+            cycle = cycle.transition(CycleAction.REQUEST_STALE)
+        cycle = cycle.transition(CycleAction.STALE_CONFIRMED, assignment=cycle.active_assignment)
+        return replace(self, cycles={**self.cycles, cycle.node_name: cycle},
+                       dependency_repairs=replace(self.dependency_repairs, pending=updated))
+
+    def _pending_dependency_repair(self) -> DependencyRepairCohort:
+        if self.state != GraphExecutionState.RUNNING or self.dependency_repairs.pending is None:
+            raise ValueError("dependency repair requires a current pending cohort")
+        return self.dependency_repairs.pending
+
+    def apply_dependency_repair(
+        self, *, cohort_key: str,
+    ) -> tuple["GraphExecution", FindingRoute | None]:
+        """Seal the re-read component and release its repairs atomically."""
+        for item in self.dependency_repairs.history:
+            if item.key == cohort_key:
+                if item.status == "applied":
+                    return self, None
+                raise ValueError("superseded dependency repair cannot apply")
+        pending = self._pending_dependency_repair()
+        if pending.key != cohort_key:
+            raise ValueError("dependency repair component changed before seal")
+        self._validate_repair_frontier(pending)
+        if not pending.ready:
+            raise ValueError("dependency repair frontier has not been captured and closed")
+        for intent in pending.intents.values():
+            member = next(item for item in pending.frontier.values() if item.node_name == intent.source_node)
+            if intent.packet_sha256 not in {ref["sha256"] for ref in pending.captures.get(member.key, ())}:
+                raise ValueError("dependency repair source packet has not been captured")
+        providers = pending.providers
+        consumers = tuple(sorted(set(pending.scope) - set(providers)))
+        cycles = dict(self.cycles)
+        for name in providers:
+            cycles[name] = _repair_ready(cycles[name])
+            refs = tuple(sorted({intent.packet_sha256 for intent in pending.intents.values()
+                                 if name in intent.provider_nodes}))
+            cycles[name] = replace(cycles[name], last_verdict=CycleVerdict(
+                accepted=False, generation=cycles[name].generation, finding_refs=refs,
+            ))
+        # No readiness refresh is allowed between provider and consumer writes.
+        result = replace(self, cycles=cycles)._mark_nodes_stale(consumers)
+        barriers = {name: values for name, values in self.repair_barriers.items()
+                    if name not in providers}
+        for provider in providers:
+            affected = set(self.graph.repair_descendants(provider))
+            for consumer in consumers:
+                if consumer in affected:
+                    barriers[consumer] = tuple(sorted({*barriers.get(consumer, ()), provider}))
+        result = replace(result, repair_barriers=barriers, published_sink_ref="",
+                         dependency_repairs=self.dependency_repairs.archive(status="applied"))
+        route = FindingRoute(target=RouteTarget.NODE_PRODUCER, node_name=providers[0],
+                             node_names=providers, assignment_kind=AssignmentKind.REPAIR,
+                             stale_nodes=consumers)
+        return result, route
+
+    def supersede_dependency_repairs(self, reason: str) -> "GraphExecution":
+        if not reason:
+            raise ValueError("superseding dependency repair requires a reason")
+        if self.state not in {GraphExecutionState.CANCELLED, GraphExecutionState.REPLAN_REQUIRED}:
+            raise ValueError("supersession requires terminal cancellation or replan admission fence")
+        return replace(self, dependency_repairs=self.dependency_repairs.archive(
+            status="superseded", reason=reason,
+        ))
 
     def apply_checker_verdict(
         self,
@@ -264,6 +507,8 @@ class GraphExecution:
         """
 
         cycle = self.cycles[current_node]
+        if current_node in self.pending_scope:
+            raise ValueError("pending dependency repair captures verdicts without publishing them")
         verdict = CycleVerdict(
             accepted=accepted,
             generation=cycle.generation,
@@ -378,7 +623,7 @@ class GraphExecution:
                         cycle.last_verdict if name == preserve_verdict_node else None
                     ),
                 )
-            elif allow_active and cycle.is_running:
+            elif allow_active and (cycle.is_running or cycle.active_assignment is not None):
                 # REPLAN_REQUIRED closes graph admission immediately. The
                 # process owner then quiesces/reaps this incarnation; the next
                 # GraphIR generation creates the replacement cycle. Never
@@ -392,11 +637,15 @@ class GraphExecution:
         return replace(self, cycles=cycles)
 
     def _refresh_readiness_and_terminal(self) -> "GraphExecution":
+        if self.state not in {GraphExecutionState.RUNNING, GraphExecutionState.COMPLETED}:
+            return self
         cycles = dict(self.cycles)
         changed = True
         while changed:
             changed = False
             for name, cycle in list(cycles.items()):
+                if name in self.pending_scope:
+                    continue
                 if cycle.state not in {
                     NodeCycleState.BLOCKED,
                     NodeCycleState.STALE,
@@ -423,7 +672,7 @@ class GraphExecution:
             )
         }
         sink_cycle = cycles[self.graph.sink]
-        if sink_cycle.state == NodeCycleState.ACCEPTED:
+        if sink_cycle.state == NodeCycleState.ACCEPTED and not self.dependency_repairs.pending:
             if any(
                 cycle.state != NodeCycleState.ACCEPTED
                 for cycle in cycles.values()

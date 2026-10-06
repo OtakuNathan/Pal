@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.role_runtime import RoleSupervisor
 from pal.bunshin.v2.semantic_orchestration.attempt_models import BoundRoleHarness, ClaimedRoleAttempt, PreparedRoleSession, PreparedRoleWorkspace, RoleAttemptRequest
@@ -26,6 +27,10 @@ class AttemptAdmission:
             str(assignment["assignment_id"]),
             harness_id=harness_spec.harness_id,
             harness_generation=effective_harness_generation,
+            business_lease=semantic_business_lease(
+                snapshot, owner_id=command.invocation_id, resource_key=command.lease_resource,
+                fencing_token=command.fencing_token,
+            ) or None,
         )
         assignment_lease_resource = f"assignment:{assignment['assignment_id']}"
         assignment_lease = self.repository.leases.claim_lease(

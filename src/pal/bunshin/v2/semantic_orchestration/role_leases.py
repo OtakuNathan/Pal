@@ -5,7 +5,8 @@ from pal.bunshin.v2.semantic_orchestration.workspace_safety import _raise_if_wor
 from pal.bunshin.v2.semantic_orchestration.workspace_safety import _lease_is_live
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken
@@ -29,21 +30,67 @@ class RoleLeases:
     repository: BunshinV2Repository
     workspace_locks: WorkspaceLockRegistry
 
+    _background_lease: ContextVar[tuple[str, str, str, int] | None] = field(
+        default_factory=lambda: ContextVar("bunshin_background_business_lease", default=None),
+        init=False, repr=False,
+    )
+
+    def bind_background_business_lease(
+        self, effect: Mapping[str, Any], *, owner_id: str, resource_key: str, fencing_token: int,
+    ) -> None:
+        # A task-local binding survives awaits/finally without ever borrowing a
+        # replacement task's latest aggregate ownership.
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        self._background_lease.set((effect_key, resource_key, owner_id, fencing_token))
+
     def release_background_business_lease(self, effect: Mapping[str, Any]) -> None:
-        try:
-            snapshot = self.effect_reads.effect_snapshot(effect)
-            if snapshot.state in {
-                "REVIEW_QUIESCING",
-                "REVIEW_SNAPSHOTTING",
-            }:
-                return
-            resource = str(snapshot.payload.get("lease_resource_key") or "")
-            owner = str(snapshot.payload.get("active_worker_id") or "")
-            token = int(snapshot.payload.get("fencing_token") or 0)
-            if resource and owner and token:
-                self.repository.leases.release_lease(resource, owner, token)
-        except Exception:
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        bound = self._background_lease.get()
+        if bound is not None and bound[0] == effect_key:
+            _key, resource, owner, token = bound
+        else:
+            causal = self.effect_reads.effect_causal_context(effect)
+            resource = str(causal.get("lease_resource_key") or "")
+            owner = str(causal.get("active_worker_id") or "")
+            token = int(causal.get("fencing_token") or 0)
+        if not resource or not owner or not token:
+            # Missing causal ownership never grants authority over latest.
             return
+        snapshot = self.effect_reads.effect_snapshot(effect)
+        same_owner = (
+            str(snapshot.payload.get("lease_resource_key") or "") == resource
+            and str(snapshot.payload.get("active_worker_id") or "") == owner
+            and int(snapshot.payload.get("fencing_token") or 0) == token
+        )
+        if same_owner and snapshot.state in {"REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"}:
+            # The same submitted verifier still needs its snapshot lease.
+            return
+        self.release_business_lease(
+            resource_key=resource, owner_id=owner, fencing_token=token,
+        )
+
+    def release_business_lease(self, *, resource_key: str, owner_id: str, fencing_token: int) -> None:
+        """Release and verify only this causal lease; do not suppress failure."""
+        if not resource_key or not owner_id or fencing_token <= 0:
+            raise ValueError("business lease release requires exact causal ownership")
+        previous = self.repository.leases.read_lease(resource_key)
+        if previous is None or (
+            str(previous.get("owner_id") or "") != owner_id
+            or int(previous.get("fencing_token") or 0) != fencing_token
+        ):
+            return
+        try:
+            self.repository.leases.release_lease(resource_key, owner_id, fencing_token)
+        except (LeaseConflict, StaleFencingToken):
+            # A concurrent exact release/replacement may win. Re-read rather
+            # than acknowledge an unverified exception.
+            pass
+        current = self.repository.leases.read_lease(resource_key)
+        if current is not None and (
+            str(current.get("owner_id") or "") == owner_id
+            and int(current.get("fencing_token") or 0) == fencing_token
+        ):
+            raise RuntimeError("retired incarnation still holds its business lease")
 
     async def ensure_node_effect_lease(
         self,
@@ -52,6 +99,8 @@ class RoleLeases:
         action_type: str,
         activation: RoleActivation,
     ) -> AggregateSnapshot:
+        if node.state in {"CANCEL_REQUESTED", "CANCELLED", "STALE", "PAUSE_REQUESTED", "PAUSED"}:
+            raise DeferredEffectError("node effect incarnation is frozen")
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)

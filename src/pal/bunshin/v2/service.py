@@ -1300,6 +1300,11 @@ class BunshinV2WorkflowService:
             )
         coordinator = WorkflowCoordinator(self.repository)
         with self.repository.transaction() as connection:
+            if selected.aggregate_type == AggregateType.DAG_NODE_RUN:
+                from pal.bunshin.v2.semantic_orchestration.dependency_repair_recovery import pending_repair_incarnation
+                # Validate terminal blockers before RESOLVE_TRIAGE's ordinary
+                # cleanup reducer removes the blocker from the projection.
+                pending_repair_incarnation(self.repository, self.artifacts, selected)
             result = (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type="RESOLVE_TRIAGE",
@@ -1320,9 +1325,10 @@ class BunshinV2WorkflowService:
                     unit_of_work=connection,
                 )
             elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
+                repair_incarnation = pending_repair_incarnation(self.repository, self.artifacts, result.snapshot)
                 pending_checker_input = (
                     _pending_checker_settlement_input(self.repository, self.artifacts, result.snapshot)
-                    if result.snapshot.state in {"REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"}
+                    if repair_incarnation is None and result.snapshot.state in {"REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"}
                     else ""
                 )
                 coordinator.resolve_triage(
@@ -1334,6 +1340,7 @@ class BunshinV2WorkflowService:
                     ),
                     pending_checker_input_fingerprint=pending_checker_input,
                     pending_checker_generation=int(result.snapshot.payload.get("graph_generation") or 0),
+                    pending_repair=repair_incarnation,
                     unit_of_work=connection,
                 )
         return {

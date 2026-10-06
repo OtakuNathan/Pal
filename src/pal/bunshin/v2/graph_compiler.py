@@ -191,15 +191,12 @@ class GraphCompiler:
                     EdgeSpec(
                         producer=producer_name,
                         consumer=consumer_name,
-                        kind=(
-                            EdgeKind.EXECUTION
-                            if (
-                                bindings.execution_adapter
-                                != "software_git.v2"
-                                or consumer_name == sink
-                            )
-                            else EdgeKind.CONTRACT
-                        ),
+                        # Produced products must be accepted before their
+                        # consumers are checked. Software producers still run
+                        # in parallel from contracts: GraphIR keeps their
+                        # producer predecessors empty independently of this
+                        # verification gate.
+                        kind=EdgeKind.EXECUTION,
                         contract_ref=path,
                         consumed_outputs=consumed,
                     )

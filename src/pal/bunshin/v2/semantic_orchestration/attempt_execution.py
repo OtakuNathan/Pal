@@ -2,8 +2,10 @@ from __future__ import annotations
 from pal.bunshin.v2.artifacts import ArtifactRef
 import asyncio
 from dataclasses import dataclass
+from pal.bunshin.v2.background_assignments import BackgroundAssignments
+from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
 from typing import Any
-from pal.bunshin.v2.contracts import AggregateSnapshot
+from pal.bunshin.v2.contracts import AggregateSnapshot, DeferredEffectError
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.role_contracts import RoleActivation
 from typing import Mapping
@@ -52,6 +54,7 @@ class AttemptExecution:
     repository: BunshinV2Repository
     role_leases: RoleLeases
     supervisor: RoleSupervisor
+    background: BackgroundAssignments | None = None
 
     async def run_profile(
         self,
@@ -76,6 +79,33 @@ class AttemptExecution:
         ``_run_profile_inner``, only after a process permit is available.
         """
 
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        if self.background is not None and effect_key:
+            self.background.assert_not_retired(effect_key)
+            existing = self.background.task(effect_key)
+            if existing is not asyncio.current_task():
+                if existing is not None and not existing.done():
+                    raise DeferredEffectError("role effect already has an owned execution task")
+
+                async def owned_profile() -> Mapping[str, Any]:
+                    return {"profile_result": await self.run_profile(
+                        effect=effect, snapshot=snapshot, invocation_id=invocation_id,
+                        lease_resource=lease_resource, fencing_token=fencing_token,
+                        profile=profile, activation=activation, instruction=instruction,
+                        reference_refs=reference_refs, workspace_override=workspace_override,
+                        prepare_workspace=prepare_workspace,
+                    )}
+
+                # Inline/direct entry uses the same exact effect-key registry.
+                # Own just this role operation, never an unrelated outer task.
+                owned = asyncio.create_task(owned_profile())
+                self.background.track(effect_key, owned)
+                result = await owned
+                return result["profile_result"]
+            self.background.bind_lease(effect_key, invocation_id, lease_resource, fencing_token)
+        self.role_leases.bind_background_business_lease(
+            effect, owner_id=invocation_id, resource_key=lease_resource, fencing_token=fencing_token,
+        )
         self.repository.leases.renew_lease(
             lease_resource,
             invocation_id,
@@ -129,6 +159,18 @@ class AttemptExecution:
             fencing_token=fencing_token, profile=profile, activation=activation, instruction=instruction,
             reference_refs=reference_refs, workspace_override=workspace_override, prepare_workspace=prepare_workspace,
         )
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        if self.background is not None and effect_key:
+            self.background.assert_not_retired(effect_key)
+        business_lease = semantic_business_lease(
+            snapshot, owner_id=invocation_id, resource_key=lease_resource, fencing_token=fencing_token,
+        )
+        if business_lease:
+            self.repository.role_assignments.assert_semantic_admission(
+                workflow_id=snapshot.workflow_id, aggregate_type=snapshot.aggregate_type.value,
+                aggregate_id=snapshot.aggregate_id, business_lease=business_lease,
+                require_running=False,
+            )
         stage_workspace_preparation = await self.workspace_preparation.execute(command)
         stage_verifier_context = await self.verifier_context.execute(command, stage_workspace_preparation)
         stage_reference_binding = await self.reference_binding.execute(command, stage_workspace_preparation)

@@ -11,7 +11,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
@@ -31,6 +31,20 @@ class VerificationSettlement:
     verifier_tests: VerifierTests
     artifacts: ContentAddressedArtifactStore
     repository: BunshinV2Repository
+    dependency_repair_registration: Callable[[AggregateSnapshot, ArtifactRef], Mapping[str, Any]] | None = None
+
+    def prepared_dependency_result(self, node: AggregateSnapshot) -> Mapping[str, Any] | None:
+        pending = dict(node.payload.get("pending_verification_ref") or {})
+        if not pending.get("sha256"):
+            return None
+        ref = self.repository.queries.read_dependency_repair_capture_ref(node.aggregate_id, str(pending["sha256"]))
+        if not ref.get("sha256"):
+            return None
+        capture = self.artifacts.read_json(ref)
+        if dict(capture.get("source_pending_ref") or {}).get("sha256") != pending["sha256"]:
+            raise SubmissionInvariantError("prepared repair capture belongs to another submission")
+        return {"provider_request_id": str(capture.get("invocation_id") or ""),
+                "result_artifact_ref": dict(capture["report_ref"])}
 
     def settled_verification_result(self, node: AggregateSnapshot) -> Mapping[str, Any] | None:
         """A committed receipt wins over replay of its immutable snapshot effect."""
@@ -119,6 +133,28 @@ class VerificationSettlement:
                 bool(routing_errors) and verification_correction_count(current) >= MAX_VERIFICATION_CORRECTIONS
             ))
         )
+        if (self.dependency_repair_registration is not None and status == VerificationStatus.FAIL
+                and defect_kind == DefectKind.DEPENDENCY and not routing_errors and not blocking_no_progress):
+            assert repair_ref is not None
+            capture_ref = self.artifacts.put_json({
+                "schema_version": "1", "node_name": node_name, "node_run_id": node.aggregate_id,
+                "workflow_id": node.workflow_id, "slot": "checker",
+                "source_pending_ref": dict(node.payload.get("pending_verification_ref") or {}),
+                "source_assignment_id": str(pending.get("role_assignment_id") or ""),
+                "source_payload_hash": str(pending.get("role_submission_payload_hash") or ""),
+                "source_candidate_ref": candidate_ref.to_dict(), "source_candidate_digest": candidate_digest,
+                "candidate_ref": accepted_candidate_ref.to_dict(), "candidate_digest": accepted_candidate_digest,
+                "report_ref": report_ref.to_dict(), "repair_packet_ref": repair_ref.to_dict(),
+                "status": status.value, "defect_kind": defect_kind.value, "routing_errors": [],
+                "target_modules": target_modules, "finding_fingerprint": fingerprint,
+                "historical_repair_bill_refs": list(node.payload.get("historical_repair_bill_refs") or []),
+                "prior_repair_bill_ref": dict(node.payload.get("repair_bill_ref") or {}),
+                "invocation_id": invocation_id, "lease_resource_key": lease_resource, "fencing_token": fencing_token,
+            }, artifact_type="DependencyRepairCaptureArtifact", child_refs=(
+                (report_ref.sha256, "verification"), (repair_ref.sha256, "repair_packet"),
+                (accepted_candidate_ref.sha256, "preserved_candidate"),
+            ))
+            return self.dependency_repair_registration(node, capture_ref)
         try:
             self.commit_verification_result(
                 accepted_candidate, accepted_candidate_digest, accepted_candidate_ref, blocking_no_progress,

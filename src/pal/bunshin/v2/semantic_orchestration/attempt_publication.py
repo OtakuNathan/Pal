@@ -1,6 +1,7 @@
 from __future__ import annotations
 import pal.bunshin.turns as _dependency_turns
 from dataclasses import dataclass
+from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
 from pathlib import Path
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.paths import invocation_root
@@ -73,6 +74,9 @@ class AttemptPublication:
             lease_resource_key=assignment_lease_resource,
             fencing_token=assignment_lease.fencing_token,
             prompt_pack_ref=prompt_ref.to_dict(),
+            business_lease=semantic_business_lease(
+                snapshot, owner_id=invocation_id, resource_key=lease_resource, fencing_token=fencing_token,
+            ) or None,
         )
         assignment_access_token = self.repository.role_access.issue_role_attempt_access_token(
             assignment_id=str(assignment["assignment_id"]),

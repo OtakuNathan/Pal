@@ -52,6 +52,17 @@ def _required(*fields: str):
     return guard
 
 
+def _dependency_repair_preparation_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
+    if action.payload.get("source_pending_verification_ref") or action.payload.get("verification_artifact_ref"):
+        raise TransitionGuardError("dependency repair preparation cannot publish a final verification settlement")
+
+
+def _dependency_repair_generation_guard(payload: Mapping[str, Any], action: ActionEnvelope) -> None:
+    generation = action.payload.get("graph_generation", payload.get("graph_generation"))
+    if type(generation) is not int or generation < 1:
+        raise TransitionGuardError("dependency repair registration requires a graph generation")
+
+
 def _all(*guards):
     def guard(payload: Mapping[str, Any], action: ActionEnvelope) -> None:
         for item in guards:
@@ -90,6 +101,20 @@ def _effect(effect_type: str, **fixed_payload: Any):
         return (EffectDraft(effect_type=effect_type, payload=payload),)
 
     return builder
+
+
+def _reconcile_dependency_repairs_effect(
+    payload: Mapping[str, Any], action: ActionEnvelope, _target_state: str,
+) -> tuple[EffectDraft, ...]:
+    generation = int(payload.get("graph_generation") or 0)
+    return (EffectDraft(effect_type="reconcile_dependency_repairs", payload={
+        "workflow_id": action.workflow_id,
+        "aggregate_type": action.aggregate_type.value,
+        "aggregate_id": action.aggregate_id,
+        "graph_generation": generation,
+        "dependency_repair_capture_ref": dict(action.payload.get("dependency_repair_capture_ref") or {}),
+        "dependency_repair_incarnation_ref": dict(action.payload.get("dependency_repair_incarnation_ref") or {}),
+    }),)
 
 
 def _effects(*effect_types: str):
@@ -1419,6 +1444,10 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref"), _allowed_unknown_guard), effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_FAILED", S.REPAIR_QUEUED, guard=_required("verification_artifact_ref", "repair_bill_ref", "finding_fingerprint"), effects=_effect("admit_implementation_role", role_mode="repair"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "VERIFICATION_DEFECT", S.REVIEW_QUEUED, guard=_required("verification_artifact_ref", "repair_bill_ref", "finding_fingerprint"), effects=_effect("admit_verifier_role", role_mode="module"), reducer=_worker_finished_reducer),
+        _spec(kind, S.REVIEW_SNAPSHOTTING, "REGISTER_DEPENDENCY_REPAIR", S.REVIEW_SNAPSHOTTING,
+              guard=_all(_required("dependency_repair_incarnation_ref", "dependency_repair_capture_ref"),
+                         _dependency_repair_preparation_guard, _dependency_repair_generation_guard),
+              effects=_reconcile_dependency_repairs_effect),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
@@ -1451,6 +1480,19 @@ def _node_transitions() -> list[TransitionSpec]:
         ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
     ]
+    # Capture is preparation only. Semantic invalidation is projected after
+    # the graph has checked the complete exact-incarnation closure ledger.
+    for state in {S.CANCEL_REQUESTED, S.REVIEW_SNAPSHOTTING, S.STALE}:
+        transitions.append(_spec(kind, state, "CAPTURE_DEPENDENCY_REPAIR", state,
+                                 guard=_all(_required("dependency_repair_capture_ref"),
+                                            _dependency_repair_preparation_guard)))
+    for state in set(S) - {S.CANCELLED, S.PAUSED, S.PAUSE_REQUESTED, S.TRIAGE_REQUIRED}:
+        transitions.append(_spec(kind, state, "SETTLE_DEPENDENCY_REPAIR", S.STALE,
+                                 guard=_required("dependency_repair_applied_ref"),
+                                 reducer=_worker_finished_reducer))
+    transitions.append(_spec(kind, S.STALE, "REOPEN_DEPENDENCY", S.REPAIR_QUEUED,
+                             guard=_required("repair_bill_ref", "dependency_repair_applied_ref"),
+                             effects=_effect("admit_implementation_role", role_mode="repair")))
     pausable = {
         S.BLOCKED_BY_DEPS,
         S.QUEUED,

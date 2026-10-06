@@ -209,7 +209,10 @@ class BunshinV2OutboxProcessor:
         except Exception as exc:
             snapshot = self._effect_snapshot(effect)
             effect_type = str(effect.get("effect_type") or "")
-            superseded = (
+            superseded = effect_type != "reconcile_dependency_repairs" and (
+                # A cohort effect remains authoritative after its source has
+                # closed to STALE; only its exact receipt/generation handler
+                # may decide supersession. Errors must remain retryable/triaged.
                 snapshot.state in {"PAUSED", "CANCELLED", "STALE"}
                 or (
                     snapshot.state == "PAUSE_REQUESTED"
@@ -498,7 +501,9 @@ class BunshinV2OutboxProcessor:
         if effect_type == "reconcile_execution_epoch":
             return await self._reconcile_execution_epoch(effect)
         if effect_type == "reconcile_workflow":
-            return self._reconcile_workflow(effect)
+            result = self._reconcile_workflow(effect)
+            await self._resume_pending_dependency_repair(effect)
+            return result
         raise ValueError(f"unsupported mechanical V2 effect: {effect_type}")
 
     def _terminal_repository_layout(
@@ -620,6 +625,30 @@ class BunshinV2OutboxProcessor:
                 )
             )
         return {}
+
+    async def _resume_pending_dependency_repair(self, effect: Mapping[str, Any]) -> None:
+        """A fresh public workflow recovery resumes the durable cohort receipt.
+
+        The original node may already be STALE, and its bounded outbox attempt
+        may be exhausted. Reusing its immutable authority here starts no worker
+        and does not reset or hide that old failed effect's retry history.
+        """
+        workflow = self._effect_snapshot(effect)
+        if workflow.state != "ACTIVE":
+            return
+        execution = self.repository.cycles.read_graph_execution(workflow_id=workflow.workflow_id)
+        cohort = execution.dependency_repairs.pending if execution is not None else None
+        if cohort is None:
+            return
+        for refs in cohort.captures.values():
+            for ref in refs:
+                if ref.get("artifact_type") != "DependencyRepairCaptureArtifact":
+                    continue
+                prepared = self.repository.queries.read_dependency_repair_effect(workflow.workflow_id, str(ref["sha256"]))
+                if prepared:
+                    await self.semantic_effects.execute_semantic_effect(prepared)
+                    return
+        raise PermanentEffectError("pending dependency repair lost its immutable registration wake")
 
     def _reconcile_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)

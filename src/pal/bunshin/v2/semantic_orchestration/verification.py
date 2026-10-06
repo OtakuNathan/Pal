@@ -5,6 +5,7 @@ from pal.bunshin.v2.semantic_orchestration.contracts import SemanticEffectRoute
 
 
 VERIFICATION_EFFECT_ROUTES = {
+    "reconcile_dependency_repairs": SemanticEffectRoute(),
     "admit_verifier_role": SemanticEffectRoute(
 
         OrchestrationRole.VERIFIER,

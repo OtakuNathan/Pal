@@ -400,7 +400,7 @@ class GraphCompilerTests(unittest.TestCase):
                 workspace_authority_rules=definition.workspace_authority_rules,
             )
 
-    def test_software_transitive_graph_waits_at_sink_checker(self) -> None:
+    def test_software_transitive_graph_gates_each_checker_but_not_producers(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
@@ -446,6 +446,9 @@ class GraphCompilerTests(unittest.TestCase):
             set(graph.nodes) - {graph.sink},
         )
         self.assertEqual(graph.producer_predecessors(graph.sink), ())
+        self.assertEqual(graph.checker_predecessors("decoder"), ("codec",))
+        self.assertEqual(graph.producer_predecessors("decoder"), ())
+        self.assertTrue(all(edge.kind == EdgeKind.EXECUTION for edge in graph.edges))
 
     def test_contract_only_dependency_is_hashed_but_not_executed(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
@@ -719,7 +722,7 @@ class GraphExecutionTests(unittest.TestCase):
             workspace_authority_rules=definition.workspace_authority_rules,
         )
 
-    def _provider_chain_graph(self):
+    def _provider_chain_graph(self, *, legacy_contract_edges: bool = False):
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
@@ -751,7 +754,7 @@ class GraphExecutionTests(unittest.TestCase):
                 "consumes": [f"{name}_frames"],
             }
             payload["scenarios"]["decode_one_frame"]["modules"].append(name)
-        return GraphCompiler().compile(
+        graph = GraphCompiler().compile(
             validate_contract_payload(payload, definition=definition),
             graph_id="provider-chain",
             generation=1,
@@ -760,6 +763,18 @@ class GraphExecutionTests(unittest.TestCase):
             source_ref="architect.yaml",
             workspace_authority_rules=definition.workspace_authority_rules,
         )
+        if not legacy_contract_edges:
+            return graph
+        # Explicitly deserialize the old persisted software edge policy for
+        # legacy finding-scope coverage; new graphs use verification gates.
+        legacy = replace(
+            graph, edges=tuple(
+                replace(edge, kind=EdgeKind.CONTRACT)
+                if edge.consumer != graph.sink else edge
+                for edge in graph.edges
+            ),
+        )
+        return graph_ir_from_mapping(legacy.to_dict())
 
     def _checking_execution(self, graph, current_node="delivery"):
         execution = GraphExecution.start(graph)
@@ -812,8 +827,8 @@ class GraphExecutionTests(unittest.TestCase):
             current_node=name, accepted=True,
         )[0]
 
-    def test_contract_edge_does_not_authorize_implementation_dependency_repair(self):
-        graph = self._provider_chain_graph()
+    def test_legacy_contract_edge_does_not_authorize_implementation_dependency_repair(self):
+        graph = self._provider_chain_graph(legacy_contract_edges=True)
         self.assertEqual(graph.incoming("decoder")[0].kind, EdgeKind.CONTRACT)
         self.assertEqual(graph.checker_predecessors("decoder"), ())
         execution = self._checking_execution(graph, "decoder")
@@ -839,6 +854,39 @@ class GraphExecutionTests(unittest.TestCase):
             replanned.cycles["decoder"].last_verdict.finding_refs,
             ("contract-disagreement",),
         )
+
+    def test_new_policy_generation_preserves_accepted_leaves_and_stales_consumers(self):
+        legacy = self._provider_chain_graph(legacy_contract_edges=True)
+        target = replace(self._provider_chain_graph(), generation=2)
+        execution = GraphExecution.start(legacy)
+        execution = replace(execution, cycles={
+            name: replace(
+                cycle, state=NodeCycleState.ACCEPTED,
+                product_ref=f"{name}-candidate", accepted_product_ref=f"{name}-accepted",
+                last_verdict=CycleVerdict(True, 1),
+            )
+            for name, cycle in execution.cycles.items()
+        })
+        with tempfile.TemporaryDirectory() as root:
+            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            coordinator.install_graph(workflow_id=legacy.graph_id, graph=legacy)
+            coordinator.repository.cycles.store_graph_execution(
+                workflow_id=legacy.graph_id, execution=execution,
+            )
+            persisted_legacy = coordinator.execution(workflow_id=legacy.graph_id, generation=1)
+            installed = coordinator.install_graph(workflow_id=target.graph_id, graph=target)
+            for name in ("codec", "peer"):
+                self.assertEqual(installed.diff.decisions[name].kind, NodeReuseKind.REUSE_ACCEPTED)
+                self.assertEqual(installed.execution.cycles[name].state, NodeCycleState.ACCEPTED)
+                self.assertEqual(installed.execution.cycles[name].accepted_product_ref, f"{name}-accepted")
+            for name in ("decoder", "delivery"):
+                self.assertEqual(installed.diff.decisions[name].kind, NodeReuseKind.REUSE_STALE)
+                self.assertNotEqual(installed.execution.cycles[name].state, NodeCycleState.ACCEPTED)
+            self.assertEqual(
+                coordinator.execution(workflow_id=legacy.graph_id, generation=1), persisted_legacy,
+            )
+            self.assertEqual(legacy.incoming("decoder")[0].kind, EdgeKind.CONTRACT)
+            self.assertEqual(target.incoming("decoder")[0].kind, EdgeKind.EXECUTION)
 
     def test_sink_can_route_transitive_execution_provider(self):
         graph = self._provider_chain_graph()

@@ -2,9 +2,12 @@ from __future__ import annotations
 from pal.bunshin.v2.semantic_orchestration.workspace_safety import _raise_if_workspace_held
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pal.bunshin.v2.semantic_orchestration.dependency_repair_runtime import DependencyRepairRuntime
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.v2.repository import BunshinV2Repository
@@ -26,6 +29,7 @@ class NodeControl:
     artifacts: ContentAddressedArtifactStore
     repository: BunshinV2Repository
     workspace_locks: WorkspaceLockRegistry
+    dependency_repairs: DependencyRepairRuntime | None = None
 
     async def stop_node_worker(
         self,
@@ -35,6 +39,12 @@ class NodeControl:
         confirm: bool = True,
     ) -> Mapping[str, Any]:
         node = self.effect_reads.effect_snapshot(effect)
+        if self.dependency_repairs is not None and self.dependency_repairs.owns(node):
+            if node.state in {"PAUSE_REQUESTED", "PAUSED", "TRIAGE_REQUIRED"} or self.dependency_repairs._control_blocked(
+                node.workflow_id, self.dependency_repairs.execution(node.workflow_id)
+            ):
+                return await self.dependency_repairs.control_cleanup(node, confirm=confirm)
+            return await self.dependency_repairs.reconcile(effect)
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         await self.role_cleanup.close_owned_process(
@@ -68,6 +78,8 @@ class NodeControl:
             AggregateType.DAG_NODE_RUN,
             node.aggregate_id,
         )
+        if current is None:
+            raise SubmissionInvariantError("controlled node disappeared before worker retirement")
         cancel_target = str(current.payload.get("cancel_target") or "CANCELLED")
         terminal_cancel = bool(cancel and cancel_target == "CANCELLED")
         self.repository.role_cancellation.cancel_role_assignments(
@@ -116,6 +128,8 @@ class NodeControl:
 
     async def reconcile_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self.effect_reads.effect_snapshot(effect)
+        if self.dependency_repairs is not None and self.dependency_repairs.owns(node):
+            return await self.dependency_repairs.reconcile(effect)
         if node.state == "PAUSE_REQUESTED":
             return await self.stop_node_worker(effect, cancel=False)
         if node.state == "CANCEL_REQUESTED":
@@ -124,6 +138,8 @@ class NodeControl:
 
     async def resume_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self.effect_reads.effect_snapshot(effect)
+        if self.dependency_repairs is not None and self.dependency_repairs.owns(node):
+            return await self.dependency_repairs.reconcile(effect)
         if node.state == "QUEUED":
             return self.node_admission.admit_node_worker(
                 effect,

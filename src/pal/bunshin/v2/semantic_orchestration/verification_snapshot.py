@@ -48,6 +48,9 @@ class VerificationSnapshot:
         settled = self.verification_settlement.settled_verification_result(node)
         if settled is not None:
             return settled
+        prepared = self.verification_settlement.prepared_dependency_result(node)
+        if prepared is not None:
+            return prepared
         pending_ref = _ref_from_mapping(node.payload.get("pending_verification_ref"))
         pending = dict(self.artifacts.read_json(pending_ref))
         invocation_id = str(pending.get("invocation_id") or "")
@@ -166,6 +169,9 @@ class VerificationSnapshot:
         settled = self.verification_settlement.settled_verification_result(node)
         if settled is not None:
             return settled
+        prepared = self.verification_settlement.prepared_dependency_result(node)
+        if prepared is not None:
+            return prepared
         pending_ref = _ref_from_mapping(node.payload.get("pending_verification_ref"))
         pending = dict(self.artifacts.read_json(pending_ref))
         review_workspace = Path(str(pending.get("review_workspace") or ""))

@@ -5,9 +5,11 @@ CONSTANT A, B, Sink, MaxRepairs, MaxCorrections
 
 Nodes == {A, B, Sink}
 NonSink == Nodes \ {Sink}
-\* Authored software contracts form A -> B -> Sink. Only the sink checker
-\* executes provider implementations; its input boundary includes both A and B.
-CheckerProviders(n) == IF n = Sink THEN NonSink ELSE {}
+\* A's produced implementation is a declared EXECUTION input of B's checker.
+\* The software sink checker consumes every produced module. All initial
+\* software producers remain independent and start from contracts in parallel.
+CheckerProviders(n) == IF n = Sink THEN NonSink
+                       ELSE IF n = B THEN {A} ELSE {}
 SemanticConsumers(n) == IF n = A THEN {B, Sink}
                         ELSE IF n = B THEN {Sink} ELSE {}
 AffectedConsumers(n, providers) ==
@@ -76,6 +78,9 @@ AcceptNode(n) ==
     /\ UNCHANGED <<graphState, productReady, repairBarrier, repairs>>
     /\ UNCHANGED <<corrections, invalidSubmissionPreserved>>
 
+\* This graph-only action is the atomic post-quiescence application cut.
+\* DependencyRepairCohort models physical cleanup and immutable receipt drain;
+\* this older lifecycle model does not equate CHECKING with a live process.
 DependencyFinding(n, providers) ==
     /\ graphState = "Running"
     /\ n \in Nodes
@@ -190,6 +195,10 @@ TypeOK ==
 SinkCheckerStartsAfterAllModules ==
     nodeState[Sink] \in {"Checking", "Accepted"} =>
         \A n \in NonSink : nodeState[n] = "Accepted"
+
+CheckerStartsAfterProducedProviders ==
+    \A n \in Nodes : nodeState[n] \in {"Checking", "Accepted"} =>
+        \A p \in CheckerProviders(n) : nodeState[p] = "Accepted"
 
 SinkProducerNeverDependencyBlocked ==
     nodeState[Sink] # "Blocked"

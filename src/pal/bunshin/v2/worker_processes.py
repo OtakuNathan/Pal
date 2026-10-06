@@ -18,6 +18,8 @@ class WorkerProcesses:
         return invocation_id in self._owners
 
     def register(self, owner: WorkerProcessOwner) -> None:
+        if self._owners.get(owner.invocation_id) is owner:
+            return
         if owner.invocation_id in self._owners or owner.run_id in self._invocations_by_run:
             raise RuntimeError(f"logical worker {owner.invocation_id} already owns a process")
         self._owners[owner.invocation_id] = owner
@@ -51,6 +53,40 @@ class WorkerProcesses:
         owner = self._owners.get(invocation_id)
         if owner is not None:
             await owner.close()
+
+    async def close_incarnation(
+        self,
+        *,
+        effect_key: str,
+        invocation_id: str,
+        lease_resource_key: str,
+        fencing_token: int,
+        assignment_id: str = "",
+        attempt_id: str = "",
+    ) -> None:
+        """Never resolve destructive authority from a reusable session alone."""
+        owner = self._owners.get(invocation_id)
+        if owner is None:
+            return
+        if not owner.effect_key or not owner.business_lease_resource_key or owner.business_fencing_token <= 0:
+            raise RuntimeError("worker process has no immutable incarnation ownership")
+        if (
+            owner.business_lease_resource_key != lease_resource_key
+            or owner.business_fencing_token != fencing_token
+        ):
+            # A newer business owner is not ours to close on cleanup replay.
+            return
+        if (
+            owner.effect_key != effect_key
+            or (assignment_id and owner.assignment_id != assignment_id)
+            or (attempt_id and owner.attempt_id != attempt_id)
+        ):
+            # A live child under this very lease cannot be declared absent
+            # merely because the capture omitted/misbound its task or attempt.
+            raise RuntimeError("worker incarnation differs within the captured business lease")
+        await owner._close_shielded()
+        if not owner.resources_released:
+            raise RuntimeError("worker incarnation retained process ownership")
 
     async def close_all(self) -> None:
         owners = tuple(self._owners.values())

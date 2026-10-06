@@ -13,6 +13,10 @@ from pal.bunshin.v2.storage.artifacts import ArtifactsStore
 from pal.bunshin.v2.storage.connection_contracts import DatabasePort
 from pal.bunshin.v2.storage.leases import LeasesStore
 from pal.bunshin.v2.storage.role_sessions import RoleSessionsStore
+from pal.bunshin.v2.storage.role_assignments import assert_semantic_role_admission_locked
+from pal.bunshin.v2.storage.role_business_leases import (
+    read_role_attempt_business_lease_locked, record_role_attempt_business_lease_locked,
+)
 
 
 @dataclass
@@ -30,6 +34,7 @@ class RoleAttemptsStore:
         lease_resource_key: str,
         fencing_token: int,
         prompt_pack_ref: Mapping[str, Any],
+        business_lease: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
@@ -37,6 +42,13 @@ class RoleAttemptsStore:
                 connection,
                 assignment_id=assignment_id,
                 attempt_id_value=attempt_id_value,
+            )
+            assert_semantic_role_admission_locked(
+                connection, workflow_id=str(assignment["workflow_id"]),
+                aggregate_type=str(assignment["aggregate_type"]),
+                aggregate_id=str(assignment["aggregate_id"]),
+                execution_spec=json.loads(str(assignment["execution_spec_json"])),
+                business_lease=business_lease,
             )
             if str(assignment["state"]) != RoleAssignmentState.CLAIMED.value:
                 raise ValueError("role assignment is not claimed")
@@ -51,6 +63,22 @@ class RoleAttemptsStore:
                 int(fencing_token),
             )
             self.artifacts.assert_artifact_refs_durable(connection, prompt_pack_ref)
+            binding = business_lease if business_lease is not None else json.loads(
+                str(assignment["execution_spec_json"])
+            ).get("business_lease")
+            if binding is not None:
+                ownership = record_role_attempt_business_lease_locked(
+                    self.database, connection, assignment=assignment,
+                    attempt_id=attempt_id_value, business_lease=binding,
+                )
+                # Keep the immutable ownership witness reachable through the
+                # exact prompt artifact used by this attempt.
+                connection.execute(
+                    "INSERT OR IGNORE INTO bunshin_v2_artifact_refs(parent_sha256, child_sha256, relation, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (str(prompt_pack_ref["sha256"]), str(ownership["artifact_ref"]["sha256"]),
+                     "role_attempt_business_lease", utc_now()),
+                )
             now = utc_now()
             connection.execute(
                 """
@@ -127,6 +155,12 @@ class RoleAttemptsStore:
                 connection, session_id=str(assignment["session_id"]),
                 fencing_token=fencing_token, checkpoint=payload,
             )
+
+    def read_role_attempt_business_lease(self, attempt_id_value: str) -> dict[str, Any] | None:
+        """Read actual claimed ownership, never a later aggregate/snapshot lease."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            return read_role_attempt_business_lease_locked(self.database, connection, str(attempt_id_value))
 
     def read_role_attempt(self, attempt_id_value: str) -> dict[str, Any] | None:
         self.database.ensure_schema()

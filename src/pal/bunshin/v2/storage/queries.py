@@ -248,6 +248,54 @@ class QueriesStore:
             ).fetchone()
         return dict(json.loads(str(row["pending_ref"]))) if row is not None else {}
 
+    def read_dependency_repair_effect(self, workflow_id: str, capture_sha256: str) -> dict[str, Any]:
+        """Read the immutable REGISTER wake for explicit workflow recovery."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM bunshin_v2_outbox WHERE workflow_id = ? "
+                "AND effect_type = 'reconcile_dependency_repairs' "
+                "AND json_extract(payload_json, '$.dependency_repair_capture_ref.sha256') = ? "
+                "ORDER BY created_at, effect_id LIMIT 1", (workflow_id, capture_sha256),
+            ).fetchone()
+        if row is None:
+            return {}
+        result = dict(row)
+        result["payload"] = json.loads(str(result.pop("payload_json")))
+        return result
+
+    def read_dependency_repair_capture_ref(self, aggregate_id: str, pending_sha256: str) -> dict[str, Any]:
+        """Prepared evidence is durable but is not an applied semantic verdict."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM bunshin_v2_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
+                "ORDER BY aggregate_version DESC",
+                (AggregateType.DAG_NODE_RUN.value, aggregate_id),
+            ).fetchall()
+        for row in rows:
+            payload = dict(json.loads(str(row["payload_json"])).get("action_payload") or {})
+            if dict(payload.get("dependency_repair_source_pending_ref") or {}).get("sha256") == pending_sha256:
+                return dict(payload.get("dependency_repair_capture_ref") or {})
+        return {}
+
+    def read_admitted_role_effect(self, aggregate_id: str, admission_key: str) -> dict[str, Any]:
+        """Find the exact run effect emitted by this graph admission."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """SELECT o.effect_id, o.effect_key, o.payload_json
+                   FROM bunshin_v2_action_dedup AS a
+                   JOIN bunshin_v2_domain_events AS e ON e.action_id = a.action_id
+                   JOIN bunshin_v2_outbox AS o ON o.event_id = e.event_id
+                   WHERE a.aggregate_type = ? AND a.aggregate_id = ? AND a.idempotency_key = ?
+                     AND o.effect_type IN ('run_implementation_role', 'run_verifier_role')
+                   ORDER BY e.aggregate_version DESC LIMIT 1""",
+                (AggregateType.DAG_NODE_RUN.value, str(aggregate_id), f"effect:{admission_key}:admit"),
+            ).fetchone()
+        return ({"effect_id": str(row["effect_id"]), "effect_key": str(row["effect_key"]),
+                 "payload": json.loads(str(row["payload_json"]))} if row is not None else {})
+
     def read_verification_settlement_ref(self, aggregate_id: str, pending_sha256: str) -> dict[str, Any]:
         """Return only a committed verdict receipt for this exact pending input."""
 

@@ -524,8 +524,11 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
             )
             state = {"value": "QUIESCING"}
             calls: list[str] = []
-            worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
-                state=state["value"]
+            from pal.bunshin.v2.contracts import AggregateSnapshot
+            worker.components.effect_reads.effect_snapshot = lambda _effect: AggregateSnapshot(
+                aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id="node-recovery",
+                workflow_id="workflow-recovery", state=state["value"], version=1,
+                payload={}, created_at="", updated_at="",
             )
 
             async def quiesce(_effect):
