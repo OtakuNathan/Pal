@@ -14,6 +14,7 @@ fi
 models=(
     ModuleLifecycle
     ProduceCheckCycle
+    ImportedPlanLifecycle
     GraphGenerationLifecycle
     GraphExecutionLifecycle
     DependencyRepairCohort

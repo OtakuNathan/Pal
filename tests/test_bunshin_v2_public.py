@@ -5860,7 +5860,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 "requirements_ref": requirements_ref,
                 "submission": {"modules": {}},
             },
-            artifact_type="TestManifestArtifact",
+            artifact_type="ContractArtifact",
         ).to_dict()
         service.start_workflow(
             {

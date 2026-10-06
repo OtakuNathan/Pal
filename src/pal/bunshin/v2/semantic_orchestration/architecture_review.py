@@ -132,6 +132,7 @@ class ArchitectureReview:
                 )
                 review_workspace = self.skeleton.provision_review_worktree(
                     artifact=projected,
+                    workflow_id=revision.workflow_id,
                     review_name=(
                         f"{revision.aggregate_id}-{manifest_ref.sha256[:12]}"
                     ),
@@ -368,6 +369,9 @@ class ArchitectureReview:
             else "REBIND_ARCHITECTURE_REVIEW"
         )
         with self.repository.transaction() as connection:
+            from pal.bunshin.v2.imported_plan import bind_imported_plan_product
+            bind_imported_plan_product(repository=self.repository, artifacts=self.artifacts,
+                                       revision=revision, unit_of_work=connection)
             revision = (connection or self.repository).transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,

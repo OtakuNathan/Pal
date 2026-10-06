@@ -196,6 +196,18 @@ class QueriesStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def read_architecture_import_ref(self, revision_id: str) -> dict[str, Any]:
+        """Immutable creation authority, not a mutable revision payload flag."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                "SELECT json_extract(payload_json, '$.action_payload.architecture_manifest_ref') AS ref "
+                "FROM bunshin_v2_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
+                "AND aggregate_version = 1 AND event_type = 'architecture_revision.import_architecture_revision'",
+                (AggregateType.ARCHITECTURE_REVISION.value, str(revision_id)),
+            ).fetchone()
+        return dict(json.loads(str(row["ref"]))) if row is not None and row["ref"] else {}
+
     def read_domain_event_aggregate_version(self, event_id: str) -> int | None:
         """Return the snapshot version that produced a durable outbox effect."""
         self.database.ensure_schema()

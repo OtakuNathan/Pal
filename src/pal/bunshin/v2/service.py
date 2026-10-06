@@ -1513,6 +1513,16 @@ class BunshinV2WorkflowService:
         if decision not in action_types:
             raise ValueError("architecture decision must be accept, edit, or reject")
         manifest_ref = _artifact_ref_from_record(record).to_dict()
+        if decision == "accept":
+            artifact = dict(self.artifacts.read_json(manifest_ref))
+            graph = dict(artifact.get("graph_ir") or {})
+            if graph and str(graph.get("graph_id") or "") != workflow_id:
+                # Reject before token consumption or ACCEPTED publication so
+                # the supported Edit/resubmission path remains available.
+                raise ValueError(
+                    "imported architecture GraphIR belongs to another workflow; "
+                    "choose Edit and resubmit through the Architect before acceptance"
+                )
         payload: dict[str, Any] = {
             "decision_token": token,
             "architecture_manifest_ref": manifest_ref,

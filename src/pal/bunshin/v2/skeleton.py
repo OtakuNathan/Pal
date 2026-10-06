@@ -1019,6 +1019,14 @@ class GitBackedSkeletonService:
         base_artifact: Mapping[str, Any] | None = None,
     ) -> ArchitectureWorkspace:
         stored_layout = dict(dict(base_artifact or {}).get("repository_layout") or {})
+        if _artifact_belongs_to_another_workflow(base_artifact or {}, workflow_id):
+            # Imported contracts retain their source identity. Only the project
+            # is shared; a repair belongs to the new workflow's own branches.
+            stored_layout = {
+                key: stored_layout[key]
+                for key in ("project_name", "project_key")
+                if key in stored_layout
+            }
         layout = resolve_project_git_layout(
             self.runtime_root,
             workspace=workspace,
@@ -1252,7 +1260,12 @@ class GitBackedSkeletonService:
         *,
         artifact: Mapping[str, Any],
         review_name: str,
+        workflow_id: str = "",
     ) -> ArchitectureReviewWorkspace:
+        if _artifact_belongs_to_another_workflow(artifact, workflow_id):
+            return self._provision_imported_review_worktree(
+                artifact=artifact, review_name=review_name
+            )
         stored_layout = dict(artifact.get("repository_layout") or {})
         raw_project_key = str(stored_layout.get("project_key") or "").strip()
         project_key = _safe_component(raw_project_key) if raw_project_key else ""
@@ -1291,6 +1304,64 @@ class GitBackedSkeletonService:
             common_git_dir=bare,
             owns_worktree=False,
         )
+
+    def _provision_imported_review_worktree(
+        self,
+        *,
+        artifact: Mapping[str, Any],
+        review_name: str,
+    ) -> ArchitectureReviewWorkspace:
+        """Review durable source commits without touching their retired workflow."""
+
+        bundle_ref = ArtifactRef.from_mapping(dict(artifact.get("git_bundle_ref") or {}))
+        record = self.artifacts.metadata_repository.read_artifact_record(bundle_ref.sha256)
+        if (
+            not bundle_ref.durable
+            or bundle_ref.artifact_type != ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT
+            or record is None
+            or ArtifactRef.from_mapping(record) != bundle_ref
+        ):
+            raise ValueError("imported architecture review requires a durable architecture bundle")
+        bundle_bytes = self.artifacts.read_bytes(bundle_ref)
+        if len(bundle_bytes) != bundle_ref.byte_size:
+            raise ValueError("imported architecture bundle byte size differs from its artifact ref")
+        identities = {
+            key: str(artifact.get(key) or "")
+            for key in (
+                "base_commit_sha", "base_tree_sha", "skeleton_commit_sha", "skeleton_tree_sha"
+            )
+        }
+        if any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) for value in identities.values()):
+            raise ValueError("imported architecture review requires exact base and skeleton commit/tree IDs")
+        review_root = bunshin_data_root(self.runtime_root) / "runtime" / "architecture-review"
+        review_root.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=f"{_safe_component(review_name)[:80]}-", dir=review_root))
+        bare = root / "review.git"
+        worktree = root / "worktree"
+        review = ArchitectureReviewWorkspace(root=root, worktree=worktree, common_git_dir=bare)
+        try:
+            bundle = root / "architecture.bundle"
+            bundle.write_bytes(bundle_bytes)
+            object_format = "sha256" if len(identities["skeleton_commit_sha"]) == 64 else "sha1"
+            _git(root, "init", "--bare", "-q", f"--object-format={object_format}", str(bare))
+            _git_dir(bare, "bundle", "verify", str(bundle))
+            _git_dir(bare, "fetch", "--no-tags", str(bundle), "+refs/heads/*:refs/pal/import/*")
+            for prefix in ("base", "skeleton"):
+                commit = identities[f"{prefix}_commit_sha"]
+                if _git_dir(bare, "cat-file", "-t", commit).strip() != "commit":
+                    raise ValueError(f"imported architecture {prefix} object is not a commit")
+                tree = _git_dir(bare, "rev-parse", f"{commit}^{{tree}}").strip()
+                if tree != identities[f"{prefix}_tree_sha"]:
+                    raise ValueError(f"imported architecture {prefix} tree differs from the artifact")
+            _git_dir(
+                bare, "merge-base", "--is-ancestor",
+                identities["base_commit_sha"], identities["skeleton_commit_sha"],
+            )
+            _git_dir(bare, "worktree", "add", "--detach", str(worktree), identities["skeleton_commit_sha"])
+            return review
+        except Exception:
+            review.cleanup()
+            raise
 
     def _import_bundle(self, common_git_dir: Path, bundle_ref: ArtifactRef) -> None:
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-import-") as temporary:
@@ -2005,6 +2076,11 @@ def _stable_hash(value: Any) -> str:
 
 def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._-") or "item"
+
+
+def _artifact_belongs_to_another_workflow(artifact: Mapping[str, Any], workflow_id: str) -> bool:
+    source_workflow_id = str(dict(artifact.get("graph_ir") or {}).get("graph_id") or "")
+    return bool(workflow_id and source_workflow_id and source_workflow_id != workflow_id)
 
 
 def _git_object_exists(git_dir: Path, object_name: str) -> bool:

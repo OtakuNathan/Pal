@@ -1,7 +1,7 @@
 ----------------------- MODULE ProduceCheckCycle -----------------------
 EXTENDS Naturals
 
-CONSTANT MaxGeneration
+CONSTANTS MaxGeneration, CycleKind
 
 States == {
     "ProducerReady", "Producing", "CheckerReady", "Checking",
@@ -23,6 +23,20 @@ Init ==
     /\ productGeneration = 0
     /\ verdictGeneration = 0
     /\ resumeState = "ProducerReady"
+
+\* Only a pristine PlanCycle can bind an imported architecture product.
+\* productGeneration abstracts its nonempty durable product_ref. The router's
+\* provenance and transaction checks are refined by ImportedPlanLifecycle.
+ImportProduct ==
+    /\ CycleKind = "Plan"
+    /\ state = "ProducerReady"
+    /\ generation = 1
+    /\ activeSlot = "None"
+    /\ productGeneration = 0
+    /\ verdictGeneration = 0
+    /\ state' = "CheckerReady"
+    /\ productGeneration' = generation
+    /\ UNCHANGED <<generation, activeSlot, verdictGeneration, resumeState>>
 
 StartProducer ==
     /\ state \in {"ProducerReady", "RepairReady"}
@@ -110,7 +124,7 @@ Cancel ==
     /\ UNCHANGED <<generation, productGeneration, verdictGeneration, resumeState>>
 
 Next ==
-    \/ StartProducer \/ SubmitProduct \/ RejectProduct
+    \/ ImportProduct \/ StartProducer \/ SubmitProduct \/ RejectProduct
     \/ StartChecker \/ RejectByChecker \/ AcceptByChecker
     \/ HumanAccept \/ HumanReject \/ HumanEdit
     \/ RequireTriage \/ ResolveTriage \/ Cancel
@@ -118,6 +132,7 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+    /\ CycleKind \in {"Plan", "Node"}
     /\ state \in States
     /\ generation \in 1..MaxGeneration
     /\ activeSlot \in Slots

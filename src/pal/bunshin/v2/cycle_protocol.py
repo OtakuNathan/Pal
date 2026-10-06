@@ -76,6 +76,7 @@ class CycleAction(StrEnum):
     UNBLOCK = "unblock"
     START_PRODUCER = "start_producer"
     PRODUCER_SUBMITTED = "producer_submitted"
+    IMPORT_PRODUCT = "import_product"
     PRODUCER_REJECTED = "producer_rejected"
     START_CHECKER = "start_checker"
     CHECKER_ACCEPTED = "checker_accepted"
@@ -398,6 +399,15 @@ def _transition_plan(
     verdict: CycleVerdict | None,
 ) -> PlanCycle:
     state = cycle.state.value
+    if action == CycleAction.IMPORT_PRODUCT:
+        # An externally supplied immutable plan is a product, not a fictitious
+        # producer process. Only initial empty PlanCycles can import it.
+        if (state != "PRODUCER_READY" or cycle.generation != 1 or not product_ref
+                or cycle.active_assignment is not None or cycle.product_ref
+                or cycle.accepted_product_ref or cycle.last_verdict is not None
+                or cycle.resume_state is not None or assignment is not None or verdict is not None):
+            raise CycleTransitionError("plan import requires an empty initial producer-ready cycle")
+        return replace(cycle, state=PlanCycleState.CHECKER_READY, product_ref=product_ref)
     if action == CycleAction.REQUEST_HUMAN_REVIEW and state == "ACCEPTED":
         return replace(cycle, state=PlanCycleState.HUMAN_REVIEW)
     if action == CycleAction.HUMAN_ACCEPTED and state == "HUMAN_REVIEW":

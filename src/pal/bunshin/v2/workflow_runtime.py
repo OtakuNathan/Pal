@@ -186,6 +186,24 @@ class WorkflowCoordinator:
             unit_of_work=unit_of_work,
         )
 
+    def import_plan_product(
+        self, *, workflow_id: str, product_ref: str,
+        unit_of_work: BunshinUnitOfWork,
+    ) -> PlanCycle:
+        """Bind an imported initial product after its domain provenance guard.
+
+        The caller pairs this with IMPORT_ARCHITECTURE_REVISION under the
+        same write lock, or validates that exact persisted import for recovery.
+        No producer assignment, verifier verdict, or graph installation occurs.
+        """
+        cycle = self.ensure_plan_cycle(workflow_id=workflow_id, unit_of_work=unit_of_work)
+        if (product_ref and cycle.generation == 1 and cycle.product_ref == product_ref
+                and cycle.state in {PlanCycleState.CHECKER_READY, PlanCycleState.CHECKING,
+                                    PlanCycleState.HUMAN_REVIEW, PlanCycleState.ACCEPTED}):
+            return cycle
+        return self.transition_plan(workflow_id=workflow_id, action=CycleAction.IMPORT_PRODUCT,
+                                    product_ref=product_ref, unit_of_work=unit_of_work)
+
     def submit_plan_product(
         self,
         *,

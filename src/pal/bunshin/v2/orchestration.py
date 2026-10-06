@@ -1123,7 +1123,7 @@ class BunshinV2OutboxProcessor:
         if operation == "review_then_execute":
             revision_id = _derived_id("arch", str(effect["effect_key"]))
             with self.repository.transaction() as connection:
-                (connection or self.repository).transitions.dispatch(
+                imported = (connection or self.repository).transitions.dispatch(
                     ActionEnvelope(
                         action_type="IMPORT_ARCHITECTURE_REVISION",
                         workflow_id=workflow.workflow_id,
@@ -1140,6 +1140,8 @@ class BunshinV2OutboxProcessor:
                         },
                     ),
                 )
+                if imported.duplicate:
+                    return {"status": "import_replayed"}
                 self._link_workflow(
                     workflow.workflow_id,
                     "LINK_ARCHITECTURE_REVISION",
@@ -1147,6 +1149,9 @@ class BunshinV2OutboxProcessor:
                     str(effect["effect_key"]),
                     unit_of_work=connection,
                 )
+                from pal.bunshin.v2.imported_plan import bind_imported_plan_product
+                bind_imported_plan_product(repository=self.repository, artifacts=self.service.artifacts,
+                    revision=imported.snapshot, unit_of_work=connection)
             return {}
         review_id = _derived_id("review", str(effect["effect_key"]))
         with self.repository.transaction() as connection:

@@ -98,3 +98,21 @@ The runtime regression suites separately exercise compiled software graphs, real
 repository transactions, claimed public outbox effects, real process/task/worktree
 cleanup, late receipts, lease rebinding, replay, explicit control and failure
 budgets. Those integration tests are the release gate for the source refinement.
+
+### Imported architecture restart lifecycle
+
+An external architecture import binds its exact durable product to an initial
+PlanCycle with the explicit `IMPORT_PRODUCT` action. This makes it checker-ready
+without inventing an Architect assignment or accepting its embedded graph. The
+revision import, workflow pointer and plan binding commit together. A legacy
+import stranded before this binding recovers through ordinary architecture triage
+resolution; reviewer admission validates the immutable import event, current
+request, product and pinned requirements before restoring that binding.
+
+Software review of a foreign-workflow artifact uses a disposable workspace made
+from its durable Git bundle, so cleanup of the old workflow does not remove its
+review input. Human Accept rejects a foreign GraphIR before consuming the decision
+token; Human Edit stays available. Edit then gives the Architect a replacement-
+owned worktree in the same project, and normal submission compiles the fresh graph.
+The edited PlanCycle can be generation 2 while the replacement workflow's first
+GraphIR is generation 1. The old artifact, graph and source workflow remain intact.
