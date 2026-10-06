@@ -333,11 +333,12 @@ class RoleAssignmentGateway:
         # payload under the same durable submission kind; its own compiler
         # contract is outside this SWE outcome validator.
         if context.draft_kind == "verification" and "outcome" in payload:
-            self._validate_verification_submission_before_receipt(
-                authenticated,
-                assignment,
-                payload,
-            )
+            with submission_validation():
+                self._validate_verification_submission_before_receipt(
+                    authenticated,
+                    assignment,
+                    payload,
+                )
         artifact_ref = self.service.artifacts.put_json(
             payload,
             artifact_type=artifact_type,
@@ -443,6 +444,10 @@ class RoleAssignmentGateway:
 
         prompt_pack = self._authenticated_prompt_pack(authenticated)
         workspace = dict(prompt_pack.get("workspace") or {})
+        workspace["bunshin_v2"] = {
+            **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
+            **dict(workspace.get("bunshin_v2") or {}),
+        }
         review_workspace = Path(str(workspace.get("repo_path") or ""))
         review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
         scratch_only = bool(workspace.get("verification_scratch_only"))
@@ -479,6 +484,7 @@ class RoleAssignmentGateway:
             current_case_paths=current_case_paths,
             corpus_scope=corpus_scope,
             scratch_only=scratch_only,
+            workspace=workspace,
         )
         if errors:
             raise ValueError(

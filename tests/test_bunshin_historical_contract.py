@@ -136,8 +136,8 @@ def test_current_repair_packet_preserves_every_regression_through_submit(tmp_pat
     assert checked.ok, checked.llm_text
     assert len(adapter.calls) == 3
 
-    # Ordinary final-corpus evidence is separately required by SWE outcomes.
-    workspace["review_tool_evidence_refs"] = [{"kind": "command", "ok": True}]
+    # Each semantic execution already supplied its real bound command receipt.
+    assert len(workspace["review_tool_evidence_refs"]) == 3
     submitted = swe_verification_tool_result(new_tool_call(
         name="op_bunshin_verification_pass", args={}, call_id="submit",
     ), workspace, [])

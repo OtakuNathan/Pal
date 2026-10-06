@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
 from pal.shared.tool_protocol import ToolCallIR
+from pal.execution.tool_facade import rejection
 
 from pal.shared.tool_protocol import new_tool_call
 
@@ -14,6 +15,7 @@ from typing import Any, Mapping
 
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot, record_verification_execution, lsp_verification_status, shell_execution_output
 from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.shared import RuntimeStatus, ToolExecutionResult
 
@@ -28,13 +30,18 @@ async def run_shell_evidence(
     obligation_tag: str,
     turn_id: str | None = None,
 ) -> ToolExecutionResult:
+    execution_started = False
     try:
         args = dict(call.args or {})
-        name = _required_text(args, "name")
-        command = _required_text(args, "command")
-        description = str(args.get("description") or name).strip()
-        timeout_seconds = max(1, int(args.get("timeout_seconds") or 300))
-        expected_exit_codes = _integer_list(args.get("expected_exit_codes") or [0])
+        try:
+            name = _required_text(args, "name")
+            command = _required_text(args, "command")
+            description = str(args.get("description") or name).strip()
+            timeout_seconds = max(1, int(args.get("timeout_seconds") or 300))
+            expected_exit_codes = _integer_list(args.get("expected_exit_codes") or [0])
+            probe_fingerprint = scratch_probe_fingerprint(workspace, str(args.get("probe_path") or ""))
+        except ValueError as exc:
+            return _error_result(call, exc, execution_started=False, input_rejected=True)
         context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
         store = SubmissionDraftStore(_runtime_root(workspace))
         snapshot = store.read(context, seed=_empty_payload())
@@ -46,9 +53,7 @@ async def run_shell_evidence(
                 "arguments": args,
                 "case_kind": case_kind,
                 "obligation_tag": obligation_tag,
-                "scratch_probe_fingerprint": scratch_probe_fingerprint(
-                    workspace, str(args.get("probe_path") or "")
-                ),
+                "scratch_probe_fingerprint": probe_fingerprint,
                 "workspace_fingerprint": execution_workspace_fingerprint(workspace),
             },
         )
@@ -75,24 +80,26 @@ async def run_shell_evidence(
                 llm_text=_shell_execution_text(name, execution, reused=True),
             )
         cwd = str(workspace.get("repo_path") or "").strip() or None
+        execution_call = new_tool_call(
+            name="op_exec_shell", args={"cmd": command,
+                **({"cwd": cwd} if cwd else {}), "timeout_ms": timeout_seconds * 1000},
+            call_id=call.call_id,
+        )
+        before = verification_corpus_snapshot(workspace)
+        execution_started = True
         result = await original_adapter.execute_tool_async(
-            new_tool_call(
-                name="op_exec_shell",
-                args={
-                    "cmd": command,
-                    **({"cwd": cwd} if cwd else {}),
-                    "timeout_ms": timeout_seconds * 1000,
-                },
-                call_id=call.call_id,
-            ),
+            execution_call,
             allow_tools=True,
             turn_id=turn_id,
         )
-        structured = dict(result.structured or {})
+        record_verification_execution(workspace, execution_call, result, before)
+        structured = shell_execution_output(result)
         exit_code = structured.get("returncode")
         stdout = str(structured.get("stdout") or "")
         stderr = str(structured.get("stderr") or result.text or "")
-        if exit_code is None:
+        if (type(exit_code) is not int or structured.get("timed_out") or structured.get("cancelled")
+                or structured.get("_runtime_error_code") not in {None, "command_failed"}
+                or (not result.ok and exit_code == 0)):
             status = "UNKNOWN"
         else:
             status = "PASS" if int(exit_code) in expected_exit_codes else "FAIL"
@@ -119,7 +126,7 @@ async def run_shell_evidence(
             "locations": _single_location(args),
             "invariants": _string_list(args.get("invariants") or []),
             "status": status,
-            "exit_code": int(exit_code) if exit_code is not None else None,
+            "exit_code": exit_code if type(exit_code) is int else None,
             "stdout_ref": stdout_ref.to_dict(),
             "stderr_ref": stderr_ref.to_dict(),
             "environment": {"cwd": cwd or "", "runner": "scoped_shell"},
@@ -151,7 +158,7 @@ async def run_shell_evidence(
             llm_text=_shell_execution_text(name, execution),
         )
     except Exception as exc:
-        return _error_result(call, exc)
+        return _error_result(call, exc, execution_started=execution_started)
 
 
 async def run_lsp_evidence(
@@ -163,10 +170,14 @@ async def run_lsp_evidence(
     obligation_tag: str = "lsp",
     turn_id: str | None = None,
 ) -> ToolExecutionResult:
+    execution_started = False
     try:
         args = dict(call.args or {})
-        name = _required_text(args, "name")
-        file_path = _required_text(args, "file")
+        try:
+            name = _required_text(args, "name")
+            file_path = _required_text(args, "file")
+        except ValueError as exc:
+            return _error_result(call, exc, execution_started=False, input_rejected=True)
         lsp_environment_fingerprint = str(
             workspace.get("lsp_environment_fingerprint") or ""
         ).strip()
@@ -206,18 +217,19 @@ async def run_lsp_evidence(
                     reused=True,
                 ),
             )
+        execution_call = new_tool_call(
+            name="op_lsp_diagnostics", args={"file": file_path,
+                **({"workspace_root": str(workspace.get("repo_path"))} if workspace.get("repo_path") else {})},
+            call_id=call.call_id,
+        )
+        before = verification_corpus_snapshot(workspace)
+        execution_started = True
         result = await original_adapter.execute_tool_async(
-            new_tool_call(
-                name="op_lsp_diagnostics",
-                args={
-                    "file": file_path,
-                    **({"workspace_root": str(workspace.get("repo_path"))} if workspace.get("repo_path") else {}),
-                },
-                call_id=call.call_id,
-            ),
+            execution_call,
             allow_tools=True,
             turn_id=turn_id,
         )
+        record_verification_execution(workspace, execution_call, result, before)
         serialized = json.dumps(dict(result.structured or {}), ensure_ascii=False, sort_keys=True)
         stdout_ref = artifacts.put_bytes(
             serialized.encode("utf-8"),
@@ -231,22 +243,7 @@ async def run_lsp_evidence(
             media_type="text/plain",
         )
         structured = dict(result.structured or {})
-        operation_result = (
-            dict(structured.get("result") or {})
-            if isinstance(structured.get("result"), Mapping)
-            else structured
-        )
-        diagnostics = list(operation_result.get("diagnostics") or [])
-        diagnostics_state = str(operation_result.get("diagnostics_state") or "")
-        operation_status = str(structured.get("status") or operation_result.get("status") or "")
-        has_error = any(_diagnostic_is_error(item) for item in diagnostics)
-        status = (
-            "UNKNOWN"
-            if not result.ok or operation_status not in {"", "ok"} or diagnostics_state == "timed_out"
-            else "FAIL"
-            if has_error
-            else "PASS"
-        )
+        status = lsp_verification_status(result)
         lsp_evidence = (
             dict(structured.get("evidence") or {})
             if isinstance(structured.get("evidence"), Mapping)
@@ -298,7 +295,7 @@ async def run_lsp_evidence(
             llm_text=_lsp_execution_text(name, status, structured),
         )
     except Exception as exc:
-        return _error_result(call, exc)
+        return _error_result(call, exc, execution_started=execution_started)
 
 
 def record_unavailable_evidence(
@@ -692,15 +689,19 @@ def _success_result(
     )
 
 
-def _error_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+def _error_result(call: ToolCallIR, exc: Exception, *, execution_started: bool = True, input_rejected: bool = False) -> ToolExecutionResult:
     record_verifier_failure(exc)
     text = f"{exc.__class__.__name__}: {exc}"
     return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,
-        llm_text=text + " Correct only this local issue and retry the same semantic operation.",
+        llm_text=text + (" Execution may have started; reconcile before retrying." if execution_started
+                         else " Correct the pre-execution issue before retrying."),
         structured={"error": str(exc), "error_type": exc.__class__.__name__},
         call_id=call.call_id,
         status=RuntimeStatus.INVALID,
+        invocation_result=(rejection("verification_preflight", text + " No command ran. Correct the input and retry.",
+                                     details={"error": str(exc), "error_type": type(exc).__name__})
+                           if input_rejected and not isinstance(exc.__cause__, OSError) else None),
     )

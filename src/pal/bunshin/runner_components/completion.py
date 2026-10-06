@@ -3,6 +3,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Mapping
 from pal.shared import BunshinInvocationPack
 from pal.bunshin.runner_components.artifacts import Artifacts
 
@@ -53,10 +54,24 @@ class Completion:
             except FileNotFoundError:
                 digest = "missing"
             artifacts.append((raw_path, digest))
-        payload = {
+        payload: dict[str, Any] = {
             "items": sorted(items, key=lambda item: json.dumps(item, sort_keys=True)),
             "artifacts": artifacts,
         }
+        if str(binding.get("role") or "") == "verifier":
+            from pal.bunshin.v2.review_findings import empty_review_draft
+            from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+            from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+
+            context = SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
+            snapshot = SubmissionDraftStore(self.runtime_root).read(context, seed=empty_review_draft())
+            cases = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {})
+            payload["verification"] = {
+                "corpus": verification_corpus_snapshot(workspace),
+                "cases": _unique_progress_values([
+                    _verification_case_progress(case) for case in cases.values()
+                ]),
+            }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
@@ -144,3 +159,43 @@ class Completion:
 
     def restore_receipt(self, observed: bool) -> None:
         self.manager_submission_receipt_observed = observed
+
+
+def _unique_progress_values(values: list[Any]) -> list[Any]:
+    """Canonicalize unordered semantic facts without counting duplicates."""
+    encoded = {json.dumps(value, sort_keys=True, ensure_ascii=False): value for value in values}
+    return [encoded[key] for key in sorted(encoded)]
+
+
+def _verification_case_progress(case: Mapping[str, Any]) -> dict[str, Any]:
+    """Observe evidence, not operation IDs, versions or replay metadata.
+
+    Content-addressed result hashes carry the actual stdout/stderr changes.
+    Request fingerprints are deliberately absent: they include unrelated repo
+    state and arguments, neither of which establishes new verification work.
+    """
+    result = {
+        key: case.get(key)
+        for key in (
+            "name", "case_kind", "command", "status",
+            "exit_code", "input_fingerprint",
+        )
+    }
+    for key in ("obligation_tags", "expected_exit_codes", "invariants"):
+        result[key] = _unique_progress_values(list(case.get(key) or []))
+    for key, fields in (
+        ("locations", ("path", "symbol", "section")),
+        ("requirements", ("section", "requirement")),
+    ):
+        result[key] = _unique_progress_values([
+            {field: item.get(field) for field in fields}
+            for item in list(case.get(key) or [])
+        ])
+    environment = dict(case.get("environment") or {})
+    result["environment"] = {
+        key: environment.get(key)
+        for key in ("cwd", "runner", "workspace_root", "primary_language", "environment_fingerprint")
+    }
+    for key in ("stdout_ref", "stderr_ref"):
+        result[key] = str(dict(case.get(key) or {}).get("sha256") or "")
+    return result

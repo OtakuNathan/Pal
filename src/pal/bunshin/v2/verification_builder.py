@@ -3,6 +3,8 @@ from __future__ import annotations
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
 from pal.shared.tool_protocol import ToolCallIR
+from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.execution.tool_facade import rejection
 
 from pal.execution.generated_tool_models import (
     BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput,
@@ -587,8 +589,8 @@ async def verification_builder_tool_result(
     draft_kind = _draft_kind(workspace)
     try:
         _assert_tool_contract_allows(workspace, name=name, args=dict(call.args or {}))
-    except Exception as exc:
-        return _error(call, exc)
+    except ValueError as exc:
+        return _rejected(call, exc)
     if name in _RUN_TO_KIND_TAG:
         case_kind, obligation = _RUN_TO_KIND_TAG[name]
         try:
@@ -597,8 +599,8 @@ async def verification_builder_tool_result(
                 draft_kind=draft_kind,
                 requested_case_kind=case_kind,
             )
-        except Exception as exc:
-            return _error(call, exc)
+        except ValueError as exc:
+            return _rejected(call, exc)
         return await run_shell_evidence(
             call,
             workspace=workspace,
@@ -711,12 +713,36 @@ def _draft_status(
     }
     if str(policy.get("lsp_policy") or "") == "when_available":
         required_tags.add("lsp")
+    work_view = bound_reference_payload(workspace, "module_work_view", required=False)
+    historical_names = {str(item.get("name") or "") for item in cases
+                        if item.get("case_kind") == "historical_regression"}
+    missing_history = [str(item["case"]) for item in historical_repair_checklist_items(work_view)
+                       if str(item["case"]) not in historical_names]
     remaining_obligations = [
-        tag
-        for tag in _ACTION_TEMPLATE_ORDER
-        if tag in required_tags and tag not in tags
+        tag for tag in _ACTION_TEMPLATE_ORDER
+        if tag in required_tags and (tag not in tags or tag == "historical_regressions" and missing_history)
     ]
     action_templates = dict(policy.get("action_templates") or {})
+    from pal.bunshin.v2.swe_verification import (
+        SEMANTIC_VERIFICATION_OUTCOMES, verification_outcome_readiness,
+    )
+    readiness = {outcome: verification_outcome_readiness(
+                     workspace, snapshot.payload, outcome=outcome, require_outcome_arguments=False)
+                 for outcome in sorted(SEMANTIC_VERIFICATION_OUTCOMES)}
+    next_tags = ["historical_regressions"] if missing_history else remaining_obligations[:3]
+    next_actions = [{"obligation": tag,
+                     **dict(action_templates.get(tag) or _VERIFICATION_ACTION_TEMPLATES.get(tag) or {}),
+                     **({"cases": missing_history} if tag == "historical_regressions" else {})}
+                    for tag in next_tags]
+    if not next_actions:
+        ready_outcomes = [outcome for outcome, state in readiness.items() if state["ready"]]
+        if ready_outcomes:
+            next_actions.append({"action": "submit", "outcomes": ready_outcomes})
+        else:
+            # Do not hide non-policy work behind an empty obligations list.
+            next_actions.append({"action": "resolve_submission_blockers",
+                                 "blockers_by_outcome": {outcome: state["blockers"]
+                                                         for outcome, state in readiness.items()}})
     result = {
         "draft_version": snapshot.version,
         "status": snapshot.status,
@@ -743,15 +769,20 @@ def _draft_status(
             for item in advisories
         ],
         "remaining_policy_obligations": remaining_obligations,
-        "next_actions": [
-            {
-                "obligation": tag,
-                **dict(action_templates.get(tag) or _VERIFICATION_ACTION_TEMPLATES.get(tag) or {}),
-            }
-            for tag in remaining_obligations[:3]
-        ],
+        "missing_historical_cases": missing_history,
+        "policy_evidence": {tag: [{"name": item.get("name"), "status": item.get("status")}
+                                  for item in cases if tag in list(item.get("obligation_tags") or [])]
+                            for tag in sorted(required_tags)},
+        "ready_by_outcome": {outcome: state["ready"] for outcome, state in readiness.items()},
+        "blockers_by_outcome": {outcome: state["blockers"] for outcome, state in readiness.items()},
+        "outcome_arguments": {"unknown": ["reason: environmental reason and follow-up plan"]},
+        "next_actions": next_actions,
     }
-    return _ok(call, "verification Draft status", result)
+    return ToolExecutionResult(
+        name=call.name, ok=True, text="verification Draft status",
+        llm_text=render_titled_structured_for_llm("verification Draft status", result),
+        structured=result, call_id=call.call_id, status=RuntimeStatus.OK,
+    )
 
 
 def _remove_case(
@@ -1217,3 +1248,12 @@ def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
     record_verifier_failure(exc)
     text = f"{exc.__class__.__name__}: {exc}"
     return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this local issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
+
+
+def _rejected(call: ToolCallIR, exc: ValueError) -> ToolExecutionResult:
+    record_verifier_failure(exc)
+    text = str(exc) + " Correct the listed prerequisites and retry. No command ran."
+    details = {"error": str(exc), "error_type": type(exc).__name__}
+    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text,
+                               structured=details, call_id=call.call_id, status=RuntimeStatus.INVALID,
+                               invocation_result=rejection("verification_preflight", text, details=details))

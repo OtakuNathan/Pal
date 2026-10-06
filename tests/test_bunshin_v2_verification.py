@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
@@ -259,6 +260,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
             role="verifier",
         )
+        self._record_current_corpus_check(workspace)
         result = swe_verification_tool_result(
             new_tool_call(
                 name="op_bunshin_verification_pass",
@@ -326,6 +328,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             role="verifier",
         )
 
+        self._record_current_corpus_check(workspace)
         result = swe_verification_tool_result(
             new_tool_call(
                 name="op_bunshin_verification_pass",
@@ -397,6 +400,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
         self.assertTrue(recorded.ok, recorded.llm_text)
 
+        self._record_current_corpus_check(workspace)
         result = swe_verification_tool_result(
             new_tool_call(
                 name="op_bunshin_verification_pass",
@@ -703,8 +707,11 @@ class BunshinV2VerificationTests(unittest.TestCase):
             {"outcome": "pass"},
             artifact_type="SemanticVerificationSubmissionArtifact",
         )
+        receipt_workspace = {"repo_path": str(repo), "write_path_scopes": [
+            {"kind": "directory", "path": "tests/router/verifier"}], "review_tool_evidence_refs": []}
+        self._record_current_corpus_check(receipt_workspace)
         prompt_ref = self.store.put_json(
-            {"role": "verifier"},
+            {"role": "verifier", "workspace": receipt_workspace},
             artifact_type="RolePromptPackArtifact",
         )
         terminal_ref = self.store.put_json(
@@ -736,9 +743,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         submission = {
             "outcome": "pass",
             "changed_test_paths": [],
-            "tool_receipts": [
-                {"kind": "command", "ok": True, "structured": {}},
-            ],
+            "tool_receipts": receipt_workspace["review_tool_evidence_refs"],
             "recorded_results": [
                 {
                     "name": "current candidate delta",
@@ -1294,6 +1299,19 @@ class BunshinV2VerificationTests(unittest.TestCase):
             "findings": [],
             "reviewer_summary": "The Manager should run the declared adversarial case.",
         }
+
+    def _record_current_corpus_check(self, workspace):
+        from pal.bunshin.v2.verification_readiness import (
+            record_verification_execution, verification_corpus_snapshot,
+        )
+        call = new_tool_call(name="op_exec_shell", args={
+            "cmd": f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py",
+            "cwd": workspace["repo_path"],
+        }, call_id="current-corpus-check")
+        before = verification_corpus_snapshot(workspace)
+        result = asyncio.run(self.adapter.execute_tool_async(call))
+        self.assertEqual(result.structured["returncode"], 0, result.structured)
+        record_verification_execution(workspace, call, result, before)
 
     def _bind_workspace(
         self,

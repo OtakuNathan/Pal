@@ -30,6 +30,8 @@ from pal.bunshin.v2.review_findings import (
 )
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.semantic_evidence import recorded_cases
+from pal.bunshin.v2.verification_readiness import current_verification_receipts, final_verification_errors, verification_case_errors
+from pal.bunshin.v2.submission_errors import submission_error_result, submission_validation
 from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.v2.verification_builder import semantic_verification_draft_errors
 from pal.bunshin.v2.verification import (
@@ -77,6 +79,7 @@ def semantic_verification_submission_errors(
     current_case_paths: list[str],
     corpus_scope: Mapping[str, Any],
     scratch_only: bool,
+    workspace: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     """Validate one semantic verifier submission against Manager-owned facts.
 
@@ -111,6 +114,7 @@ def semantic_verification_submission_errors(
         for item in list(submission.get("recorded_results") or [])
         if isinstance(item, Mapping)
     ]
+    errors.extend(verification_case_errors(recorded_results, outcome=outcome, workspace=workspace))
     required_historical = historical_repair_checklist_items(work_view)
     try:
         validate_verification_case_order(
@@ -168,23 +172,9 @@ def semantic_verification_submission_errors(
         errors.append(
             "verification requires Manager-recorded shell, Git, or LSP evidence"
         )
-    last_write = max(
-        (
-            index
-            for index, item in enumerate(receipts)
-            if item.get("kind") == "test_write"
-        ),
-        default=-1,
-    )
-    final_checks = [
-        item
-        for index, item in enumerate(receipts)
-        if index > last_write and item.get("kind") in {"command", "lsp"}
-    ]
-    if changed_paths and not final_checks:
-        errors.append("run verification again after the final test edit")
-    if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
-        errors.append("PASS requires a successful final command or LSP receipt")
+    if workspace is not None:
+        receipts = current_verification_receipts(receipts, workspace)
+    errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(changed_paths)))
     return tuple(dict.fromkeys(errors))
 
 
@@ -389,7 +379,7 @@ def compile_swe_verification_tool_contract(
         guidance_overrides["op_bunshin_verification_pass"] = {"use_when": (
             f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
             "adding or strengthening coverage only for a demonstrated gap, and running a successful "
-            "ordinary shell or LSP check against the final corpus state. PASS takes no arguments."
+            "shell or LSP check (including a semantic run tool) against the final corpus state. PASS takes no arguments."
         )}
     elif requirements:
         guidance_overrides["op_bunshin_verification_pass"] = {"use_when": (
@@ -409,6 +399,7 @@ def swe_verification_tool_result(
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
 ) -> ToolExecutionResult:
+    submission_started = False
     try:
         outcome = _OUTCOME_BY_CAPABILITY[call.name]
         args = dict(call.args or {})
@@ -424,39 +415,14 @@ def swe_verification_tool_result(
         findings, advisories = partition_findings(
             findings_from_work_items(workspace)
         )
-        work_items = assert_work_items_complete(workspace)
-        contract = dict(
-            dict(workspace.get("bunshin_v2") or {}).get(
-                "swe_verification_tool_contract"
+        with submission_validation():
+            readiness = verification_outcome_readiness(
+                workspace, snapshot.payload, outcome=outcome, reason=reason,
             )
-            or {}
-        )
-        if outcome == "module_repair":
-            if any(
-                str(item.get("finding_kind") or "") == "verification_defect"
-                for item in findings
-            ):
-                raise ValueError(
-                    "correct Verifier-owned probes in this session before submitting"
-                )
-            target_modules = infer_repair_target_modules(
-                findings,
-                contract.get("repair_path_owners") or {},
-            )
-        else:
-            target_modules = []
-        errors = _submission_errors(
-            outcome=outcome,
-            findings=findings,
-            reason=reason,
-            workspace=workspace,
-        )
-        errors.extend(
-            semantic_verification_draft_errors(snapshot.payload, workspace)
-        )
-        errors = list(dict.fromkeys(errors))
-        if errors:
-            raise ValueError("Submission has the following errors:\n- " + "\n- ".join(errors))
+            if readiness["blockers"]:
+                raise ValueError("Submission has the following errors:\n- " + "\n- ".join(readiness["blockers"]))
+        work_items = readiness["work_items"]
+        target_modules = readiness["target_modules"]
 
         receipts = [
             dict(item)
@@ -479,6 +445,7 @@ def swe_verification_tool_result(
         }
         submission_ref: dict[str, Any]
         if store.uses_role_gateway:
+            submission_started = True
             receipt = store.mark_submitted(
                 context,
                 expected_version=snapshot.version,
@@ -502,6 +469,7 @@ def swe_verification_tool_result(
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
+            submission_started = True
             store.mark_submitted(
                 context,
                 expected_version=snapshot.version,
@@ -537,16 +505,37 @@ def swe_verification_tool_result(
         )
     except Exception as exc:
         record_verifier_failure(exc)
-        text = f"{exc.__class__.__name__}: {exc}"
-        return ToolExecutionResult(
-            name=call.name,
-            ok=False,
-            text=text,
-            llm_text=text + " Correct all listed issues and retry in this invocation.",
-            structured={"error": str(exc), "error_type": exc.__class__.__name__},
-            call_id=call.call_id,
-            status=RuntimeStatus.INVALID,
+        return submission_error_result(
+            call, exc, submission_started=submission_started,
+            invalid_code="verification_validation",
+            correction="Correct all listed issues and retry in this invocation.",
         )
+
+
+def verification_outcome_readiness(
+    workspace: Mapping[str, Any], payload: Mapping[str, Any], *,
+    outcome: str, reason: str = "", require_outcome_arguments: bool = True,
+) -> dict[str, Any]:
+    """The single read-only preflight used by status and semantic submit."""
+    findings, _ = partition_findings(findings_from_work_items(workspace))
+    errors = _submission_errors(outcome=outcome, findings=findings, reason=reason, workspace=workspace,
+                                require_outcome_arguments=require_outcome_arguments)
+    errors.extend(semantic_verification_draft_errors(payload, workspace))
+    work_items: dict[str, Any] = {}
+    try:
+        work_items = assert_work_items_complete(workspace)
+    except ValueError as exc:
+        errors.append(str(exc))
+    targets: list[str] = []
+    if outcome == "module_repair":
+        contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+        try:
+            targets = infer_repair_target_modules(findings, contract.get("repair_path_owners") or {})
+        except ValueError as exc:
+            errors.append(str(exc))
+    errors.extend(verification_case_errors(recorded_cases(payload), outcome=outcome, workspace=workspace))
+    return {"ready": not errors, "blockers": list(dict.fromkeys(errors)),
+            "work_items": work_items, "target_modules": targets}
 
 
 def _submission_errors(
@@ -555,6 +544,7 @@ def _submission_errors(
     findings: list[Mapping[str, Any]],
     reason: str,
     workspace: Mapping[str, Any],
+    require_outcome_arguments: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     receipts = [
@@ -570,7 +560,7 @@ def _submission_errors(
         errors.append("repair or revision outcomes require at least one add_finding call")
     if outcome in {"pass", "unknown"} and findings:
         errors.append(f"{outcome.upper()} requires an empty finding Draft")
-    if outcome == "unknown" and not reason:
+    if outcome == "unknown" and require_outcome_arguments and not reason:
         errors.append("UNKNOWN requires an environmental reason and follow-up verification plan")
     finding_kinds = {
         str(item.get("finding_kind") or "")
@@ -601,23 +591,8 @@ def _submission_errors(
             "verification changed paths outside the bound module corpus: "
             + ", ".join(outside)
         )
-    last_write = max(
-        (
-            index
-            for index, item in enumerate(receipts)
-            if str(item.get("kind") or "") == "test_write"
-        ),
-        default=-1,
-    )
-    final_checks = [
-        item
-        for index, item in enumerate(receipts)
-        if index > last_write and str(item.get("kind") or "") in {"command", "lsp"}
-    ]
-    if changed_paths and not final_checks:
-        errors.append("run verification again after the final test edit")
-    if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
-        errors.append("PASS requires a successful final command or LSP check")
+    receipts = current_verification_receipts(receipts, workspace)
+    errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(changed_paths)))
     return errors
 
 

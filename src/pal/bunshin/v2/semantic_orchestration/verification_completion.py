@@ -63,6 +63,14 @@ class VerificationCompletion:
             if scratch_only
             else _verification_corpus_files(review_workspace, corpus_scope)
         )
+        prompt_pack = self.artifacts.read_json(prompt_ref)
+        receipt_workspace = dict(prompt_pack.get("workspace") or {})
+        receipt_workspace.update(repo_path=str(review_workspace), review_scratch_dir=str(review_scratch),
+                                 verification_scratch_only=scratch_only)
+        receipt_workspace["bunshin_v2"] = {
+            **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
+            **dict(receipt_workspace.get("bunshin_v2") or {}),
+        }
         errors = semantic_verification_submission_errors(
             submission,
             work_view=work_view,
@@ -70,6 +78,7 @@ class VerificationCompletion:
             current_case_paths=current_case_paths,
             corpus_scope=corpus_scope,
             scratch_only=scratch_only,
+            workspace=receipt_workspace,
         )
         normalized_submission = dict(submission)
         if errors:

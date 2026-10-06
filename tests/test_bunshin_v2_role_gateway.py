@@ -407,14 +407,15 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         ).fencing_token
         review_scratch = self.runtime_root / "verifier-scratch"
         review_scratch.mkdir()
+        receipt_workspace = {
+            "repo_path": str(self.workspace), "review_scratch_dir": str(review_scratch),
+            "verification_scratch_only": False,
+            "write_path_scopes": [{"kind": "directory", "path": "tests/router/verifier"}],
+            "bunshin_v2": {"authoring_input_fingerprint": "router-verification-input"},
+            "review_tool_evidence_refs": [],
+        }
         prompt_ref = self.service.artifacts.put_json(
-            {
-                "workspace": {
-                    "repo_path": str(self.workspace),
-                    "review_scratch_dir": str(review_scratch),
-                    "verification_scratch_only": False,
-                }
-            },
+            {"workspace": receipt_workspace},
             artifact_type="RolePromptPackArtifact",
         )
         self.service.repository.role_attempts.start_role_attempt(
@@ -484,6 +485,26 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
 
         build_file.unlink()
         build_file.parent.rmdir()
+        with self.assertRaisesRegex(SubmissionValidationError, "fresh validation required"):
+            self.gateway.call("draft_submit", {
+                "access_token": token, "context": context, "expected_version": 0,
+                "submission": submission,
+            })
+        # A legacy checkpoint stays readable, but requires an actual fresh run.
+        import asyncio
+        import sys
+        from tests.test_bunshin_v2_verification import _FakeExecutionAdapter
+        from pal.shared.tool_protocol import new_tool_call
+        from pal.bunshin.v2.verification_readiness import record_verification_execution, verification_corpus_snapshot
+        call = new_tool_call(name="op_exec_shell", args={
+            "cmd": f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py",
+            "cwd": str(self.workspace),
+        })
+        before = verification_corpus_snapshot(receipt_workspace)
+        result = asyncio.run(_FakeExecutionAdapter().execute_tool_async(call))
+        self.assertEqual(result.structured["returncode"], 0)
+        record_verification_execution(receipt_workspace, call, result, before)
+        submission["tool_receipts"] = receipt_workspace["review_tool_evidence_refs"]
         receipt = self.gateway.call(
             "draft_submit",
             {
