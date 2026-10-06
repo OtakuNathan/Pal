@@ -6,6 +6,7 @@ from pal.bunshin.v2.candidate_builder import validate_candidate_submission
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.verification import UnknownPolicy, VerificationCaseResult, VerificationCaseSpec, VerificationStatus, historical_repair_checklist_items
 from pal.bunshin.v2.role_protocol import stable_hash
+from pal.bunshin.v2.verification_lsp_policy import lsp_policy_errors
 
 
 def _validate_skeleton_coder_report(
@@ -301,9 +302,9 @@ def _validate_verification_policy(
                 "verification must replay every historical RepairBill case before submit: "
                 + ", ".join(missing)
             )
-    if str(policy.get("lsp_policy") or "") == "when_available" and "lsp" not in tags:
-        if not str(exceptions.get("lsp") or "").strip():
-            raise ValueError("VerificationPolicy requires LSP evidence or policy_exceptions.lsp")
+    lsp_errors = lsp_policy_errors(policy, list(plan.get("recorded_results") or []), exceptions)
+    if lsp_errors:
+        raise ValueError(lsp_errors[0])
     allowed_obligations = {
         str(item) for item in list(policy.get("allowed_obligations") or []) if str(item)
     }

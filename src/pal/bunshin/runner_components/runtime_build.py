@@ -147,7 +147,8 @@ def build_slim_bunshin_runtime(
         ),
         read_delegate=broker_web.read if broker_web is not None else None,
     )
-    build_lsp_plugin(runtime_root=Path(runtime_root)).register_with_core(context)
+    # All roles borrow the resident LSP manager, regardless of LLM authority.
+    build_lsp_plugin(runtime_root=Path(runtime_root), client_only=True).register_with_core(context)
     for module_id in (
         "execution",
         "artifact",

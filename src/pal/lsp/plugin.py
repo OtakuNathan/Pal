@@ -160,6 +160,8 @@ def _position_schema() -> dict[str, Any]:
 @dataclass
 class LspManagerPluginProvider:
     runtime_root: Path
+    # Bunshin roles may query the resident's manager but never own its lifecycle.
+    client_only: bool = field(default=False, kw_only=True)
     client: LspManagerClient = field(init=False)
     process: subprocess.Popen | None = field(default=None, init=False, repr=False)
     _lifecycle_lock: threading.RLock = field(
@@ -369,7 +371,8 @@ class LspManagerPluginProvider:
     def start_manager(self) -> None:
         try:
             self._ensure_manager_started()
-            self.last_health = self.client.rescan_sync()
+            if not self.client_only:
+                self.last_health = self.client.rescan_sync()
             self.last_error = ""
         except Exception as exc:
             self.last_error = f"{exc.__class__.__name__}: {exc}"
@@ -389,6 +392,8 @@ class LspManagerPluginProvider:
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
+            if self.client_only:
+                raise PermissionError("client-only LSP providers cannot rescan the resident manager")
             self._ensure_manager_started()
             payload = self.client.rescan_sync()
             self.last_health = dict(payload)
@@ -404,6 +409,16 @@ class LspManagerPluginProvider:
             self._ensure_manager_started_locked()
 
     def _ensure_manager_started_locked(self) -> None:
+        if self.client_only:
+            # The host alone may start, replace or clean up the shared endpoint.
+            # A missing/unhealthy host must remain an error, never trigger repair
+            # from a role whose shared LSP runtime directory is read-only.
+            health = self._validate_health(self.client.health_sync())
+            if bool(health.get("shutdown_requested")):
+                raise RuntimeError("lsp manager is shutting down")
+            self.last_health = health
+            self.last_error = ""
+            return
         status = self._process_status()
         if status is not None and status[1] is None:
             try:
@@ -455,6 +470,9 @@ class LspManagerPluginProvider:
             self._stop_manager_locked()
 
     def _stop_manager_locked(self) -> None:
+        if self.client_only:
+            self.last_health = {}
+            return
         try:
             health = self.client.health_sync()
         except Exception:
@@ -558,6 +576,7 @@ class LspManagerPluginProvider:
         process_status = self._process_status()
         return {
             "module_id": "lsp",
+            "client_only": self.client_only,
             "manager_running": process_status is not None and process_status[1] is None,
             "manager_owned": process_status is not None and process_status[1] is None,
             "log_sink": current_service_log_sink_description(),
@@ -683,9 +702,12 @@ class LspManagerPluginBundle:
     runtime_root: Path
     plugin_id: str = "lsp"
     version: str = "0.1.0"
+    client_only: bool = field(default=False, kw_only=True)
 
     def register_with_core(self, context) -> ModuleHandle:
-        provider = LspManagerPluginProvider(runtime_root=self.runtime_root)
+        provider = LspManagerPluginProvider(
+            runtime_root=self.runtime_root, client_only=self.client_only
+        )
         handle = ModuleHandle(
             module_id="lsp",
             tier=MODULE_TIER_DETACHABLE,
@@ -699,8 +721,8 @@ class LspManagerPluginBundle:
         return handle
 
 
-def build_lsp_plugin(*, runtime_root: Path) -> LspManagerPluginBundle:
-    return LspManagerPluginBundle(runtime_root=runtime_root)
+def build_lsp_plugin(*, runtime_root: Path, client_only: bool = False) -> LspManagerPluginBundle:
+    return LspManagerPluginBundle(runtime_root=runtime_root, client_only=client_only)
 
 
 def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResult:

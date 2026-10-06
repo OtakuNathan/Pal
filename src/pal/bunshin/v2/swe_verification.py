@@ -34,6 +34,7 @@ from pal.bunshin.v2.verification_readiness import current_verification_receipts,
 from pal.bunshin.v2.submission_errors import submission_error_result, submission_validation
 from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.v2.verification_builder import semantic_verification_draft_errors
+from pal.bunshin.v2.verification_lsp_policy import bound_verification_policy, lsp_policy_errors
 from pal.bunshin.v2.verification import (
     historical_repair_checklist_items,
     validate_verification_case_order,
@@ -115,6 +116,8 @@ def semantic_verification_submission_errors(
         if isinstance(item, Mapping)
     ]
     errors.extend(verification_case_errors(recorded_results, outcome=outcome, workspace=workspace))
+    if workspace is not None:
+        errors.extend(lsp_policy_errors(bound_verification_policy(workspace), recorded_results))
     required_historical = historical_repair_checklist_items(work_view)
     try:
         validate_verification_case_order(

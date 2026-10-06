@@ -40,10 +40,16 @@ class VerifierContext:
             family_verification_policy = dict(
                 family_policies.get("verification") or {}
             )
+            preparation_ref = bound_reference_refs.get("workspace_preparation")
+            workspace_preparation = (
+                self.artifacts.read_json(preparation_ref)
+                if preparation_ref is not None else None
+            )
             effective_policy = effective_verification_policy(
                 work_view=view,
                 verification_policy=family_verification_policy,
                 system_delivery_view=system_delivery_view,
+                workspace_preparation=workspace_preparation,
             )
             if activation.role == OrchestrationRole.VERIFIER:
                 verification_tool_contract = (
@@ -51,6 +57,7 @@ class VerifierContext:
                         work_view=view,
                         verification_policy=family_verification_policy,
                         system_delivery_view=system_delivery_view,
+                        workspace_preparation=workspace_preparation,
                     )
                 )
             verification_policy_ref = self.artifacts.put_json(

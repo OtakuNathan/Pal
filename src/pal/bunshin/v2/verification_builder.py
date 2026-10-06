@@ -51,6 +51,11 @@ from pal.bunshin.v2.submission_preflight import (
     bound_reference_payload,
     raise_submission_errors,
 )
+from pal.bunshin.v2.verification_lsp_policy import (
+    compile_lsp_applicability,
+    lsp_evidence_required,
+    lsp_policy_errors,
+)
 from pal.bunshin.v2.verification import (
     historical_repair_checklist_items,
     validate_verification_case_order,
@@ -338,6 +343,7 @@ def effective_verification_policy(
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
     system_delivery_view: Mapping[str, Any] | None = None,
+    workspace_preparation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile family defaults into obligations owned by one verifier node."""
 
@@ -356,6 +362,7 @@ def effective_verification_policy(
     require_dogfood = sink
     require_platform_probe = sink and "platform_probe" in entrypoint_kinds
     historical_regressions = historical_repair_checklist_items(work_view)
+    lsp_applicability = compile_lsp_applicability(source, workspace_preparation)
 
     allowed_obligations = {
         "compile",
@@ -364,6 +371,9 @@ def effective_verification_policy(
         "warning_clean",
     }
     allowed_obligations.add("candidate_delta_review")
+    if (str(source.get("lsp_policy") or "") == "when_available"
+            and not lsp_applicability["required"]):
+        allowed_obligations.discard("lsp")
     if historical_regressions:
         allowed_obligations.add("historical_regressions")
     if mode == "module" or require_consumer_probe:
@@ -390,6 +400,8 @@ def effective_verification_policy(
         # no case to replay and must not become an UNKNOWN obligation.
         "require_historical_regressions": bool(historical_regressions),
         "lsp_policy": str(source.get("lsp_policy") or ""),
+        "require_lsp": bool(source.get("require_lsp", False)),
+        "lsp_applicability": lsp_applicability,
         "unknown_policy": str(source.get("unknown_policy") or "strict"),
         "case_timeout_seconds": int(source.get("case_timeout_seconds") or 300),
         "allowed_obligations": sorted(allowed_obligations),
@@ -402,6 +414,7 @@ def compile_verification_invocation_tool_contract(
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
     system_delivery_view: Mapping[str, Any] | None = None,
+    workspace_preparation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile one stable, invocation-local description contract from bound inputs."""
 
@@ -466,9 +479,12 @@ def compile_verification_invocation_tool_contract(
         work_view=work_view,
         verification_policy=verification_policy,
         system_delivery_view=system_delivery_view,
+        workspace_preparation=workspace_preparation,
     )
     historical_regressions = historical_repair_checklist_items(work_view)
     allowed_capabilities = set(_COMMON_VERIFICATION_CAPABILITIES)
+    if "lsp" not in set(policy["allowed_obligations"]):
+        allowed_capabilities.discard("op_bunshin_verification_run_lsp_check")
     if "consumer_probe" in set(policy["allowed_obligations"]):
         allowed_capabilities.add("op_bunshin_verification_run_consumer_probe")
     if "public_surface_dogfood" in set(policy["allowed_obligations"]):
@@ -711,7 +727,7 @@ def _draft_status(
         )
         if bool(policy.get(key, False))
     }
-    if str(policy.get("lsp_policy") or "") == "when_available":
+    if lsp_evidence_required(policy):
         required_tags.add("lsp")
     work_view = bound_reference_payload(workspace, "module_work_view", required=False)
     historical_names = {str(item.get("name") or "") for item in cases
@@ -769,6 +785,7 @@ def _draft_status(
             for item in advisories
         ],
         "remaining_policy_obligations": remaining_obligations,
+        "lsp_applicability": dict(policy.get("lsp_applicability") or {}),
         "missing_historical_cases": missing_history,
         "policy_evidence": {tag: [{"name": item.get("name"), "status": item.get("status")}
                                   for item in cases if tag in list(item.get("obligation_tags") or [])]
@@ -1021,8 +1038,7 @@ def _verification_submission_errors(
             errors.append(f"VerificationPolicy requires {tag} evidence or an explicit UNKNOWN reason")
     if bool(policy.get("require_historical_regressions", False)) and historical and "historical_regressions" not in tags:
         errors.append("VerificationPolicy requires historical RepairBill regression evidence")
-    if str(policy.get("lsp_policy") or "") == "when_available" and "lsp" not in tags and not str(exceptions.get("lsp") or "").strip():
-        errors.append("VerificationPolicy requires LSP evidence or an explicit UNKNOWN reason")
+    errors.extend(lsp_policy_errors(policy, recorded_results, exceptions))
     allowed_obligations = {
         str(item) for item in list(policy.get("allowed_obligations") or []) if str(item)
     }
