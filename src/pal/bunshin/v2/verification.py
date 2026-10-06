@@ -684,6 +684,11 @@ def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
             or finding.get("case")
             or finding.get("case_name")
             or bill.get("case_name")
+            # Current WorkItem findings have a stable Manager-assigned
+            # identity rather than the legacy author-supplied case/key.
+            # Preserve that identity as the regression's case name instead
+            # of silently treating a real RepairPacket as empty history.
+            or finding.get("finding_id")
             or ""
         ).strip()
         if not case_name or case_name in seen:

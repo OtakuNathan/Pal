@@ -44,7 +44,7 @@ from pal.shared import ToolExecutionResult
 from pal.bunshin.profiles import filter_bunshin_allowed_capabilities, is_bunshin_capability_denied
 from pal.bunshin.tool_guidance import (
     bunshin_tool_guidance,
-    normalize_tool_guidance_overrides,
+    merge_tool_guidance_overrides,
 )
 from pal.bunshin.tool_admission import (
     admit_bunshin_tool_call,
@@ -518,8 +518,24 @@ class BunshinScopedExecutionRuntime:
         if expand is not None:
             self.allowed_capabilities = expand(self.allowed_capabilities)
 
-        self.capability_guidance_overrides = normalize_tool_guidance_overrides(
-            self.capability_guidance_overrides
+        verification_contract = dict(
+            dict(self.workspace.get("bunshin_v2") or {}).get("verification_tool_contract") or {}
+        )
+        verification_allowed = {
+            str(item) for item in list(verification_contract.get("allowed_capabilities") or [])
+        }
+        if verification_allowed:
+            # Match the invocation-local guard before mounting either provider
+            # contracts or discovery. Role-wide evidence permissions include
+            # tools that do not apply to this node. Keep separately governed
+            # outcome, checklist, finding, and ordinary execution capabilities.
+            self.allowed_capabilities = [
+                name for name in self.allowed_capabilities
+                if not is_verification_builder_capability(name) or name in verification_allowed
+            ]
+        self.capability_guidance_overrides = merge_tool_guidance_overrides(
+            self.capability_guidance_overrides,
+            verification_contract.get("guidance_overrides"),
         )
         self.base_runtime = _ExecutionOverlay(
             self._original_runtime,

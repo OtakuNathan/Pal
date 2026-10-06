@@ -532,7 +532,7 @@ def compile_verification_invocation_tool_contract(
         overrides["op_bunshin_verification_run_historical_regression"] = {"use_when": (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
             "Use an exact case name from the checklist and a command that executes its preserved reproducer or committed project regression. "
-            "Every listed case must be recorded before new risk exploration and before submit_verification. A repeated "
+            "Every listed case must be recorded before new risk exploration and before the bound verification outcome tool. A repeated "
             "FAIL blocks PASS but must not skip the current Candidate diff-risk audit; finish that audit, batch all "
             "findings, and then submit one outcome. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
