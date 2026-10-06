@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
+
 from pal.shared.tool_protocol import ToolCallIR
 
 from pal.shared.tool_protocol import new_tool_call
@@ -691,6 +693,7 @@ def _success_result(
 
 
 def _error_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+    record_verifier_failure(exc)
     text = f"{exc.__class__.__name__}: {exc}"
     return ToolExecutionResult(
         name=call.name,

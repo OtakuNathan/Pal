@@ -1,10 +1,18 @@
 """Bounded, content-free verifier telemetry; never a tool-output log."""
 from __future__ import annotations
 
-from typing import Any, Literal
+from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+import sqlite3
+import sys
+from types import FunctionType
+from typing import Any, Iterator, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.shared import BunshinInvocationPack, ToolExecutionResult
 from pal.shared.tool_protocol import FailedResult, RejectedResult, ToolCallIR
 
@@ -50,6 +58,118 @@ _STATUSES = frozenset({
 })
 
 
+# Finite source tokens, resolved to exact loaded code objects before capture.
+# A fabricated co_filename/co_name or a dynamically named exception is not a
+# source identity and is never copied into this operational event.
+_FRAME_SOURCES = {
+    "pal.bunshin.v2.semantic_evidence": (
+        "run_shell_evidence", "run_lsp_evidence", "_required_text", "_runtime_root",
+        "_artifact_store", "execution_workspace_fingerprint", "_integer_list",
+    ),
+    "pal.bunshin.v2.verification_builder": (
+        "verification_builder_tool_result", "_assert_tool_contract_allows",
+        "_preflight_verification_case_execution", "_require_adapter", "_store_context",
+    ),
+    "pal.bunshin.v2.swe_verification": ("swe_verification_tool_result",),
+    "pal.bunshin.v2.submission_drafts": (
+        "SubmissionDraftContext.from_workspace", "SubmissionDraftStore.read",
+        "SubmissionDraftStore._assert_authoring_contract", "SubmissionDraftStore._assert_fence",
+        "SubmissionDraftStore._read_or_create_locked", "SubmissionDraftStore._inherited_payload_locked",
+        "SubmissionDraftStore._ensure_schema", "decode_remote_draft_snapshot",
+    ),
+    "pal.bunshin.v2.role_contracts": ("RoleActivation.from_values", "RoleActivation.__post_init__"),
+    "pal.bunshin.ipc": ("BunshinRoleGatewayClient.request_sync", "BunshinRoleGatewayClient.request"),
+}
+_FRAME_TOKENS = frozenset((module.rsplit(".", 1)[-1] + ".py", function)
+                         for module, functions in _FRAME_SOURCES.items() for function in functions)
+_ERROR_TYPES: dict[type[BaseException], str] = {error: error.__name__ for error in (
+    ValueError, TypeError, RuntimeError, KeyError, OSError, FileNotFoundError,
+    PermissionError, TimeoutError, sqlite3.OperationalError, BunshinManagerRpcError, ValidationError,
+)}
+
+
+class VerifierFailureFrame(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    file: str = Field(max_length=64)
+    function: str = Field(max_length=64)
+    line: int = Field(gt=0, lt=1_000_000_000)
+
+    @model_validator(mode="after")
+    def known_source(self) -> "VerifierFailureFrame":
+        if (self.file, self.function) not in _FRAME_TOKENS:
+            raise ValueError("unknown verifier source frame")
+        return self
+
+
+class VerifierFailureProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    error_type: str = Field(max_length=32)
+    frames: list[VerifierFailureFrame] = Field(max_length=6)
+
+    @field_validator("error_type")
+    @classmethod
+    def known_type(cls, value: str) -> str:
+        if value not in {*_ERROR_TYPES.values(), "other"}:
+            raise ValueError("unknown verifier exception type")
+        return value
+
+
+@dataclass
+class VerifierFailureCapture:
+    provenance: VerifierFailureProvenance | None = None
+
+
+_FAILURE_CAPTURE: ContextVar[VerifierFailureCapture | None] = ContextVar("verifier_failure_capture", default=None)
+
+
+@contextmanager
+def capture_verifier_failure(*, enabled: bool) -> Iterator[VerifierFailureCapture]:
+    # Heartbeat creates a child task. Share this per-call holder through the
+    # inherited context, never set a new child ContextVar value or global sink.
+    capture = VerifierFailureCapture()
+    token = _FAILURE_CAPTURE.set(capture if enabled else None)
+    try:
+        yield capture
+    finally:
+        _FAILURE_CAPTURE.reset(token)
+
+
+def record_verifier_failure(exc: Exception) -> None:
+    """Best-effort pre-conversion capture; no change to the tool's result."""
+    capture = _FAILURE_CAPTURE.get()
+    if capture is None or capture.provenance is not None:
+        return
+    try:
+        codes = {}
+        for module_name, functions in _FRAME_SOURCES.items():
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            for function in functions:
+                value: object = module
+                for part in function.split("."):
+                    value = vars(value).get(part)
+                    if value is None:
+                        break
+                if isinstance(value, (classmethod, staticmethod)):
+                    value = value.__func__
+                if isinstance(value, FunctionType):
+                    codes[id(value.__code__)] = (module_name.rsplit(".", 1)[-1] + ".py", function)
+        frames: deque[VerifierFailureFrame] = deque(maxlen=6)
+        traceback = exc.__traceback__
+        while traceback is not None:
+            source = codes.get(id(traceback.tb_frame.f_code))
+            if source is not None:
+                frames.append(VerifierFailureFrame(file=source[0], function=source[1], line=traceback.tb_lineno))
+            traceback = traceback.tb_next
+        capture.provenance = VerifierFailureProvenance(
+            error_type=_ERROR_TYPES.get(type(exc), "other"), frames=list(frames),
+        )
+    except Exception:
+        # Telemetry failure must not replace the original failure or result.
+        return
+
+
 class VerifierToolDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -64,6 +184,7 @@ class VerifierToolDiagnostic(BaseModel):
     error_code: str = Field(default="", max_length=64)
     # Filled by Manager from the process owner's envelope, never worker data.
     attempt_id: str = Field(default="", pattern=r"^(?:att_[0-9a-f]{24})?$")
+    provenance: VerifierFailureProvenance | None = None
 
     @field_validator("tool_alias")
     @classmethod
@@ -106,6 +227,7 @@ def verifier_tool_diagnostic(
     call: ToolCallIR, *, round_index: int, tool_call_index: int,
     stage: Literal["started", "completed", "failed"],
     result: ToolExecutionResult | None = None,
+    provenance: VerifierFailureProvenance | None = None,
 ) -> dict[str, Any] | None:
     alias = verifier_tool_alias(call)
     if not alias:
@@ -130,6 +252,7 @@ def verifier_tool_diagnostic(
             route=("call_tool" if call.name in {"call_tool", "op_tool_call"}
                    else "read_tool" if call.name in {"read_tool", "op_tool_read"} else "direct"),
             stage=stage, ok=ok, status=status, error_code=error_code,
+            provenance=provenance,
         ).model_dump()
     except ValidationError:
         # A malformed diagnostic must not change tool execution semantics.

@@ -1,5 +1,8 @@
 from __future__ import annotations
-from pal.bunshin.verifier_tool_diagnostics import is_verifier_pack, verifier_tool_diagnostic
+from pal.bunshin.verifier_tool_diagnostics import (
+    VerifierFailureProvenance, capture_verifier_failure, is_verifier_pack,
+    record_verifier_failure, verifier_tool_alias, verifier_tool_diagnostic,
+)
 from pal.bunshin.runner_components.models import BunshinAgentLoopState
 from pal.bunshin.runner_components.prompt_values import _tool_result_text
 from pal.bunshin.runner_components.prompt_values import _BUNSHIN_TOOL_RESULT_RETENTION_CALLS
@@ -60,49 +63,53 @@ class ToolObservation:
             "advance_tool_result_clock",
             None,
         )
-        try:
-            if callable(advance_result_clock):
-                advance_result_clock(
-                    turn_id=turn_id or continuation.turn_id,
-                    clock_id=f"tool:{call.call_id}",
-                    retention_steps=_BUNSHIN_TOOL_RESULT_RETENTION_CALLS,
+        with capture_verifier_failure(
+            enabled=is_verifier_pack(self.reporter.pack) and bool(verifier_tool_alias(call)),
+        ) as capture:
+            try:
+                if callable(advance_result_clock):
+                    advance_result_clock(
+                        turn_id=turn_id or continuation.turn_id,
+                        clock_id=f"tool:{call.call_id}",
+                        retention_steps=_BUNSHIN_TOOL_RESULT_RETENTION_CALLS,
+                    )
+                operation = self.tool_execution.execute_allowed_tool(
+                    state.execution_runtime, call, allow_tools=allow_tools,
+                    budget=budget, turn_id=turn_id or continuation.turn_id,
                 )
-            operation = self.tool_execution.execute_allowed_tool(
-                state.execution_runtime, call, allow_tools=allow_tools,
-                budget=budget, turn_id=turn_id or continuation.turn_id,
-            )
-            result = await self.heartbeat.await_with_progress_heartbeat(
-                operation,
-                phase="tool_call_waiting",
-                round=state.llm_round_count,
-                tool_call_index=index,
-                tool_name=call.name,
-                target_name=target_name,
-            )
-        except Exception as exc:
-            await self.emit_verifier_diagnostic(state, call, index, "failed")
-            self.reporter.append_debug_log(
-                "tool_call_failed",
-                {
-                    "round": state.llm_round_count,
-                    "tool_call_index": index,
-                    "tool_name": call.name,
-                    "target_name": target_name,
-                    "error_type": exc.__class__.__name__,
-                    "error": str(exc),
-                },
-            )
-            await self.reporter.emit_progress(
-                "tool_call_failed",
-                round=state.llm_round_count,
-                tool_call_index=index,
-                tool_name=call.name,
-                target_name=target_name,
-                error_type=exc.__class__.__name__,
-                error=_preview_text(str(exc), limit=500),
-            )
-            raise
-        await self.emit_verifier_diagnostic(state, call, index, "completed", result=result)
+                result = await self.heartbeat.await_with_progress_heartbeat(
+                    operation,
+                    phase="tool_call_waiting",
+                    round=state.llm_round_count,
+                    tool_call_index=index,
+                    tool_name=call.name,
+                    target_name=target_name,
+                )
+            except Exception as exc:
+                record_verifier_failure(exc)
+                await self.emit_verifier_diagnostic(state, call, index, "failed", provenance=capture.provenance)
+                self.reporter.append_debug_log(
+                    "tool_call_failed",
+                    {
+                        "round": state.llm_round_count,
+                        "tool_call_index": index,
+                        "tool_name": call.name,
+                        "target_name": target_name,
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                    },
+                )
+                await self.reporter.emit_progress(
+                    "tool_call_failed",
+                    round=state.llm_round_count,
+                    tool_call_index=index,
+                    tool_name=call.name,
+                    target_name=target_name,
+                    error_type=exc.__class__.__name__,
+                    error=_preview_text(str(exc), limit=500),
+                )
+                raise
+            await self.emit_verifier_diagnostic(state, call, index, "completed", result=result, provenance=capture.provenance)
         state.tool_call_count += 1
         self.tool_session.observe_count(max(
             self.tool_session.observed_tool_call_count,
@@ -137,12 +144,13 @@ class ToolObservation:
         self, state: BunshinAgentLoopState, call: ToolCallIR, index: int,
         stage: Literal["started", "completed", "failed"], *,
         result: ToolExecutionResult | None = None,
+        provenance: VerifierFailureProvenance | None = None,
     ) -> None:
         if not is_verifier_pack(self.reporter.pack):
             return
         payload = verifier_tool_diagnostic(
             call, round_index=state.llm_round_count, tool_call_index=index,
-            stage=stage, result=result,
+            stage=stage, result=result, provenance=provenance,
         )
         if payload is not None:
             try:

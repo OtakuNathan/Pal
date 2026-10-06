@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
+
 from pal.shared.tool_protocol import ToolCallIR
 
 from pal.execution.generated_tool_models import (
@@ -1212,5 +1214,6 @@ def _ok(call: ToolCallIR, text: str, structured: Mapping[str, Any]) -> ToolExecu
 
 
 def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+    record_verifier_failure(exc)
     text = f"{exc.__class__.__name__}: {exc}"
     return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this local issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)

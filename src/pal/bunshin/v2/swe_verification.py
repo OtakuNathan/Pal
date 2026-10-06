@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
+
 from pal.shared.tool_protocol import ToolCallIR
 
 from pal.execution.generated_tool_models import (
@@ -534,6 +536,7 @@ def swe_verification_tool_result(
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
+        record_verifier_failure(exc)
         text = f"{exc.__class__.__name__}: {exc}"
         return ToolExecutionResult(
             name=call.name,
