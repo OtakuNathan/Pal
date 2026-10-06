@@ -32,6 +32,8 @@ DEFAULT_BUNSHIN_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_BUNSHIN_SANDBOX_MAX_RUN_DIRS = 128
 BUNSHIN_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
 
+_GIT_CORE_ROOTS = (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core"))
+
 _SECRET_ENV_MARKERS = (
     "API_KEY",
     "TOKEN",
@@ -526,13 +528,7 @@ def _build_bwrap_invocation(
     if not reference_binds:
         _, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
     _append_reference_projection_binds(args, reference_binds)
-    git_wrapper = shim_dir / "git"
-    for target in _git_entrypoint_targets():
-        if target.exists():
-            args.extend(["--ro-bind", str(git_wrapper), str(target)])
-    git_internal_wrapper = shim_dir / "git-internal"
-    for target in _git_internal_targets():
-        args.extend(["--ro-bind", str(git_internal_wrapper), str(target)])
+    _append_git_shim_binds(args, shim_dir)
     args.extend(["--chdir", _sandbox_cwd(pack), "--"])
     args.extend(argv)
     return args
@@ -690,24 +686,85 @@ def _command_targets(command: str) -> tuple[Path, ...]:
 
 def _git_entrypoint_targets() -> tuple[Path, ...]:
     candidates = [*_command_targets("git")]
-    for root in (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core")):
+    for root in _GIT_CORE_ROOTS:
         candidate = root / "git"
-        if candidate.exists():
+        if candidate.exists() or candidate.is_symlink():
             candidates.append(candidate)
     return tuple(dict.fromkeys(candidates))
 
 
 def _git_internal_targets() -> tuple[Path, ...]:
     targets: list[Path] = []
-    for root in (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core")):
+    for root in _GIT_CORE_ROOTS:
         if not root.is_dir():
             continue
+        # Guard lexical helper names even for broken/cyclic symlinks: their
+        # targets can become executable after the gateway mounts are applied.
         targets.extend(
             path
             for path in root.glob("git-*")
-            if path.is_file() and os.access(path, os.X_OK)
+            if path.is_symlink() or (path.is_file() and os.access(path, os.X_OK))
         )
     return tuple(dict.fromkeys(targets))
+
+
+def _append_git_shim_binds(args: list[str], shim_dir: Path) -> None:
+    # Resolve directory aliases (for example /bin -> /usr/bin), but NEVER
+    # resolve the final component: git-add -> git still needs the hard block,
+    # while git itself must retain the classified read-only gateway.
+    guards: dict[Path, Path] = {}
+    for target in _git_entrypoint_targets():
+        if target.exists() or target.is_symlink():
+            guards[target.parent.resolve() / target.name] = shim_dir / "git"
+    for target in _git_internal_targets():
+        guards[target.parent.resolve() / target.name] = shim_dir / "git-internal"
+
+    projected = {target.parent for target in guards if target.is_symlink()}
+    # Reconstruct only directories already exposed by a same-path read-only
+    # bind. In particular, a git-core directory alias must not import siblings
+    # from a previously hidden host directory, or cover earlier nested mounts.
+    exposed_roots: list[Path] = []
+    previous_mounts: list[Path] = []
+    redirected_mounts: list[Path] = []
+    for index, argument in enumerate(args):
+        if argument in {"--bind", "--ro-bind"}:
+            source, destination = args[index + 1:index + 3]
+            mounted_path = Path(destination).resolve()
+            previous_mounts.append(mounted_path)
+            if source != destination:
+                redirected_mounts.append(mounted_path)
+            if argument == "--ro-bind" and source == destination and Path(source).is_dir():
+                exposed_roots.append(mounted_path)
+        elif argument in {"--tmpfs", "--remount-ro", "--proc", "--dev"}:
+            mounted_path = Path(args[index + 1]).resolve()
+            previous_mounts.append(mounted_path)
+            if argument != "--remount-ro":
+                redirected_mounts.append(mounted_path)
+    for directory in projected:
+        if not any(directory != root and directory.is_relative_to(root) for root in exposed_roots):
+            raise RuntimeError(f"Git shim projection is outside an existing read-only mount: {directory}")
+        if any(directory.is_relative_to(mount) for mount in redirected_mounts):
+            raise RuntimeError(f"Git shim projection is hidden by an existing mount: {directory}")
+        if any(mount.is_relative_to(directory) for mount in previous_mounts):
+            raise RuntimeError(f"Git shim projection would replace an existing mount: {directory}")
+    for directory in sorted(projected, key=lambda path: (len(path.parts), str(path))):
+        # bwrap refuses a bind over a symlink in the read-only /usr mount.
+        # A private directory projection provides real mount points for guarded
+        # names without modifying the host, following arbitrary helper targets,
+        # or making the system directory writable inside the sandbox.
+        args.extend(["--tmpfs", str(directory)])
+        for entry in sorted(directory.iterdir()):
+            wrapper = guards.get(entry)
+            if wrapper is not None:
+                args.extend(["--ro-bind", str(wrapper), str(entry)])
+            elif entry.is_symlink():
+                args.extend(["--symlink", os.readlink(entry), str(entry)])
+            else:
+                args.extend(["--ro-bind", str(entry), str(entry)])
+        args.extend(["--remount-ro", str(directory)])
+    for target, wrapper in guards.items():
+        if target.parent not in projected:
+            args.extend(["--ro-bind", str(wrapper), str(target)])
 
 
 def _sandbox_cwd(pack: BunshinInvocationPack) -> str:
