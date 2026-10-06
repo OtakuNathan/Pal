@@ -31,6 +31,8 @@ from pal.llm.transport import (
 )
 from pal.foundation.fd_lease import fd_lease_snapshot
 from pal.llm.usage import LLMUsageLedger
+from pydantic import ValidationError
+from pal.bunshin.verifier_tool_diagnostics import VerifierToolDiagnostic, is_verifier_pack
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.config import effective_bunshin_runtime_config
 from pal.bunshin.event_delivery import BunshinEventDelivery
@@ -933,6 +935,28 @@ class BunshinManager:
         delivery_attempt_id = str(item.pop("_attempt_id", "") or "")
         run_id = str(item.get("run_id") or "")
         state = self.runs.get(run_id)
+        if item.get("event_kind") == "verifier_tool_diagnostic":
+            # This operational record has its own strict contract even with
+            # prompt logging enabled. Do not route it to chat or role state.
+            if state is None or not delivery_attempt_id or not is_verifier_pack(state.pack):
+                return
+            try:
+                diagnostic = VerifierToolDiagnostic.model_validate(item.get("payload"))
+                diagnostic = VerifierToolDiagnostic.model_validate({
+                    **diagnostic.model_dump(), "attempt_id": delivery_attempt_id,
+                })
+            except ValidationError:
+                return
+            try:
+                self.v2_service.repository.role_events.record_worker_event({
+                    "event_kind": "verifier_tool_diagnostic",
+                    "invocation_id": state.pack.invocation_id,
+                    "payload": diagnostic.model_dump(),
+                })
+            except Exception:
+                # A diagnostic-only storage failure cannot abort worker IPC.
+                pass
+            return
         if state is not None:
             payload = dict(item.get("payload") or {})
             payload.pop("route", None)
