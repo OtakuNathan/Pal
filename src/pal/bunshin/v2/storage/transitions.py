@@ -103,6 +103,8 @@ class TransitionsStore:
                     "fencing_token": int(
                         outcome.snapshot.payload.get("fencing_token") or 0
                     ),
+                    **({"pending_verification_ref": dict(outcome.snapshot.payload.get("pending_verification_ref") or {})}
+                       if effect.effect_type in {"quiesce_verifier_role", "snapshot_verifier_result"} else {}),
                 }
                 effect_request_hash = _stable_hash({"effect_type": effect.effect_type, "payload": payload})
                 connection.execute(

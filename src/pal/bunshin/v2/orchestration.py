@@ -376,14 +376,13 @@ class BunshinV2OutboxProcessor:
             )
             if not targets:
                 raise RuntimeError("repair propagation effect has no explicit target nodes")
-            for target in targets:
-                DefectPropagationService(self.repository).propagate_dependency_defect(
-                    workflow_id=node.workflow_id,
-                    epoch_id=str(node.payload.get("epoch_id") or ""),
-                    dependency_node_id=target,
-                    repair_bill_ref=repair_ref,
-                    reopen_action="REOPEN_DEPENDENCY",
-                )
+            DefectPropagationService(self.repository).propagate_dependency_defects(
+                workflow_id=node.workflow_id,
+                epoch_id=str(node.payload.get("epoch_id") or ""),
+                dependency_node_ids=targets,
+                repair_bill_ref=repair_ref,
+                reopen_action="REOPEN_DEPENDENCY",
+            )
             return {}
         if effect_type == "request_epoch_replan":
             return self._request_epoch_replan(effect)

@@ -719,6 +719,279 @@ class GraphExecutionTests(unittest.TestCase):
             workspace_authority_rules=definition.workspace_authority_rules,
         )
 
+    def _provider_chain_graph(self):
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        for name in ("codec", "peer"):
+            module = copy.deepcopy(payload["modules"]["decoder"])
+            module["responsibility"] = f"Own {name} frames."
+            module["provides"] = [f"{name}_frames"]
+            module["dependencies"] = {}
+            module["definition"]["contract"]["outputs"] = {
+                f"{name}_frames": {
+                    "interface": f"{name}::frames",
+                    "semantics": f"Complete {name} frames.",
+                }
+            }
+            module["definition"]["paths"] = {
+                "contract_mode": "review_guarded",
+                "contract_paths": [f"include/{name}.hpp"],
+                "implementation_scopes": [
+                    {"kind": "file", "path": f"src/{name}.cpp"}
+                ],
+                "reference_only": [],
+            }
+            payload["modules"][name] = module
+            consumer = "decoder" if name == "codec" else "delivery"
+            payload["modules"][consumer]["dependencies"][name] = {
+                "purpose": f"Consume {name} frames.",
+                "handoff": "Owned frame bytes.",
+                "consumes": [f"{name}_frames"],
+            }
+            payload["scenarios"]["decode_one_frame"]["modules"].append(name)
+        return GraphCompiler().compile(
+            validate_contract_payload(payload, definition=definition),
+            graph_id="provider-chain",
+            generation=1,
+            bindings=_bindings(),
+            satellite_projector=_projector(definition),
+            source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
+        )
+
+    def _checking_execution(self, graph, current_node="delivery"):
+        execution = GraphExecution.start(graph)
+        cycles = dict(execution.cycles)
+        for name, cycle in cycles.items():
+            if name != current_node and name not in graph.semantic_descendants(
+                current_node
+            ):
+                cycles[name] = replace(
+                    cycle,
+                    state=NodeCycleState.ACCEPTED,
+                    product_ref=f"{name}-candidate",
+                    accepted_product_ref=f"{name}-accepted",
+                    last_verdict=CycleVerdict(True, 1),
+                )
+        cycle = cycles[current_node].transition(
+            CycleAction.START_PRODUCER,
+            assignment=CycleAssignment(
+                CycleSlot.PRODUCER, AssignmentKind.INITIAL, 1, "input",
+            ),
+        ).transition(
+            CycleAction.PRODUCER_SUBMITTED, product_ref="current-candidate",
+        ).transition(
+            CycleAction.START_CHECKER,
+            assignment=CycleAssignment(
+                CycleSlot.CHECKER, AssignmentKind.INITIAL, 1, "candidate",
+            ),
+        )
+        return replace(execution, cycles={**cycles, current_node: cycle})
+
+    def _accept_repair(self, execution, name):
+        self.assertIn(name, execution.runnable_nodes())
+        cycle = execution.cycles[name].transition(
+            CycleAction.START_PRODUCER,
+            assignment=CycleAssignment(
+                CycleSlot.PRODUCER, AssignmentKind.REPAIR, 1, f"{name}-repair",
+            ),
+        ).transition(
+            CycleAction.PRODUCER_SUBMITTED, product_ref=f"{name}-repaired",
+        )
+        execution = execution.with_cycle(cycle)
+        self.assertIn(name, execution.runnable_nodes())
+        execution = execution.with_cycle(cycle.transition(
+            CycleAction.START_CHECKER,
+            assignment=CycleAssignment(
+                CycleSlot.CHECKER, AssignmentKind.RECHECK, 1, f"{name}-check",
+            ),
+        ))
+        return execution.apply_checker_verdict(
+            current_node=name, accepted=True,
+        )[0]
+
+    def test_contract_edge_does_not_authorize_implementation_dependency_repair(self):
+        graph = self._provider_chain_graph()
+        self.assertEqual(graph.incoming("decoder")[0].kind, EdgeKind.CONTRACT)
+        self.assertEqual(graph.checker_predecessors("decoder"), ())
+        execution = self._checking_execution(graph, "decoder")
+        with patch.object(NodeCycle, "transition") as transition:
+            with self.assertRaisesRegex(ValueError, "checker execution provider"):
+                execution.apply_checker_verdict(
+                    current_node="decoder",
+                    accepted=False,
+                    finding_refs=("contract-only-provider",),
+                    finding_class=FindingClass.DEPENDENCY_DEFECT,
+                    dependency_node="codec",
+                )
+            transition.assert_not_called()
+        replanned, route = execution.apply_checker_verdict(
+            current_node="decoder",
+            accepted=False,
+            finding_refs=("contract-disagreement",),
+            finding_class=FindingClass.CONTRACT_DEFECT,
+        )
+        self.assertEqual(route.target.value, "plan_cycle")
+        self.assertEqual(replanned.state, GraphExecutionState.REPLAN_REQUIRED)
+        self.assertEqual(
+            replanned.cycles["decoder"].last_verdict.finding_refs,
+            ("contract-disagreement",),
+        )
+
+    def test_sink_can_route_transitive_execution_provider(self):
+        graph = self._provider_chain_graph()
+        self.assertNotIn("codec", {edge.producer for edge in graph.incoming("delivery")})
+        self.assertIn("codec", graph.checker_predecessors("delivery"))
+        execution = self._checking_execution(graph)
+        routed, route = execution.apply_checker_verdict(
+            current_node="delivery",
+            accepted=False,
+            finding_refs=("transitive-provider",),
+            finding_class=FindingClass.DEPENDENCY_DEFECT,
+            dependency_node="codec",
+        )
+        self.assertEqual(route.node_name, "codec")
+        self.assertEqual(route.node_names, ("codec",))
+        self.assertEqual(route.stale_nodes, ("decoder", "delivery"))
+        self.assertEqual(routed.cycles["codec"].state, NodeCycleState.REPAIR_READY)
+        self.assertEqual(routed.cycles["peer"], execution.cycles["peer"])
+        self.assertEqual(routed.repair_barriers["decoder"], ("codec",))
+        self.assertEqual(routed.repair_barriers["delivery"], ("codec",))
+        self.assertEqual(
+            routed.cycles["delivery"].last_verdict.finding_refs,
+            ("transitive-provider",),
+        )
+
+    def test_batch_repairs_interdependent_providers_without_staling_targets(self):
+        graph = self._provider_chain_graph()
+        execution = self._checking_execution(graph)
+        routed, route = execution.apply_checker_verdict(
+            current_node="delivery",
+            accepted=False,
+            finding_refs=("codec-finding", "decoder-finding", "peer-finding"),
+            finding_class=FindingClass.DEPENDENCY_DEFECT,
+            dependency_node="decoder",
+            dependency_nodes=("codec", "peer", "decoder"),
+        )
+        self.assertEqual(route.node_name, "decoder")
+        self.assertEqual(route.node_names, ("decoder", "codec", "peer"))
+        self.assertEqual(route.stale_nodes, ("delivery",))
+        for name in route.node_names:
+            self.assertEqual(routed.cycles[name].state, NodeCycleState.REPAIR_READY)
+        self.assertEqual(routed.cycles["delivery"].state, NodeCycleState.STALE)
+        self.assertNotIn("decoder", routed.repair_barriers)
+        self.assertEqual(routed.repair_barriers["delivery"], ("codec", "decoder", "peer"))
+        self.assertEqual(routed.runnable_nodes(), ("codec", "decoder", "peer"))
+        routed = self._accept_repair(routed, "codec")
+        self.assertEqual(routed.runnable_nodes(), ("decoder", "peer"))
+        routed = self._accept_repair(routed, "decoder")
+        self.assertEqual(routed.cycles["delivery"].state, NodeCycleState.STALE)
+        routed = self._accept_repair(routed, "peer")
+        self.assertEqual(routed.cycles["delivery"].state, NodeCycleState.PRODUCER_READY)
+        self.assertEqual(dict(routed.repair_barriers), {})
+        self.assertEqual(routed.graph, graph)
+
+    def test_invalid_batch_target_rejects_before_any_transition_or_storage(self):
+        graph = self._provider_chain_graph()
+        execution = self._checking_execution(graph)
+        for invalid in ("delivery", "missing", ""):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as root:
+                coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+                coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
+                coordinator.repository.cycles.store_graph_execution(
+                    workflow_id=graph.graph_id, execution=execution,
+                )
+                with patch.object(NodeCycle, "transition") as transition:
+                    with self.assertRaisesRegex(ValueError, "checker execution provider"):
+                        coordinator.checker_verdict(
+                            workflow_id=graph.graph_id,
+                            node_name="delivery",
+                            accepted=False,
+                            finding_refs=("invalid-batch",),
+                            finding_class=FindingClass.DEPENDENCY_DEFECT,
+                            dependency_nodes=("decoder", invalid),
+                        )
+                    transition.assert_not_called()
+                self.assertEqual(
+                    coordinator.execution(workflow_id=graph.graph_id), execution,
+                )
+
+    def test_batched_consumers_wait_only_for_their_affected_providers(self):
+        execution = self._checking_execution(self._provider_chain_graph())
+        routed, _ = execution.apply_checker_verdict(
+            current_node="delivery", accepted=False,
+            finding_refs=("codec-and-peer-findings",),
+            finding_class=FindingClass.DEPENDENCY_DEFECT,
+            dependency_nodes=("codec", "peer"),
+        )
+        self.assertEqual(routed.repair_barriers["decoder"], ("codec",))
+        self.assertEqual(routed.repair_barriers["delivery"], ("codec", "peer"))
+        routed = self._accept_repair(routed, "codec")
+        self.assertEqual(routed.cycles["decoder"].state, NodeCycleState.PRODUCER_READY)
+        self.assertEqual(routed.cycles["delivery"].state, NodeCycleState.STALE)
+        self.assertEqual(routed.cycles["peer"].state, NodeCycleState.REPAIR_READY)
+
+    def test_invalid_later_repair_state_does_not_transition_first_target(self):
+        execution = self._checking_execution(self._provider_chain_graph())
+        execution = replace(execution, cycles={
+            **execution.cycles,
+            "peer": replace(execution.cycles["peer"], state=NodeCycleState.CHECKING),
+        })
+        with patch.object(NodeCycle, "transition") as transition:
+            with self.assertRaisesRegex(ValueError, "repair target must be quiescent"):
+                execution.apply_checker_verdict(
+                    current_node="delivery", accepted=False,
+                    finding_refs=("invalid-state",),
+                    finding_class=FindingClass.DEPENDENCY_DEFECT,
+                    dependency_nodes=("codec", "peer"),
+                )
+            transition.assert_not_called()
+
+    def test_batch_dependency_replay_keeps_receipt_and_does_not_route_again(self):
+        graph = self._provider_chain_graph()
+        with tempfile.TemporaryDirectory() as root:
+            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
+            coordinator.repository.cycles.store_graph_execution(
+                workflow_id=graph.graph_id,
+                execution=self._checking_execution(graph),
+            )
+            coordinator.checker_verdict(
+                workflow_id=graph.graph_id, node_name="delivery", accepted=False,
+                finding_refs=("provider-finding", "other-provider-finding"),
+                finding_class=FindingClass.DEPENDENCY_DEFECT,
+                dependency_nodes=("codec", "peer"),
+            )
+            first = coordinator.execution(workflow_id=graph.graph_id)
+            self.assertEqual(first.cycles["delivery"].last_verdict.finding_refs,
+                             ("provider-finding", "other-provider-finding"))
+            # Reconstruct the coordinator to exercise its persisted receipt.
+            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            self.assertIsNone(coordinator.checker_verdict(
+                workflow_id=graph.graph_id, node_name="delivery", accepted=False,
+                finding_refs=("provider-finding", "other-provider-finding"),
+                finding_class=FindingClass.DEPENDENCY_DEFECT,
+                dependency_nodes=("missing", "delivery"),
+            ))
+            self.assertEqual(coordinator.execution(workflow_id=graph.graph_id), first)
+
+    def test_verification_correction_keeps_product_and_rechecks(self):
+        execution = self._checking_execution(self._provider_chain_graph(), "decoder")
+        corrected, route = execution.apply_checker_verdict(
+            current_node="decoder", accepted=False,
+            finding_refs=("corrected-verifier-finding",),
+            finding_class=FindingClass.VERIFICATION_DEFECT,
+        )
+        self.assertEqual(route.assignment_kind, AssignmentKind.RECHECK)
+        self.assertEqual(corrected.cycles["decoder"].state, NodeCycleState.CHECKER_READY)
+        self.assertEqual(corrected.cycles["decoder"].product_ref, "current-candidate")
+        self.assertEqual(corrected.cycles["decoder"].last_verdict.finding_refs,
+                         ("corrected-verifier-finding",))
+        self.assertEqual(corrected.graph, execution.graph)
+        self.assertIn("decoder", corrected.runnable_nodes())
+
     def test_all_software_producers_start_but_sink_checker_waits(self) -> None:
         execution = GraphExecution.start(self._graph())
         self.assertEqual(execution.runnable_nodes(), ("decoder", "delivery"))

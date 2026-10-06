@@ -5,6 +5,8 @@ from pal.bunshin.v2.semantic_orchestration.verification_workspace import _verifi
 from pal.bunshin.v2.semantic_orchestration.verification_workspace import _semantic_path_scope_matches
 from pal.bunshin.v2.semantic_orchestration.verification_policy import _resolve_dependency_node_id
 from pal.bunshin.v2.semantic_orchestration.verification_policy import _manager_unknown_policy
+from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
+from pal.bunshin.v2.swe_verification import infer_repair_target_modules, verification_finding_route_errors
 import hashlib
 import json
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.v2.graph_executor import FindingClass
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.review_findings import structured_advisories, structured_findings
-from pal.bunshin.v2.verification import DefectKind, VerificationService, VerificationStatus, no_progress_detected
+from pal.bunshin.v2.verification import DefectKind, VerificationService, VerificationStatus, no_progress_detected, verification_correction_count, MAX_VERIFICATION_CORRECTIONS
 from pal.bunshin.v2.verification_builder import dominant_verification_defect_kind
 from pal.bunshin.v2.semantic_orchestration.role_reports import RoleReports
 from pal.bunshin.v2.semantic_orchestration.verifier_tests import VerifierTests
@@ -29,6 +31,20 @@ class VerificationSettlement:
     verifier_tests: VerifierTests
     artifacts: ContentAddressedArtifactStore
     repository: BunshinV2Repository
+
+    def settled_verification_result(self, node: AggregateSnapshot) -> Mapping[str, Any] | None:
+        """A committed receipt wins over replay of its immutable snapshot effect."""
+
+        pending_value = dict(node.payload.get("pending_verification_ref") or {})
+        if not pending_value.get("sha256"):
+            return None
+        report_value = self.repository.queries.read_verification_settlement_ref(node.aggregate_id, str(pending_value["sha256"]))
+        if not report_value.get("sha256"):
+            return None
+        report = self.artifacts.read_json(report_value)
+        if dict(report.get("source_pending_verification_ref") or {}).get("sha256") != pending_value["sha256"]:
+            return None
+        return {"provider_request_id": str(report.get("invocation_id") or ""), "result_artifact_ref": report_value}
 
     def finalize_semantic_verification(
         self,
@@ -43,13 +59,22 @@ class VerificationSettlement:
         review_scratch: Path,
         execution_adapter: str,
     ) -> Mapping[str, Any]:
+        settled = self.settled_verification_result(node)
+        if settled is not None:
+            return settled
+        current = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+        if current is None or current.version != node.version or current.state != "REVIEW_SNAPSHOTTING":
+            raise SubmissionInvariantError("verification snapshot no longer owns the current node version")
+        if candidate_digest != str(current.payload.get("candidate_digest") or ""):
+            raise SubmissionInvariantError("verification snapshot candidate no longer matches the current node")
         accepted_candidate, accepted_candidate_digest, accepted_candidate_ref, changed_paths, fencing_token, findings, invocation_id, lease_resource, outcome, receipts, receipts_ref, report_ref, scratch_only, status = self.collect_verification_report(
             candidate, candidate_digest, candidate_ref, execution_adapter, node, pending, review_scratch,
             review_workspace, submission,
         )
-        defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules = self.publish_repair_evidence(
-            accepted_candidate, accepted_candidate_digest, candidate_ref, changed_paths, findings, node, outcome,
-            receipts, receipts_ref, report_ref, status, submission,
+        routing_errors = verification_finding_route_errors(findings, _verification_repair_scope(self.repository, node))
+        defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules = _publish_repair_evidence(
+            self.artifacts, self.repository, accepted_candidate, accepted_candidate_digest, candidate_ref, changed_paths, findings, node, outcome,
+            receipts, receipts_ref, report_ref, status, submission, routing_errors=routing_errors,
         )
 
         current = self.repository.snapshots.read_snapshot(
@@ -58,6 +83,8 @@ class VerificationSettlement:
         )
         if current is None:
             raise SubmissionInvariantError("verification node disappeared before verdict")
+        if current.version != node.version:
+            raise SubmissionInvariantError("verification node changed before verdict commit")
         unknown_policy = _manager_unknown_policy(node)
         coordinator = WorkflowCoordinator(self.repository)
         node_name = str(
@@ -88,7 +115,9 @@ class VerificationSettlement:
         )
         blocking_no_progress = (
             status == VerificationStatus.FAIL
-            and no_progress_detected(failure_history)
+            and (no_progress_detected(failure_history) or (
+                bool(routing_errors) and verification_correction_count(current) >= MAX_VERIFICATION_CORRECTIONS
+            ))
         )
         try:
             self.commit_verification_result(
@@ -96,6 +125,7 @@ class VerificationSettlement:
                 blocking_unknown, candidate_digest, coordinator, current, defect_kind, fingerprint, invocation_id,
                 module_node_id, node, node_name, repair_node_ids, repair_ref, report_ref, scratch_only, status,
                 target_modules, unknown_policy,
+                routing_errors=routing_errors,
             )
         finally:
             try:
@@ -117,6 +147,7 @@ class VerificationSettlement:
         defect_kind: Any, fingerprint: Any, invocation_id: str, module_node_id: Any, node: AggregateSnapshot,
         node_name: Any, repair_node_ids: Any, repair_ref: ArtifactRef | None, report_ref: ArtifactRef,
         scratch_only: Any, status: Any, target_modules: Any, unknown_policy: Any,
+        *, routing_errors: list[str] | None = None,
     ) -> None:
         with self.repository.transaction() as connection:
             if blocking_unknown or blocking_no_progress:
@@ -157,6 +188,7 @@ class VerificationSettlement:
                         and defect_kind == DefectKind.DEPENDENCY
                         else ""
                     ),
+                    dependency_nodes=tuple(target_modules) if defect_kind == DefectKind.DEPENDENCY else (),
                     accepted_product_ref=(
                         accepted_candidate_ref.sha256
                         if status
@@ -211,86 +243,8 @@ class VerificationSettlement:
                     else ""
                 ),
                 unit_of_work=connection,
+                correction_errors=routing_errors or (),
             )
-
-    def publish_repair_evidence(
-        self, accepted_candidate: Any, accepted_candidate_digest: Any, candidate_ref: ArtifactRef, changed_paths: Any,
-        findings: Any, node: AggregateSnapshot, outcome: Any, receipts: Any, receipts_ref: Any,
-        report_ref: ArtifactRef, status: Any, submission: Mapping[str, Any],
-    ) -> tuple[Any, Any, Any, Any, ArtifactRef | None, Any]:
-        routed_defect = dominant_verification_defect_kind(findings)
-        defect_kind = {
-            "contract_revision": DefectKind.CONTRACT,
-            "architecture_revision": DefectKind.ARCHITECTURE,
-            "requirements_revision": DefectKind.REQUIREMENTS,
-        }.get(
-            outcome,
-            DefectKind(routed_defect)
-            if routed_defect
-            else DefectKind.MODULE,
-        )
-        target_modules = [
-            str(item).strip()
-            for item in list(submission.get("target_modules") or [])
-            if str(item).strip()
-        ]
-        repair_node_ids = [
-            _resolve_dependency_node_id(
-                self.repository,
-                node,
-                dependency_module=module_name,
-            )
-            for module_name in target_modules
-        ]
-        module_node_id = ""
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "outcome": outcome,
-                    "findings": findings,
-                    "changed_test_paths": changed_paths,
-                    "receipt_hashes": [str(item.get("output_sha256") or "") for item in receipts],
-                    "candidate_tree": _candidate_tree_fingerprint(
-                        accepted_candidate,
-                        fallback=accepted_candidate_digest,
-                    ),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        repair_ref: ArtifactRef | None = None
-        if status == VerificationStatus.FAIL:
-            repair_ref = self.artifacts.put_json(
-                {
-                    "schema_version": "1",
-                    "artifact_kind": "semantic_repair_packet",
-                    "module_name": str(
-                        node.payload.get("module_name") or node.payload.get("unit_id") or ""
-                    ),
-                    "route": outcome,
-                    "target_modules": target_modules,
-                    "findings": findings,
-                    "candidate_ref": candidate_ref.to_dict(),
-                    "verification_ref": report_ref.to_dict(),
-                    "changed_test_paths": changed_paths,
-                    "tool_receipts_ref": receipts_ref.to_dict(),
-                    "regression_commands": [
-                        str(dict(item.get("args") or {}).get("cmd") or "")
-                        for item in receipts
-                        if item.get("kind") == "command"
-                        and str(dict(item.get("args") or {}).get("cmd") or "").strip()
-                    ],
-                },
-                artifact_type="RepairPacketArtifact",
-                provenance={"owner": "manager", "source_role": "verifier"},
-                child_refs=(
-                    (report_ref.sha256, "verification"),
-                    (receipts_ref.sha256, "tool_receipts"),
-                ),
-            )
-        return defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules
 
     def collect_verification_report(
         self, candidate: Mapping[str, Any], candidate_digest: str, candidate_ref: ArtifactRef, execution_adapter: str,
@@ -391,6 +345,8 @@ class VerificationSettlement:
         )
         report_payload = {
                 "schema_version": "2",
+                "source_pending_verification_ref": dict(node.payload.get("pending_verification_ref") or {}),
+                "invocation_id": invocation_id,
                 "module_name": str(
                     node.payload.get("module_name") or node.payload.get("unit_id") or ""
                 ),
@@ -420,3 +376,117 @@ class VerificationSettlement:
             child_refs=tuple(report_children),
         )
         return accepted_candidate, accepted_candidate_digest, accepted_candidate_ref, changed_paths, fencing_token, findings, invocation_id, lease_resource, outcome, receipts, receipts_ref, report_ref, scratch_only, status
+
+def _publish_repair_evidence(
+    artifacts: ContentAddressedArtifactStore, repository: BunshinV2Repository, accepted_candidate: Any, accepted_candidate_digest: Any, candidate_ref: ArtifactRef, changed_paths: Any,
+    findings: Any, node: AggregateSnapshot, outcome: Any, receipts: Any, receipts_ref: Any,
+    report_ref: ArtifactRef, status: Any, submission: Mapping[str, Any],
+    *, routing_errors: list[str] | None = None,
+) -> tuple[Any, Any, Any, Any, ArtifactRef | None, Any]:
+    routed_defect = dominant_verification_defect_kind(findings)
+    defect_kind = {
+        "contract_revision": DefectKind.CONTRACT,
+        "architecture_revision": DefectKind.ARCHITECTURE,
+        "requirements_revision": DefectKind.REQUIREMENTS,
+    }.get(
+        outcome,
+        DefectKind(routed_defect)
+        if routed_defect
+        else DefectKind.MODULE,
+    )
+    scope = _verification_repair_scope(repository, node)
+    if routing_errors:
+        defect_kind = DefectKind.VERIFICATION
+        target_modules = []
+    elif defect_kind == DefectKind.DEPENDENCY:
+        target_modules = sorted(set(infer_repair_target_modules(
+            [item for item in findings if item.get("finding_kind") == DefectKind.DEPENDENCY.value],
+            scope["repair_path_owners"],
+        )) - {scope["module_name"]})
+    elif defect_kind in {DefectKind.MODULE, DefectKind.SINK}:
+        target_modules = [scope["module_name"]]
+    else:
+        target_modules = []
+    repair_node_ids = [
+        _resolve_dependency_node_id(
+            repository,
+            node,
+            dependency_module=module_name,
+        )
+        for module_name in target_modules
+    ]
+    module_node_id = ""
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "outcome": outcome,
+                "findings": findings,
+                "changed_test_paths": changed_paths,
+                "receipt_hashes": [str(item.get("output_sha256") or "") for item in receipts],
+                "candidate_tree": _candidate_tree_fingerprint(
+                    accepted_candidate,
+                    fallback=accepted_candidate_digest,
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    repair_ref: ArtifactRef | None = None
+    if status == VerificationStatus.FAIL:
+        finding_targets: dict[str, list[str]] = {}
+        if not routing_errors and defect_kind in {DefectKind.MODULE, DefectKind.SINK, DefectKind.DEPENDENCY}:
+            for finding in findings:
+                identity = str(finding.get("finding_id") or finding.get("finding_key") or "")
+                if finding.get("finding_kind") == DefectKind.DEPENDENCY.value:
+                    finding_targets[identity] = sorted(set(infer_repair_target_modules(
+                        [finding], scope["repair_path_owners"],
+                    )) - {scope["module_name"]})
+                else:
+                    finding_targets[identity] = [scope["module_name"]]
+        pending_ref = dict(node.payload.get("pending_verification_ref") or {})
+        repair_ref = artifacts.put_json(
+            {
+                "schema_version": "1",
+                "artifact_kind": "semantic_repair_packet",
+                "module_name": str(
+                    node.payload.get("module_name") or node.payload.get("unit_id") or ""
+                ),
+                "route": "verification_correction" if routing_errors else outcome,
+                "target_modules": target_modules,
+                **({
+                    "classification": "invalid_verifier_submission",
+                    "routing_errors": routing_errors,
+                    "original_outcome": outcome,
+                    "original_target_modules": list(submission.get("target_modules") or []),
+                    "correction_instruction": (
+                        "Reevaluate this preserved submission against the bound repair scope. "
+                        "Resolve every original finding explicitly; retain valid current-module defects and "
+                        "their regression corpus. Do not report intentional contract stubs as failed provider "
+                        "implementations. Do not infer PASS from this Manager correction."
+                    ),
+                } if routing_errors else {}),
+                "findings": findings,
+                "finding_targets": finding_targets,
+                "source_pending_verification_ref": pending_ref,
+                "candidate_ref": candidate_ref.to_dict(),
+                "verification_ref": report_ref.to_dict(),
+                "changed_test_paths": changed_paths,
+                "tool_receipts_ref": receipts_ref.to_dict(),
+                "regression_commands": [
+                    str(dict(item.get("args") or {}).get("cmd") or "")
+                    for item in receipts
+                    if item.get("kind") == "command"
+                    and str(dict(item.get("args") or {}).get("cmd") or "").strip()
+                ],
+            },
+            artifact_type="RepairPacketArtifact",
+            provenance={"owner": "manager", "source_role": "verifier"},
+            child_refs=(
+                (report_ref.sha256, "verification"),
+                (receipts_ref.sha256, "tool_receipts"),
+                *(((str(pending_ref["sha256"]), "original_submission"),) if pending_ref.get("sha256") else ()),
+            ),
+        )
+    return defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules

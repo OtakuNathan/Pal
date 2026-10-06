@@ -102,6 +102,9 @@ def semantic_verification_submission_errors(
     except ValueError as exc:
         findings = []
         errors.append(str(exc))
+    if workspace is not None:
+        contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+        errors.extend(verification_finding_route_errors(findings, contract))
     reason = str(submission.get("reason") or "").strip()
     if outcome not in {"pass", "unknown"} and not findings:
         errors.append("repair and revision outcomes require structured findings")
@@ -353,6 +356,7 @@ def compile_swe_verification_tool_contract(
     work_view: Mapping[str, Any],
     *,
     repair_path_owners: Mapping[str, Any] | None = None,
+    repair_scope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     module_name = str(
         work_view.get("module_name") or work_view.get("verification_name") or ""
@@ -365,18 +369,24 @@ def compile_swe_verification_tool_contract(
         for name, value in dict(work_view.get("requirements") or {}).items()
     }
     compiled_repair_path_owners = _normalize_repair_path_owners(
-        repair_path_owners
+        dict(repair_scope).get("repair_path_owners")
+        if repair_scope is not None
+        else repair_path_owners
         if repair_path_owners is not None
         else _work_view_repair_path_owners(work_view)
     )
+    dependency_modules = sorted(str(item) for item in dict(repair_scope or {}).get("dependency_modules") or [])
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record one evidence-backed verifier finding. Correct an incorrect Verifier-owned probe "
         "in this session before submission; use module_defect for the current implementation, "
-        "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
+        "dependency_defect only for an accepted upstream product bound to this check, contract_defect for a frozen public contract, "
         "architecture_defect for ownership/topology, requirements_defect for a contradictory task ledger, and "
         "sink_defect for the authored composition/delivery module. A performance finding requires a representative "
-        "workload, concrete impact, and exact hot path; do not report speculative micro-optimization."
+        "workload, concrete impact, and exact hot path; do not report speculative micro-optimization. "
+        "Contract-only stubs are intentional and are not evidence that an upstream implementation is defective. "
+        "Test the current module against the declared contract using focused probes or doubles. "
+        f"Bound upstream implementation repair targets: {json.dumps(dependency_modules)}."
     )}
     if verification_corpus:
         guidance_overrides["op_bunshin_verification_pass"] = {"use_when": (
@@ -391,6 +401,9 @@ def compile_swe_verification_tool_contract(
     return {
         "module_name": module_name,
         "repair_path_owners": compiled_repair_path_owners,
+        "graph_sink": bool(dict(repair_scope or {}).get("graph_sink", work_view.get("graph_sink"))),
+        "dependency_modules": dependency_modules,
+        "contract_only_modules": sorted(set(compiled_repair_path_owners) - set(dependency_modules) - {module_name}),
         "verification_corpus": verification_corpus,
         "requirements": requirements,
         "guidance_overrides": guidance_overrides,
@@ -536,6 +549,8 @@ def verification_outcome_readiness(
             targets = infer_repair_target_modules(findings, contract.get("repair_path_owners") or {})
         except ValueError as exc:
             errors.append(str(exc))
+    contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+    errors.extend(verification_finding_route_errors(findings, contract))
     errors.extend(verification_case_errors(recorded_cases(payload), outcome=outcome, workspace=workspace))
     return {"ready": not errors, "blockers": list(dict.fromkeys(errors)),
             "work_items": work_items, "target_modules": targets}
@@ -650,6 +665,53 @@ def infer_repair_target_modules(
             "Manager cannot derive repair targets without workspace-owned finding locations"
         )
     return sorted(resolved)
+
+
+def verification_finding_route_errors(
+    findings: list[Mapping[str, Any]],
+    contract: Mapping[str, Any],
+) -> list[str]:
+    """Validate semantic finding kinds against the same bound repair authority.
+
+    Workspace visibility/path ownership alone cannot authorize implementation
+    repairs. Contract/architecture/requirements findings retain their plan route.
+    """
+
+    if "dependency_modules" not in contract:
+        # Legacy prompt packs are revalidated from their baseline at settlement.
+        return []
+    current = str(contract.get("module_name") or "")
+    dependencies = set(str(item) for item in contract.get("dependency_modules") or [])
+    errors: list[str] = []
+    for finding in findings:
+        kind = str(finding.get("finding_kind") or finding.get("defect_kind") or "")
+        identity = str(finding.get("finding_id") or finding.get("finding_key") or "<unnamed>")
+        if kind in {"contract_defect", "architecture_defect", "requirements_defect"}:
+            continue
+        if kind == "verification_defect":
+            errors.append(f"{identity}: correct Verifier-owned probes in this session before submitting")
+            continue
+        try:
+            owners = set(infer_repair_target_modules([finding], contract.get("repair_path_owners") or {}))
+        except ValueError as exc:
+            errors.append(f"{identity}: {exc}")
+            continue
+        if kind == "dependency_defect":
+            upstream = owners - {current}
+            if not upstream or upstream - dependencies:
+                errors.append(
+                    f"{identity}: dependency_defect must cite a bound accepted provider implementation; "
+                    f"eligible modules: {', '.join(sorted(dependencies)) or '(none)'}. "
+                    "Contract-only stubs are intentional, not provider defects. Correct the probe/claim; "
+                    "use contract_defect only for evidence of a defect in the declared contract. "
+                    "Preserve unrelated current-module findings."
+                )
+        elif kind in {"module_defect", "sink_defect"}:
+            if current not in owners:
+                errors.append(f"{identity}: {kind} must cite the current module {current}; use dependency_defect for a bound provider product")
+            if kind == "sink_defect" and not contract.get("graph_sink"):
+                errors.append(f"{identity}: sink_defect is only valid for the declared sink checker")
+    return errors
 
 
 def _work_view_repair_path_owners(

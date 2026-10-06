@@ -448,6 +448,12 @@ class RoleAssignmentGateway:
             **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
             **dict(workspace.get("bunshin_v2") or {}),
         }
+        from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
+
+        workspace["bunshin_v2"]["swe_verification_tool_contract"] = {
+            **dict(workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
+            **_verification_repair_scope(self.repository, node),
+        }
         review_workspace = Path(str(workspace.get("repo_path") or ""))
         review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
         scratch_only = bool(workspace.get("verification_scratch_only"))

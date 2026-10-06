@@ -135,6 +135,46 @@ def _verification_repair_path_owners(
     return dict(sorted(owners.items()))
 
 
+def _verification_repair_scope(
+    repository: BunshinV2Repository,
+    node: AggregateSnapshot,
+) -> dict[str, Any]:
+    """Separate visible contracts from immutable products bound to this check.
+
+    A provider's *current* ACCEPTED state does not prove that its product was
+    assembled into this verifier's candidate. Only the recorded baseline does.
+    """
+
+    current = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
+    owners = _verification_repair_path_owners(repository, node)
+    execution = repository.cycles.read_graph_execution(workflow_id=node.workflow_id)
+    checker_providers = (
+        set(execution.graph.checker_predecessors(current))
+        if execution is not None and current in execution.graph.nodes
+        else None
+    )
+    declared_ids = set(str(item) for item in node.payload.get("dependency_node_ids") or [])
+    outputs = dict(node.payload.get("dependency_outputs") or {})
+    bound: set[str] = set()
+    for provider in _verification_related_module_nodes(repository, node):
+        name = str(provider.payload.get("module_name") or provider.payload.get("unit_id") or "")
+        product = dict(outputs.get(provider.aggregate_id) or {})
+        if (
+            provider.aggregate_id in declared_ids
+            and (checker_providers is None or name in checker_providers)
+            and str(product.get("candidate_digest") or "")
+            and dict(product.get("candidate_ref") or {}).get("sha256")
+        ):
+            bound.add(name)
+    return {
+        "module_name": current,
+        "graph_sink": bool(node.payload.get("graph_sink")),
+        "repair_path_owners": owners,
+        "dependency_modules": sorted(bound),
+        "contract_only_modules": sorted(set(owners) - bound - {current}),
+    }
+
+
 def _verification_related_module_nodes(
     repository: BunshinV2Repository,
     node: AggregateSnapshot,

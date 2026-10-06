@@ -228,6 +228,58 @@ class QueriesStore:
             "fencing_token": int(action_payload.get("fencing_token") or 0),
         }
 
+    def read_effect_pending_verification_ref(self, event_id: str) -> dict[str, Any]:
+        """Bind legacy snapshot effects to their causal submission, never latest."""
+
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT json_extract(submit.payload_json, '$.action_payload.pending_verification_ref') AS pending_ref
+                FROM bunshin_v2_domain_events AS cause
+                JOIN bunshin_v2_domain_events AS submit
+                  ON submit.aggregate_type = cause.aggregate_type
+                 AND submit.aggregate_id = cause.aggregate_id
+                 AND submit.aggregate_version <= cause.aggregate_version
+                WHERE cause.event_id = ?
+                  AND json_extract(submit.payload_json, '$.action_payload.pending_verification_ref.sha256') IS NOT NULL
+                ORDER BY submit.aggregate_version DESC LIMIT 1
+                """, (str(event_id),),
+            ).fetchone()
+        return dict(json.loads(str(row["pending_ref"]))) if row is not None else {}
+
+    def read_verification_settlement_ref(self, aggregate_id: str, pending_sha256: str) -> dict[str, Any]:
+        """Return only a committed verdict receipt for this exact pending input."""
+
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT json_extract(payload_json, '$.action_payload.verification_artifact_ref') AS report_ref
+                FROM bunshin_v2_domain_events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                  AND json_extract(payload_json, '$.action_payload.source_pending_verification_ref.sha256') = ?
+                  AND json_extract(payload_json, '$.action_payload.verification_artifact_ref.sha256') IS NOT NULL
+                ORDER BY aggregate_version DESC LIMIT 1
+                """, (AggregateType.DAG_NODE_RUN.value, str(aggregate_id), str(pending_sha256)),
+            ).fetchone()
+        return dict(json.loads(str(row["report_ref"]))) if row is not None else {}
+
+    def has_dependency_repair_receipt(self, aggregate_id: str, repair_sha256: str, action_type: str) -> bool:
+        """A later repair must not erase an earlier propagation's replay receipt."""
+
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM bunshin_v2_domain_events
+                WHERE aggregate_type = ? AND aggregate_id = ? AND event_type = ?
+                  AND json_extract(payload_json, '$.action_payload.source_repair_packet_ref.sha256') = ?
+                LIMIT 1
+                """, (AggregateType.DAG_NODE_RUN.value, str(aggregate_id),
+                      f"dag_node_run.{action_type.lower()}", str(repair_sha256)),
+            ).fetchone() is not None
+
     def has_nonterminal_workflows_for_task(self, task_id: str) -> bool:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:

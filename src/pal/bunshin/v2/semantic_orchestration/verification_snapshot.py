@@ -3,11 +3,11 @@ import pal.bunshin.v2.execution_values as _dependency_execution_values
 from pal.bunshin.v2.semantic_orchestration.review_results import _ref_from_mapping
 from pal.bunshin.v2.semantic_orchestration.workspace_safety import _raise_if_workspace_held
 from pal.bunshin.v2.semantic_orchestration.workspace_safety import _lease_is_live
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
+from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
 from pal.bunshin.v2.execution_values import workspace_content_fingerprint
 from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.v2.repository import BunshinV2Repository
@@ -25,11 +25,29 @@ class VerificationSnapshot:
     repository: BunshinV2Repository
     workspace_locks: WorkspaceLockRegistry
 
+    def verification_input_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:
+        node = self.effect_reads.effect_snapshot(effect)
+        causal = self.effect_reads.effect_causal_context(effect)
+        pending_ref = dict(causal.get("pending_verification_ref") or {})
+        if not pending_ref.get("sha256"):
+            pending_ref = self.repository.queries.read_effect_pending_verification_ref(str(effect.get("event_id") or ""))
+        if not pending_ref.get("sha256"):
+            raise SubmissionInvariantError("verification effect has no causal pending submission")
+        bound = replace(node, payload={**node.payload, "pending_verification_ref": pending_ref})
+        if self.verification_settlement.settled_verification_result(bound) is not None:
+            return bound
+        if pending_ref != dict(node.payload.get("pending_verification_ref") or {}):
+            raise SubmissionInvariantError("verification effect belongs to a superseded pending submission")
+        return node
+
     async def quiesce_verifier_role(
         self,
         effect: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        node = self.effect_reads.effect_snapshot(effect)
+        node = self.verification_input_snapshot(effect)
+        settled = self.verification_settlement.settled_verification_result(node)
+        if settled is not None:
+            return settled
         pending_ref = _ref_from_mapping(node.payload.get("pending_verification_ref"))
         pending = dict(self.artifacts.read_json(pending_ref))
         invocation_id = str(pending.get("invocation_id") or "")
@@ -144,7 +162,10 @@ class VerificationSnapshot:
         self,
         effect: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        node = self.effect_reads.effect_snapshot(effect)
+        node = self.verification_input_snapshot(effect)
+        settled = self.verification_settlement.settled_verification_result(node)
+        if settled is not None:
+            return settled
         pending_ref = _ref_from_mapping(node.payload.get("pending_verification_ref"))
         pending = dict(self.artifacts.read_json(pending_ref))
         review_workspace = Path(str(pending.get("review_workspace") or ""))

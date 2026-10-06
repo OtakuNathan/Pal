@@ -11,11 +11,12 @@ from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors
+from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors, verification_finding_route_errors
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.review_findings import structured_advisories, structured_findings
 from pal.bunshin.v2.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.v2.semantic_orchestration.role_reports import RoleReports
+from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
 
 
 @dataclass
@@ -71,6 +72,10 @@ class VerificationCompletion:
             **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
             **dict(receipt_workspace.get("bunshin_v2") or {}),
         }
+        receipt_workspace["bunshin_v2"]["swe_verification_tool_contract"] = {
+            **dict(receipt_workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
+            **_verification_repair_scope(self.repository, node),
+        }
         errors = semantic_verification_submission_errors(
             submission,
             work_view=work_view,
@@ -80,6 +85,15 @@ class VerificationCompletion:
             scratch_only=scratch_only,
             workspace=receipt_workspace,
         )
+        # This role already has a durable submission receipt. A legacy pack
+        # may have accepted an invalid repair route before the preflight was
+        # tightened. Preserve it for snapshot's explicit checker correction;
+        # evidence/corpus invariant failures remain manager errors.
+        route_errors = set(verification_finding_route_errors(
+            structured_findings(submission),
+            receipt_workspace["bunshin_v2"]["swe_verification_tool_contract"],
+        ))
+        errors = tuple(error for error in errors if error not in route_errors)
         normalized_submission = dict(submission)
         if errors:
             raise SubmissionInvariantError(

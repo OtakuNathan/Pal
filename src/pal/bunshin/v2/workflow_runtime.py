@@ -553,6 +553,7 @@ class WorkflowCoordinator:
         finding_refs: Iterable[str] = (),
         finding_class: FindingClass | None = None,
         dependency_node: str = "",
+        dependency_nodes: tuple[str, ...] = (),
         accepted_product_ref: str = "",
         unit_of_work: BunshinUnitOfWork | None = None,
     ) -> FindingRoute | None:
@@ -586,6 +587,7 @@ class WorkflowCoordinator:
             finding_refs=finding_refs_tuple,
             finding_class=finding_class,
             dependency_node=dependency_node,
+            dependency_nodes=dependency_nodes,
             accepted_product_ref=accepted_product_ref,
         )
         (unit_of_work or self.repository).cycles.store_graph_execution(

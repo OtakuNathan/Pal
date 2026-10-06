@@ -8,7 +8,7 @@ from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.role_contracts import OrchestrationRole
 from typing import Mapping
 from pal.shared import BunshinInvocationPack
-from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_path_owners
+from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
 from pal.bunshin.tool_guidance import merge_tool_guidance_overrides
 from pal.bunshin.v2.adapters import prepare_v2_role_workspace
 from pal.bunshin.v2.contract_submission import bind_architect_file
@@ -42,7 +42,7 @@ class ToolPolicy:
             if view_ref is not None:
                 tool_contract = compile_swe_verification_tool_contract(
                     self.artifacts.read_json(view_ref),
-                    repair_path_owners=_verification_repair_path_owners(
+                    repair_scope=_verification_repair_scope(
                         self.repository,
                         snapshot,
                     ),

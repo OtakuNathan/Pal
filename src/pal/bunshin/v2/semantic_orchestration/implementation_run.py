@@ -275,6 +275,7 @@ class ImplementationRun:
             semantic_repair_view = repair_bill_semantic_view(
                 self.artifacts,
                 repair_ref,
+                module_name=str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
             )
             semantic_repair_view["verifier_tests_are_preinstalled"] = bool(
                 node.payload.get("verifier_test_paths")

@@ -88,6 +88,17 @@ def _verifier_reference_refs(
     producer_report_value = node_payload.get("producer_report_ref")
     if isinstance(producer_report_value, Mapping) and producer_report_value.get("sha256"):
         references["coder_report"] = _ref_from_mapping(producer_report_value)
+    repair_value = node_payload.get("repair_bill_ref")
+    if isinstance(repair_value, Mapping) and repair_value.get("sha256"):
+        from pal.bunshin.v2.verification import repair_bill_semantic_view
+
+        repair_view = repair_bill_semantic_view(artifacts, repair_value)
+        if repair_view.get("route") == "verification_correction":
+            references["repair_bill"] = artifacts.put_json(
+                repair_view,
+                artifact_type="VerifierCorrectionViewArtifact",
+                child_refs=((str(repair_value["sha256"]), "original_repair_packet"),),
+            )
     return references
 
 

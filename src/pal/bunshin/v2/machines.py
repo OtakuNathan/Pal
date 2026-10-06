@@ -420,10 +420,10 @@ def _architecture_resume_cleanup_reducer(
     return updated
 
 
-def _node_has_terminal_blocking_unknown(payload: Mapping[str, Any]) -> bool:
+def _node_has_terminal_verification_blocker(payload: Mapping[str, Any]) -> bool:
     return (
         str(payload.get("triage_resume_state") or "") == "REVIEW_SNAPSHOTTING"
-        and dict(payload.get("blocker") or {}).get("kind") == "blocking_unknown"
+        and dict(payload.get("blocker") or {}).get("kind") in {"blocking_unknown", "invalid_verifier_submission"}
         and bool(payload.get("verification_artifact_ref"))
     )
 
@@ -435,10 +435,10 @@ def _node_resume_cleanup_reducer(
     updated = dict(_resume_cleanup_reducer(payload, action))
     updated.pop("failure_artifact_ref", None)
     source = str(payload.get("triage_resume_state") or "")
-    retry_verification = _node_has_terminal_blocking_unknown(payload)
+    retry_verification = _node_has_terminal_verification_blocker(payload)
     if retry_verification:
         # An operator resolution starts a new evaluation of the same Candidate.
-        # Keep its immutable UNKNOWN evidence and logical role session, but do
+        # Keep its immutable verdict evidence and logical role session, but do
         # not replay the settled submission or inherit its draft evidence.
         updated["verifier_evaluation_generation"] = (
             int(payload.get("verifier_evaluation_generation") or 0) + 1
@@ -446,6 +446,7 @@ def _node_resume_cleanup_reducer(
         updated["triage_resume_state"] = str(DagNodeRunState.REVIEW_QUEUED)
         updated.pop("pending_verification_ref", None)
         updated.pop("unknown_blocking", None)
+        updated.pop("verification_correction_attempts", None)
     if retry_verification or source not in {
         "SNAPSHOTTING",
         "REVIEW_SNAPSHOTTING",

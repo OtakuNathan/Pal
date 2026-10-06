@@ -47,6 +47,7 @@ class FindingRoute:
     node_name: str = ""
     assignment_kind: AssignmentKind = AssignmentKind.REPAIR
     stale_nodes: tuple[str, ...] = ()
+    node_names: tuple[str, ...] = ()
 
 
 class NodeReuseKind(StrEnum):
@@ -173,6 +174,7 @@ class GraphExecution:
         finding_class: FindingClass,
         current_node: str,
         dependency_node: str = "",
+        dependency_nodes: tuple[str, ...] = (),
     ) -> FindingRoute:
         if current_node not in self.graph.nodes:
             raise ValueError(f"unknown current node: {current_node}")
@@ -189,24 +191,28 @@ class GraphExecution:
                 assignment_kind=AssignmentKind.RECHECK,
             )
         if finding_class == FindingClass.DEPENDENCY_DEFECT:
-            direct_dependencies = set(
-                edge.producer for edge in self.graph.incoming(current_node)
-            )
-            if dependency_node not in direct_dependencies:
+            providers = tuple(dict.fromkeys(
+                ((dependency_node,) if dependency_node else ())
+                + dependency_nodes
+            ))
+            eligible = set(self.graph.checker_predecessors(current_node))
+            if not providers or any(name not in eligible for name in providers):
                 raise ValueError(
-                    "dependency defect must name a direct declared provider"
+                    "dependency defect must name a checker execution provider"
                 )
-            stale = {
-                current_node,
-                *self.graph.semantic_descendants(current_node),
-                *self.graph.semantic_descendants(dependency_node),
-            }
-            stale.discard(dependency_node)
+            stale = set().union(
+                *(self._dependency_consumers(current_node, name)
+                  for name in providers)
+            )
+            # A target can also consume another target. Its repair must not
+            # be overwritten by the consumer invalidation of that provider.
+            stale.difference_update(providers)
             return FindingRoute(
                 target=RouteTarget.NODE_PRODUCER,
-                node_name=dependency_node,
+                node_name=providers[0],
                 assignment_kind=AssignmentKind.REPAIR,
                 stale_nodes=tuple(sorted(stale)),
+                node_names=providers,
             )
         if finding_class in {
             FindingClass.CONTRACT_DEFECT,
@@ -230,6 +236,15 @@ class GraphExecution:
             )
         raise ValueError(f"unsupported finding class: {finding_class}")
 
+    def _dependency_consumers(
+        self, current_node: str, provider: str,
+    ) -> set[str]:
+        return {
+            current_node,
+            *self.graph.semantic_descendants(current_node),
+            *self.graph.semantic_descendants(provider),
+        } - {provider}
+
     def apply_checker_verdict(
         self,
         *,
@@ -238,6 +253,7 @@ class GraphExecution:
         finding_refs: tuple[str, ...] = (),
         finding_class: FindingClass | None = None,
         dependency_node: str = "",
+        dependency_nodes: tuple[str, ...] = (),
         accepted_product_ref: str = "",
     ) -> tuple["GraphExecution", FindingRoute | None]:
         """Close one checker assignment and route a rejection mechanically.
@@ -270,15 +286,35 @@ class GraphExecution:
             finding_class=finding_class,
             current_node=current_node,
             dependency_node=dependency_node,
+            dependency_nodes=dependency_nodes,
         )
+        # Validate the complete batch before closing even the reporting
+        # checker. A bad later target must never leave a partial repair route.
+        for name in route.node_names:
+            if self.cycles[name].state not in {
+                NodeCycleState.ACCEPTED,
+                NodeCycleState.STALE,
+                NodeCycleState.PRODUCER_READY,
+                NodeCycleState.REPAIR_READY,
+            }:
+                raise ValueError(
+                    "repair target must be quiescent, got "
+                    f"{self.cycles[name].state.value}"
+                )
         action = (
             CycleAction.CHECKER_RETRY
             if route.target == RouteTarget.NODE_CHECKER
             else CycleAction.CHECKER_REJECTED
         )
-        result = self.with_cycle(
-            cycle.transition(action, verdict=verdict)
+        result = replace(
+            self,
+            cycles={
+                **self.cycles,
+                current_node: cycle.transition(action, verdict=verdict),
+            },
         )
+        if finding_class != FindingClass.DEPENDENCY_DEFECT:
+            result = result._refresh_readiness_and_terminal()
         if route.target == RouteTarget.NODE_CHECKER:
             return result, route
         if route.target == RouteTarget.PLAN_CYCLE:
@@ -286,34 +322,39 @@ class GraphExecution:
                 result._mark_nodes_stale(
                     route.stale_nodes,
                     allow_active=True,
+                    preserve_verdict_node=current_node,
                 ),
                 state=GraphExecutionState.REPLAN_REQUIRED,
             ), route
         cycles = dict(result.cycles)
-        target = cycles[route.node_name]
-        if route.node_name != current_node:
-            target = _repair_ready(target)
-            cycles[route.node_name] = target
+        for target_name in route.node_names or (route.node_name,):
+            if target_name != current_node:
+                cycles[target_name] = _repair_ready(cycles[target_name])
         result = replace(result, cycles=cycles)
         if finding_class == FindingClass.DEPENDENCY_DEFECT:
             barriers = dict(result.repair_barriers)
-            for stale_name in route.stale_nodes:
-                barriers[stale_name] = tuple(
-                    sorted(
-                        {
-                            *barriers.get(stale_name, ()),
-                            route.node_name,
-                        }
+            for provider in route.node_names:
+                for consumer in self._dependency_consumers(current_node, provider):
+                    if consumer not in route.stale_nodes:
+                        # Batch targets already have repair work. Their normal
+                        # producer/checker prerequisites gate execution inputs;
+                        # CONTRACT edges must not serialize software repairs.
+                        continue
+                    barriers[consumer] = tuple(
+                        sorted({*barriers.get(consumer, ()), provider})
                     )
-                )
             result = replace(result, repair_barriers=barriers)
-        return result._mark_nodes_stale(route.stale_nodes), route
+        return result._mark_nodes_stale(
+            route.stale_nodes,
+            preserve_verdict_node=current_node,
+        ), route
 
     def _mark_nodes_stale(
         self,
         node_names: tuple[str, ...],
         *,
         allow_active: bool = False,
+        preserve_verdict_node: str = "",
     ) -> "GraphExecution":
         cycles = dict(self.cycles)
         for name in node_names:
@@ -333,7 +374,9 @@ class GraphExecution:
                     cycle,
                     state=NodeCycleState.STALE,
                     active_assignment=None,
-                    last_verdict=None,
+                    last_verdict=(
+                        cycle.last_verdict if name == preserve_verdict_node else None
+                    ),
                 )
             elif allow_active and cycle.is_running:
                 # REPLAN_REQUIRED closes graph admission immediately. The
