@@ -55,10 +55,16 @@ not a second DAG scheduler or semantic lifecycle owner.
   process group, Manager run registration, and exclusive worktree ownership.
   A terminal IPC receipt or leader exit cannot release ownership; replacement
   starts only after the complete process group is reaped and accounting closes.
-- `ContinuationLifecycle.tla` models fresh-v29 checkpoint admission. Only a v8
-  encrypted logical-coroutine payload may start a worker; v7 and malformed checkpoints are
+- `ContinuationLifecycle.tla` models v29 resume-checkpoint format admission. Only a v8
+  encrypted logical-coroutine payload may restore a worker; v7 and malformed checkpoints are
   rejected with visible deterministic errors, while only transient worker
   failures may consume retry budget.
+- `StartupRecoveryLifecycle.tla` distinguishes a never-created coroutine from
+  an initialized coroutine whose required checkpoint is missing. It separates
+  file publication, durable session initialization, and worker acknowledgment;
+  explores failure/recovery between them; and forbids fresh work before acknowledgment,
+  stale-fence initialization, and silent fresh execution after initialization.
+  A negative-control configuration deliberately enables the forbidden fallback.
 - `LogicalCoroutineSnapshotLifecycle.tla` models worker-owned composite runtime
   state, opaque Manager routing, closed-boundary checkpoint replacement,
   crash/restore with a new fence, and joint N+5 retirement of pager/file state.
@@ -124,3 +130,62 @@ effect code is not automatically translated into TLA+.
 `test_replan_preserves_changed_module_worktree_and_role_session` and
 `test_replan_deletes_and_readds_module_as_a_new_identity` are the concrete
 boundary tests for `ReplanReuseLifecycle`.
+
+
+## Startup/recovery implementation boundary
+
+`StartupRecoveryLifecycle` covers checkpoint-capable Pal workers, beginning with
+`RoleSessionState.UNINITIALIZED`. The durable status is the historical fact;
+current filesystem presence alone is not that fact. `Active` and `Suspended`
+both require a checkpoint on the next admission. Existing initialized sessions
+are never inferred to be uninitialized from a missing file.
+
+The refinement boundary is explicit, rather than generated Python semantics:
+
+- `AdmitFresh`: `RoleCheckpoints.prepare_agent_session_attempt` permits absent
+  input only for `uninitialized`. `AdmitResume` restores a valid existing file,
+  including one published while the session still says `uninitialized`;
+  admission reconciles that status with `INITIALIZE` before process launch.
+  `RejectCheckpoint` represents missing required, unreadable, invalid-envelope,
+  or wrong-identity input; `ContinuationLifecycle` expands the format checks.
+- `StartProcess`: durable `ACTIVATE` preserves `uninitialized`; it is not evidence
+  of a created coroutine. `FailAttempt` and `CrashBeforeAck` abstract failure
+  settlement through `PARK`, which also preserves `uninitialized`. Queueing a
+  concrete retry alone can leave an initialized session `active`; the model
+  collapses that stopped state to `Suspended`. Both require the same checkpoint
+  on admission, so this abstraction preserves the admission property. Charged failures stop at
+  the configured budget; an uncharged process loss does not spend that budget.
+- `PublishCheckpoint`, `CommitInitialization`, `ReceiveInitializationAck` are
+  separate steps: the Manager promotes the file, commits `INITIALIZE`, and
+  replies to the worker's `checkpoint_initialize` operation. The worker awaits
+  that reply before entering fresh semantic work. A restored worker already
+  has its Manager-selected input and does not repeat the initialization ACK;
+  its valid snapshot may have an earlier producer fence. Publication while
+  `Running` abstracts Manager promotion at retirement, not a Manager ACK for
+  every worker-local safe-point write. A crash before the DB commit leaves
+  an uninitialized session with a restorable file; a crash after commit but
+  before ACK leaves an initialized session requiring that file.
+- Initial worker-requested publication and initialization require the current attempt/fence.
+  `RejectStaleInitialization` is a rejected old-worker operation with no durable
+  mutation. The accepted token is retained as a model history variable and
+  checked by `InitializationRequiresCurrentFence`.
+- `DamageCheckpoint` preserves the initialization fact and sequence, while
+  modeling file loss or corruption between attempts. A missing checkpoint is
+  never silently replaced with a fresh invocation for an initialized session.
+
+The model does not implement encryption, SQLite transactions, IPC transport,
+OS process reaping, or arbitrary Python callbacks. It does not claim end-to-end
+workflow completion: its liveness properties concern admission resolution and
+settlement after retry exhaustion, under the stated weak fairness assumptions.
+Finite start/sequence bounds are exploration bounds, not production limits.
+External/non-checkpoint harnesses and successful legacy submissions are outside
+this model; the implementation conservatively treats successful submission as
+initialized history for future admission rather than permitting a fresh reset.
+
+`tests/test_bunshin_startup_recovery_model.py` checks the concrete session
+transition mapping, checker coverage, and positive/negative model configurations.
+When `TLA2TOOLS_JAR` is set, it runs TLC in a temporary directory. Without that
+pinned jar, the TLC tests explicitly skip; the other Python checks are not a
+substitute for model checking. The full shell checker includes the positive
+model and requires a `FreshStartNeverForgetsInitialization` counterexample from
+`StartupRecoveryLifecycleUnsafe.cfg`.
