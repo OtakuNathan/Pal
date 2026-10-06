@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.failure_diagnostics import append_failure_diagnostic
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,6 +83,7 @@ def _worker_terminal_failure(
         or "worker_terminal_failed"
     ).strip()
     details = str(payload.get("error") or payload.get("summary") or "").strip()
+    details = append_failure_diagnostic(details, payload.get("failure_diagnostic"))
     retry_directive = str(payload.get("retry_directive") or "").strip()
     return error_kind, details, retry_directive
 

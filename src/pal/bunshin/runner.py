@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.failure_diagnostics import exception_diagnostic
 from pal.bunshin.runner_components.models import BunshinRuntimeBundle as BunshinRuntimeBundle
 from pal.bunshin.runner_components.models import _BunshinCooperativeCancel as _BunshinCooperativeCancel
 from pal.bunshin.runner_components.models import _BunshinCooperativeRestart as _BunshinCooperativeRestart
@@ -86,6 +87,7 @@ class BunshinRunner:
                         "status": "failed",
                         "summary": f"bunshin runner failed: {exc.__class__.__name__}",
                         "error": str(exc),
+                        "failure_diagnostic": exception_diagnostic(exc),
                         "error_type": exc.__class__.__name__,
                         "error_kind": (
                             "invalid_agent_session_checkpoint"

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.failure_diagnostics import append_failure_diagnostic
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,8 @@ class WorkerExecution:
                     if self.publish_worker_event is not None:
                         await self.publish_worker_event(event)
                 elif str(item.get("kind") or "") == "worker_error":
-                    worker_error = str(item.get("error") or "")
+                    worker_error = append_failure_diagnostic(
+                        str(item.get("error") or ""), item.get("failure_diagnostic"),
+                    )
             await owner.wait()
         return ExitedRoleProcess(events=events, owner=owner, worker_error=worker_error)

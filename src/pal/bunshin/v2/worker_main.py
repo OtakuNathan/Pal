@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.failure_diagnostics import exception_diagnostic
 
 import argparse
 import asyncio
@@ -101,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "kind": "worker_error",
                     "error": f"{exc.__class__.__name__}: {exc}",
+                    "failure_diagnostic": exception_diagnostic(exc),
                 }
             ),
             flush=True,
