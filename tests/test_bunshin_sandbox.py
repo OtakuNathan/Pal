@@ -24,6 +24,7 @@ from pal.lsp.ipc import LspManagerClient
 from pal.shared import ToolExecutionResult
 from pal.memory import MemoryService
 from pal.bunshin.manager import BunshinManager
+from pal.bunshin.harnesses import pal_harness_spec
 from pal.bunshin.ipc import (
     BUNSHIN_RUNTIME_DB_PATH_ENV,
     ROLE_GATEWAY_TOKEN_ENV,
@@ -804,7 +805,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-c", probe],
+                    argv=[pal_harness_spec().worker_argv[0], "-c", probe],
                     env={"PATH": "/usr/bin:/bin"},
                 )
                 result = subprocess.run(
@@ -864,7 +865,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-c", probe],
+                    argv=[pal_harness_spec().worker_argv[0], "-c", probe],
                     env={"PATH": "/usr/bin:/bin"},
                 )
                 result = subprocess.run(
@@ -1611,7 +1612,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-c", "import msgpack; import pal.foundation.sidecar; print('imports-ok')"],
+                    argv=[pal_harness_spec().worker_argv[0], "-c", "import msgpack; import pal.foundation.sidecar; print('imports-ok')"],
                     env={"PATH": "/usr/bin:/bin"},
                 )
             result = subprocess.run(argv, env=env, cwd=str(repo), capture_output=True, text=True, timeout=20)
@@ -1644,7 +1645,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-c", script],
+                    argv=[pal_harness_spec().worker_argv[0], "-c", script],
                     env={"PATH": "/usr/bin:/bin", ROLE_GATEWAY_TOKEN_ENV: "assignment-only"},
                 )
             result = subprocess.run(argv, env=env, cwd=str(repo), capture_output=True, text=True, timeout=20)

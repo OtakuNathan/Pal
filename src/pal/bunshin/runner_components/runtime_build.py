@@ -18,6 +18,7 @@ from pal.lsp import build_lsp_plugin
 from pal.bunshin.ipc import BUNSHIN_RUNTIME_DB_PATH_ENV
 from pal.memory import L3ProviderSelector, MemoryService, build_ollama_embedding_provider_from_config, register_with_core as register_memory_with_core
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
+from pal.skill.repository import ReadOnlySkillRepository
 from pal.bunshin.llm_transport import ManagerProxyTransport
 from pal.bunshin.web_broker import BunshinBrokerWebClient
 from pal.plugins.l3 import SQLiteVecL3Plugin, register_with_core as register_l3_with_core
@@ -106,7 +107,7 @@ def build_slim_bunshin_runtime(
     register_skill_with_core(
         context,
         SkillService(
-            repository=SkillRepository(),
+            repository=ReadOnlySkillRepository() if read_only_database else SkillRepository(),
             runtime_root=Path(runtime_root),
         ),
     )

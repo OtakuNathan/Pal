@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 from peewee import DoesNotExist
@@ -118,6 +118,56 @@ class SkillRepository:
                 }
             )
         )
+
+
+@dataclass
+class ReadOnlySkillRepository(SkillRepository):
+    """Durable user skills plus declarations from this worker's mounted modules.
+
+    Persisted declarations describe the host's module graph, not the worker's.
+    Rebuild them locally so publishing and withdrawing capabilities never mutate
+    the shared database or resurrect stale host declarations.
+    """
+
+    _declared: dict[str, SkillDescriptor] = field(default_factory=dict, init=False)
+
+    def upsert_skill(self, descriptor: SkillDescriptor) -> SkillDescriptor:
+        if descriptor.source_kind != SKILL_SOURCE_DECLARED:
+            raise PermissionError("worker skill repository is read-only")
+        if descriptor.status in {SKILL_STATUS_DISABLED, SKILL_STATUS_DEPRECATED}:
+            descriptor = replace(descriptor, enabled=False)
+        self._declared[descriptor.skill_id] = descriptor
+        return descriptor
+
+    def get_skill(self, skill_id: str) -> SkillDescriptor | None:
+        if skill_id in self._declared:
+            return self._declared[skill_id]
+        skill = super().get_skill(skill_id)
+        return skill if skill is not None and skill.source_kind != SKILL_SOURCE_DECLARED else None
+
+    def list_skills(self, *, enabled_only: bool = False, active_only: bool = False) -> tuple[SkillDescriptor, ...]:
+        skills = {
+            skill.skill_id: skill for skill in super().list_skills()
+            if skill.source_kind != SKILL_SOURCE_DECLARED
+        }
+        skills.update(self._declared)
+        return tuple(
+            skill for _, skill in sorted(skills.items())
+            if (not (enabled_only or active_only) or skill.enabled)
+            and (not active_only or skill.active)
+        )
+
+    def delete_declared_skills_for_module(self, module_id: str) -> int:
+        removed = [key for key, skill in self._declared.items() if skill.module_id == module_id]
+        for key in removed:
+            del self._declared[key]
+        return len(removed)
+
+    def mark_deprecated(self, skill_id: str) -> SkillDescriptor | None:
+        raise PermissionError("worker skill repository is read-only")
+
+    def disable_skill(self, skill_id: str) -> SkillDescriptor | None:
+        raise PermissionError("worker skill repository is read-only")
 
 
 def _skill_from_model(row: SkillModel) -> SkillDescriptor:
