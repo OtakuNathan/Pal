@@ -23,6 +23,10 @@ from pal.bunshin.v2 import (
     build_default_transition_engine,
 )
 from pal.bunshin.v2.contracts import StaleFencingToken, UnknownTransitionError
+from pal.bunshin.v2.cycle_protocol import (
+    AssignmentKind, CycleAction, CycleAssignment, CycleSlot, CycleTransitionError,
+    CycleVerdict, NodeCycle, NodeCycleState,
+)
 from pal.bunshin.v2.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.v2.sessions import module_verifier_session_id, node_role_generation
 
@@ -225,6 +229,114 @@ def test_nonterminal_unknown_label_preserves_generic_resume_boundary():
     assert resumed.payload[GENERATION] == 2
 
 
+@pytest.mark.parametrize("boundary", ["REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"])
+def test_logical_checker_restore_refines_snapshot_without_a_new_invocation(boundary):
+    """Trace the existing aggregate/cycle actions, not public recovery validation.
+
+    Invocation count is the number of real run_verifier_role effects emitted.
+    The logical START_CHECKER/RESUME action itself produces no process effect.
+    """
+    engine = build_default_transition_engine()
+    initial = snapshot(2)
+    queued = replace(initial, state="REVIEW_QUEUED", payload={
+        key: value for key, value in initial.payload.items() if key not in SNAPSHOT_FIELDS
+    })
+    cycle = NodeCycle(
+        "graph:router", "router", generation=1,
+        state=NodeCycleState.CHECKER_READY, product_ref="candidate",
+    )
+    finding = CycleVerdict(False, 1, ("corrected-submission",))
+    # READY without a pending submission is not authority to settle a checker.
+    assert not queued.payload.get("pending_verification_ref")
+    with pytest.raises(UnknownTransitionError):
+        step(engine, queued, "REVIEW_PASSED", verification_artifact_ref=REPORT)
+    with pytest.raises(CycleTransitionError):
+        cycle.transition(CycleAction.CHECKER_RETRY, verdict=finding)
+
+    started = step(engine, queued, "START_REVIEW", fencing_token=1)
+    effects = list(started.effects)
+    cycle = cycle.transition(CycleAction.START_CHECKER, assignment=CycleAssignment(
+        CycleSlot.CHECKER, AssignmentKind.INITIAL, 1, "candidate",
+    ))
+    pending = step(engine, started.snapshot, "SUBMIT_SEMANTIC_VERIFICATION",
+                   pending_verification_ref=PENDING).snapshot
+    if boundary == "REVIEW_SNAPSHOTTING":
+        pending = step(engine, pending, "VERIFIER_QUIESCED", fencing_token=1,
+                       process_group_reaped=True, exclusive_workspace_lock=True,
+                       workspace_fingerprint="same-candidate-tree").snapshot
+    assert pending.state == boundary
+    assert cycle.state == NodeCycleState.CHECKING
+    triaged = step(engine, pending, "ENTER_TRIAGE", blocker={"kind": "snapshot_interrupted"})
+    cycle = cycle.transition(CycleAction.REQUIRE_TRIAGE)
+    resolved = step(engine, triaged.snapshot, "RESOLVE_TRIAGE")
+    effects.extend(resolved.effects)
+    cycle = cycle.transition(CycleAction.RESOLVE_TRIAGE)
+    assert cycle.state == NodeCycleState.CHECKER_READY
+    with pytest.raises(CycleTransitionError):
+        cycle.transition(CycleAction.CHECKER_RETRY, verdict=finding)
+
+    # The public operation validates the durable pending receipt, then composes
+    # this exact existing logical action with RESOLVE_TRIAGE atomically.
+    assert resolved.snapshot.payload["pending_verification_ref"] == PENDING
+    cycle = cycle.transition(CycleAction.START_CHECKER, assignment=CycleAssignment(
+        CycleSlot.CHECKER, AssignmentKind.RESUME, 1,
+        f"pending-checker-settlement:{PENDING['sha256']}",
+    ))
+    assert cycle.state == NodeCycleState.CHECKING
+    assert cycle.active_assignment.kind == AssignmentKind.RESUME
+    assert cycle.active_assignment.input_fingerprint == "pending-checker-settlement:unknown-pending"
+    assert resolved.snapshot.state == boundary
+    assert resolved.snapshot.payload[GENERATION] == 2
+    assert cycle.product_ref == "candidate"
+    assert sum(effect.effect_type == "run_verifier_role" for effect in effects) == 1
+
+    snapshotted = resolved.snapshot
+    if boundary == "REVIEW_QUIESCING":
+        snapshotted = step(engine, snapshotted, "VERIFIER_QUIESCED", fencing_token=1,
+                           process_group_reaped=True, exclusive_workspace_lock=True,
+                           workspace_fingerprint="same-candidate-tree").snapshot
+    corrected = step(engine, snapshotted, "VERIFICATION_DEFECT",
+                     verification_artifact_ref=REPORT,
+                     repair_bill_ref={"sha256": "corrected-submission"},
+                     finding_fingerprint="finding").snapshot
+    cycle = cycle.transition(CycleAction.CHECKER_RETRY, verdict=finding)
+    assert corrected.state == "REVIEW_QUEUED"
+    assert cycle.state == NodeCycleState.CHECKER_READY
+    fresh = step(engine, corrected, "START_REVIEW", fencing_token=2)
+    effects.extend(fresh.effects)
+    cycle = cycle.transition(CycleAction.START_CHECKER, assignment=CycleAssignment(
+        CycleSlot.CHECKER, AssignmentKind.RECHECK, 1, "candidate",
+    ))
+    assert cycle.state == NodeCycleState.CHECKING
+    assert sum(effect.effect_type == "run_verifier_role" for effect in effects) == 2
+
+
+@pytest.mark.parametrize("blocker", ["blocking_unknown", "invalid_verifier_submission"])
+def test_terminal_resolution_refines_to_ready_without_snapshot_authority(blocker):
+    engine = build_default_transition_engine()
+    triaged = step(engine, snapshot(2), "ENTER_TRIAGE",
+                   verification_artifact_ref=REPORT, blocker={"kind": blocker}).snapshot
+    cycle = NodeCycle(
+        "graph:router", "router", generation=1,
+        state=NodeCycleState.CHECKING, product_ref="candidate",
+        active_assignment=CycleAssignment(
+            CycleSlot.CHECKER, AssignmentKind.INITIAL, 1, "candidate",
+        ),
+    ).transition(CycleAction.REQUIRE_TRIAGE)
+    resolved = step(engine, triaged, "RESOLVE_TRIAGE")
+    cycle = cycle.transition(CycleAction.RESOLVE_TRIAGE)
+    assert resolved.snapshot.state == "REVIEW_QUEUED"
+    assert resolved.snapshot.payload[GENERATION] == 3
+    assert not resolved.snapshot.payload.get("pending_verification_ref")
+    assert cycle.state == NodeCycleState.CHECKER_READY
+    assert cycle.active_assignment is None
+    assert all(effect.effect_type != "run_verifier_role" for effect in resolved.effects)
+    with pytest.raises(CycleTransitionError):
+        cycle.transition(CycleAction.CHECKER_RETRY, verdict=CycleVerdict(False, 1, ("old",)))
+    started = step(engine, resolved.snapshot, "START_REVIEW", fencing_token=2)
+    assert [effect.effect_type for effect in started.effects] == ["run_verifier_role"]
+
+
 def test_operator_triage_model_config_checks_recovery_contract():
     """Wiring only: this assertion deliberately makes no formal-proof claim."""
     config = (SPEC_ROOT / "OperatorTriageRecovery.cfg").read_text()
@@ -232,17 +344,42 @@ def test_operator_triage_model_config_checks_recovery_contract():
         "NoOldUnknownReplay", "ConsumedEvidenceIsCurrent", "AcceptedRequiresCurrentPass",
         "PendingReceiptIsImmutable", "FreshEvaluationHasNoPendingSnapshot",
         "EachEvaluationWasOperatorRequested", "ReceiptHasMatchingDraft", "ReceiptIdentityIsUnique",
+        "AggregateRefinesLogicalChecker", "LogicalResumeHasExactPendingCursor",
+        "ReadyHasNoSettlementCursor", "ProcessInvocationAccounting",
+        "TerminalCorrectionHasSettledEvidence",
     ):
         assert f"INVARIANT {invariant}\n" in config
     for prop in (
         "HistoryNeverShrinks", "GenerationAdvanceRequiresOperator", "TerminalUnknownWaitsForOperator",
         "InterruptedSnapshotReplaysExactly", "OperatorRetryPreservesInputsAndHistory",
         "NewReceiptRequiresCurrentFence",
+        "SnapshotSettlementRequiresChecking", "ProcessInvocationRequiresFreshStart",
+        "FreshStartCreatesNewInvocation", "TerminalResolutionKeepsCheckerReady",
+        "TerminalCorrectionWaitsForOperator",
     ):
         assert f"PROPERTY {prop}\n" in config
     script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
     assert "OperatorTriageRecoveryUnsafe.cfg" in script
     assert "Invariant NoOldUnknownReplay is violated" in script
+
+
+def test_operator_triage_model_restore_uses_logical_start_not_process_start():
+    """Static action wiring only; this is not a TLC execution or proof."""
+    model = (SPEC_ROOT / "OperatorTriageRecovery.tla").read_text()
+    restore = model.split("ResolveInterruptedSnapshot ==", 1)[1].split(
+        "ResolveTerminalBlocker(blocker) ==", 1,
+    )[0]
+    assert '/\\ ValidPendingReceipt' in restore
+    assert '/\\ [receipt |-> node.pending, evaluation |-> node.generation] \\notin consumed' in restore
+    assert '/\\ checkerState = "TriageRequired"' in restore
+    assert '/\\ checkerState\' = "Checking"' in restore
+    assert '/\\ checkerKind\' = "Resume"' in restore
+    assert "/\\ checkerInput' = node.pending" in restore
+    assert "/\\ UNCHANGED processInvocations" in restore
+    assert "START_CHECKER with AssignmentKind.RESUME" in restore
+    finalization = model.split("FinalizeSnapshot ==", 1)[1].split("InterruptSnapshot ==", 1)[0]
+    assert '/\\ checkerState = "Checking"' in finalization
+    assert '/\\ ValidPendingReceipt' in finalization
 
 
 @pytest.mark.parametrize("module,unsafe", [

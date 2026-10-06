@@ -289,8 +289,48 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_interrupted_snapshot_resolution_replays_same_pending_submission(self):
-        original = self.node()
-        self.dispatch("ENTER_TRIAGE", {"blocker": {"kind": "effect_failed"}})
+        async def settled_pending():
+            prepared = await self.prepare(self.node(), "interrupted-review")
+            session = await self.assignment(prepared)
+            attempt, lease, _, _ = self.start_attempt(prepared, session)
+            submission = {"outcome": "UNKNOWN"}
+            receipt = self.service.artifacts.put_json(
+                submission, artifact_type="VerifierRoleSubmissionArtifact",
+            )
+            payload_hash = stable_hash(submission)
+            self.repository.role_submissions.record_role_submission(
+                assignment_id=session.assignment["assignment_id"], attempt_id_value=attempt,
+                fencing_token=lease.fencing_token, artifact_ref=receipt.to_dict(),
+                payload_hash=payload_hash,
+                settlement_action={"action_type": "SUBMIT_SEMANTIC_VERIFICATION"},
+            )
+            self.repository.role_submissions.settle_role_assignment(
+                assignment_id=session.assignment["assignment_id"], submission_payload_hash=payload_hash,
+            )
+            return self.service.artifacts.put_json({
+                "submission": submission, "submission_ref": receipt.to_dict(),
+                "candidate_ref": self.candidate.to_dict(), "candidate_digest": "candidate-digest",
+                "role_assignment_id": session.assignment["assignment_id"],
+                "role_submission_payload_hash": payload_hash,
+                "invocation_id": prepared[0].invocation_id,
+            }, artifact_type="PendingSemanticVerificationArtifact")
+
+        self.pending = asyncio.run(settled_pending())
+        pending = self.service.artifacts.read_json(self.pending)
+        receipt_binding = {
+            "role_assignment_id": pending["role_assignment_id"],
+            "role_submission_payload_hash": pending["role_submission_payload_hash"],
+        }
+        original = replace(self.node(), payload={
+            **receipt_binding,
+            **self.node().payload, "pending_verification_ref": self.pending.to_dict(),
+            "graph_generation": 1,
+        })
+        self.dispatch("ENTER_TRIAGE", {
+            "blocker": {"kind": "effect_failed"}, "pending_verification_ref": self.pending.to_dict(),
+            "graph_generation": 1, **receipt_binding,
+        })
+        self.coordinator.require_node_triage(workflow_id="wf-unknown", node_name="router")
         self.resolve()
         resumed = self.node()
         self.assertEqual(resumed.state, "REVIEW_SNAPSHOTTING")

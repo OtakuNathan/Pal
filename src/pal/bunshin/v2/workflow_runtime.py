@@ -729,9 +729,13 @@ class WorkflowCoordinator:
         workflow_id: str,
         node_name: str = "",
         plan: bool = False,
+        pending_checker_input_fingerprint: str = "",
+        pending_checker_generation: int = 0,
         unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
         if plan:
+            if pending_checker_input_fingerprint:
+                raise ValueError("pending node checker settlement cannot restore a plan cycle")
             self._control_plan(
                 workflow_id,
                 CycleAction.RESOLVE_TRIAGE,
@@ -742,15 +746,45 @@ class WorkflowCoordinator:
             workflow_id=workflow_id,
         )
         if execution is None or node_name not in execution.cycles:
+            if pending_checker_input_fingerprint:
+                raise ValueError("pending checker settlement has no current graph cycle")
             return
         cycle = execution.cycles[node_name]
         if cycle.state != NodeCycleState.TRIAGE_REQUIRED:
+            if pending_checker_input_fingerprint and not (
+                cycle.state == NodeCycleState.CHECKING
+                and cycle.generation == pending_checker_generation
+                and cycle.active_assignment == CycleAssignment(
+                    CycleSlot.CHECKER, AssignmentKind.RESUME,
+                    pending_checker_generation, pending_checker_input_fingerprint,
+                )
+            ):
+                raise ValueError("pending checker settlement does not own the current graph cursor")
             return
+        if pending_checker_input_fingerprint and (
+            cycle.resume_state != NodeCycleState.CHECKER_READY
+            or cycle.active_assignment is not None
+            or not cycle.product_ref
+            or cycle.generation != pending_checker_generation
+        ):
+            raise ValueError("pending checker settlement does not match the triaged graph cycle")
+        resumed = cycle.transition(CycleAction.RESOLVE_TRIAGE)
+        if pending_checker_input_fingerprint:
+            # CHECKING is the logical checker/settlement cursor, not an OS
+            # process. The verifier already submitted and quiesced. Restore
+            # only that cursor; no role admission or process is created here.
+            resumed = resumed.transition(
+                CycleAction.START_CHECKER,
+                assignment=CycleAssignment(
+                    slot=CycleSlot.CHECKER,
+                    kind=AssignmentKind.RESUME,
+                    generation=cycle.generation,
+                    input_fingerprint=pending_checker_input_fingerprint,
+                ),
+            )
         (unit_of_work or self.repository).cycles.store_graph_execution(
             workflow_id=workflow_id,
-            execution=execution.with_cycle(
-                cycle.transition(CycleAction.RESOLVE_TRIAGE)
-            ),
+            execution=execution.with_cycle(resumed),
         )
 
     def _control_plan(

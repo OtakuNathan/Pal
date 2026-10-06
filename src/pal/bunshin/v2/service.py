@@ -26,7 +26,7 @@ from pal.bunshin.v2.contract_protocol import (
     software_contract_projection,
     validate_contract_payload,
 )
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
+from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult, SubmissionInvariantError
 from pal.bunshin.v2.machines import LIVENESS_REQUIRED_STATES
 from pal.bunshin.v2.human_review import (
     human_review_card_is_current,
@@ -1258,6 +1258,15 @@ class BunshinV2WorkflowService:
         if not candidates:
             raise ValueError("workflow has no TRIAGE_REQUIRED item that can be resolved")
         selected = _select_triage_candidate(candidates, subject=subject)
+        if (
+            selected.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(selected.payload.get("triage_resume_state") or "") == "REVIEW_SNAPSHOTTING"
+            and dict(selected.payload.get("blocker") or {}).get("kind") == "no_progress"
+            and dict(selected.payload.get("verification_artifact_ref") or {}).get("sha256")
+        ):
+            # Older terminal FAIL events predate exact pending-receipt indexing.
+            # They cannot authorize replay as an uncommitted snapshot either.
+            raise SubmissionInvariantError("pending checker settlement already has a committed verdict")
         resolution_payload: dict[str, Any] = {
             "triage_resolution": summary,
             "triage_resolution_kind": "manual",
@@ -1311,6 +1320,11 @@ class BunshinV2WorkflowService:
                     unit_of_work=connection,
                 )
             elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
+                pending_checker_input = (
+                    _pending_checker_settlement_input(self.repository, self.artifacts, result.snapshot)
+                    if result.snapshot.state in {"REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"}
+                    else ""
+                )
                 coordinator.resolve_triage(
                     workflow_id=workflow_id,
                     node_name=str(
@@ -1318,6 +1332,8 @@ class BunshinV2WorkflowService:
                         or selected.payload.get("unit_id")
                         or ""
                     ),
+                    pending_checker_input_fingerprint=pending_checker_input,
+                    pending_checker_generation=int(result.snapshot.payload.get("graph_generation") or 0),
                     unit_of_work=connection,
                 )
         return {
@@ -2056,3 +2072,67 @@ def _select_triage_candidate(
     raise ValueError(
         f"no TRIAGE_REQUIRED item matches subject {subject!r}. Available subjects: {names}"
     )
+
+
+def _pending_checker_settlement_input(
+    repository: BunshinV2Repository,
+    artifacts: ContentAddressedArtifactStore,
+    node: AggregateSnapshot,
+) -> str:
+    """Validate the already-submitted check before restoring its logical cursor.
+
+    Public triage resolution may resume a snapshot, rather than start another
+    verifier. A durable settled role receipt is the authority for that case;
+    READY alone never authorizes a checker verdict.
+    """
+
+    pending_value = dict(node.payload.get("pending_verification_ref") or {})
+    if not pending_value.get("sha256"):
+        raise SubmissionInvariantError("pending checker settlement has no durable pending submission")
+    if repository.queries.read_verification_settlement_ref(node.aggregate_id, str(pending_value["sha256"])):
+        raise SubmissionInvariantError("pending checker settlement already has a committed verdict")
+    pending = dict(artifacts.read_json(pending_value))
+    candidate = dict(node.payload.get("candidate_ref") or {})
+    if (
+        not candidate.get("sha256")
+        or dict(pending.get("candidate_ref") or {}).get("sha256") != candidate["sha256"]
+        or not str(pending.get("candidate_digest") or "")
+        or str(pending.get("candidate_digest")) != str(node.payload.get("candidate_digest") or "")
+    ):
+        raise SubmissionInvariantError("pending checker settlement candidate binding is stale or missing")
+    artifacts.read_json(candidate)
+    if (
+        str(pending.get("role_assignment_id") or "") != str(node.payload.get("role_assignment_id") or "")
+        or str(pending.get("role_submission_payload_hash") or "") != str(node.payload.get("role_submission_payload_hash") or "")
+    ):
+        raise SubmissionInvariantError("pending checker settlement is not the node's submitted verifier assignment")
+    assignment = repository.role_assignments.read_role_assignment(str(pending.get("role_assignment_id") or ""))
+    if assignment is None or any(
+        str(assignment.get(key) or "") != value
+        for key, value in {
+            "workflow_id": node.workflow_id,
+            "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+            "aggregate_id": node.aggregate_id,
+            "role": "verifier",
+            "mode": "module",
+            "state": "settled",
+            "session_id": str(pending.get("invocation_id") or ""),
+        }.items()
+    ):
+        raise SubmissionInvariantError("pending checker settlement has no matching settled verifier receipt")
+    if int(dict(assignment.get("execution_spec") or {}).get("evaluation_generation") or 0) != int(
+        node.payload.get("verifier_evaluation_generation") or 0
+    ):
+        raise SubmissionInvariantError("pending checker settlement belongs to a stale verifier evaluation")
+    submission_ref = dict(pending.get("submission_ref") or {})
+    receipt_ref = dict(assignment.get("submission_artifact_ref") or {})
+    payload_hash = str(pending.get("role_submission_payload_hash") or "")
+    if (
+        not submission_ref.get("sha256")
+        or submission_ref.get("sha256") != receipt_ref.get("sha256")
+        or not payload_hash
+        or payload_hash != str(assignment.get("submission_payload_hash") or "")
+        or dict(pending.get("submission") or {}) != dict(artifacts.read_json(receipt_ref))
+    ):
+        raise SubmissionInvariantError("pending checker settlement does not match its immutable verifier submission")
+    return f"pending-checker-settlement:{pending_value['sha256']}"
