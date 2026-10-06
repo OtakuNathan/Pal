@@ -59,6 +59,10 @@ def _meaningful_stderr_tail(stderr: str, *, limit: int = 4000) -> str:
     return "\n".join(filtered)[-limit:]
 
 
+def _terminal_completion_gate_stalled(payload: Mapping[str, Any]) -> bool:
+    return str(payload.get("blocker_kind") or "") == "completion_gate_stalled"
+
+
 def _worker_terminal_failure(
     events: list[Mapping[str, Any]],
 ) -> tuple[str, str, str]:
@@ -75,7 +79,17 @@ def _worker_terminal_failure(
     if terminal is None:
         return "", "", ""
     payload = dict(terminal.get("payload") or {})
-    if str(payload.get("status") or "") != "failed":
+    status = str(payload.get("status") or "")
+    if status == "blocked" and _terminal_completion_gate_stalled(payload):
+        # A cleanup failure can turn a blocked worker's exit code nonzero.
+        # Preserve the same permanent gate classification as the zero-exit
+        # terminal-validation path, rather than spending another model attempt.
+        return (
+            "completion_gate_stalled",
+            str(payload.get("summary") or "completion gate stalled").strip(),
+            "do_not_retry",
+        )
+    if status != "failed":
         return "", "", ""
     error_kind = str(
         payload.get("error_kind")

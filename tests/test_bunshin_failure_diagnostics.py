@@ -199,3 +199,83 @@ def test_checkpoint_classification_is_unchanged_with_metadata():
     assert kind == "invalid_agent_session_checkpoint"
     assert directive == "do_not_retry"
     assert details.startswith("continuation does not contain L1\nworker_diagnostic=")
+
+
+@pytest.mark.parametrize("terminal_payload,has_receipt,permanent", [
+    ({"status": "blocked", "blocker_kind": "completion_gate_stalled",
+      "summary": "required primary artifact absent after submit feedback"}, False, True),
+    ({"status": "blocked", "blocker_kind": "other_blocker",
+      "summary": "ordinary blocked outcome"}, False, False),
+    ({"status": "failed", "error_kind": "runner_failure",
+      "retry_directive": "reconcile_first", "summary": "retryable failure"}, False, False),
+    ({"status": "failed", "error_kind": "invalid_agent_session_checkpoint",
+      "retry_directive": "do_not_retry", "summary": "invalid checkpoint"}, False, True),
+    ({"status": "completed", "summary": "durable submission recorded"}, True, False),
+])
+def test_nonzero_cleanup_preserves_terminal_policy_and_diagnostics(
+    monkeypatch, terminal_payload, has_receipt, permanent,
+):
+    """Parse real wire messages, then classify the nonzero process result."""
+    from pal.bunshin.v2.semantic_orchestration import attempt_worker_execution as execution_module
+
+    cleanup = "ExceptionGroup: bunshin runtime shutdown failed (1 sub-exception)"
+    messages = [
+        {"kind": "event", "event": {"event_kind": "terminal", "payload": terminal_payload}},
+        {"kind": "worker_error", "error": cleanup, "failure_diagnostic": _diagnostic()},
+    ]
+
+    async def lines():
+        for message in messages:
+            yield json.dumps(message).encode()
+
+    owner = SimpleNamespace(stdout_lines=lines, wait=AsyncMock(), returncode=1, stderr=b"")
+    monkeypatch.setattr(execution_module, "WorkerProcessOwner", lambda **kw: owner)
+
+    @asynccontextmanager
+    async def shell(*args, **kwargs):
+        yield
+
+    repository = MagicMock()
+    repository.role_assignments.read_role_assignment.return_value = {
+        "submission_artifact_ref": {"sha256": "receipt"} if has_receipt else {},
+    }
+    execution = WorkerExecution(
+        MagicMock(), None, None, repository, MagicMock(),
+        SimpleNamespace(process_shell=shell), None, MagicMock(),
+    )
+    command = SimpleNamespace(fencing_token=1, invocation_id="i", lease_resource="l", snapshot=MagicMock())
+    admission = SimpleNamespace(
+        assignment_lease=SimpleNamespace(fencing_token=1),
+        assignment_lease_resource="a", attempt={"attempt_id": "a"},
+    )
+    publication = SimpleNamespace(argv=[], env={}, pack=SimpleNamespace(workspace={}))
+    exited = asyncio.run(execution.execute(
+        command, admission, publication, SimpleNamespace(role="verifier", run_id="r"),
+    ))
+    checkpoints = MagicMock()
+    checkpoints.publish_agent_session_checkpoint.return_value = None
+    processor = ProcessResult(repository, checkpoints)
+
+    async def process():
+        return await processor.execute(
+            command, admission, SimpleNamespace(continuation_output_path=None),
+            publication, SimpleNamespace(pal_checkpoint_capable=False),
+            SimpleNamespace(assignment={"assignment_id": "a"}), exited,
+        )
+
+    if has_receipt:
+        result = asyncio.run(process())
+        assert result.terminal_payload == terminal_payload
+        repository.role_retries.queue_role_attempt_retry.assert_not_called()
+        return
+    with pytest.raises((RuntimeError, PermanentEffectError)) as caught:
+        asyncio.run(process())
+    assert isinstance(caught.value, PermanentEffectError) is permanent
+    assert cleanup in str(caught.value)
+    assert "worker_diagnostic=" in str(caught.value)
+    if terminal_payload["status"] == "failed" or permanent:
+        assert terminal_payload["summary"] in str(caught.value)
+    if permanent:
+        repository.role_retries.queue_role_attempt_retry.assert_not_called()
+    else:
+        repository.role_retries.queue_role_attempt_retry.assert_called_once()

@@ -54,6 +54,9 @@ class ProcessResult:
                 or error_tail
                 or "worker emitted no structured error"
             )
+            secondary_error = worker_error or error_tail
+            if terminal_error and secondary_error and secondary_error not in terminal_error:
+                details = f"{terminal_error}\nWorker process error: {secondary_error}"
             permanent = retry_directive == "do_not_retry"
             if not permanent:
                 self.repository.role_retries.queue_role_attempt_retry(
