@@ -112,9 +112,10 @@ class ReferenceBinding:
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "Read and run both durable corpora; extend only tests/<module_name>/verifier and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. When this module is the authored graph sink, keep its end-to-end and delivery cases in the same verifier corpus. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "Read and run both durable corpora; extend only tests/<module_name>/verifier for demonstrated coverage gaps, while tests/<module_name>/developer remains read-only. Reuse unchanged contract analysis and coverage mapping, but rerun required evidence on the current Candidate and validate affected checks after the final corpus edit. Keep sink end-to-end cases in the same verifier corpus.",
                 "For this assignment, first record every required current/historical regression, then record a current-Candidate diff-risk check for newly introduced defects. A failing regression blocks PASS but never skips the diff-risk phase.",
-                "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
+                "Use the visible dedicated verification run tools for classified evidence and ordinary shell for read-only Git inspection. A successful classified execution can also supply its final-corpus receipt; do not rerun it solely to obtain an ordinary-shell receipt. Use read_verification_draft_status to resolve readiness or next-action uncertainty; follow ready_by_outcome, blockers_by_outcome, missing_historical_cases, and applicable next_actions rather than polling after every phase.",
+                "Follow the Role Contract completion rule and Manager readiness, supplying UNKNOWN's environmental reason and follow-up plan at submission when needed. Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
             if self.workflow_facts.execution_adapter(snapshot) == SOFTWARE_GIT_ADAPTER:

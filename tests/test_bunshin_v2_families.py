@@ -1486,7 +1486,8 @@ workspace_policy: {}
         self.assertIn("same node cycle", verifier)
         self.assertIn("interactive TTY with a PTY-style harness", verifier)
         self.assertIn("do not invent facts", generic)
-        self.assertIn("never acceptance evidence", verifier)
+        self.assertIn("independently inspect their assertions", verifier)
+        self.assertIn("never rely on producer claims for acceptance", verifier)
         self.assertIn("minimum sufficient focused build/test path", verifier)
         self.assertIn("disposition=advisory with priority=p2", verifier)
         self.assertIn("Do not block acceptance for stylistic type-level abstraction", verifier)
@@ -1513,8 +1514,10 @@ workspace_policy: {}
         coder_body, _, _ = coder.partition(quality_heading)
         self.assertLess(len(coder_body), 5_500)
         # The separately requested quality section has its own bounded budget.
-        # Check effective module-mode output too: it replaces the base fragment.
-        for behavior in (coder, verifier, str(verifier_profile["behavior_fragment"])):
+        # Module verification keeps quality review incidental and nonblocking.
+        self.assertIn("Review changed owned code incidentally", verifier)
+        self.assertIn("do not invent style tests", verifier)
+        for behavior in (coder, str(verifier_profile["behavior_fragment"])):
             self.assertEqual(behavior.count(quality_heading), 1)
             _, _, quality = behavior.partition(quality_heading)
             self.assertLess(len(quality), 1_400)

@@ -348,8 +348,8 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     elif role == "verifier":
         lines.extend(
             [
-                "- Verification: treat VerificationPolicy as the bounded checklist. Replay required cases, inspect current diff risk, and submit as soon as decisive evidence covers it; do not accumulate optional evidence or repeat unchanged passing checks.",
-                "- Use the Manager-prepared verification LSP tool. Do not invoke language-server executables or create compile configuration through shell.",
+                "- Verification: follow the Role Contract completion rule and the Manager's outcome-specific readiness. Required history precedes current-delta and independent adversarial risk checks. Submit once all required evidence, final-corpus validation, findings, and checklist gates permit the intended outcome; do not invent additional adversarial work once required risk coverage is established. Preserve every phase in the bound playbook.",
+                "- When LSP evidence applies, use the visible Manager-prepared verification LSP tool. Do not invoke language-server executables or create compile configuration through shell.",
             ]
         )
     elif role == "architect":
@@ -388,6 +388,8 @@ def prompt_view_from_pack(pack: BunshinInvocationPack) -> dict[str, Any]:
 
 
 def _render_bound_invocation(scaffold: dict[str, Any]) -> str:
+    # Keep the exact bound invocation in the durable developer scaffold: the
+    # original user turn may be summarized during compaction or checkpoint resume.
     lines = [str(scaffold.get("instruction") or "").strip()]
     acceptance = [str(item) for item in list(scaffold.get("acceptance_criteria") or []) if str(item).strip()]
     if acceptance:
