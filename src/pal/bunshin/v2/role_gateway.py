@@ -108,6 +108,14 @@ class RoleAssignmentGateway:
     def call(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(params or {})
         authenticated = self.authorize(str(payload.pop("access_token", "")))
+        if method == "checkpoint_initialize":
+            assignment = dict(authenticated["assignment"])
+            checkpoint = self.repository.role_attempts.publish_initial_role_checkpoint(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(authenticated["attempt_id"]),
+                fencing_token=int(authenticated["fencing_token"]),
+            )
+            return {"sequence": int(checkpoint["sequence"])}
         if method == "submission_status":
             return self._submission_status(authenticated)
         if method == "harness_state_read":

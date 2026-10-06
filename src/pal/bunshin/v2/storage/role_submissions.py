@@ -216,6 +216,10 @@ class RoleSubmissionsStore:
         self.role_sessions.transition_role_session_locked(
             connection,
             str(assignment["session_id"]),
-            RoleSessionAction.SUSPEND,
+            (
+                RoleSessionAction.PARK
+                if json.loads(str(assignment["settlement_action_json"] or "{}")).get("action_type") == "ROLE_FAILED"
+                else RoleSessionAction.SUSPEND
+            ),
             now=now,
         )

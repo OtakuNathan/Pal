@@ -133,6 +133,11 @@ class AgentSession:
                 initial_instruction=initial_instruction,
                 response_keys=response_keys,
             )
+        if (
+            session_metadata.get("checkpoint_initialization_required")
+            and not self.session_checkpoints.agent_session_checkpoint
+        ):
+            raise AgentSessionCheckpointError("role cannot begin work before its initial checkpoint")
         while True:
             await self.control.raise_if_cancel_requested()
             if self.session_checkpoints.continuation_is_restart_safe(continuation, state.memory_service):

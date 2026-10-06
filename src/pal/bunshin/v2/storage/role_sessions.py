@@ -2,13 +2,13 @@ from __future__ import annotations
 from pal.bunshin.v2.storage.serialization import _decode_role_session
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 from pal.foundation import utc_now
-from pal.bunshin.checkpoint import LogicalCoroutineCheckpointStore
+from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, normalize_agent_session_checkpoint
 from pal.bunshin.v2.contracts import AggregateType
 from pal.bunshin.v2.paths import cleanup_role_runtime
 from pal.bunshin.v2.role_protocol import RoleAssignmentState, RoleSessionAction, RoleSessionState, canonical_role_profile_parts, role_session_target
-from pal.bunshin.v2.role_contracts import RoleActivation
+from pal.bunshin.v2.role_contracts import RoleActivation, role_session_stage_key
 from pal.bunshin.v2.storage.connection_contracts import DatabasePort
 from pal.bunshin.v2.storage.projections import ProjectionsStore
 from pal.bunshin.v2.storage.role_session_checks import RoleSessionChecksStore
@@ -136,7 +136,7 @@ class RoleSessionsStore:
                     values["family_binding_sha"],
                     values["scope_kind"],
                     values["subject_key"],
-                    RoleSessionState.ACTIVE.value,
+                    RoleSessionState.UNINITIALIZED.value,
                     now,
                     now,
                 ),
@@ -146,6 +146,55 @@ class RoleSessionsStore:
                 (values["session_id"],),
             ).fetchone()
             return _decode_role_session(row)
+
+    def publish_role_session_checkpoint_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        fencing_token: int,
+        checkpoint: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the file before acknowledging that fresh admission is over.
+
+        A crash between the file replace and database commit leaves an
+        uninitialized session with a valid checkpoint; preparation restores it.
+        An acknowledged worker may do semantic work only after both succeed.
+        """
+        session = connection.execute(
+            "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+            (str(session_id),),
+        ).fetchone()
+        if session is None:
+            raise AgentSessionCheckpointError("worker checkpoint has no durable session")
+        # Check lifecycle before touching the durable file.
+        role_session_target(str(session["status"]), RoleSessionAction.INITIALIZE)
+        payload = normalize_agent_session_checkpoint(checkpoint)
+        expected = {
+            "logical_coroutine_id": str(session_id),
+            "workflow_id": str(session["workflow_id"]),
+            "stage_key": role_session_stage_key(
+                str(session["scope_kind"]), str(session["subject_key"]), str(session["role"]),
+            ),
+            "producer_fencing_token": int(fencing_token),
+        }
+        for key, value in expected.items():
+            if payload[key] != value:
+                raise AgentSessionCheckpointError(f"worker checkpoint has the wrong {key}")
+        store = LogicalCoroutineCheckpointStore(self.database.runtime_root)
+        # The first safe point is acknowledged while the worker is alive and
+        # can be observed again at process retirement or after a lost ACK.
+        # Only an exact replay is idempotent; equal-sequence mutations fail.
+        if store.read(session_id) != payload:
+            store.publish(
+                payload,
+                expected_logical_coroutine_id=session_id,
+                current_fencing_token=fencing_token,
+            )
+        self.transition_role_session_locked(
+            connection, session_id, RoleSessionAction.INITIALIZE, now=utc_now(),
+        )
+        return payload
 
     def read_role_session(self, session_id: str) -> dict[str, Any] | None:
         self.database.ensure_schema()

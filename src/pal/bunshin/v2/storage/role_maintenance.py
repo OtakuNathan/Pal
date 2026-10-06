@@ -26,11 +26,12 @@ class RoleMaintenanceStore:
             rows = connection.execute(
                 """
                 SELECT session_id FROM bunshin_v2_role_sessions
-                WHERE workflow_id = ? AND status IN (?, ?)
+                WHERE workflow_id = ? AND status IN (?, ?, ?)
                 ORDER BY created_at, session_id
                 """,
                 (
                     str(workflow_id),
+                    RoleSessionState.UNINITIALIZED.value,
                     RoleSessionState.ACTIVE.value,
                     RoleSessionState.SUSPENDED.value,
                 ),
@@ -54,9 +55,10 @@ class RoleMaintenanceStore:
             rows = connection.execute(
                 """
                 SELECT session_id FROM bunshin_v2_role_sessions
-                WHERE status IN (?, ?)
+                WHERE status IN (?, ?, ?)
                 """,
                 (
+                    RoleSessionState.UNINITIALIZED.value,
                     RoleSessionState.ACTIVE.value,
                     RoleSessionState.SUSPENDED.value,
                 ),
@@ -101,9 +103,10 @@ class RoleMaintenanceStore:
             rows = connection.execute(
                 """
                 SELECT session_id FROM bunshin_v2_role_sessions
-                WHERE status IN (?, ?)
+                WHERE status IN (?, ?, ?)
                 """,
                 (
+                    RoleSessionState.UNINITIALIZED.value,
                     RoleSessionState.ACTIVE.value,
                     RoleSessionState.SUSPENDED.value,
                 ),

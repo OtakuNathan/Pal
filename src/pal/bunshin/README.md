@@ -84,6 +84,16 @@ Interaction rule:
   and orphaned spool while preserving active and suspended resumable sessions.
   Terminal workflow cleanup also retires workflow worktrees and artifact-module
   scratch; content-addressed artifacts, audit rows, and deliveries remain
+- a new logical role session is durably `uninitialized` until its first
+  checkpoint publication is acknowledged by Manager. Process claim/start,
+  startup retry exhaustion, and prelaunch cancellation preserve that state.
+  The worker writes its initial closed safe point, Manager publishes the
+  encrypted file then commits initialization, and only an acknowledgement
+  permits LLM/tool work. An interrupted file-before-database publication is
+  restored on retry. Active/suspended sessions, including legacy records,
+  require their checkpoint and fail closed if it is missing or corrupt; they
+  never silently restart fresh. Successful legacy submissions also require
+  continuation even if they did not publish a checkpoint
 - checkpoint schema v8 stores a non-sensitive routing/fencing header plus one
   authenticated encrypted logical-process payload. Module-owned state is
   serialized behind that envelope; Manager routes it opaquely and only the

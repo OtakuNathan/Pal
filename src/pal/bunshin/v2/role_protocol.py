@@ -10,6 +10,7 @@ from pal.bunshin.v2.role_contracts import RoleActivation
 
 
 class RoleSessionState(StrEnum):
+    UNINITIALIZED = "uninitialized"
     ACTIVE = "active"
     SUSPENDED = "suspended"
     COMPLETED = "completed"
@@ -17,6 +18,8 @@ class RoleSessionState(StrEnum):
 
 
 class RoleSessionAction(StrEnum):
+    INITIALIZE = "initialize"
+    PARK = "park"
     ACTIVATE = "activate"
     SUSPEND = "suspend"
     COMPLETE = "complete"
@@ -89,6 +92,19 @@ def canonical_role_profile_parts(profile_id: str) -> tuple[str, str]:
 
 
 _SESSION_TRANSITIONS = {
+    # Claiming/spawning a process does not prove that a checkpoint exists.
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.ACTIVATE): RoleSessionState.UNINITIALIZED,
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.PARK): RoleSessionState.UNINITIALIZED,
+    (RoleSessionState.ACTIVE, RoleSessionAction.PARK): RoleSessionState.SUSPENDED,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.PARK): RoleSessionState.SUSPENDED,
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.INITIALIZE): RoleSessionState.ACTIVE,
+    (RoleSessionState.ACTIVE, RoleSessionAction.INITIALIZE): RoleSessionState.ACTIVE,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.INITIALIZE): RoleSessionState.SUSPENDED,
+    # A successful submission is evidence of work even for a legacy harness
+    # that did not publish a checkpoint. It must never permit a fresh retry.
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.SUSPEND): RoleSessionState.SUSPENDED,
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.COMPLETE): RoleSessionState.COMPLETED,
+    (RoleSessionState.UNINITIALIZED, RoleSessionAction.CANCEL): RoleSessionState.CANCELLED,
     (RoleSessionState.ACTIVE, RoleSessionAction.ACTIVATE): RoleSessionState.ACTIVE,
     (RoleSessionState.ACTIVE, RoleSessionAction.SUSPEND): RoleSessionState.SUSPENDED,
     (RoleSessionState.SUSPENDED, RoleSessionAction.ACTIVATE): RoleSessionState.ACTIVE,

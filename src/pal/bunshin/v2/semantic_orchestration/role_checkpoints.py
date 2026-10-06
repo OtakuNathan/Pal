@@ -15,7 +15,8 @@ from pal.bunshin.v2.contracts import SubmissionInvariantError
 from pal.bunshin.v2.paths import invocation_root
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.role_contracts import role_session_stage_key
-from pal.bunshin.v2.role_protocol import stable_hash
+from pal.bunshin.v2.role_protocol import RoleSessionAction, RoleSessionState, stable_hash
+from pal.foundation import utc_now
 from pal.shared import BunshinInvocationPack
 
 
@@ -175,9 +176,9 @@ class RoleCheckpoints:
         store = LogicalCoroutineCheckpointStore(self.runtime_root)
         checkpoint = store.read(session_id)
         if checkpoint is None:
-            if str(session.get("status") or "") in {"suspended", "interrupted"}:
+            if str(session.get("status") or "") != RoleSessionState.UNINITIALIZED.value:
                 raise AgentSessionCheckpointError(
-                    "suspended role session has no logical-coroutine checkpoint"
+                    "role session requires a logical-coroutine checkpoint but it is missing"
                 )
             return None, checkpoint_path
         restored = normalize_agent_session_checkpoint(checkpoint)
@@ -199,6 +200,14 @@ class RoleCheckpoints:
                 "role session continuation has the wrong stage"
             )
         materialized = store.materialize_input(session_id, restore_path)
+        if materialized is None:
+            raise AgentSessionCheckpointError("logical-coroutine checkpoint disappeared during restoration")
+        # Reconcile a first publication whose file persisted but DB/ACK did
+        # not. Never erase or bypass that continuation to fresh-start.
+        with self.repository.database.write_connection() as connection:
+            self.repository.role_sessions.transition_role_session_locked(
+                connection, session_id, RoleSessionAction.INITIALIZE, now=utc_now(),
+            )
         return materialized, checkpoint_path
 
     def publish_agent_session_checkpoint(
@@ -233,11 +242,13 @@ class RoleCheckpoints:
         )
         if str(payload.get("stage_key") or "") != expected_stage:
             raise RuntimeError("worker checkpoint output has the wrong stage")
-        LogicalCoroutineCheckpointStore(self.runtime_root).publish(
-            payload,
-            expected_logical_coroutine_id=invocation_id,
-            current_fencing_token=fencing_token,
-        )
+        with self.repository.database.write_connection() as connection:
+            self.repository.role_sessions.publish_role_session_checkpoint_locked(
+                connection,
+                session_id=invocation_id,
+                fencing_token=fencing_token,
+                checkpoint=payload,
+            )
         with contextlib.suppress(FileNotFoundError):
             checkpoint_path.unlink()
         return payload

@@ -3,6 +3,8 @@ from pal.bunshin.v2.storage.serialization import _decode_role_attempt
 from pal.bunshin.v2.storage.serialization import _json
 import json
 import sqlite3
+from pal.bunshin.checkpoint import AgentSessionCheckpointError
+from pal.bunshin.v2.paths import invocation_root
 from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.foundation import utc_now
@@ -88,6 +90,43 @@ class RoleAttemptsStore:
                 (str(attempt_id_value),),
             ).fetchone()
             return _decode_role_attempt(row)
+
+    def publish_initial_role_checkpoint(
+        self,
+        *,
+        assignment_id: str,
+        attempt_id_value: str,
+        fencing_token: int,
+    ) -> dict[str, Any]:
+        """Acknowledge only this authenticated live attempt's first safe point."""
+        self.database.ensure_schema()
+        with self.database.write_connection() as connection:
+            assignment, attempt = self.role_assignment_attempt_locked(
+                connection, assignment_id=assignment_id, attempt_id_value=attempt_id_value,
+            )
+            self.leases.assert_lease_locked(
+                connection, str(attempt["lease_resource_key"]),
+                str(attempt_id_value), int(fencing_token),
+            )
+            if str(attempt["status"]) != RoleAttemptState.RUNNING.value:
+                raise AgentSessionCheckpointError("checkpoint initialization requires a running attempt")
+            # Paths come only from durable Manager identities, never worker
+            # parameters or sandbox path aliases.
+            path = (
+                invocation_root(self.database.runtime_root)
+                / str(assignment["session_id"]) / "session-attempts"
+                / str(attempt_id_value) / "continuation-output.json"
+            )
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise AgentSessionCheckpointError("initial worker checkpoint is unreadable") from exc
+            if not isinstance(payload, dict):
+                raise AgentSessionCheckpointError("initial worker checkpoint is not an object")
+            return self.role_sessions.publish_role_session_checkpoint_locked(
+                connection, session_id=str(assignment["session_id"]),
+                fencing_token=fencing_token, checkpoint=payload,
+            )
 
     def read_role_attempt(self, attempt_id_value: str) -> dict[str, Any] | None:
         self.database.ensure_schema()

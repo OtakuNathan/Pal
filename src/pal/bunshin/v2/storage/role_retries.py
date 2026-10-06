@@ -182,7 +182,7 @@ class RoleRetriesStore:
             self.role_sessions.transition_role_session_locked(
                 connection,
                 str(assignment["session_id"]),
-                RoleSessionAction.SUSPEND,
+                RoleSessionAction.PARK,
                 now=now,
             )
             return RoleSubmissionReceipt(

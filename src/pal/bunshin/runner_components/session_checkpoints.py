@@ -16,6 +16,7 @@ from pal.memory import MemoryService
 from pal.memory.turn_ir import L1TurnState
 from pal.bunshin.checkpoint import AgentSessionCheckpointError, open_agent_session_checkpoint, seal_agent_session_checkpoint
 from pal.bunshin.v2.role_contracts import role_session_stage_key
+from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import BunshinInvocationPack
 from pal.bunshin.runner_components.artifacts import Artifacts
@@ -221,6 +222,8 @@ class SessionCheckpoints:
         fencing_token = int(session_metadata.get("fencing_token") or 0)
         checkpoint_text = str(session_metadata.get("continuation_output_path") or "").strip()
         if not session_id or fencing_token <= 0 or not checkpoint_text:
+            if session_metadata.get("checkpoint_initialization_required"):
+                raise AgentSessionCheckpointError("initial checkpoint has no Manager binding")
             return
         checkpoint_path = Path(checkpoint_text)
         if not self.continuation_is_restart_safe(continuation, state.memory_service):
@@ -258,6 +261,16 @@ class SessionCheckpoints:
         os.chmod(temporary, 0o600)
         os.replace(temporary, target)
         _fsync_directory(target.parent)
+        if (
+            session_metadata.get("checkpoint_initialization_required")
+            and not self.agent_session_checkpoint
+        ):
+            client = role_gateway_client_from_env(self.runtime_root)
+            if client is None:
+                raise AgentSessionCheckpointError("initial checkpoint requires Manager acknowledgement")
+            acknowledgement = await client.request("checkpoint_initialize")
+            if acknowledgement.get("sequence") != sequence:
+                raise AgentSessionCheckpointError("initial checkpoint acknowledgement has the wrong sequence")
         self.agent_session_checkpoint = private_payload
 
     def restore_invocation_checkpoint_state(

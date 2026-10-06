@@ -66,14 +66,17 @@ def normalize_agent_session_checkpoint(
             raise AgentSessionCheckpointError(
                 f"manager-selected agent continuation has no {field_name}"
             )
-    if int(value.get("sequence") or 0) <= 0:
-        raise AgentSessionCheckpointError(
-            "manager-selected agent continuation has no positive sequence"
-        )
-    if int(value.get("producer_fencing_token") or 0) <= 0:
-        raise AgentSessionCheckpointError(
-            "manager-selected agent continuation has no producer fencing token"
-        )
+    for field_name in ("sequence", "producer_fencing_token"):
+        try:
+            positive = int(value.get(field_name) or 0) > 0
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise AgentSessionCheckpointError(
+                f"manager-selected agent continuation has an invalid {field_name}"
+            ) from exc
+        if not positive:
+            raise AgentSessionCheckpointError(
+                f"manager-selected agent continuation has no positive {field_name}"
+            )
     if not isinstance(value.get("metrics"), Mapping):
         raise AgentSessionCheckpointError(
             "manager-selected agent continuation has invalid public metrics"
@@ -199,6 +202,8 @@ class LogicalCoroutineCheckpointStore:
     def read(self, logical_coroutine_id: str) -> dict[str, Any] | None:
         path = self.current_path(logical_coroutine_id)
         if not path.is_file():
+            if path.exists() or path.is_symlink():
+                raise AgentSessionCheckpointError("logical-coroutine checkpoint is not a regular file")
             return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))

@@ -133,6 +133,7 @@ class AttemptPack:
             ),
             "harness_id": harness_spec.harness_id,
             "harness_generation": effective_harness_generation,
+            "checkpoint_initialization_required": stage_harness_binding.pal_checkpoint_capable,
             "continuation_input_path": str(continuation_input_path or ""),
             "continuation_output_path": str(continuation_output_path),
         }

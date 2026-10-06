@@ -200,7 +200,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
 
         self.assertEqual(
             self.repository.role_sessions.read_role_session(session_id)["status"],
-            RoleSessionState.ACTIVE.value,
+            RoleSessionState.UNINITIALIZED.value,
         )
 
     def start_attempt(self, assignment_id: str) -> tuple[dict, int]:
@@ -896,7 +896,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         )
         self.assertEqual(
             self.repository.role_sessions.read_role_session("session-router")["status"],
-            "suspended",
+            "uninitialized",
         )
         with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
             self.repository.role_sessions.complete_role_session("session-router")
