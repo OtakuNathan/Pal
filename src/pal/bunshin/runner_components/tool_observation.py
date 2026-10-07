@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pal.bunshin.producer_tool_diagnostics import (
-    MAX_PRODUCER_TOOL_DIAGNOSTICS, is_producer_pack, producer_tool_diagnostic,
+    MAX_PRODUCER_TOOL_DIAGNOSTICS, is_producer_pack, producer_tool_alias, producer_tool_diagnostic,
 )
 from pal.bunshin.verifier_tool_diagnostics import (
     VerifierFailureProvenance, capture_verifier_failure, is_verifier_pack,
@@ -154,7 +154,7 @@ class ToolObservation:
     ) -> None:
         try:
             if (self._producer_diagnostic_count >= MAX_PRODUCER_TOOL_DIAGNOSTICS
-                    or not is_producer_pack(self.reporter.pack)):
+                    or not is_producer_pack(self.reporter.pack, producer_tool_alias(call))):
                 return
             payload = producer_tool_diagnostic(
                 call, round_index=state.llm_round_count, tool_call_index=index,

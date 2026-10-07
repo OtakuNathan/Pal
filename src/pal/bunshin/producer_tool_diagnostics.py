@@ -1,4 +1,4 @@
-"""Bounded, content-free implementation telemetry; never a tool-output log.
+"""Bounded, content-free producer telemetry; never a tool-output log.
 
 Retain only the first 128 records per persistent logical invocation, across
 attempts and restarts. Later records are dropped without stopping any tools.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from pal.shared import BunshinInvocationPack, ToolExecutionResult
 from pal.shared.tool_protocol import FailedResult, RejectedResult, ToolCallIR
@@ -25,8 +25,10 @@ _PRODUCER_ALIASES = {
     "op_bunshin_update_checklist": "update_checklist",
     "op_bunshin_candidate_report_architecture_defect": "report_candidate_architecture_defect",
     "op_bunshin_candidate_request_module_split": "request_candidate_module_split",
+    "op_bunshin_contract_submit": "submit_contract",
 }
 _ALIASES = frozenset(_PRODUCER_ALIASES.values())
+_IMPLEMENTATION_ALIASES = _ALIASES - {"submit_contract"}
 _ERROR_CODES = frozenset({
     "unknown_tool", "wrong_invocation_mode", "invalid_arguments", "invalid",
     "capability_not_allowed", "capability_denied_by_bunshin_policy",
@@ -34,7 +36,13 @@ _ERROR_CODES = frozenset({
     "missing_effect_receipt", "output_validation_failed", "rejected",
     "submission_infrastructure_error", "submission_outcome_unknown",
     "checklist_invalid", "candidate_workspace_polluted", "candidate_product_required",
+    "invalid_contract_submission",
     "validation", "tool_execution_exception", "unclassified_error",
+})
+_ERROR_TYPES = frozenset({
+    "ValueError", "TypeError", "RuntimeError", "KeyError", "OSError",
+    "FileNotFoundError", "PermissionError", "TimeoutError", "OperationalError",
+    "BunshinManagerRpcError", "ValidationError", "SubmissionValidationError", "other",
 })
 _STATUSES = frozenset({
     "ok", "error", "queued", "unsupported", "invalid", "not_found",
@@ -54,6 +62,7 @@ class ProducerToolDiagnostic(BaseModel):
     ok: bool | None = None
     status: str = Field(default="unknown", max_length=64)
     error_code: str = Field(default="", max_length=64)
+    error_type: str | None = Field(default=None, max_length=32)
     # Manager replaces this from the process owner's envelope.
     attempt_id: str = Field(default="", max_length=28, pattern=r"^(?:att_[0-9a-f]{24})?$")
 
@@ -78,11 +87,28 @@ class ProducerToolDiagnostic(BaseModel):
             raise ValueError("unknown producer error code")
         return value
 
+    @field_validator("error_type")
+    @classmethod
+    def known_error_type(cls, value: str | None) -> str | None:
+        if value is not None and value not in _ERROR_TYPES:
+            raise ValueError("unknown producer exception type")
+        return value
 
-def is_producer_pack(pack: BunshinInvocationPack) -> bool:
+    @model_validator(mode="after")
+    def contract_error_type_only(self) -> "ProducerToolDiagnostic":
+        if self.error_type is not None and self.tool_alias != "submit_contract":
+            raise ValueError("exception type is only recorded for contract submission")
+        return self
+
+
+def is_producer_pack(pack: BunshinInvocationPack, tool_alias: str | None = None) -> bool:
     # Profiles are presentation, not authority; other roles use checklists too.
     binding = (pack.metadata or {}).get("bunshin_v2")
-    return isinstance(binding, dict) and binding.get("role") == "implementation"
+    if not isinstance(binding, dict):
+        return False
+    if binding.get("role") == "implementation":
+        return tool_alias is None or tool_alias in _IMPLEMENTATION_ALIASES
+    return binding.get("role") == "architect" and tool_alias == "submit_contract"
 
 
 def producer_tool_alias(call: ToolCallIR) -> str:
@@ -102,7 +128,7 @@ def producer_tool_diagnostic(
     alias = producer_tool_alias(call)
     if not alias:
         return None
-    status, error_code, ok = "unknown", "", None
+    status, error_code, ok, error_type = "unknown", "", None, None
     if result is not None:
         ok = result.ok if type(result.ok) is bool else None
         status = _allowed_value(result.status, _STATUSES, "unknown")
@@ -114,14 +140,21 @@ def producer_tool_diagnostic(
         )
         if ok is False:
             error_code = _allowed_value(code, _ERROR_CODES, "unclassified_error")
+            if alias == "submit_contract":
+                # Read only an existing normalized type token, never error text,
+                # nested output, or exception frames. Unknown types stay generic.
+                details = invocation.details if isinstance(invocation, (FailedResult, RejectedResult)) else structured
+                error_type = _allowed_value(details.get("error_type"), _ERROR_TYPES, "other")
     if stage == "failed":
         ok, status, error_code = False, "error", "tool_execution_exception"
+        if alias == "submit_contract":
+            error_type = "other"
     try:
         return ProducerToolDiagnostic(
             round=round_index, tool_call_index=tool_call_index, tool_alias=alias,
             route=("call_tool" if call.name in {"call_tool", "op_tool_call"}
                    else "read_tool" if call.name in {"read_tool", "op_tool_read"} else "direct"),
-            stage=stage, ok=ok, status=status, error_code=error_code,
+            stage=stage, ok=ok, status=status, error_code=error_code, error_type=error_type,
         ).model_dump()
     except ValidationError:
         return None

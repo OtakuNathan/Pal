@@ -945,14 +945,16 @@ class BunshinManager:
             # gateway. Worker-supplied lookalikes have no recording authority.
             return
         if item.get("event_kind") == "producer_tool_diagnostic":
-            # Only the Manager's implementation binding supplies authority and
+            # Only the Manager's role binding supplies tool authority and
             # identity. Keep this operational record out of chat and role state.
             state = self.runs.get(owner_run_id) if isinstance(owner_run_id, str) else None
-            if (state is None or not delivery_attempt_id or not is_producer_pack(state.pack)
+            if (state is None or not delivery_attempt_id
                     or state.producer_diagnostic_count >= MAX_PRODUCER_TOOL_DIAGNOSTICS):
                 return
             try:
                 diagnostic = ProducerToolDiagnostic.model_validate(item.get("payload"))
+                if not is_producer_pack(state.pack, diagnostic.tool_alias):
+                    return
                 diagnostic = ProducerToolDiagnostic.model_validate({
                     **diagnostic.model_dump(), "attempt_id": delivery_attempt_id,
                 })
