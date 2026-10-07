@@ -14,22 +14,22 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contract_protocol import validate_contract_payload
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot
-from pal.bunshin.v2.dag_scheduling import DagScheduler
-from pal.bunshin.v2.dependency_baselines import prepare_node_verification_baseline
-from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_executor import FindingClass
-from pal.bunshin.v2.graph_protocol import EdgeKind, RoleBinding
-from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
-from pal.bunshin.v2.skeleton_compilation import SkeletonEpochCompiler
-from pal.bunshin.v2.swe_verification import verification_finding_route_errors
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contract_protocol import validate_contract_payload
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
+from pal.bunshin.dag_scheduling import DagScheduler
+from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
+from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.graph_executor import FindingClass
+from pal.bunshin.graph_protocol import EdgeKind, RoleBinding
+from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
+from pal.bunshin.skeleton_compilation import SkeletonEpochCompiler
+from pal.bunshin.swe_verification import verification_finding_route_errors
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
 # A diamond gives the transitive provider two paths to inventory. The sink

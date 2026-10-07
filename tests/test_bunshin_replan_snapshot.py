@@ -2,9 +2,9 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from pal.bunshin.v2 import git_replan
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.graph_executor import GraphDiff, NodeReuseDecision, NodeReuseKind
+from pal.bunshin import git_replan
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.graph_executor import GraphDiff, NodeReuseDecision, NodeReuseKind
 
 
 def test_concurrent_projection_change_cannot_skip_module_replacement(monkeypatch):

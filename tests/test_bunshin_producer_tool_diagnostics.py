@@ -159,7 +159,7 @@ def test_worker_authority_is_scoped_to_role_and_exact_alias(role, alias):
     (type("PrivateException", (Exception,), {})(SECRET), False, "submission_infrastructure_error", "other"),
 ])
 def test_contract_submission_error_projection_uses_only_normalized_type_tokens(normalized, error, started, code, error_type):
-    from pal.bunshin.v2.submission_errors import SubmissionValidationError, submission_error_result
+    from pal.bunshin.submission_errors import SubmissionValidationError, submission_error_result
     from pal.execution.runtime import ExecutionRuntime
 
     if error == "validation":
@@ -436,7 +436,7 @@ def test_worker_cannot_forge_manager_git_diagnostics(tmp_path, debug_enabled):
     ("verifier", "submit_contract", False), ("verifier", "submit_candidate", False),
 ])
 def test_process_owner_binds_producer_identity_despite_forged_worker_run(tmp_path, monkeypatch, owner_role, alias, accepted):
-    from pal.bunshin.v2.semantic_orchestration import attempt_worker_execution as execution_module
+    from pal.bunshin.semantic_orchestration import attempt_worker_execution as execution_module
 
     async def scenario():
         manager = BunshinManager(tmp_path)
@@ -480,8 +480,8 @@ def test_process_owner_binds_producer_identity_despite_forged_worker_run(tmp_pat
 
 @pytest.mark.parametrize("role,alias", PRODUCER_BINDINGS)
 def test_durable_retention_survives_manager_reconstruction_without_affecting_progress(tmp_path, role, alias):
-    from pal.bunshin.v2 import AggregateType, ContentAddressedArtifactStore
-    from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+    from pal.bunshin import AggregateType, ContentAddressedArtifactStore
+    from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 
     async def scenario():
         manager = BunshinManager(tmp_path)

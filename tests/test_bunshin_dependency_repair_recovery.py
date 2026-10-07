@@ -13,16 +13,16 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import NodeCycleState
-from pal.bunshin.v2.graph_executor import GraphExecutionState
-from pal.bunshin.v2.semantic_orchestration.dependency_repair_recovery import pending_repair_incarnation
-from pal.bunshin.v2.semantic_orchestration.dependency_repair_runtime import DependencyRepairRuntime
-from pal.bunshin.v2.semantic_orchestration.effect_reads import EffectReads
-from pal.bunshin.v2.semantic_orchestration.node_control import NodeControl
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import NodeCycleState
+from pal.bunshin.graph_executor import GraphExecutionState
+from pal.bunshin.semantic_orchestration.dependency_repair_recovery import pending_repair_incarnation
+from pal.bunshin.semantic_orchestration.dependency_repair_runtime import DependencyRepairRuntime
+from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
+from pal.bunshin.semantic_orchestration.node_control import NodeControl
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from tests.test_bunshin_dependency_repair_apply import Case
 from tests.test_bunshin_dependency_repair_protocol import _execution, _intent, _member
 
@@ -361,7 +361,7 @@ def test_workflow_resolution_restarts_exhausted_apply_after_all_frontier_closed(
             aggregate_type=AggregateType.WORKFLOW, aggregate_id=case.workflow_id, actor="fixture",
             expected_version=workflow.version, payload={"execution_epoch_id": "epoch-scope"}))
         original = _exhaust_on_next_claim(case)
-        with patch("pal.bunshin.v2.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort",
+        with patch("pal.bunshin.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort",
                    side_effect=RuntimeError("apply failed after exact frontier closure")):
             assert await case.processor._process_effect(original) == "failed"
         cohort = case.graph().dependency_repairs.pending

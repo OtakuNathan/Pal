@@ -6,20 +6,20 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
-from pal.bunshin.v2.storage.cycles import CyclesStore
+from pal.bunshin.storage.cycles import CyclesStore
 
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.cycle_protocol import (
     AssignmentKind, CycleAction, CycleAssignment, CycleSlot,
     CycleTransitionError, NodeCycle, NodeCycleState,
 )
-from pal.bunshin.v2.dependency_repair_protocol import (
+from pal.bunshin.dependency_repair_protocol import (
     DependencyRepairDeferred, DependencyRepairLedger,
     RepairClosure, RepairIncarnation, RepairIntent,
 )
-from pal.bunshin.v2.graph_executor import GraphExecution, GraphExecutionState, diff_graphs
-from pal.bunshin.v2.graph_protocol import EdgeKind, EdgeSpec, GraphIR, NodeSpec, RoleBinding
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator, _replanned_execution
+from pal.bunshin.graph_executor import GraphExecution, GraphExecutionState, diff_graphs
+from pal.bunshin.graph_protocol import EdgeKind, EdgeSpec, GraphIR, NodeSpec, RoleBinding
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.workflow_runtime import WorkflowCoordinator, _replanned_execution
 
 
 def _ref(value: str) -> dict:

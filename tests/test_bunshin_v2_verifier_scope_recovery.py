@@ -19,21 +19,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_protocol import validate_contract_payload
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
-from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_protocol import EdgeKind, RoleBinding, graph_ir_from_mapping
-from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result, empty_review_draft, structured_findings
-from pal.bunshin.v2.role_protocol import stable_hash
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _verifier_reference_refs
-from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.swe_verification import (
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_protocol import validate_contract_payload
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
+from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.graph_protocol import EdgeKind, RoleBinding, graph_ir_from_mapping
+from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
+from pal.bunshin.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result, empty_review_draft, structured_findings
+from pal.bunshin.role_protocol import stable_hash
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.role_inputs import _verifier_reference_refs
+from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.swe_verification import (
     compile_swe_verification_tool_contract,
     infer_repair_target_modules,
     semantic_verification_submission_errors,
@@ -41,10 +41,10 @@ from pal.bunshin.v2.swe_verification import (
     verification_finding_route_errors,
     verification_outcome_readiness,
 )
-from pal.bunshin.v2.verification import VerificationService, VerificationStatus
-from pal.bunshin.v2.verification_readiness import record_verification_execution, verification_corpus_snapshot
-from pal.bunshin.v2.work_items import findings_from_work_items, update_checklist_tool_result
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.verification import VerificationService, VerificationStatus
+from pal.bunshin.verification_readiness import record_verification_execution, verification_corpus_snapshot
+from pal.bunshin.work_items import findings_from_work_items, update_checklist_tool_result
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import EffectOutcome, RejectedResult, RetryDirective, new_tool_call
 
@@ -415,7 +415,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         return self._node()
 
     def test_correction_retry_bound_counts_changed_findings_per_candidate_cycle(self):
-        from pal.bunshin.v2.verification import verification_correction_count
+        from pal.bunshin.verification import verification_correction_count
 
         provider = self._accept_provider()
         node = self._review_node()
@@ -451,7 +451,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         # durable role receipt. Full cohort/public-outbox ownership is covered
         # in test_bunshin_dependency_repair_runtime, rather than fabricated here.
         self.worker.components.verification_settlement.dependency_repair_registration = None
-        from pal.bunshin.v2.verification import repair_bill_semantic_view
+        from pal.bunshin.verification import repair_bill_semantic_view
 
         self._accept_provider("manifest_model")
         self._accept_provider("archive_verify")
@@ -517,15 +517,15 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.coordinator.execution(workflow_id=self.workflow_id), execution)
 
     def test_correction_findings_seed_required_next_verifier_tasks(self):
-        from pal.bunshin.v2.catalog import BunshinV2Catalog
-        from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-        from pal.bunshin.v2.semantic_orchestration.attempt_models import RoleAttemptRequest
-        from pal.bunshin.v2.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
-        from pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction import PromptConstruction
-        from pal.bunshin.v2.semantic_orchestration.attempt_reference_binding import ReferenceBinding
-        from pal.bunshin.v2.semantic_orchestration.attempt_verifier_context import VerifierContext
-        from pal.bunshin.v2.semantic_orchestration.workflow_facts import WorkflowFacts
-        from pal.bunshin.v2.task_ledger import TaskLedgerService
+        from pal.bunshin.workflow_catalog import BunshinV2Catalog
+        from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+        from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
+        from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
+        from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
+        from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+        from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+        from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
+        from pal.bunshin.task_ledger import TaskLedgerService
 
         self._accept_provider()
         self._finalize(self._review_node())
@@ -579,7 +579,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.coordinator.execution(workflow_id=self.workflow_id), graph)
 
     def test_quiesce_preserves_live_worker_fence_before_correction(self):
-        from pal.bunshin.v2.contracts import StaleFencingToken
+        from pal.bunshin.contracts import StaleFencingToken
 
         self._accept_provider()
         node = self._review_node()
@@ -602,7 +602,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self._node(), node)
 
     def test_workspace_staleness_guard_precedes_correction_recovery(self):
-        from pal.bunshin.v2.execution_values import workspace_content_fingerprint
+        from pal.bunshin.execution_values import workspace_content_fingerprint
 
         self._accept_provider()
         node = self._review_node()
@@ -748,7 +748,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         VerificationService(self.repository, self.artifacts).submit_verdict(node=self._node(name), verification_ref=report, status=VerificationStatus.PASS, actor="regression")
 
     def test_aggregate_provider_batch_preserves_targets_and_replay_after_reacceptance(self):
-        from pal.bunshin.v2.verification import DefectPropagationService
+        from pal.bunshin.verification import DefectPropagationService
 
         self._accept_provider("manifest_model")
         self._accept_provider("archive_verify")
@@ -775,7 +775,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertTrue(all(self._node(name).state == "ACCEPTED" for name in ("archive_verify", "manifest_model")))
 
     def test_aggregate_provider_batch_rolls_back_first_reopen_if_later_target_rejects(self):
-        from pal.bunshin.v2.verification import DefectPropagationService
+        from pal.bunshin.verification import DefectPropagationService
 
         self._accept_provider("archive_verify")
         self.assertEqual(self._node("manifest_model").state, "BLOCKED_BY_DEPS")
@@ -793,7 +793,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT count(*) FROM bunshin_v2_outbox").fetchone()[0], effects_before)
 
     def test_delayed_provider_packet_replay_does_not_overwrite_a_newer_repair(self):
-        from pal.bunshin.v2.verification import DefectPropagationService
+        from pal.bunshin.verification import DefectPropagationService
 
         for name in ("manifest_model", "archive_verify"):
             self._accept_provider(name)
@@ -823,16 +823,16 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         # durable role receipt. Full cohort/public-outbox ownership is covered
         # in test_bunshin_dependency_repair_runtime, rather than fabricated here.
         self.worker.components.verification_settlement.dependency_repair_registration = None
-        from pal.bunshin.v2.catalog import BunshinV2Catalog
-        from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-        from pal.bunshin.v2.semantic_orchestration.attempt_models import RoleAttemptRequest
-        from pal.bunshin.v2.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
-        from pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction import PromptConstruction
-        from pal.bunshin.v2.semantic_orchestration.attempt_reference_binding import ReferenceBinding
-        from pal.bunshin.v2.semantic_orchestration.attempt_verifier_context import VerifierContext
-        from pal.bunshin.v2.semantic_orchestration.workflow_facts import WorkflowFacts
-        from pal.bunshin.v2.task_ledger import TaskLedgerService
-        from pal.bunshin.v2.verification import DefectPropagationService, repair_bill_semantic_view
+        from pal.bunshin.workflow_catalog import BunshinV2Catalog
+        from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+        from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
+        from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
+        from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
+        from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+        from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+        from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
+        from pal.bunshin.task_ledger import TaskLedgerService
+        from pal.bunshin.verification import DefectPropagationService, repair_bill_semantic_view
 
         for name in ("manifest_model", "archive_verify"):
             self._accept_provider(name)
@@ -843,7 +843,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         node = self._node("backup_cli")
         self.assertEqual(node.state, "STALE")
         packet_ref = node.payload["repair_bill_ref"]
-        from pal.bunshin.v2.artifacts import ArtifactRef
+        from pal.bunshin.artifacts import ArtifactRef
         DefectPropagationService(self.repository).propagate_dependency_defects(
             workflow_id=self.workflow_id, epoch_id="epoch-scope",
             dependency_node_ids=[self._node_id("archive_verify"), self._node_id("manifest_model")],

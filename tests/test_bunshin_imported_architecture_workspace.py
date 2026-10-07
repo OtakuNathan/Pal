@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.paths import bunshin_data_root, cleanup_workflow_worktrees
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.skeleton import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.paths import bunshin_data_root, cleanup_workflow_worktrees
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.skeleton import (
     ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT,
     GitBackedSkeletonService,
 )
@@ -201,7 +201,7 @@ class ImportedArchitectureWorkspaceTests(unittest.TestCase):
             self._assert_no_review_scratch()
 
     def test_imported_review_cleans_up_after_checkout_failure(self) -> None:
-        from pal.bunshin.v2 import skeleton
+        from pal.bunshin import skeleton
         run_git = skeleton._git_dir
 
         def fail_checkout(git_dir, *args):

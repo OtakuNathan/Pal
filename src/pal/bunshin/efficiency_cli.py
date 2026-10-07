@@ -15,9 +15,9 @@ from typing import TextIO
 from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP
 
 from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.v2.efficiency_metrics import compute_workflow_metrics
-from pal.bunshin.v2.efficiency_report import render_json, render_text
-from pal.bunshin.v2.efficiency_store import (
+from pal.bunshin.efficiency_metrics import compute_workflow_metrics
+from pal.bunshin.efficiency_report import render_json, render_text
+from pal.bunshin.efficiency_store import (
     EfficiencyStoreError,
     WorkflowNotFoundError,
     read_workflow_telemetry,

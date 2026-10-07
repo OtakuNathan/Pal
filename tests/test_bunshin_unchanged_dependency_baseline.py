@@ -18,18 +18,18 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.cycle_protocol import CycleSlot
-from pal.bunshin.v2.dag_scheduling import DagScheduler
-from pal.bunshin.v2.dependency_baselines import prepare_node_verification_baseline
-from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.skeleton_compilation import SkeletonEpochCompiler
-from pal.bunshin.v2.verification import VerificationService, VerificationStatus
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.cycle_protocol import CycleSlot
+from pal.bunshin.dag_scheduling import DagScheduler
+from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
+from pal.bunshin.execution_values import workspace_content_fingerprint
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.skeleton_compilation import SkeletonEpochCompiler
+from pal.bunshin.verification import VerificationService, VerificationStatus
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from tests import test_bunshin_produced_dependency_gates as gates
 from tests import test_bunshin_dependency_repair_runtime as runtime
 
@@ -325,7 +325,7 @@ def test_public_workflow_triage_resolution_resumes_same_checkpoint_and_epoch(cas
         effect = case.claim(provider.aggregate_id, "notify_node_accepted")
         effect["max_attempts"] = 1
         with patch(
-            "pal.bunshin.v2.dependency_baselines._validate_unchanged_dependency_candidate",
+            "pal.bunshin.dependency_baselines._validate_unchanged_dependency_candidate",
             side_effect=ValueError("accepted dependency Candidate contains no delta: " + provider.aggregate_id),
         ):
             assert await case.processor._process_effect(effect) == "failed"

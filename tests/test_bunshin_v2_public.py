@@ -29,60 +29,60 @@ from pal.bunshin import register_with_core as register_bunshin_with_core
 from pal.bunshin.capabilities import BunshinManagerProvider, inspect_bunshin
 from pal.bunshin.ipc import bunshin_port_path, bunshin_socket_path
 from pal.bunshin.sandbox import build_sandboxed_runner_invocation
-from pal.bunshin.v2.adapters import prepare_v2_workspace_environment
-from pal.bunshin.v2.capabilities import (
+from pal.bunshin.adapters import prepare_v2_workspace_environment
+from pal.bunshin.workflow_capabilities import (
     BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
     BunshinV2PublicProvider,
 )
-from pal.bunshin.v2.ask_question import ASK_QUESTION_CAPABILITY
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
-from pal.bunshin.v2.workspace_resources import WorkspaceProcessHolder
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.ask_question import ASK_QUESTION_CAPABILITY
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_submission import CONTRACT_SUBMIT_CAPABILITY
+from pal.bunshin.workspace_resources import WorkspaceProcessHolder
+from pal.bunshin.cycle_protocol import (
     AssignmentKind,
     CycleSlot,
     PlanCycle,
     PlanCycleState,
 )
-from pal.bunshin.v2.graph_protocol import GraphIR, NodeSpec, RoleBinding
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.v2.orchestration import (
+from pal.bunshin.graph_protocol import GraphIR, NodeSpec, RoleBinding
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.orchestration import (
     BunshinV2OutboxProcessor,
     _execution_epoch_id,
     reconcile_control_requests,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService, _active_workflow_lineage_ids
-from pal.bunshin.v2.human_review import HUMAN_REVIEW_RENDER_VERSION
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.sessions import (
+from pal.bunshin.service import BunshinV2WorkflowService, _active_workflow_lineage_ids
+from pal.bunshin.human_review import HUMAN_REVIEW_RENDER_VERSION
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.sessions import (
     architect_session_id,
     coder_session_id,
     module_verifier_session_id,
 )
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count, _assignment_input_fingerprint, _contract_submit_idempotency_key, _implementation_action_idempotency_key
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _assignment_role_input_refs, _candidate_tree_fingerprint, _durable_workspace_preparation, _role_uses_bound_durable_workspace, _semantic_role_input_refs
-from pal.bunshin.v2.semantic_orchestration.architecture_instructions import _architect_authoring_locations, _skeleton_architecture_review_view, _stable_architecture_preflight_finding, _contract_architect_instruction
-from pal.bunshin.v2.semantic_orchestration.review_results import _bind_architecture_edit_instruction_for_review
-from pal.bunshin.v2.semantic_orchestration.role_environment import _bind_role_attempt_sandbox, _refresh_ephemeral_role_reference_binds, _workspace_tooling_from_work_view, _prepare_role_workspace_before_environment, _workflow_skill_injections
-from pal.bunshin.v2.semantic_orchestration.worker_results import _named_json_output, _recorded_role_metrics, _worker_event_timing
-from pal.bunshin.v2.semantic_orchestration.workspace_safety import _raise_if_workspace_held
-from pal.bunshin.v2.semantic_orchestration.role_policy import apply_v2_revision_scope_capability_policy, apply_v2_role_capability_policy
-from pal.bunshin.v2.role_protocol import (
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count, _assignment_input_fingerprint, _contract_submit_idempotency_key, _implementation_action_idempotency_key
+from pal.bunshin.semantic_orchestration.role_inputs import _assignment_role_input_refs, _candidate_tree_fingerprint, _durable_workspace_preparation, _role_uses_bound_durable_workspace, _semantic_role_input_refs
+from pal.bunshin.semantic_orchestration.architecture_instructions import _architect_authoring_locations, _skeleton_architecture_review_view, _stable_architecture_preflight_finding, _contract_architect_instruction
+from pal.bunshin.semantic_orchestration.review_results import _bind_architecture_edit_instruction_for_review
+from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox, _refresh_ephemeral_role_reference_binds, _workspace_tooling_from_work_view, _prepare_role_workspace_before_environment, _workflow_skill_injections
+from pal.bunshin.semantic_orchestration.worker_results import _named_json_output, _recorded_role_metrics, _worker_event_timing
+from pal.bunshin.semantic_orchestration.workspace_safety import _raise_if_workspace_held
+from pal.bunshin.semantic_orchestration.role_policy import apply_v2_revision_scope_capability_policy, apply_v2_role_capability_policy
+from pal.bunshin.role_protocol import (
     RoleAssignmentRequest,
     RoleAssignmentState,
     canonical_role_profile_parts,
 )
-from pal.bunshin.v2.role_protocol import stable_hash
-from pal.bunshin.v2.skeleton import ArchitectureWorkspace, architecture_revision_scope
-from pal.bunshin.v2.work_items import UPDATE_CHECKLIST_CAPABILITY
-from pal.bunshin.v2.submission_drafts import (
+from pal.bunshin.role_protocol import stable_hash
+from pal.bunshin.skeleton import ArchitectureWorkspace, architecture_revision_scope
+from pal.bunshin.work_items import UPDATE_CHECKLIST_CAPABILITY
+from pal.bunshin.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
 )
-from pal.bunshin.v2 import ActionEnvelope, AggregateType
-from pal.bunshin.v2.contracts import (
+from pal.bunshin import ActionEnvelope, AggregateType
+from pal.bunshin.contracts import (
     AggregateVersionConflict,
     AggregateSnapshot,
     DeferredEffectError,
@@ -194,7 +194,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         )
 
         with patch(
-            "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
+            "pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders",
             return_value=(manager_lock,),
         ):
             _raise_if_workspace_held(
@@ -229,7 +229,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         }
         for label, holder in unexpected_holders.items():
             with self.subTest(label=label), patch(
-                "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
+                "pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders",
                 return_value=(holder,),
             ):
                 with self.assertRaisesRegex(RuntimeError, "workspace is held"):
@@ -524,7 +524,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
             )
             state = {"value": "QUIESCING"}
             calls: list[str] = []
-            from pal.bunshin.v2.contracts import AggregateSnapshot
+            from pal.bunshin.contracts import AggregateSnapshot
             worker.components.effect_reads.effect_snapshot = lambda _effect: AggregateSnapshot(
                 aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id="node-recovery",
                 workflow_id="workflow-recovery", state=state["value"], version=1,
@@ -2545,7 +2545,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         processor._link_workflow = lambda *_args, **_kwargs: None
 
         with patch(
-            "pal.bunshin.v2.orchestration.WorkflowCoordinator.begin_plan_revision"
+            "pal.bunshin.orchestration.WorkflowCoordinator.begin_plan_revision"
         ) as begin_revision:
             processor._create_revision({"effect_key": "event-edit:0"})
 
@@ -2581,7 +2581,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         worker.components.effect_reads.effect_snapshot = lambda _effect: revision
 
         with patch(
-            'pal.bunshin.v2.projections.PlanRevisionProjectionStore.update_status',
+            'pal.bunshin.projections.PlanRevisionProjectionStore.update_status',
             return_value=self.runtime_root / "plans" / "revision-human-resolution",
         ):
             result = worker.components.human_review.materialize_plan_revision_status(
@@ -2643,7 +2643,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         with patch(
-            "pal.bunshin.v2.orchestration.WorkflowCoordinator.begin_plan_revision"
+            "pal.bunshin.orchestration.WorkflowCoordinator.begin_plan_revision"
         ):
             processor._create_revision({"effect_key": "event-replan-edit:0"})
 
@@ -3029,7 +3029,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             read_decision=lambda: None,
         )
         with patch(
-            "pal.bunshin.v2.work_items.render_work_item_context",
+            "pal.bunshin.work_items.render_work_item_context",
             side_effect=["pending: implement", "completed: implement"],
         ) as render:
             self.assertEqual(runner.components.prompt_context.render_durable_role_context(), "pending: implement")
@@ -3058,7 +3058,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             read_decision=lambda: None,
         )
         with patch(
-            "pal.bunshin.v2.work_items.render_work_item_context",
+            "pal.bunshin.work_items.render_work_item_context",
             side_effect=["phase 1", "phase 2"],
         ) as render:
             self.assertEqual(
@@ -3760,7 +3760,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         ) or True
         processor.repository.queries.list_workflow_snapshots = lambda _workflow_id: []
 
-        with patch("pal.bunshin.v2.orchestration.DagScheduler.schedule_ready_nodes"):
+        with patch("pal.bunshin.orchestration.DagScheduler.schedule_ready_nodes"):
             processor._node_accepted({"effect_key": "node-pass"})
 
         self.assertEqual(completed, [])
@@ -3807,7 +3807,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         worker.repository.transitions.dispatch = dispatch
         worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
-        with patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
+        with patch("pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
                 worker.components.role_leases.ensure_node_effect_lease(
                     node,
@@ -3866,7 +3866,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
 
         with patch(
-            "pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders",
+            "pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders",
             return_value=(),
         ):
             with self.assertRaisesRegex(RuntimeError, "rebind dispatch failed"):
@@ -4012,7 +4012,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.leases.renew_lease = lambda *_args, **_kwargs: None
         worker.components.workflow_facts.workspace_fingerprint = lambda *_args: "stable-tree"
 
-        with patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
+        with patch("pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
                 worker.components.role_leases.ensure_node_effect_lease(
                     node,
@@ -4148,8 +4148,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.transaction = lambda: contextlib.nullcontext(worker.repository)
 
         with (
-            patch("pal.bunshin.v2.semantic_orchestration.workspace_safety.workspace_process_holders", side_effect=holders),
-            patch("pal.bunshin.v2.execution_values.workspace_content_fingerprint", return_value="tree"),
+            patch("pal.bunshin.semantic_orchestration.workspace_safety.workspace_process_holders", side_effect=holders),
+            patch("pal.bunshin.execution_values.workspace_content_fingerprint", return_value="tree"),
         ):
             asyncio.run(worker.components.architecture_snapshot.quiesce_architect_role({"effect_key": "quiesce-lsp"}))
 
@@ -4707,11 +4707,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 capture_attempt,
             ),
             patch("pal.bunshin.profiles.resolve_pinned_bunshin_pack", lambda pack, **_kwargs: pack),
-            patch("pal.bunshin.v2.semantic_orchestration.role_policy.apply_v2_role_capability_policy", identity),
-            patch("pal.bunshin.v2.semantic_orchestration.role_policy.apply_v2_research_capability_policy", identity),
+            patch("pal.bunshin.semantic_orchestration.role_policy.apply_v2_role_capability_policy", identity),
+            patch("pal.bunshin.semantic_orchestration.role_policy.apply_v2_research_capability_policy", identity),
             patch("pal.bunshin.turns.sanitize_runner_session_pack", identity),
             patch(
-                "pal.bunshin.v2.semantic_orchestration.role_environment.with_bunshin_sandbox_metadata",
+                "pal.bunshin.semantic_orchestration.role_environment.with_bunshin_sandbox_metadata",
                 capture_sandbox_pack,
             ),
         ):
@@ -4847,11 +4847,11 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_bunshin_plugin_exposes_only_semantic_v2_business_capabilities(self) -> None:
         self.assertEqual(
             BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput.__module__,
-            "pal.bunshin.v2.capabilities",
+            "pal.bunshin.workflow_capabilities",
         )
         self.assertEqual(
             BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput.__module__,
-            "pal.bunshin.v2.capabilities",
+            "pal.bunshin.workflow_capabilities",
         )
         core = PalCore()
         register_bunshin_with_core(core.context, runtime_root=self.runtime_root)

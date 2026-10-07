@@ -69,7 +69,7 @@ def test_moved_contracts_keep_compatibility_exports():
     from pal.llm import response_hooks, response_hook_contracts
     from pal.web_fetch import browser_service, runtime_paths
     from pal.plugins import host, paths
-    from pal.bunshin.v2 import role_gateway, role_gateway_client, submission_drafts
+    from pal.bunshin import role_gateway, role_gateway_client, submission_drafts
 
     for name in ("ProviderResponseHookError", "ProviderResponseHookContext"):
         assert getattr(response_hooks, name) is getattr(response_hook_contracts, name)

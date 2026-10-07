@@ -337,7 +337,7 @@ def test_source_dependency_validation_failure_keeps_authorized_draft(setup_revie
 
 def test_manager_rejects_stale_or_superseded_proposal_sources():
     from pal.bunshin.manager import BunshinManager
-    from pal.bunshin.v2.contracts import AggregateType
+    from pal.bunshin.contracts import AggregateType
     workflow = SimpleNamespace(aggregate_id="workflow", payload={"task_id": "task", "execution_epoch_id": "epoch"})
     node = SimpleNamespace(workflow_id="workflow", state="ACCEPTED", payload={"epoch_id": "epoch"})
     repository = SimpleNamespace(snapshots=SimpleNamespace(

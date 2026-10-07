@@ -12,12 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.bunshin.v2.contracts import AggregateType, StaleFencingToken
-from pal.bunshin.v2.cycle_protocol import CycleSlot, NodeCycleState
-from pal.bunshin.v2.process_lifecycle import WorkerProcessOwner
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest, stable_hash
-from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.contracts import AggregateType, StaleFencingToken
+from pal.bunshin.cycle_protocol import CycleSlot, NodeCycleState
+from pal.bunshin.process_lifecycle import WorkerProcessOwner
+from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
+from pal.bunshin.storage.role_assignments import semantic_business_lease
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from tests.test_bunshin_unchanged_dependency_baseline import ExistingRepositoryCase
 
 

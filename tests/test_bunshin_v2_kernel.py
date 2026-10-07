@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.bunshin.v2 import (
+from pal.bunshin import (
     ActionEnvelope,
     AggregateSnapshot,
     AggregateType,
@@ -18,7 +18,7 @@ from pal.bunshin.v2 import (
     TransitionError,
     build_default_transition_engine,
 )
-from pal.bunshin.v2.contracts import (
+from pal.bunshin.contracts import (
     AggregateVersionConflict,
     ArchitectureRevisionState,
     DagNodeRunState,
@@ -31,9 +31,9 @@ from pal.bunshin.v2.contracts import (
     StandaloneReviewState,
     TaskState,
 )
-from pal.bunshin.v2.recovery import BunshinV2Recovery
-from pal.bunshin.v2.storage.serialization import _active_projection_snapshot
-from pal.bunshin.v2.sessions import (
+from pal.bunshin.recovery import BunshinV2Recovery
+from pal.bunshin.storage.serialization import _active_projection_snapshot
+from pal.bunshin.sessions import (
     architecture_reviewer_session_id,
     architect_session_id,
     architect_session_id_for_revision,
@@ -41,28 +41,28 @@ from pal.bunshin.v2.sessions import (
     module_verifier_session_id,
     node_role_generation,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.v2.machine_dsl import ControlDisposition, ControlIntent
-from pal.bunshin.v2.machines import (
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
+from pal.bunshin.machines import (
     LIVENESS_REQUIRED_STATES,
     all_machine_specs,
     all_transition_specs,
 )
-from pal.bunshin.v2.orchestration import (
+from pal.bunshin.orchestration import (
     LEGACY_MECHANICAL_EFFECT_TYPES,
     MECHANICAL_EFFECT_TYPES,
 )
-from pal.bunshin.v2.formal import (
+from pal.bunshin.formal import (
     STATE_CLASSIFICATIONS,
     STATE_ENUMS,
     StateClass,
     render_implementation_topology,
     transition_topology,
 )
-from pal.bunshin.v2.semantic_orchestration import SemanticOrchestrator, SEMANTIC_EFFECT_TYPES
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.semantic_orchestration import SemanticOrchestrator, SEMANTIC_EFFECT_TYPES
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.checkpoint import (
     LogicalCoroutineCheckpointStore,
     open_agent_session_checkpoint,

@@ -136,7 +136,7 @@ Interaction rule:
   long-lived local checkouts are optional later publication/debug actions, not
   automatic completion side effects
 - declared repo-relative input binding is one fail-closed contract in
-  `pal.bunshin.v2.input_binding`. Only reference entries explicitly declared
+  `pal.bunshin.input_binding`. Only reference entries explicitly declared
   repo-relative (a relative `path`, or any path explicitly marked
   `repo_relative: true`) are captured once per workflow into an immutable
   `InputBindingManifest` carrying the source repository HEAD commit and the

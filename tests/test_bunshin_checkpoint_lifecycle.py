@@ -10,12 +10,12 @@ import pytest
 from pal.bunshin.checkpoint import (
     AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, seal_agent_session_checkpoint,
 )
-from pal.bunshin.v2.contracts import AggregateType, StaleFencingToken
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
-from pal.bunshin.v2.role_protocol import RoleSessionAction
-from pal.bunshin.v2.semantic_orchestration.role_checkpoints import RoleCheckpoints
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.contracts import AggregateType, StaleFencingToken
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.role_gateway import RoleAssignmentGateway
+from pal.bunshin.role_protocol import RoleSessionAction
+from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
+from pal.bunshin.service import BunshinV2WorkflowService
 from tests import test_bunshin_v2_role_protocol as protocol_fixture
 from tests.test_bunshin_completion_resume import make_bundle, make_runner
 
@@ -188,7 +188,7 @@ def test_acknowledged_checkpoint_loss_stays_fail_closed_after_retry(role, suspen
 def test_file_publication_survives_database_rollback_and_recovers_as_resume(role):
     _assignment, attempt, fence, token = launch(role)
     _output, payload = write_initial(role, attempt, fence)
-    with patch("pal.bunshin.v2.storage.role_sessions.RoleSessionsStore.transition_role_session_locked", side_effect=RuntimeError("database commit lost")):
+    with patch("pal.bunshin.storage.role_sessions.RoleSessionsStore.transition_role_session_locked", side_effect=RuntimeError("database commit lost")):
         with pytest.raises(RuntimeError, match="database commit lost"):
             acknowledge(role, token)
     restart(role)

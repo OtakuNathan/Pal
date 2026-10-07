@@ -10,27 +10,27 @@ import unittest
 from unittest.mock import patch
 
 from pal.bunshin.harnesses import BunshinHarnessRegistryGeneration, pal_harness_spec
-from pal.bunshin.v2 import ActionEnvelope, AggregateType, build_default_transition_engine
-from pal.bunshin.v2.capabilities import BunshinV2PublicProvider
-from pal.bunshin.v2.contracts import AggregateSnapshot, StaleFencingToken
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
-from pal.bunshin.v2.graph_protocol import GraphIR, NodeSpec, RoleBinding
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.role_protocol import stable_hash
-from pal.bunshin.v2.semantic_orchestration.attempt_assignment_reuse import AssignmentReuse
-from pal.bunshin.v2.semantic_orchestration.attempt_harness_binding import HarnessBinding
-from pal.bunshin.v2.semantic_orchestration.attempt_models import (
+from pal.bunshin import ActionEnvelope, AggregateType, build_default_transition_engine
+from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.contracts import AggregateSnapshot, StaleFencingToken
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
+from pal.bunshin.graph_protocol import GraphIR, NodeSpec, RoleBinding
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.role_protocol import stable_hash
+from pal.bunshin.semantic_orchestration.attempt_assignment_reuse import AssignmentReuse
+from pal.bunshin.semantic_orchestration.attempt_harness_binding import HarnessBinding
+from pal.bunshin.semantic_orchestration.attempt_models import (
     AttemptReplay, PreparedRolePrompt, PreparedVerifierContext, RoleAttemptRequest,
 )
-from pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction import PromptConstruction
-from pal.bunshin.v2.semantic_orchestration.attempt_reference_binding import ReferenceBinding
-from pal.bunshin.v2.semantic_orchestration.attempt_role_session import RoleSession
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _node_role_session_id
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.verification import VerificationService, VerificationStatus
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
+from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+from pal.bunshin.semantic_orchestration.attempt_role_session import RoleSession
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.role_inputs import _node_role_session_id
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.verification import VerificationService, VerificationStatus
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.execution.contracts import CapabilityCall
 from pal.shared import RuntimeStatus
 
@@ -175,7 +175,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
         ).execute(command, workspace)
         # Family validation is unrelated to evaluation identity; leave all
         # fingerprint, receipt selection, session and draft machinery real.
-        with patch("pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction.validate_family_binding_payload",
+        with patch("pal.bunshin.semantic_orchestration.attempt_prompt_construction.validate_family_binding_payload",
                    return_value={"verifier": {"role_profile": {"canonical_profile_id": command.profile}}}):
             prompt = await PromptConstruction(self.worker.components.workflow_facts).execute(
                 command, references, PreparedVerifierContext({"policy": "unchanged"}), workspace,

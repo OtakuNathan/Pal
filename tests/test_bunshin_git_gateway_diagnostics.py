@@ -17,7 +17,7 @@ from pal.bunshin.git_gateway_diagnostics import (
     MAX_GIT_DIAGNOSTIC_BYTES,
     MAX_GIT_DIAGNOSTIC_SESSIONS,
 )
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
+from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 
@@ -267,8 +267,8 @@ def test_existing_git_operation_runs_once_and_raw_classification_is_not_recorded
         structured={"returncode": 1, "stdout": SECRET,
         "stderr": SECRET, "classification": {"raw": SECRET}})
     plan = object()
-    with patch("pal.bunshin.v2.role_gateway.GitTool") as tool, patch(
-        "pal.bunshin.v2.role_gateway.scoped_role_git_read_plan", return_value=plan
+    with patch("pal.bunshin.role_gateway.GitTool") as tool, patch(
+        "pal.bunshin.role_gateway.scoped_role_git_read_plan", return_value=plan
     ):
         tool.return_value._invoke_scoped_read.return_value = result
         response = invoke(gateway, cwd=str(tmp_path))
@@ -279,9 +279,9 @@ def test_existing_git_operation_runs_once_and_raw_classification_is_not_recorded
 
 
 def test_durable_cap_survives_gateway_and_repository_reconstruction(tmp_path):
-    from pal.bunshin.v2.contracts import AggregateType
-    from pal.bunshin.v2.service import BunshinV2WorkflowService
-    from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+    from pal.bunshin.contracts import AggregateType
+    from pal.bunshin.service import BunshinV2WorkflowService
+    from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 
     service = BunshinV2WorkflowService(tmp_path)
     prompt = service.artifacts.put_json({"fixture": True}, artifact_type="RolePromptPackArtifact")

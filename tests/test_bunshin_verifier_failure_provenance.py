@@ -19,8 +19,8 @@ from pal.bunshin.verifier_tool_diagnostics import (
     VerifierFailureProvenance, VerifierToolDiagnostic, capture_verifier_failure,
     record_verifier_failure,
 )
-from pal.bunshin.v2.semantic_evidence import _error_result
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext
+from pal.bunshin.semantic_evidence import _error_result
+from pal.bunshin.submission_drafts import SubmissionDraftContext
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared import BunshinInvocationPack, ToolExecutionResult
 from pal.shared.tool_protocol import new_tool_call

@@ -19,7 +19,7 @@ from pal.bunshin.harnesses import (
     PAL_HARNESS_ID,
 )
 from pal.bunshin.manager import BunshinManager
-from pal.bunshin.v2.semantic_orchestration.role_environment import _select_attempt_harness
+from pal.bunshin.semantic_orchestration.role_environment import _select_attempt_harness
 from pal.shared import BunshinInvocationPack
 from plugins.codex_architect_harness.codex_architect_worker import (
     CodexAppServer,

@@ -3,11 +3,11 @@ from dataclasses import replace
 
 import pytest
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import CycleAction, CycleAssignment, CycleSlot, AssignmentKind, CycleTransitionError, PlanCycle, PlanCycleState
-from pal.bunshin.v2.imported_plan import bind_imported_plan_product
-from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import CycleAction, CycleAssignment, CycleSlot, AssignmentKind, CycleTransitionError, PlanCycle, PlanCycleState
+from pal.bunshin.imported_plan import bind_imported_plan_product
+from pal.bunshin.repository import BunshinV2Repository
 
 
 class ImportedBinding:

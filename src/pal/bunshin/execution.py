@@ -1,0 +1,24 @@
+"""Public execution entry points; implementation lives with each owner."""
+from __future__ import annotations
+from pal.bunshin.execution_models import ExecutionCompilation as ExecutionCompilation
+from pal.bunshin.execution_models import DependencyIntegrationConflict as DependencyIntegrationConflict
+from pal.bunshin.execution_models import NodeRunJournal as NodeRunJournal
+from pal.bunshin.epoch_compilation import ExecutionCompiler as ExecutionCompiler
+from pal.bunshin.module_identity import reconcile_module_identities as reconcile_module_identities
+from pal.bunshin.execution_graph_facts import dependency_fingerprint as dependency_fingerprint
+from pal.bunshin.dag_scheduling import DagScheduler as DagScheduler
+from pal.bunshin.work_views import UnitWorkViewBuilder as UnitWorkViewBuilder
+from pal.bunshin.candidate_snapshots import CandidateSnapshotService as CandidateSnapshotService
+from pal.bunshin.module_workspaces import provision_module_worktrees as provision_module_worktrees
+from pal.bunshin.module_workspaces import provision_skeleton_module_worktrees as provision_skeleton_module_worktrees
+from pal.bunshin.module_workspaces import provision_module_verification_workspace as provision_module_verification_workspace
+from pal.bunshin.dependency_baselines import prepare_node_dependency_baseline as prepare_node_dependency_baseline
+from pal.bunshin.dependency_baselines import prepare_node_verification_baseline as prepare_node_verification_baseline
+from pal.bunshin.execution_values import workspace_content_fingerprint as workspace_content_fingerprint
+from pal.bunshin.workspace_git import git_changed_paths as git_changed_paths
+from pal.bunshin.workspace_resources import WorkspaceProcessHolder as WorkspaceProcessHolder
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry as WorkspaceLockRegistry
+from pal.bunshin.workspace_resources import workspace_process_holders as workspace_process_holders
+from pal.bunshin.workspace_resources import format_workspace_process_holders as format_workspace_process_holders
+from pal.bunshin.workspace_resources import workspace_has_live_processes as workspace_has_live_processes
+from pal.bunshin.workspace_resources import exclusive_workspace_lock as exclusive_workspace_lock

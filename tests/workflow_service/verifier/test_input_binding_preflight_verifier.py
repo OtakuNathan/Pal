@@ -3,7 +3,7 @@
 ``input_binding`` is a parallel dependency module: in this worktree its
 procedures are contract declarations, so these cases drive the real
 ``BunshinV2WorkflowService.start_workflow`` against contract-conforming
-doubles installed at the ``pal.bunshin.v2.service`` import boundary, exactly
+doubles installed at the ``pal.bunshin.service`` import boundary, exactly
 as the declared edge contract (participation rule, fail-closed errors,
 manifest publication) prescribes.
 
@@ -29,17 +29,17 @@ from typing import Any, Sequence
 
 import pytest
 
-import pal.bunshin.v2.service as service_module
-from pal.bunshin.v2.artifacts import ArtifactRef
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.input_binding import (
+import pal.bunshin.service as service_module
+from pal.bunshin.artifacts import ArtifactRef
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.input_binding import (
     BOUND_INPUT_ARTIFACT,
     INPUT_BINDING_MANIFEST_ARTIFACT,
     INPUT_BINDING_SCHEMA_VERSION,
     BoundInputError,
     DeclaredInput,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinV2WorkflowService
 
 SOURCE_COMMIT = "1" * 40
 

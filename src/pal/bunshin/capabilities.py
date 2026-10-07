@@ -28,8 +28,8 @@ from pal.bunshin.harnesses import (
     BunshinHarnessRegistryGeneration,
 )
 from pal.bunshin.source import BunshinControlEventHandler, BunshinEventSource
-from pal.bunshin.v2.capabilities import BunshinV2PublicProvider
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.service import BunshinV2WorkflowService
 from pal.shared import EventKind
 
 if TYPE_CHECKING:

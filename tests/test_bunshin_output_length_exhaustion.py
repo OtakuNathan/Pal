@@ -10,10 +10,10 @@ import pytest
 from pal.bunshin.runner import BunshinRunner
 from pal.bunshin.runner_components.models import BunshinAgentLoopState
 from pal.bunshin.runner_components.prompt_values import DEFAULT_BUNSHIN_OUTPUT_LENGTH_RECOVERY_ROUNDS
-from pal.bunshin.v2.background_assignments import BackgroundAssignments
-from pal.bunshin.v2.contracts import PermanentEffectError
-from pal.bunshin.v2.semantic_orchestration.assignment_execution import AssignmentExecution
-from pal.bunshin.v2.semantic_orchestration.attempt_terminal_validation import TerminalValidation
+from pal.bunshin.background_assignments import BackgroundAssignments
+from pal.bunshin.contracts import PermanentEffectError
+from pal.bunshin.semantic_orchestration.assignment_execution import AssignmentExecution
+from pal.bunshin.semantic_orchestration.attempt_terminal_validation import TerminalValidation
 from pal.core.turns import EffectResult
 from pal.llm import generation_result_from_values
 from pal.shared import BunshinInvocationPack, RuntimeStatus
@@ -115,7 +115,7 @@ def test_blocked_terminal_reaches_supervisor_without_rebinding_exhausted_recover
             SimpleNamespace(terminal_payload=terminal), SimpleNamespace(assignment=assignment),
         )
 
-    monkeypatch.setattr("pal.bunshin.v2.semantic_orchestration.assignment_execution.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("pal.bunshin.semantic_orchestration.assignment_execution.asyncio.sleep", AsyncMock())
     result = asyncio.run(supervisor.background_worker_loop(
         {"effect_key": "architect-effect", "effect_type": "run_architecture_stage"}, role_runner,
     ))

@@ -21,7 +21,7 @@ class Completion:
         Read failures propagate: unavailable evidence must not be mistaken for
         unchanged work. The caller runs this observation outside the event loop.
         """
-        from pal.bunshin.v2.work_items import read_work_items
+        from pal.bunshin.work_items import read_work_items
 
         workspace = dict(self.pack.workspace or {})
         binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
@@ -59,9 +59,9 @@ class Completion:
             "artifacts": artifacts,
         }
         if str(binding.get("role") or "") == "verifier":
-            from pal.bunshin.v2.review_findings import empty_review_draft
-            from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-            from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+            from pal.bunshin.review_findings import empty_review_draft
+            from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+            from pal.bunshin.verification_readiness import verification_corpus_snapshot
 
             context = SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
             snapshot = SubmissionDraftStore(self.runtime_root).read(context, seed=empty_review_draft())
@@ -119,7 +119,7 @@ class Completion:
         if self.manager_submission_receipt_observed:
             return True
         try:
-            from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
+            from pal.bunshin.role_gateway_client import role_gateway_client_from_env
 
             client = role_gateway_client_from_env(self.runtime_root)
             if client is None:

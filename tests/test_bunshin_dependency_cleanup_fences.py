@@ -8,19 +8,19 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.background_assignments import BackgroundAssignments
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType, DeferredEffectError, SubmissionInvariantError
-from pal.bunshin.v2.process_lifecycle import WorkerProcessOwner, WorkerProcessReapError
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.semantic_orchestration.effect_reads import EffectReads
-from pal.bunshin.v2.semantic_orchestration.attempt_execution import AttemptExecution
-from pal.bunshin.v2.semantic_orchestration.role_cleanup import RoleCleanup
-from pal.bunshin.v2.semantic_orchestration.role_leases import RoleLeases
-from pal.bunshin.v2.storage.role_assignments import semantic_business_lease
-from pal.bunshin.v2.worker_processes import WorkerProcesses
-from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.background_assignments import BackgroundAssignments
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType, DeferredEffectError, SubmissionInvariantError
+from pal.bunshin.process_lifecycle import WorkerProcessOwner, WorkerProcessReapError
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
+from pal.bunshin.semantic_orchestration.attempt_execution import AttemptExecution
+from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
+from pal.bunshin.semantic_orchestration.role_leases import RoleLeases
+from pal.bunshin.storage.role_assignments import semantic_business_lease
+from pal.bunshin.worker_processes import WorkerProcesses
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 
 
 class DependencyCleanupTaskTests(unittest.IsolatedAsyncioTestCase):

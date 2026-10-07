@@ -19,7 +19,7 @@ import subprocess
 
 import pytest
 
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.cycle_protocol import (
     AssignmentKind, CycleAction, CycleAssignment, CycleSlot, CycleTransitionError,
     CycleVerdict, NodeCycle, NodeCycleState, PlanCycle, PlanCycleState,
 )

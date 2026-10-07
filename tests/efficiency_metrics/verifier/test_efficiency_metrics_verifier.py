@@ -12,13 +12,13 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from pal.bunshin.v2.efficiency_metrics import (
+from pal.bunshin.efficiency_metrics import (
     MetricValue,
     RoleEfficiencyTotals,
     WorkflowEfficiencyMetrics,
     compute_workflow_metrics,
 )
-from pal.bunshin.v2.efficiency_store import WorkflowTelemetryRecords
+from pal.bunshin.efficiency_store import WorkflowTelemetryRecords
 
 
 def invocation(

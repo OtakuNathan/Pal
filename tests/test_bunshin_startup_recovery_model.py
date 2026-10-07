@@ -86,7 +86,7 @@ def test_startup_recovery_tlc(tmp_path, unsafe):
 ])
 def test_model_failure_park_matches_durable_session_transition(state, expected):
     """FailAttempt/CrashBeforeAck must not manufacture initialization."""
-    from pal.bunshin.v2.role_protocol import role_session_target
+    from pal.bunshin.role_protocol import role_session_target
 
     assert role_session_target(state, "park").value == expected
 
@@ -98,7 +98,7 @@ def test_model_failure_park_matches_durable_session_transition(state, expected):
 ])
 def test_model_start_then_checkpoint_commit_matches_session_transition(state, activated, initialized):
     """StartProcess then CommitInitialization matches ACTIVATE then INITIALIZE."""
-    from pal.bunshin.v2.role_protocol import role_session_target
+    from pal.bunshin.role_protocol import role_session_target
 
     starting = role_session_target(state, "activate")
     assert starting.value == activated

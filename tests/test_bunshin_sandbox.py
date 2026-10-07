@@ -39,7 +39,7 @@ from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runti
 from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
 from pal.bunshin.git_shim import GIT_TRAP_EXIT_CODE, _RoleGatewayClient, main as git_shim_main
 from pal.bunshin.user_interaction import BunshinUserInteractionPort
-from pal.bunshin.v2.worker_main import _read_control_message
+from pal.bunshin.worker_main import _read_control_message
 from pal.bunshin.sandbox import (
     PAL_BUNSHIN_RUNTIME_ROOT_ENV,
     build_sandboxed_runner_invocation,
@@ -692,7 +692,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-m", "pal.bunshin.v2.worker_main"],
+                    argv=["python", "-m", "pal.bunshin.worker_main"],
                     env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
                 )
 

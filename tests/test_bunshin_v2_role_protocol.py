@@ -6,15 +6,15 @@ import unittest
 from pathlib import Path
 
 from pal.bunshin.checkpoint import LogicalCoroutineCheckpointStore
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.paths import role_run_id
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.semantic_orchestration import SemanticOrchestrator
-from pal.bunshin.v2.sessions import architecture_reviewer_session_id
-from pal.bunshin.v2.role_protocol import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.paths import role_run_id
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.semantic_orchestration import SemanticOrchestrator
+from pal.bunshin.sessions import architecture_reviewer_session_id
+from pal.bunshin.role_protocol import (
     RoleAssignmentAction,
     RoleAssignmentRequest,
     RoleAssignmentState,

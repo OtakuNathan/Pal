@@ -12,7 +12,7 @@ from uuid import uuid4
 from pal.core.runtime_state import validate_runtime_snapshot
 from pal.foundation.encryption import EncryptedJsonEnvelopeCodec
 from pal.bunshin.ipc import bunshin_runtime_dir
-from pal.bunshin.v2.contracts import PermanentEffectError
+from pal.bunshin.contracts import PermanentEffectError
 
 
 AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION = "8"

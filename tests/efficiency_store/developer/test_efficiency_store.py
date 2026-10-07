@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pal.bunshin.v2.efficiency_store import (
+from pal.bunshin.efficiency_store import (
     EfficiencyStoreError,
     StorageUnavailableError,
     WorkflowNotFoundError,
@@ -16,7 +16,7 @@ from pal.bunshin.v2.efficiency_store import (
     open_readonly,
     read_workflow_telemetry,
 )
-from pal.bunshin.v2.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_v2_schema
 
 
 def _insert_role_invocation(

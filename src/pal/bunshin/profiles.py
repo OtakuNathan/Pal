@@ -12,20 +12,20 @@ from pal.bunshin.tool_guidance import normalize_tool_guidance_overrides
 from pal.bunshin.utils import dedupe_strings as _dedupe
 from pal.bunshin.utils import dict_from as _dict
 from pal.bunshin.utils import string_list as _string_list
-from pal.bunshin.v2.ask_question import ASK_QUESTION_CAPABILITY
-from pal.bunshin.v2.candidate_builder import (
+from pal.bunshin.ask_question import ASK_QUESTION_CAPABILITY
+from pal.bunshin.candidate_builder import (
     CANDIDATE_BUILDER_CAPABILITIES,
 )
-from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY
-from pal.bunshin.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
-from pal.bunshin.v2.review_submission import REVIEW_SUBMIT_CAPABILITY
-from pal.bunshin.v2.role_contracts import validate_family_binding_payload
-from pal.bunshin.v2.work_items import UPDATE_CHECKLIST_CAPABILITY
-from pal.bunshin.v2.swe_verification import (
+from pal.bunshin.review_findings import ADD_FINDING_CAPABILITY
+from pal.bunshin.contract_submission import CONTRACT_SUBMIT_CAPABILITY
+from pal.bunshin.review_submission import REVIEW_SUBMIT_CAPABILITY
+from pal.bunshin.role_contracts import validate_family_binding_payload
+from pal.bunshin.work_items import UPDATE_CHECKLIST_CAPABILITY
+from pal.bunshin.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     is_swe_verification_capability,
 )
-from pal.bunshin.v2.verification_builder import (
+from pal.bunshin.verification_builder import (
     VERIFICATION_BUILDER_CAPABILITIES,
     VERIFICATION_EVIDENCE_CAPABILITIES,
     VERIFICATION_TOOL_CAPABILITIES,

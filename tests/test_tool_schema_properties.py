@@ -16,11 +16,11 @@ from pal.bunshin.scoped_execution import (
     BunshinScopedExecutionOpBunshinArtifactEditInput,
     BunshinScopedExecutionShellInput,
 )
-from pal.bunshin.v2.capabilities import (
+from pal.bunshin.workflow_capabilities import (
     BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
 )
-from pal.bunshin.v2.work_items import (
+from pal.bunshin.work_items import (
     BunshinAddFindingInput,
     BunshinUpdateChecklistInput,
 )

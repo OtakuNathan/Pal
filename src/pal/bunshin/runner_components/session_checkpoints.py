@@ -15,8 +15,8 @@ from pal.llm.ir import MessageState
 from pal.memory import MemoryService
 from pal.memory.turn_ir import L1TurnState
 from pal.bunshin.checkpoint import AgentSessionCheckpointError, open_agent_session_checkpoint, seal_agent_session_checkpoint
-from pal.bunshin.v2.role_contracts import role_session_stage_key
-from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env
+from pal.bunshin.role_contracts import role_session_stage_key
+from pal.bunshin.role_gateway_client import role_gateway_client_from_env
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import BunshinInvocationPack
 from pal.bunshin.runner_components.artifacts import Artifacts

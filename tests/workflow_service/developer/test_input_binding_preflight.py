@@ -8,7 +8,7 @@ fails closed before any workflow state exists.
 The ``input_binding`` module is a parallel dependency; its public contract
 (``declared_inputs_from_references`` / ``capture_input_binding`` /
 ``InputBindingManifest``) is mirrored here by contract-conforming doubles
-patched at the ``pal.bunshin.v2.service`` import boundary.  The doubles
+patched at the ``pal.bunshin.service`` import boundary.  The doubles
 store real ``BoundInputArtifact`` blobs through the real artifact store so
 the manifest publication path (child refs, durable records) is exercised
 against production code.
@@ -24,17 +24,17 @@ from typing import Any, Sequence
 
 import pytest
 
-import pal.bunshin.v2.service as service_module
-from pal.bunshin.v2.artifacts import ArtifactRef
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.input_binding import (
+import pal.bunshin.service as service_module
+from pal.bunshin.artifacts import ArtifactRef
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.input_binding import (
     BOUND_INPUT_ARTIFACT,
     INPUT_BINDING_MANIFEST_ARTIFACT,
     INPUT_BINDING_SCHEMA_VERSION,
     BoundInputError,
     DeclaredInput,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinV2WorkflowService
 
 SOURCE_COMMIT = "0" * 40
 

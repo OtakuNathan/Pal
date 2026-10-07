@@ -9,24 +9,24 @@ import pytest
 
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.execution.runtime import ExecutionRuntime
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.review_findings import structured_findings
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.semantic_orchestration.role_policy import apply_v2_role_capability_policy
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION, authoring_input_fingerprint
-from pal.bunshin.v2.swe_verification import swe_verification_tool_result
-from pal.bunshin.v2.verification import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.review_findings import structured_findings
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.semantic_orchestration.role_policy import apply_v2_role_capability_policy
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, authoring_input_fingerprint
+from pal.bunshin.swe_verification import swe_verification_tool_result
+from pal.bunshin.verification import (
     historical_repair_checklist_items,
     repair_bill_semantic_view,
     repair_checklist_items,
 )
-from pal.bunshin.v2.verification_builder import (
+from pal.bunshin.verification_builder import (
     VERIFICATION_BUILDER_TOOL_SPECS,
     compile_verification_invocation_tool_contract,
     verification_builder_tool_result,
 )
-from pal.bunshin.v2.work_items import update_checklist_tool_result
+from pal.bunshin.work_items import update_checklist_tool_result
 from pal.shared import BunshinInvocationPack, RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import new_tool_call
 

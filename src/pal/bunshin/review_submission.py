@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from pal.shared.tool_protocol import ToolCallIR
+
+from pathlib import Path
+from typing import Any, Mapping
+
+from pal.execution.tool_facade import EmptyToolInput
+from pal.bunshin.review_findings import partition_findings
+from pal.bunshin.submission_drafts import (
+    SubmissionDraftContext,
+    SubmissionDraftStore,
+)
+from pal.bunshin.work_items import (
+    assert_work_items_complete,
+    findings_from_work_items,
+    submission_work_items,
+)
+from pal.shared import RuntimeStatus, ToolExecutionResult
+from pal.bunshin.submission_errors import (
+    SubmissionValidationError, submission_error_result,
+)
+
+
+REVIEW_SUBMIT_CAPABILITY = "op_bunshin_review_submit"
+
+REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
+    "alias": "submit_review",
+    "guidance": {
+        "purpose": "Submit the completed semantic review and let the Manager derive its verdict.",
+        "use_when": (
+            "Use with no arguments after the complete audit is finished, every finding is "
+            "recorded with add_finding, and the checklist is complete."
+        ),
+        "do_not_use_when": (
+            "Do not submit before breadth and composition review finish, emit a separate "
+            "Markdown verdict, or treat a blocking p2 finding as PASS."
+        ),
+        "failure_next_steps": (
+            "Follow the returned error category. For infrastructure or uncertain-outcome "
+            "failures, preserve content and let the runtime recover/reconcile. For validation errors: "
+            "Complete or correct the checklist and structured findings reported by the "
+            "rejection, then submit again without inventing a separate verdict."
+        ),
+    },
+    "InputModel": EmptyToolInput,
+    "examples": (),
+    "idempotency": "idempotent",
+    "retry_policy": "automatic",
+}
+
+
+def review_submit_tool_result(
+    call: ToolCallIR,
+    workspace: Mapping[str, Any],
+) -> ToolExecutionResult:
+    submission_started = False
+    try:
+        if dict(call.args or {}):
+            raise SubmissionValidationError("submit_review takes no arguments")
+        ledger = assert_work_items_complete(workspace)
+        findings = findings_from_work_items(workspace)
+        blocking, advisories = partition_findings(findings)
+        binding = dict(workspace.get("bunshin_v2") or {})
+        role = str(binding.get("role") or "")
+        mode = str(binding.get("mode") or "")
+        if role != "reviewer":
+            raise ValueError("submit_review is available only to reviewer roles")
+        draft_kind = (
+            "architecture_review"
+            if mode == "architecture"
+            else "standalone_review"
+        )
+        context = SubmissionDraftContext.from_workspace(
+            workspace,
+            draft_kind=draft_kind,
+        )
+        store = SubmissionDraftStore(_runtime_root(workspace))
+        snapshot = store.read(context, seed={})
+        payload = {
+            "schema_version": "1",
+            "verdict": "FAIL" if blocking else "PASS",
+            "findings": blocking,
+            "advisories": advisories,
+            "work_items": submission_work_items(ledger["items"]),
+        }
+        submission_started = True
+        result = store.mark_submitted(
+            context,
+            expected_version=snapshot.version,
+            submission_payload=payload,
+        )
+        text = (
+            f"Review {payload['verdict']} submitted with "
+            f"{len(blocking)} blocking finding(s) and "
+            f"{len(advisories)} advisory finding(s)."
+        )
+        return ToolExecutionResult(
+            name=call.name,
+            ok=True,
+            text=text,
+            llm_text=text,
+            structured=dict(result),
+            call_id=call.call_id,
+            status=RuntimeStatus.OK,
+        )
+    except Exception as exc:
+        return submission_error_result(
+            call, exc, submission_started=submission_started,
+            invalid_code="invalid_review_submission",
+            correction="Complete or correct the reported audit/checklist/findings defects before retrying.",
+        )
+
+
+def _runtime_root(workspace: Mapping[str, Any]) -> Path:
+    value = str(workspace.get("runtime_root") or "").strip()
+    if not value:
+        raise ValueError("review submission requires runtime_root")
+    return Path(value)

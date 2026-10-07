@@ -10,7 +10,7 @@ from pal.bunshin.config import bunshin_db_path
 @contextmanager
 def workflow_memory_binding(runtime_root, repository, workflow_id):
     from pal.memory.storage import MemoryStorage
-    from pal.bunshin.v2.contracts import AggregateType
+    from pal.bunshin.contracts import AggregateType
     storage = MemoryStorage(runtime_root)
     created = storage.catalog_path.exists() and repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id) is None
     if created:

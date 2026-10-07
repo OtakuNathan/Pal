@@ -16,7 +16,7 @@ from pal.bunshin.catalog_store import family_override_path, profile_override_pat
 from pal.bunshin.families import BunshinFamilyRegistry
 from pal.bunshin.manager import BunshinManager
 from pal.bunshin.profiles import BunshinProfileRegistry
-from pal.bunshin.v2.capabilities import BunshinV2PublicProvider
+from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
 from pal.shared import IntrospectionCall, RuntimeStatus
 
 

@@ -7,21 +7,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_protocol import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_protocol import (
     software_contract_projection,
 )
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.skeleton import (
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.skeleton import (
     ArchitectureValidationError,
     GitBackedSkeletonService,
     _architect_private_implementation_changes,
     compiled_module_write_scopes,
     validate_architecture_submission,
 )
-from pal.bunshin.v2.task_ledger import TaskLedgerService
-from pal.bunshin.v2.workspace_paths import (
+from pal.bunshin.task_ledger import TaskLedgerService
+from pal.bunshin.workspace_paths import (
     MANAGER_ARCHITECT_DIRECTORY,
     module_developer_test_path,
     module_verification_corpus_path,

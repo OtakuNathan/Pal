@@ -16,20 +16,20 @@ from pal.bunshin.prompt_adapter import (
     render_bunshin_task_prompt,
 )
 from pal.bunshin.runner_components.prompt_context import PromptContext
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.semantic_orchestration.attempt_models import RoleAttemptRequest
-from pal.bunshin.v2.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
-from pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction import PromptConstruction
-from pal.bunshin.v2.semantic_orchestration.attempt_reference_binding import ReferenceBinding
-from pal.bunshin.v2.semantic_orchestration.attempt_verifier_context import VerifierContext
-from pal.bunshin.v2.semantic_orchestration.workflow_facts import WorkflowFacts
-from pal.bunshin.v2.task_ledger import TaskLedgerService
-from pal.bunshin.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
-from pal.bunshin.v2.work_items import update_checklist_tool_result
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
+from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
+from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
+from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
+from pal.bunshin.task_ledger import TaskLedgerService
+from pal.bunshin.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
+from pal.bunshin.work_items import update_checklist_tool_result
 from pal.core.prompt_compiler import PromptCompiler
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.shared import BunshinInvocationPack, PromptAssemblyContext

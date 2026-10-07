@@ -7,10 +7,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.v2.adapters import ArtifactBundleAdapter, prepare_v2_role_workspace, provision_artifact_workspaces
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.paths import resolve_project_git_layout
-from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.adapters import ArtifactBundleAdapter, prepare_v2_role_workspace, provision_artifact_workspaces
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.paths import resolve_project_git_layout
+from pal.bunshin.repository import BunshinV2Repository
 from pal.shared import BunshinInvocationPack
 
 

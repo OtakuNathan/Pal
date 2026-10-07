@@ -20,14 +20,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pal.bunshin.v2 import adapters
-from pal.bunshin.v2.adapters import (
+from pal.bunshin import adapters
+from pal.bunshin.adapters import (
     ArtifactBundleAdapter,
     artifact_tree_fingerprint,
 )
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.input_binding import BOUND_INPUTS_ROOT
-from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.input_binding import BOUND_INPUTS_ROOT
+from pal.bunshin.repository import BunshinV2Repository
 
 
 def _documented_is_bound_input_path(relative_path: object) -> bool:

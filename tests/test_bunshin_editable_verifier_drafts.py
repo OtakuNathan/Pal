@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import pytest
 
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.work_items import FINDING_KINDS, read_work_items
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.work_items import FINDING_KINDS, read_work_items
 from pal.shared.tool_protocol import new_tool_call
 from tests.test_bunshin_verifier_tool_feedback import payload, run_delta, status, verifier
 
@@ -103,7 +103,7 @@ def test_same_evaluation_fence_retry_keeps_current_findings_editable(verifier):
     fixture, workspace, _, call, _, _ = verifier
     created = finding(call)
     retry = fixture._advance_worker_fence(workspace)
-    from pal.bunshin.v2.work_items import edit_finding_tool_result
+    from pal.bunshin.work_items import edit_finding_tool_result
     result = edit_finding_tool_result(new_tool_call(name="op_bunshin_remove_finding", args={
         "finding_id": created["finding_id"], "expected_revision": 1, "reason": "Corrected in same evaluation",
     }, call_id="retry-remove"), retry)
@@ -140,8 +140,8 @@ def test_unrelated_fresh_command_cannot_revive_stale_historical_cases(verifier):
     assert not state["ready_by_outcome"]["pass"]
     assert any("finding_first" in error and "stale" in error for error in state["blockers_by_outcome"]["pass"])
     assert not call("submit_verification_pass").ok
-    from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors
-    from pal.bunshin.v2.semantic_evidence import recorded_cases
+    from pal.bunshin.swe_verification import semantic_verification_submission_errors
+    from pal.bunshin.semantic_evidence import recorded_cases
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
     draft = SubmissionDraftStore(fixture.runtime_root).read(context)
     errors = semantic_verification_submission_errors({"outcome": "pass", "findings": [],

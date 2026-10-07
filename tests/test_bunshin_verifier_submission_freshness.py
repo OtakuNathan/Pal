@@ -8,14 +8,14 @@ from unittest.mock import patch
 import pytest
 
 from pal.bunshin.ipc import BunshinManagerRpcError
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.submission_errors import SubmissionValidationError, role_gateway_error_kind
-from pal.bunshin.v2.verification_builder import _submit
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.role_gateway import RoleAssignmentGateway
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.submission_errors import SubmissionValidationError, role_gateway_error_kind
+from pal.bunshin.verification_builder import _submit
 from pal.shared.tool_protocol import new_tool_call
 from tests.test_bunshin_verifier_tool_feedback import payload, run_delta, verifier
 
@@ -110,13 +110,13 @@ def managed_verifier(verifier):
 
     class Remote:
         def request_sync(self, method, params):
-            with patch("pal.bunshin.v2.role_gateway_client.role_gateway_client_from_env", return_value=None):
+            with patch("pal.bunshin.role_gateway_client.role_gateway_client_from_env", return_value=None):
                 try:
                     return gateway.call(method, {"access_token": token, **params})
                 except Exception as exc:
                     raise BunshinManagerRpcError(str(exc), kind=role_gateway_error_kind(exc)) from exc
 
-    with patch("pal.bunshin.v2.role_gateway_client.role_gateway_client_from_env", return_value=Remote()):
+    with patch("pal.bunshin.role_gateway_client.role_gateway_client_from_env", return_value=Remote()):
         payload(call("update_checklist", plan=[{"step": "audit", "status": "completed"}]))
         yield verifier, service, assignment
 

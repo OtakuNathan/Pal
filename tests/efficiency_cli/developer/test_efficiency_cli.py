@@ -17,7 +17,7 @@ import pytest
 
 import pal.bunshin.efficiency_cli as cli
 from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.v2.efficiency_store import (
+from pal.bunshin.efficiency_store import (
     StorageUnavailableError,
     WorkflowNotFoundError,
 )

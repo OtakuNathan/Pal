@@ -14,20 +14,20 @@ from unittest.mock import patch
 
 import yaml
 
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.capabilities import BunshinV2PublicProvider
-from pal.bunshin.v2.contract_submission import architect_path
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot, CycleTransitionError, PlanCycleState
-from pal.bunshin.v2.graph_compiler import GraphCompiler
-from pal.bunshin.v2.graph_protocol import EdgeKind, graph_ir_from_mapping
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.contract_submission import architect_path
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, CycleTransitionError, PlanCycleState
+from pal.bunshin.graph_compiler import GraphCompiler
+from pal.bunshin.graph_protocol import EdgeKind, graph_ir_from_mapping
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.role_gateway import RoleAssignmentGateway
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.execution.contracts import CapabilityCall
 from pal.shared import RuntimeStatus
 
@@ -136,7 +136,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
                 # This is still the same legitimately claimed outbox effect.
                 # Crash after cycle binding, before the transaction commits;
                 # its normal retry must leave no partial import or receipt.
-                from pal.bunshin.v2 import imported_plan
+                from pal.bunshin import imported_plan
                 bind = imported_plan.bind_imported_plan_product
                 def fail_after_binding(**options):
                     bind(**options)
@@ -436,14 +436,14 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
         self.legacy_import = True
         # Reproduce the old manager behavior, rather than writing snapshots or
         # seeding cycle states. The old import omitted its product transition.
-        with patch("pal.bunshin.v2.imported_plan.bind_imported_plan_product", return_value=False):
+        with patch("pal.bunshin.imported_plan.bind_imported_plan_product", return_value=False):
             old_ref, old_record, old_bytes, old_installed, replacement_id, imported = self._restart_to_imported()
             self.assertIsNone(self.repository.cycles.read_plan_cycle(workflow_id=replacement_id))
             failures = 0
             now = datetime.now(timezone.utc)
             with (
-                patch("pal.bunshin.v2.storage.outbox_claims._utc_datetime", side_effect=lambda: now),
-                patch("pal.bunshin.v2.storage.outbox_results._utc_datetime", side_effect=lambda: now),
+                patch("pal.bunshin.storage.outbox_claims._utc_datetime", side_effect=lambda: now),
+                patch("pal.bunshin.storage.outbox_results._utc_datetime", side_effect=lambda: now),
             ):
                 for _ in range(30):
                     now += timedelta(seconds=6)
@@ -490,7 +490,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
 
 
     def test_authored_revision_cannot_skip_producer_through_import_recovery(self):
-        from pal.bunshin.v2.imported_plan import bind_imported_plan_product
+        from pal.bunshin.imported_plan import bind_imported_plan_product
         self._drive_until(lambda: self._revision(self.source_id) is not None, label="new requirement routing")
         revision = self._revision(self.source_id)
         self.assertEqual(revision.state, "ARCHITECT_QUEUED")

@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.submission_drafts import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
     SubmissionDraftContext,
     SubmissionDraftStore,

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin.runner import BunshinRunner
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.shared import BunshinInvocationPack
 from tests.test_bunshin_completion_resume import SyntheticModel, make_bundle, noop

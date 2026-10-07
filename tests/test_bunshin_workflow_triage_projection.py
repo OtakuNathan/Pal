@@ -9,15 +9,15 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
-from pal.bunshin.v2.orchestration import (
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
+from pal.bunshin.orchestration import (
     BunshinV2OutboxProcessor, _reconcile_cycle_control_projection,
     _workflow_pauses_cycles,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.storage.cycles import CyclesStore
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.storage.cycles import CyclesStore
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from tests.test_bunshin_produced_dependency_gates import _compile_graph
 
 

@@ -15,7 +15,7 @@ from pal.bunshin.config import (
     ensure_bunshin_runtime_settings_schema,
 )
 from pal.bunshin.ipc import BunshinManagerClient, bunshin_runtime_dir
-from pal.bunshin.v2.schema import (
+from pal.bunshin.schema import (
     BUNSHIN_V2_SCHEMA_VERSION,
     ensure_bunshin_v2_schema,
 )

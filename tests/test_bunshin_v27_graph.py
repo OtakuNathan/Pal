@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 import yaml
 
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_protocol import validate_contract_payload
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.coroutine_runtime import CoroutineRunSemaphore
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_protocol import validate_contract_payload
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
+from pal.bunshin.cycle_protocol import (
     AssignmentKind,
     CycleAction,
     CycleAssignment,
@@ -26,23 +26,23 @@ from pal.bunshin.v2.cycle_protocol import (
     PlanCycleState,
     CycleVerdict,
 )
-from pal.bunshin.v2.graph_compiler import (
+from pal.bunshin.graph_compiler import (
     GraphCompilationError,
     GraphCompileBindings,
     GraphCompiler,
     build_yaml_source_map,
 )
-from pal.bunshin.v2.graph_executor import (
+from pal.bunshin.graph_executor import (
     FindingClass,
     GraphExecution,
     GraphExecutionState,
     NodeReuseKind,
     diff_graphs,
 )
-from pal.bunshin.v2.graph_satellites import (
+from pal.bunshin.graph_satellites import (
     FamilyGraphSatelliteProjector,
 )
-from pal.bunshin.v2.graph_protocol import (
+from pal.bunshin.graph_protocol import (
     EdgeKind,
     EdgeSpec,
     GraphIR,
@@ -50,10 +50,10 @@ from pal.bunshin.v2.graph_protocol import (
     RoleBinding,
     graph_ir_from_mapping,
 )
-from pal.bunshin.v2.role_runtime import RoleSupervisor
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.orchestration import reconcile_control_requests
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.role_runtime import RoleSupervisor
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.orchestration import reconcile_control_requests
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
 def _bindings(adapter: str = "software_git.v2") -> GraphCompileBindings:

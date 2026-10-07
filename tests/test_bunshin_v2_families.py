@@ -21,30 +21,30 @@ from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
-from pal.bunshin.v2.contract_runtime import ContractArtifactAccess
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.epoch_compilation import ExecutionCompiler
-from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.v2.graph_protocol import RoleBinding
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.role_contracts import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
+from pal.bunshin.contract_runtime import ContractArtifactAccess
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.epoch_compilation import ExecutionCompiler
+from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
+from pal.bunshin.graph_protocol import RoleBinding
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.role_contracts import (
     OrchestrationRole,
     RoleActivation,
     RoleMode,
     validate_family_binding_payload,
 )
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.semantic_orchestration import (
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.semantic_orchestration import (
     apply_v2_research_capability_policy,
     apply_v2_role_capability_policy,
 )
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _role_mode_profile_payload
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.role_inputs import _role_mode_profile_payload
 from pal.shared import BunshinInvocationPack, RuntimeStatus
 from tests.capability_fixture import mount_test_capability
 from pal.shared import ToolExecutionResult
@@ -1240,12 +1240,12 @@ workspace_policy: {}
                     self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
 
     def test_worker_authoring_tools_never_expose_manager_identity_fields(self) -> None:
-        from pal.bunshin.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
-        from pal.bunshin.v2.contract_submission import CONTRACT_SUBMIT_TOOL_SPEC
-        from pal.bunshin.v2.review_submission import REVIEW_SUBMIT_TOOL_SPEC
-        from pal.bunshin.v2.swe_verification import SWE_VERIFICATION_TOOL_SPECS
-        from pal.bunshin.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
-        from pal.bunshin.v2.work_items import (
+        from pal.bunshin.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
+        from pal.bunshin.contract_submission import CONTRACT_SUBMIT_TOOL_SPEC
+        from pal.bunshin.review_submission import REVIEW_SUBMIT_TOOL_SPEC
+        from pal.bunshin.swe_verification import SWE_VERIFICATION_TOOL_SPECS
+        from pal.bunshin.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
+        from pal.bunshin.work_items import (
             ADD_FINDING_TOOL_SPEC,
             UPDATE_CHECKLIST_TOOL_SPEC,
         )

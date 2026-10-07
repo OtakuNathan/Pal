@@ -4,13 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import NodeCycleState
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.semantic_orchestration.dependency_repair_apply import apply_dependency_repair_cohort
-from pal.bunshin.v2.storage.transitions import TransitionsStore
-from pal.bunshin.v2.verification import repair_bill_semantic_view
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import NodeCycleState
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.semantic_orchestration.dependency_repair_apply import apply_dependency_repair_cohort
+from pal.bunshin.storage.transitions import TransitionsStore
+from pal.bunshin.verification import repair_bill_semantic_view
 from tests.test_bunshin_dependency_repair_protocol import _execution, _member, _intent, _closure
 
 
@@ -225,8 +225,8 @@ def test_registration_and_capture_are_not_final_verdict_events(tmp_path):
 def test_unclosed_graph_cannot_publish_repairs(tmp_path):
     case = Case(tmp_path)
     # An older caller cannot certify a current frontier that is still open.
-    from pal.bunshin.v2.storage.serialization import _json
-    from pal.bunshin.v2.storage.serialization import _cycle_payload
+    from pal.bunshin.storage.serialization import _json
+    from pal.bunshin.storage.serialization import _cycle_payload
     with case.repository.database.write_connection() as connection:
         connection.execute("UPDATE bunshin_v2_graph_generations SET execution_json = ? WHERE graph_id = ?", (
             _json({"state": "RUNNING", "dependency_repairs": case.unclosed.dependency_repairs.to_dict()}), "graph"))
@@ -301,7 +301,7 @@ def test_user_cancellation_dominates_repair_projection(tmp_path):
 
 
 def test_preparation_rejects_final_receipt_keys(tmp_path):
-    from pal.bunshin.v2.contracts import TransitionGuardError
+    from pal.bunshin.contracts import TransitionGuardError
     case = Case(tmp_path)
     with pytest.raises(TransitionGuardError, match="cannot publish a final verification settlement"):
         case.repository.transitions.dispatch(ActionEnvelope(

@@ -240,8 +240,8 @@ def test_manager_storage_failure_does_not_abort_worker_reader(tmp_path):
 
 
 def test_real_manager_storage_distinguishes_no_call_from_pre_handler_rejection(tmp_path):
-    from pal.bunshin.v2 import AggregateType, ContentAddressedArtifactStore
-    from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+    from pal.bunshin import AggregateType, ContentAddressedArtifactStore
+    from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 
     async def scenario():
         manager = BunshinManager(tmp_path)

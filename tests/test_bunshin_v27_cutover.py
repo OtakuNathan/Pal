@@ -9,7 +9,7 @@ from pal.bunshin.config import BUNSHIN_DB_FILENAME
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.cutover import cutover_bunshin_runtime
 from pal.bunshin.ipc import bunshin_runtime_dir
-from pal.bunshin.v2.schema import (
+from pal.bunshin.schema import (
     BUNSHIN_V2_SCHEMA_VERSION,
     ensure_bunshin_v2_schema,
 )

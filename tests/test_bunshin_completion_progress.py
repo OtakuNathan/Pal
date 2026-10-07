@@ -43,7 +43,7 @@ def test_ledger_content_not_version_or_call_count_drives_progress(tmp_path):
     ledger = {"version": 1, "items": [
         {"kind": "task", "summary": "resolve finding: f1", "status": "pending"}
     ]}
-    with patch("pal.bunshin.v2.work_items.read_work_items", return_value=ledger):
+    with patch("pal.bunshin.work_items.read_work_items", return_value=ledger):
         before = runner.components.completion.completion_gate_progress_marker()
         ledger["version"] = 2
         ledger["items"][0]["item_id"] = "new-bookkeeping-id"
@@ -87,7 +87,7 @@ def test_registered_staged_artifact_content_is_observed(tmp_path):
 
 def test_unavailable_ledger_does_not_masquerade_as_stagnation(tmp_path):
     runner = runner_at(tmp_path, bound=True)
-    with patch("pal.bunshin.v2.work_items.read_work_items", side_effect=RuntimeError("gateway unavailable")):
+    with patch("pal.bunshin.work_items.read_work_items", side_effect=RuntimeError("gateway unavailable")):
         with pytest.raises(RuntimeError, match="gateway unavailable"):
             runner.components.completion.completion_gate_progress_marker()
 
@@ -136,7 +136,7 @@ def test_checklist_progress_allows_another_completion_attempt(tmp_path):
     base.pack.workspace["output_policy"] = {"primary_artifact": "expected.json"}
     runner = RepairingRunner(runtime_root=tmp_path, pack=base.pack,
                             bunshin_id="test", run_id="test", write_event=noop, read_decision=noop)
-    with patch("pal.bunshin.v2.work_items.read_work_items", return_value=ledger):
+    with patch("pal.bunshin.work_items.read_work_items", return_value=ledger):
         asyncio.run(runner.components.invocation.run_v2_invocation(None))
     assert runner.calls == 3
     assert runner.components.status.blocked_kind == "completion_gate_stalled"

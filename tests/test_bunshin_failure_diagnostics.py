@@ -10,11 +10,11 @@ import pytest
 
 from pal.bunshin.failure_diagnostics import append_failure_diagnostic, exception_diagnostic
 from pal.bunshin.runner import BunshinRunner
-from pal.bunshin.v2 import worker_main
-from pal.bunshin.v2.contracts import AggregateType, PermanentEffectError
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.semantic_orchestration.attempt_process_result import ProcessResult
-from pal.bunshin.v2.semantic_orchestration.attempt_worker_execution import WorkerExecution
+from pal.bunshin import worker_main
+from pal.bunshin.contracts import AggregateType, PermanentEffectError
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.semantic_orchestration.attempt_process_result import ProcessResult
+from pal.bunshin.semantic_orchestration.attempt_worker_execution import WorkerExecution
 
 
 def _failure(depth=0):
@@ -94,7 +94,7 @@ def test_runner_reports_runtime_build_failure_before_accepted(monkeypatch):
 @pytest.mark.parametrize("terminal", [False, True])
 @pytest.mark.parametrize("permanent", [False, True])
 def test_real_parse_and_process_result_preserve_metadata_in_failure_artifact(monkeypatch, terminal, permanent):
-    from pal.bunshin.v2.semantic_orchestration import attempt_worker_execution as execution_module
+    from pal.bunshin.semantic_orchestration import attempt_worker_execution as execution_module
     diagnostic = _diagnostic()
     payload = {"error": "original error", "failure_diagnostic": diagnostic}
     if terminal:
@@ -151,7 +151,7 @@ def test_real_parse_and_process_result_preserve_metadata_in_failure_artifact(mon
 
 
 def test_background_role_failure_artifact_retains_diagnostics():
-    from pal.bunshin.v2.semantic_orchestration.assignment_failures import AssignmentFailures
+    from pal.bunshin.semantic_orchestration.assignment_failures import AssignmentFailures
     artifacts = MagicMock()
     repository = MagicMock()
     assignment = {"assignment_id": "a", "role": "coder", "state": "settled",
@@ -188,7 +188,7 @@ def test_malformed_wire_frames_are_ignored_and_labels_are_safe():
 
 
 def test_checkpoint_classification_is_unchanged_with_metadata():
-    from pal.bunshin.v2.semantic_orchestration.worker_results import _worker_terminal_failure
+    from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
     kind, details, directive = _worker_terminal_failure([{
         "event_kind": "terminal", "payload": {
             "status": "failed", "error_kind": "invalid_agent_session_checkpoint",
@@ -218,7 +218,7 @@ def test_nonzero_cleanup_preserves_terminal_policy_and_diagnostics(
     monkeypatch, terminal_payload, has_receipt, permanent,
 ):
     """Parse real wire messages, then classify the nonzero process result."""
-    from pal.bunshin.v2.semantic_orchestration import attempt_worker_execution as execution_module
+    from pal.bunshin.semantic_orchestration import attempt_worker_execution as execution_module
 
     cleanup = "ExceptionGroup: bunshin runtime shutdown failed (1 sub-exception)"
     messages = [

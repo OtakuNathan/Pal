@@ -19,8 +19,8 @@ from pal.bunshin.harness_request import (
     compile_architect_harness_request,
 )
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, BunshinRoleGatewayClient
-from pal.bunshin.v2.contract_submission import contract_submit_tool_result
-from pal.bunshin.v2.work_items import (
+from pal.bunshin.contract_submission import contract_submit_tool_result
+from pal.bunshin.work_items import (
     read_work_items,
     update_checklist_tool_result,
 )

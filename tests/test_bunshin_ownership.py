@@ -23,7 +23,7 @@ def measurements(path: Path) -> dict[str, int]:
 
 def owned_modules() -> set[Path]:
     declared = {PACKAGE / name for name in json.loads(BASELINE.read_text())}
-    for directory in ("runner_components", "v2/storage", "v2/semantic_orchestration"):
+    for directory in ("runner_components", "storage", "semantic_orchestration"):
         declared.update((PACKAGE / directory).rglob("*.py"))
     return declared
 
@@ -42,8 +42,8 @@ def test_bunshin_ownership_budgets():
 def test_components_never_import_entrypoints():
     entries = {
         "pal.bunshin.runner",
-        "pal.bunshin.v2.execution",
-        "pal.bunshin.v2.semantic_orchestration.orchestrator",
+        "pal.bunshin.execution",
+        "pal.bunshin.semantic_orchestration.orchestrator",
     }
     for path in owned_modules():
         if path.name in {"__init__.py", "runner.py", "execution.py", "orchestrator.py"}:
@@ -54,28 +54,28 @@ def test_components_never_import_entrypoints():
 
 
 def test_storage_cannot_import_application_components():
-    forbidden = ("pal.bunshin.runner", "pal.bunshin.v2.semantic_orchestration", "pal.bunshin.v2.service")
-    for path in (PACKAGE / "v2/storage").glob("*.py"):
+    forbidden = ("pal.bunshin.runner", "pal.bunshin.semantic_orchestration", "pal.bunshin.service")
+    for path in (PACKAGE / "storage").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.ImportFrom):
                 assert not (node.module or "").startswith(forbidden), (path, node.module)
 
 
 def test_workspace_resources_do_not_depend_on_execution():
-    tree = ast.parse((PACKAGE / 'v2/workspace_resources.py').read_text())
+    tree = ast.parse((PACKAGE / 'workspace_resources.py').read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             assert node.module not in {
-                'pal.bunshin.v2.execution',
-                'pal.bunshin.v2.semantic_orchestration.orchestrator',
+                'pal.bunshin.execution',
+                'pal.bunshin.semantic_orchestration.orchestrator',
             }
 
 
 def test_unit_of_work_publishes_or_rolls_back_all_stores(tmp_path):
     import pytest
-    from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-    from pal.bunshin.v2.cycle_protocol import PlanCycle
-    from pal.bunshin.v2.repository import BunshinV2Repository
+    from pal.bunshin.contracts import ActionEnvelope, AggregateType
+    from pal.bunshin.cycle_protocol import PlanCycle
+    from pal.bunshin.repository import BunshinV2Repository
 
     repository = BunshinV2Repository(tmp_path)
     action = ActionEnvelope(
@@ -122,9 +122,9 @@ def test_runner_state_is_isolated_between_invocations(tmp_path):
 
 
 def test_semantic_components_do_not_import_workflow_facade():
-    for path in (PACKAGE / "v2/semantic_orchestration").glob("*.py"):
+    for path in (PACKAGE / "semantic_orchestration").glob("*.py"):
         if path.name in {"composition.py", "orchestrator.py"}:
             continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.ImportFrom):
-                assert node.module != "pal.bunshin.v2.service", path
+                assert node.module != "pal.bunshin.service", path

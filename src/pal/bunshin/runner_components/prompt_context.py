@@ -23,7 +23,7 @@ class PromptContext:
         }
         if not str(binding.get("role") or ""):
             return ""
-        from pal.bunshin.v2.work_items import render_work_item_context
+        from pal.bunshin.work_items import render_work_item_context
 
         return render_work_item_context(workspace)
 

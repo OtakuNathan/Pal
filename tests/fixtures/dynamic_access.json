@@ -455,71 +455,71 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/architecture_templates.py:ArchitectureTemplateCompiler.list_specializations:getattr(provider, 'declared_bunshin_architecture_specializations', None)": {
+  "src/pal/bunshin/architecture_compilation.py:ArchitectureTemplateCompiler.list_specializations:getattr(provider, 'declared_bunshin_architecture_specializations', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'attached', False)": {
+  "src/pal/bunshin/workflow_capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'attached', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'enabled', False)": {
+  "src/pal/bunshin/workflow_capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'enabled', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/efficiency_metrics.py:compute_workflow_metrics:getattr(totals, field_name)": {
+  "src/pal/bunshin/efficiency_metrics.py:compute_workflow_metrics:getattr(totals, field_name)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/efficiency_report.py:_render_role:getattr(role, field)": {
+  "src/pal/bunshin/efficiency_report.py:_render_role:getattr(role, field)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/efficiency_report.py:render_json:getattr(role, field)": {
+  "src/pal/bunshin/efficiency_report.py:render_json:getattr(role, field)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/graph_compiler.py:build_yaml_source_map.visit:getattr(key_node, 'value', '')": {
+  "src/pal/bunshin/graph_compiler.py:build_yaml_source_map.visit:getattr(key_node, 'value', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/input_binding.py:_open_materialization_parent:getattr(os, 'O_DIRECTORY', 0)": {
+  "src/pal/bunshin/input_binding.py:_open_materialization_parent:getattr(os, 'O_DIRECTORY', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/input_binding.py:_open_materialization_parent:getattr(os, 'O_NOFOLLOW', 0)": {
+  "src/pal/bunshin/input_binding.py:_open_materialization_parent:getattr(os, 'O_NOFOLLOW', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/input_binding.py:_read_bytes_beneath:getattr(os, 'O_NOFOLLOW', 0)": {
+  "src/pal/bunshin/input_binding.py:_read_bytes_beneath:getattr(os, 'O_NOFOLLOW', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/input_binding.py:_write_bytes_atomically_beneath:getattr(os, 'O_NOFOLLOW', 0)": {
+  "src/pal/bunshin/input_binding.py:_write_bytes_atomically_beneath:getattr(os, 'O_NOFOLLOW', 0)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/machine_dsl.py:target_resolver.decorate:getattr(resolver, '__name__', 'dynamic_target')": {
+  "src/pal/bunshin/machine_dsl.py:target_resolver.decorate:getattr(resolver, '__name__', 'dynamic_target')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/machine_dsl.py:transition_target_states:getattr(target, 'target_states', ())": {
+  "src/pal/bunshin/machine_dsl.py:transition_target_states:getattr(target, 'target_states', ())": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/semantic_orchestration/human_review.py:HumanReview.materialize_plan_revision_status:getattr(revision, 'updated_at', '')": {
+  "src/pal/bunshin/semantic_orchestration/human_review.py:HumanReview.materialize_plan_revision_status:getattr(revision, 'updated_at', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/semantic_orchestration/workflow_facts.py:WorkflowFacts.uses_git_skeleton:getattr(workflow, 'payload', {})": {
+  "src/pal/bunshin/semantic_orchestration/workflow_facts.py:WorkflowFacts.uses_git_skeleton:getattr(workflow, 'payload', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/verification.py:VerificationCaseRunner.run:getattr(exc, 'stderr', b'')": {
+  "src/pal/bunshin/verification.py:VerificationCaseRunner.run:getattr(exc, 'stderr', b'')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/v2/verification.py:VerificationCaseRunner.run:getattr(exc, 'stdout', b'')": {
+  "src/pal/bunshin/verification.py:VerificationCaseRunner.run:getattr(exc, 'stdout', b'')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

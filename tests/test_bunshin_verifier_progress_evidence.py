@@ -13,9 +13,9 @@ import pytest
 from pal.bunshin.runner import BunshinRunner
 from pal.bunshin.runner_components.artifacts import Artifacts
 from pal.bunshin.runner_components.completion import Completion
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.semantic_evidence import run_shell_evidence
-from pal.bunshin.v2.submission_drafts import (
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.semantic_evidence import run_shell_evidence
+from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
     SubmissionDraftContext,
     SubmissionDraftStore,

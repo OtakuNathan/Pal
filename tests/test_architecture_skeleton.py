@@ -489,8 +489,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_bunshin_does_not_depend_on_user_facing_channel_modules(self) -> None:
         for relative_path in (
-            "src/pal/bunshin/v2/contracts.py",
-            "src/pal/bunshin/v2/service.py",
+            "src/pal/bunshin/contracts.py",
+            "src/pal/bunshin/service.py",
         ):
             self._assert_no_forbidden_imports(
                 ROOT / relative_path,

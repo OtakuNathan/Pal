@@ -26,7 +26,7 @@ from pal.bunshin.profiles import (
     BunshinProfileRegistry,
     canonical_profile_id,
 )
-from pal.bunshin.v2.role_contracts import (
+from pal.bunshin.role_contracts import (
     TASK_PROFILE_BINDING,
     family_execution_adapter,
     validate_role_bindings,
@@ -405,7 +405,7 @@ class BunshinCatalogService:
                 + ", ".join(cross_family)
             )
         if family.workflow_template == "contract_dag.v2":
-            from pal.bunshin.v2.catalog import REGISTERED_ADAPTERS
+            from pal.bunshin.workflow_catalog import REGISTERED_ADAPTERS
 
             execution_adapter = family_execution_adapter(
                 family.execution_adapter

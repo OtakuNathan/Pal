@@ -11,29 +11,29 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.bunshin.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, BunshinV2Repository
-from pal.bunshin.v2.contract_runtime import ContractArtifactAccess
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.adapters import (
+from pal.bunshin import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, BunshinV2Repository
+from pal.bunshin.contract_runtime import ContractArtifactAccess
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.adapters import (
     ARTIFACT_BUNDLE_ADAPTER,
     SOFTWARE_GIT_ADAPTER,
     ArtifactBundleAdapter,
 )
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateVersionConflict, StaleFencingToken
-from pal.bunshin.v2.candidate_snapshots import CandidateSnapshotService, _validate_skeleton_candidate_paths
-from pal.bunshin.v2.dag_scheduling import DagScheduler
-from pal.bunshin.v2.execution_models import DependencyIntegrationConflict, NodeRunJournal
-from pal.bunshin.v2.epoch_compilation import ExecutionCompiler
-from pal.bunshin.v2.work_views import UnitWorkViewBuilder
-from pal.bunshin.v2.dependency_baselines import prepare_node_dependency_baseline, prepare_node_verification_baseline
-from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry, format_workspace_process_holders, workspace_process_holders
-from pal.bunshin.v2.task_ledger import TaskLedgerService
-from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_protocol import RoleBinding
-from pal.bunshin.v2.graph_satellites import FamilyNodeProjection
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.contracts import AggregateSnapshot, AggregateVersionConflict, StaleFencingToken
+from pal.bunshin.candidate_snapshots import CandidateSnapshotService, _validate_skeleton_candidate_paths
+from pal.bunshin.dag_scheduling import DagScheduler
+from pal.bunshin.execution_models import DependencyIntegrationConflict, NodeRunJournal
+from pal.bunshin.epoch_compilation import ExecutionCompiler
+from pal.bunshin.work_views import UnitWorkViewBuilder
+from pal.bunshin.dependency_baselines import prepare_node_dependency_baseline, prepare_node_verification_baseline
+from pal.bunshin.execution_values import workspace_content_fingerprint
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry, format_workspace_process_holders, workspace_process_holders
+from pal.bunshin.task_ledger import TaskLedgerService
+from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.graph_protocol import RoleBinding
+from pal.bunshin.graph_satellites import FamilyNodeProjection
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
 def _lock_candidate_workspace(

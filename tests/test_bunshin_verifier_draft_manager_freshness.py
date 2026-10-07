@@ -10,14 +10,14 @@ from unittest.mock import patch
 import pytest
 
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.semantic_evidence import recorded_cases
-from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
-from pal.bunshin.v2.work_items import submission_work_items
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.role_gateway import RoleAssignmentGateway
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.semantic_evidence import recorded_cases
+from pal.bunshin.verification_readiness import verification_corpus_snapshot
+from pal.bunshin.work_items import submission_work_items
 from pal.shared.tool_protocol import new_tool_call
 from tests.test_bunshin_verifier_tool_feedback import payload, verifier
 
@@ -60,7 +60,7 @@ def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier
     gateway = RoleAssignmentGateway(service)
     class Remote:
         def request_sync(self, method, params):
-            with patch("pal.bunshin.v2.role_gateway_client.role_gateway_client_from_env", return_value=None):
+            with patch("pal.bunshin.role_gateway_client.role_gateway_client_from_env", return_value=None):
                 return gateway.call(method, {"access_token": token, **params})
     remote = Remote()
     runtime = BunshinScopedExecutionRuntime(fixture.adapter, original_runtime.allowed_capabilities, workspace)
@@ -72,7 +72,7 @@ def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
     command = f"{sys.executable} tests/router/verifier/probe.py"
     try:
-        with patch("pal.bunshin.v2.role_gateway_client.role_gateway_client_from_env", return_value=remote):
+        with patch("pal.bunshin.role_gateway_client.role_gateway_client_from_env", return_value=remote):
             payload(call("update_checklist", plan=[{"step": "audit", "status": "completed"}]))
             for name in ("finding_first", "finding_second"):
                 payload(call("run_verification_historical_regression", name=name, command=command))
@@ -103,7 +103,7 @@ def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier
             probe.write_text("assert False\n")
             receipt = remote.request_sync("draft_submit", {"context": context.to_dict(), "submission": sealed})
             assert receipt["submission_payload_hash"] == accepted["submission_payload_hash"]
-            from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors
+            from pal.bunshin.swe_verification import semantic_verification_submission_errors
             errors = semantic_verification_submission_errors(sealed, work_view=view, changed_paths=[],
                 current_case_paths=["tests/router/verifier/probe.py"], corpus_scope=view["verification_corpus"],
                 scratch_only=False, workspace=workspace)

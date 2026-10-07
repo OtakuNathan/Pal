@@ -7,7 +7,7 @@ durable ``input_binding_ref`` record, deciding repository-including versus
 artifact-style binding from the resolved workspace contract, materializing or
 verifying accordingly, and projecting ``bound_input`` reference entries.
 
-The ``pal.bunshin.v2.input_binding`` procedures are a parallel module whose
+The ``pal.bunshin.input_binding`` procedures are a parallel module whose
 declaration bodies are deferred, so these tests substitute a test adapter at
 the orchestrator module's import surface while the production path keeps
 calling the declared public functions.
@@ -22,15 +22,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pal.bunshin.v2.contracts import (
+from pal.bunshin.contracts import (
     AggregateSnapshot,
     AggregateType,
 )
-from pal.bunshin.v2.input_binding import BoundInputError
-from pal.bunshin.v2.semantic_orchestration import attempt_inputs as orchestrator_module
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays, _role_workspace_input_binding_roots
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.input_binding import BoundInputError
+from pal.bunshin.semantic_orchestration import attempt_inputs as orchestrator_module
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays, _role_workspace_input_binding_roots
+from pal.bunshin.service import BunshinV2WorkflowService
 
 WORKFLOW_ID = "wf-bind"
 

@@ -11,7 +11,7 @@ from pal.bunshin.checkpoint import (
     open_agent_session_checkpoint,
     seal_agent_session_checkpoint,
 )
-from pal.bunshin.v2.semantic_orchestration.worker_results import _worker_terminal_failure
+from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
 
 
 def _private_checkpoint(*, sequence: int = 1, fencing_token: int = 1):

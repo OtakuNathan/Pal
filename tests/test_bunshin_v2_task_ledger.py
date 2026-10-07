@@ -6,8 +6,8 @@ from pathlib import Path
 
 import yaml
 
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.task_ledger import (
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.task_ledger import (
     TASK_LEDGER_ARTIFACT,
     TaskRevisionAuthority,
     validate_task_ledger,

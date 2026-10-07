@@ -11,24 +11,24 @@ from pathlib import Path
 import yaml
 
 from pal.bunshin.turns import sanitize_runner_session_pack
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_protocol import (
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_protocol import (
     compile_contract_markdown,
     load_architect_yaml,
     read_architect_yaml,
     software_contract_projection,
     validate_contract_payload,
 )
-from pal.bunshin.v2.contract_submission import (
+from pal.bunshin.contract_submission import (
     architect_path,
     bind_architect_file,
     contract_submit_tool_result,
 )
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.review_submission import review_submit_tool_result
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.v2.skeleton import compile_skeleton_markdown
-from pal.bunshin.v2.work_items import (
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.review_submission import review_submit_tool_result
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.bunshin.skeleton import compile_skeleton_markdown
+from pal.bunshin.work_items import (
     ADD_FINDING_CAPABILITY,
     UPDATE_CHECKLIST_CAPABILITY,
     add_finding_tool_result,

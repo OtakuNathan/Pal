@@ -43,20 +43,20 @@ import unittest
 from pathlib import Path
 
 from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
-from pal.bunshin.v2.adapters import (
+from pal.bunshin.adapters import (
     ARTIFACT_BUNDLE_ADAPTER,
     ArtifactBundleAdapter,
     artifact_tree_fingerprint,
 )
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.input_binding import (
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.input_binding import (
     INPUT_BINDING_MANIFEST_ARTIFACT,
     BoundInputError,
     InputBindingManifest,
     verify_bound_inputs,
 )
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.service import BunshinV2WorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
 # The bound module workspace itself: a real read-only Git repository whose
@@ -65,7 +65,7 @@ WORKSPACE_REPO = Path(__file__).resolve().parents[3]
 
 # Stable tracked files of the workspace repository used as declared inputs.
 SPEC_REPO_PATH = "pyproject.toml"
-NOTES_REPO_PATH = "src/pal/bunshin/v2/input_binding.py"
+NOTES_REPO_PATH = "src/pal/bunshin/input_binding.py"
 
 
 def _workspace_head() -> str:

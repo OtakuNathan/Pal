@@ -14,16 +14,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.capabilities import BunshinV2PublicProvider
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleAction, CycleSlot, CycleTransitionError, NodeCycleState
-from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest, stable_hash
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _node_role_session_id, _verifier_reference_refs
-from pal.bunshin.v2.verification import VerificationService, VerificationStatus
-from pal.bunshin.v2.review_findings import structured_findings
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleAction, CycleSlot, CycleTransitionError, NodeCycleState
+from pal.bunshin.execution_values import workspace_content_fingerprint
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
+from pal.bunshin.semantic_orchestration.role_inputs import _node_role_session_id, _verifier_reference_refs
+from pal.bunshin.verification import VerificationService, VerificationStatus
+from pal.bunshin.review_findings import structured_findings
 from pal.execution.contracts import CapabilityCall
 from pal.shared import RuntimeStatus
 
@@ -226,13 +226,13 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
 
     async def _new_verifier_assignment(self):
         from pal.bunshin.harnesses import BunshinHarnessRegistryGeneration, pal_harness_spec
-        from pal.bunshin.v2.semantic_orchestration.attempt_assignment_reuse import AssignmentReuse
-        from pal.bunshin.v2.semantic_orchestration.attempt_models import AttemptReplay, PreparedRolePrompt, RoleAttemptRequest
-        from pal.bunshin.v2.semantic_orchestration.attempt_prompt_construction import PromptConstruction
-        from pal.bunshin.v2.semantic_orchestration.attempt_reference_binding import ReferenceBinding
-        from pal.bunshin.v2.semantic_orchestration.attempt_role_session import RoleSession
-        from pal.bunshin.v2.semantic_orchestration.attempt_verifier_context import VerifierContext
-        from pal.bunshin.v2.semantic_orchestration.workflow_facts import WorkflowFacts
+        from pal.bunshin.semantic_orchestration.attempt_assignment_reuse import AssignmentReuse
+        from pal.bunshin.semantic_orchestration.attempt_models import AttemptReplay, PreparedRolePrompt, RoleAttemptRequest
+        from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
+        from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+        from pal.bunshin.semantic_orchestration.attempt_role_session import RoleSession
+        from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+        from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
 
         node = self._node()
         refs = _verifier_reference_refs(
@@ -360,7 +360,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self._assert_restore_rolls_back(evaluation_generation=1)
 
     def test_claimed_outbox_reconciliation_commits_one_correction_receipt(self):
-        from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
+        from pal.bunshin.orchestration import BunshinV2OutboxProcessor
         import json
 
         self._prepare_pending()

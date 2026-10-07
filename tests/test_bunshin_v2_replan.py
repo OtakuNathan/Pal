@@ -6,18 +6,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
-from pal.bunshin.v2.cycle_protocol import PlanCycle, PlanCycleState
-from pal.bunshin.v2.orchestration import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
+from pal.bunshin.cycle_protocol import PlanCycle, PlanCycleState
+from pal.bunshin.orchestration import (
     BunshinV2OutboxProcessor,
     _active_control_children,
     reconcile_control_requests,
 )
-from pal.bunshin.v2.recovery import BunshinV2Recovery
-from pal.bunshin.v2.replan import architecture_finding_semantic_view
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.task_ledger import TaskLedgerService
+from pal.bunshin.recovery import BunshinV2Recovery
+from pal.bunshin.replan import architecture_finding_semantic_view
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.task_ledger import TaskLedgerService
 
 
 class BunshinV2ReplanTests(unittest.TestCase):

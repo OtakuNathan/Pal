@@ -1,4 +1,4 @@
-"""Verifier corpus for ``pal.bunshin.v2.input_binding``.
+"""Verifier corpus for ``pal.bunshin.input_binding``.
 
 The developer corpus builds Git fixture repositories with ``git init`` /
 ``git add`` / ``git commit``, which the sandboxed read-only Git gateway traps,
@@ -18,8 +18,8 @@ from typing import Any, Mapping
 
 import pytest
 
-from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
-from pal.bunshin.v2.input_binding import (
+from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.input_binding import (
     BOUND_INPUT_ARTIFACT,
     BOUND_INPUTS_ROOT,
     BoundInputError,
@@ -42,7 +42,7 @@ from pal.bunshin.v2.input_binding import (
 WORKSPACE_REPO = Path(__file__).resolve().parents[3]
 
 # Stable tracked files of the workspace repository used as capture sources.
-MODULE_SOURCE = "src/pal/bunshin/v2/input_binding.py"
+MODULE_SOURCE = "src/pal/bunshin/input_binding.py"
 PROJECT_SOURCE = "pyproject.toml"
 
 

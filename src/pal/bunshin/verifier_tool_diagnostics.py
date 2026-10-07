@@ -62,22 +62,22 @@ _STATUSES = frozenset({
 # A fabricated co_filename/co_name or a dynamically named exception is not a
 # source identity and is never copied into this operational event.
 _FRAME_SOURCES = {
-    "pal.bunshin.v2.semantic_evidence": (
+    "pal.bunshin.semantic_evidence": (
         "run_shell_evidence", "run_lsp_evidence", "_required_text", "_runtime_root",
         "_artifact_store", "execution_workspace_fingerprint", "_integer_list",
     ),
-    "pal.bunshin.v2.verification_builder": (
+    "pal.bunshin.verification_builder": (
         "verification_builder_tool_result", "_assert_tool_contract_allows",
         "_preflight_verification_case_execution", "_require_adapter", "_store_context",
     ),
-    "pal.bunshin.v2.swe_verification": ("swe_verification_tool_result",),
-    "pal.bunshin.v2.submission_drafts": (
+    "pal.bunshin.swe_verification": ("swe_verification_tool_result",),
+    "pal.bunshin.submission_drafts": (
         "SubmissionDraftContext.from_workspace", "SubmissionDraftStore.read",
         "SubmissionDraftStore._assert_authoring_contract", "SubmissionDraftStore._assert_fence",
         "SubmissionDraftStore._read_or_create_locked", "SubmissionDraftStore._inherited_payload_locked",
         "SubmissionDraftStore._ensure_schema", "decode_remote_draft_snapshot",
     ),
-    "pal.bunshin.v2.role_contracts": ("RoleActivation.from_values", "RoleActivation.__post_init__"),
+    "pal.bunshin.role_contracts": ("RoleActivation.from_values", "RoleActivation.__post_init__"),
     "pal.bunshin.ipc": ("BunshinRoleGatewayClient.request_sync", "BunshinRoleGatewayClient.request"),
 }
 _FRAME_TOKENS = frozenset((module.rsplit(".", 1)[-1] + ".py", function)

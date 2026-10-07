@@ -9,25 +9,25 @@ from unittest.mock import patch
 from pathlib import Path
 import subprocess
 
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.contract_protocol import software_contract_projection
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.v2.graph_protocol import graph_ir_from_mapping
-from pal.bunshin.v2.git_scope import scoped_role_git_read_plan
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.contract_protocol import software_contract_projection
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.graph_protocol import graph_ir_from_mapping
+from pal.bunshin.git_scope import scoped_role_git_read_plan
 from pal.execution.git_tool import GitTool, _run_git, classify_git_command
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.submission_drafts import (
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
     SubmissionDraftContext,
     SubmissionDraftStore,
 )
-from pal.bunshin.v2.role_gateway import (
+from pal.bunshin.role_gateway import (
     RoleAssignmentGateway,
     RoleGatewayArtifactStore,
 )
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.submission_errors import SubmissionValidationError
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.submission_errors import SubmissionValidationError
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
 class BunshinV2RoleGatewayTests(unittest.TestCase):
@@ -507,12 +507,12 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         import sys
         from tests.test_bunshin_v2_verification import _FakeExecutionAdapter
         from pal.shared.tool_protocol import new_tool_call
-        from pal.bunshin.v2.verification_readiness import record_verification_execution, verification_corpus_snapshot
+        from pal.bunshin.verification_readiness import record_verification_execution, verification_corpus_snapshot
         call = new_tool_call(name="op_exec_shell", args={
             "cmd": f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py",
             "cwd": str(self.workspace),
         })
-        from pal.bunshin.v2.semantic_evidence import run_shell_evidence, recorded_cases
+        from pal.bunshin.semantic_evidence import run_shell_evidence, recorded_cases
         receipt_workspace["runtime_root"] = str(self.runtime_root)
         receipt_workspace["bunshin_v2"].update(context)
         receipt_workspace.pop("verification_case_revision", None)

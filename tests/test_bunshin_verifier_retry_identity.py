@@ -9,16 +9,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.cycle_protocol import AssignmentKind, CycleSlot
-from pal.bunshin.v2.orchestration import reconcile_control_requests
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.semantic_orchestration.attempt_models import RoleAttemptRequest
-from pal.bunshin.v2.semantic_evidence import record_unavailable_evidence, recorded_cases
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.work_items import edit_finding_tool_result, findings_from_work_items
-from pal.bunshin.v2.verification_builder import _remove_case
-from pal.bunshin.v2.swe_verification import verification_outcome_readiness
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
+from pal.bunshin.orchestration import reconcile_control_requests
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
+from pal.bunshin.semantic_evidence import record_unavailable_evidence, recorded_cases
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.work_items import edit_finding_tool_result, findings_from_work_items
+from pal.bunshin.verification_builder import _remove_case
+from pal.bunshin.swe_verification import verification_outcome_readiness
 from pal.shared.tool_protocol import new_tool_call
 from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
 
@@ -64,7 +64,7 @@ class PauseResumeVerifier:
         self.fx.coordinator.producer_submitted(workflow_id=self.workflow, node_name="archive_verify",
                                               product_ref=self.fx.candidate_ref.sha256)
         # Optional environment integrations are the only preparation test doubles.
-        monkeypatch.setattr("pal.bunshin.v2.semantic_orchestration.attempt_workspace_preparation.prewarm_workspace_lsp",
+        monkeypatch.setattr("pal.bunshin.semantic_orchestration.attempt_workspace_preparation.prewarm_workspace_lsp",
                             lambda **kwargs: {"status": "unavailable", "servers": []})
         monkeypatch.setattr(self.worker.components.role_cleanup, "release_managed_lsp_workspace",
                             AsyncMock(return_value={"status": "unavailable"}))

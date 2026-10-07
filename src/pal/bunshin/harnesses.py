@@ -161,7 +161,7 @@ def pal_harness_spec() -> BunshinHarnessSpec:
         worker_argv=(
             str(Path(sys.executable).resolve()),
             "-m",
-            "pal.bunshin.v2.worker_main",
+            "pal.bunshin.worker_main",
         ),
         config={},
     )

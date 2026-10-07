@@ -10,11 +10,11 @@ from unittest.mock import patch
 import pytest
 
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.semantic_orchestration.role_policy import apply_v2_role_capability_policy
-from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors
-from pal.bunshin.v2.verification_builder import compile_verification_invocation_tool_contract
-from pal.bunshin.v2.work_items import update_checklist_tool_result
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.semantic_orchestration.role_policy import apply_v2_role_capability_policy
+from pal.bunshin.swe_verification import semantic_verification_submission_errors
+from pal.bunshin.verification_builder import compile_verification_invocation_tool_contract
+from pal.bunshin.work_items import update_checklist_tool_result
 from pal.core.turn_executor import TurnExecutor
 from pal.llm.ir import GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole, WireShape
 from pal.llm.shapes.base import ShapeContext
@@ -228,7 +228,7 @@ def test_candidate_change_and_manager_freshness_reject_stale_receipt(verifier):
 def test_submit_receipt_uncertainty_is_not_validation_rejection(verifier):
     _, _, _, call, _, _ = verifier
     payload(run_delta(verifier))
-    with patch('pal.bunshin.v2.submission_drafts.SubmissionDraftStore.mark_submitted', side_effect=TimeoutError('receipt lost')):
+    with patch('pal.bunshin.submission_drafts.SubmissionDraftStore.mark_submitted', side_effect=TimeoutError('receipt lost')):
         result = call('submit_verification_pass')
     assert not result.ok
     assert result.structured['effect'] == 'unknown'
@@ -260,7 +260,7 @@ def test_empty_corpus_is_reported_before_submit(verifier):
 
 @pytest.mark.parametrize('case_change', [{'status': 'FAIL'}, {'status': 'UNKNOWN'}, {'input_fingerprint': 'another-candidate'}])
 def test_manager_and_local_case_status_and_input_gates_agree(verifier, case_change):
-    from pal.bunshin.v2.swe_verification import verification_outcome_readiness
+    from pal.bunshin.swe_verification import verification_outcome_readiness
     _, workspace, _, _, _, view = verifier
     payload(run_delta(verifier))
     case = {'name': 'case', 'case_kind': 'diff_risk', 'obligation_tags': ['candidate_delta_review'],
@@ -301,7 +301,7 @@ def test_runner_records_bound_ordinary_execution_and_edit_invalidates_it(verifie
     )))
     assert result.ok, result.llm_text
     assert len(refs) == 1 and refs[0]['ok'] and refs[0]['verification_binding']['corpus']
-    from pal.bunshin.v2.verification_readiness import current_verification_receipts
+    from pal.bunshin.verification_readiness import current_verification_receipts
     assert not current_verification_receipts(refs, workspace)[0]['stale']
     probe.write_text('assert 4 == 4\n')
     assert current_verification_receipts(refs, workspace)[0]['stale']
@@ -372,7 +372,7 @@ def test_missing_probe_preflight_is_not_an_uncertain_execution(verifier):
 
 def test_snapshot_refuses_symlink_swap_during_file_open(verifier, tmp_path):
     import os
-    from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+    from pal.bunshin.verification_readiness import verification_corpus_snapshot
     _, workspace, probe, _, _, _ = verifier
     outside = tmp_path / 'outside.txt'
     outside.write_text('do not hash this')
@@ -385,7 +385,7 @@ def test_snapshot_refuses_symlink_swap_during_file_open(verifier, tmp_path):
             probe.unlink()
             probe.symlink_to(outside)
         return original(path, flags, *args, **kwargs)
-    with patch('pal.bunshin.v2.verification_corpus.os.open', side_effect=swap):
+    with patch('pal.bunshin.verification_corpus.os.open', side_effect=swap):
         with pytest.raises(OSError):
             verification_corpus_snapshot(workspace)
     assert swapped

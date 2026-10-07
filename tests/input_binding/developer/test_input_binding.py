@@ -1,4 +1,4 @@
-"""Focused developer tests for ``pal.bunshin.v2.input_binding``.
+"""Focused developer tests for ``pal.bunshin.input_binding``.
 
 Covers the owned contract directly: participation and derivation of
 declared inputs, containment resolution, provenance capture against a real
@@ -15,8 +15,8 @@ from typing import Any, Mapping
 
 import pytest
 
-from pal.bunshin.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
-from pal.bunshin.v2.input_binding import (
+from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.input_binding import (
     BOUND_INPUT_ARTIFACT,
     BOUND_INPUTS_ROOT,
     BoundInputError,

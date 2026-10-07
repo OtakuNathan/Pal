@@ -47,13 +47,13 @@ from pal.bunshin.ipc import (
 )
 from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.web_broker import web_result_to_payload
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.recovery import BunshinV2Recovery
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.semantic_orchestration import SemanticOrchestrator
-from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
-from pal.bunshin.v2.submission_errors import role_gateway_error_kind
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.recovery import BunshinV2Recovery
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.semantic_orchestration import SemanticOrchestrator
+from pal.bunshin.role_gateway import RoleAssignmentGateway
+from pal.bunshin.submission_errors import role_gateway_error_kind
 from pal.shared import BunshinApprovalDecision, BunshinInvocationPack, RuntimeStatus
 from pal.shared.json_values import thaw_json
 

@@ -115,7 +115,7 @@ class BunshinPythonMountTests(unittest.TestCase):
         self.assertIn(library_bind, triples)
         self.assertLess(triples.index(library_bind), triples.index(dependency_bind))
         self.assertLess(triples.index(library_bind), triples.index(["--ro-bind", str(endpoint), str(endpoint)]))
-        self.assertEqual(argv[argv.index("--") + 1:], [str(self.executable), "-m", "pal.bunshin.v2.worker_main", "--help"])
+        self.assertEqual(argv[argv.index("--") + 1:], [str(self.executable), "-m", "pal.bunshin.worker_main", "--help"])
         for path in (self.prefix, self.prefix.parent, self.executable.parent, self.alias):
             self.assertNotIn(["--ro-bind", str(path), str(path)], triples)
         for path in (self.library, self.executable):

@@ -18,17 +18,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.bunshin.v2 import (
+from pal.bunshin import (
     ActionEnvelope, AggregateSnapshot, AggregateType, BunshinV2Repository,
     build_default_transition_engine,
 )
-from pal.bunshin.v2.contracts import StaleFencingToken, UnknownTransitionError
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.contracts import StaleFencingToken, UnknownTransitionError
+from pal.bunshin.cycle_protocol import (
     AssignmentKind, CycleAction, CycleAssignment, CycleSlot, CycleTransitionError,
     CycleVerdict, NodeCycle, NodeCycleState,
 )
-from pal.bunshin.v2.semantic_orchestration.assignment_identity import AssignmentIdentity
-from pal.bunshin.v2.sessions import module_verifier_session_id, node_role_generation
+from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
+from pal.bunshin.sessions import module_verifier_session_id, node_role_generation
 
 
 ROOT = Path(__file__).resolve().parents[1]

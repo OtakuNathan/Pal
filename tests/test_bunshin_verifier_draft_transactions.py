@@ -9,12 +9,12 @@ import threading
 
 import pytest
 
-from pal.bunshin.v2.contracts import AggregateType
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.work_items import submission_work_items
-from pal.bunshin.v2.review_findings import partition_findings
-from pal.bunshin.v2.semantic_evidence import recorded_cases
+from pal.bunshin.contracts import AggregateType
+from pal.bunshin.role_protocol import RoleAssignmentRequest
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.work_items import submission_work_items
+from pal.bunshin.review_findings import partition_findings
+from pal.bunshin.semantic_evidence import recorded_cases
 from tests import test_bunshin_v2_role_gateway as gateway_tests
 
 
@@ -227,7 +227,7 @@ def test_trusted_logical_evaluation_owns_retry_but_receipt_or_new_generation_is_
     ids = [item["item_id"] for item in inherited.payload["items"] if item["kind"] == "finding"]
     assert (finding["finding_id"] in ids) is editable
     if editable:
-        from pal.bunshin.v2.work_items import prepare_work_item_mutation
+        from pal.bunshin.work_items import prepare_work_item_mutation
         workspace = {"runtime_root": str(store.runtime_root), "bunshin_v2": {
             **next_context.to_dict(), "authoring_input_fingerprint": next_context.input_fingerprint}}
         args = {"finding_id": finding["finding_id"], "expected_revision": 1, "reason": "Same evaluation correction"}
@@ -314,7 +314,7 @@ def test_upsert_deleted_identity_remains_reserved_after_same_evaluation_retry(ga
     created = mutate(gateway, "work_items", "reserved-key")
     mutate(gateway, "work_items", "delete", finding_id=created["finding_id"], expected_revision=1, reason="Mistaken")
     retry = replacement_attempt(gateway)
-    from pal.bunshin.v2.work_items import prepare_work_item_mutation
+    from pal.bunshin.work_items import prepare_work_item_mutation
     workspace = {"runtime_root": str(store.runtime_root), "bunshin_v2": {
         **retry.to_dict(), "authoring_input_fingerprint": retry.input_fingerprint}}
     args = {"finding_id": created["finding_id"], "expected_revision": 0,

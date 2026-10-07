@@ -21,25 +21,25 @@ from pal.execution.tool_facade import (
     rejection,
 )
 from pal.shared import ToolExecutionResult
-from pal.bunshin.v2 import (
+from pal.bunshin import (
     ActionEnvelope,
     AggregateType,
     ArtifactRef,
     ContentAddressedArtifactStore,
     BunshinV2Repository,
 )
-from pal.bunshin.v2.contracts import AggregateSnapshot, SubmissionInvariantError
-from pal.bunshin.v2.delivery import DeliveryService, is_github_pull_request_remote
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.service import BunshinV2WorkflowService
-from pal.bunshin.v2.cycle_protocol import (
+from pal.bunshin.contracts import AggregateSnapshot, SubmissionInvariantError
+from pal.bunshin.delivery import DeliveryService, is_github_pull_request_remote
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.cycle_protocol import (
     AssignmentKind,
     CycleAction,
     CycleSlot,
 )
-from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY, add_finding_tool_result
-from pal.bunshin.v2.verification import (
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.review_findings import ADD_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY, add_finding_tool_result
+from pal.bunshin.verification import (
     DefectKind,
     DefectPropagationService,
     UnknownPolicy,
@@ -53,38 +53,38 @@ from pal.bunshin.v2.verification import (
     no_progress_detected,
     repair_bill_semantic_view,
 )
-from pal.bunshin.v2.verification_builder import (
+from pal.bunshin.verification_builder import (
     VERIFICATION_BUILDER_TOOL_SPECS,
     compile_verification_invocation_tool_contract,
     dominant_verification_defect_kind,
     effective_verification_policy,
     verification_builder_tool_result,
 )
-from pal.bunshin.v2.candidate_builder import (
+from pal.bunshin.candidate_builder import (
     CANDIDATE_BUILDER_TOOL_SPECS,
     candidate_builder_tool_result,
 )
-from pal.bunshin.v2.work_items import (
+from pal.bunshin.work_items import (
     BunshinUpdateChecklistInput,
     render_work_item_context,
     update_checklist_tool_result,
 )
-from pal.bunshin.v2.swe_verification import (
+from pal.bunshin.swe_verification import (
     _changed_paths,
     compile_swe_verification_tool_contract,
     infer_repair_target_modules,
     swe_verification_tool_result,
 )
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.v2.task_ledger import TaskLedgerService
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.bunshin.task_ledger import TaskLedgerService
+from pal.bunshin.role_protocol import RoleAssignmentRequest
 from pal.shared import RuntimeStatus
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.review_results import _compile_standalone_review_markdown, _verification_case_specs
-from pal.bunshin.v2.semantic_orchestration.verification_receipts import _confirmed_verification_findings, _recorded_verification_case_results, _verification_findings
-from pal.bunshin.v2.semantic_orchestration.verification_policy import _reject_manager_identity_fields, _routable_verification_findings, _resolve_dependency_node_id, _manager_required_system_scenario_work_items, _validate_skeleton_coder_report, _verification_repair_path_owners
-from pal.bunshin.v2.semantic_orchestration.verification_workspace import _semantic_verifier_instruction, _module_verifier_git_diff_refs, _verification_workspace_changed_paths, _verification_workspace_from_prompt_pack
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _verifier_reference_refs
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.review_results import _compile_standalone_review_markdown, _verification_case_specs
+from pal.bunshin.semantic_orchestration.verification_receipts import _confirmed_verification_findings, _recorded_verification_case_results, _verification_findings
+from pal.bunshin.semantic_orchestration.verification_policy import _reject_manager_identity_fields, _routable_verification_findings, _resolve_dependency_node_id, _manager_required_system_scenario_work_items, _validate_skeleton_coder_report, _verification_repair_path_owners
+from pal.bunshin.semantic_orchestration.verification_workspace import _semantic_verifier_instruction, _module_verifier_git_diff_refs, _verification_workspace_changed_paths, _verification_workspace_from_prompt_pack
+from pal.bunshin.semantic_orchestration.role_inputs import _verifier_reference_refs
 
 
 class _FakeExecutionAdapter:
@@ -754,7 +754,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             ],
         }
 
-        from pal.bunshin.v2.verification_readiness import case_corpus_binding, case_definition_fingerprint
+        from pal.bunshin.verification_readiness import case_corpus_binding, case_definition_fingerprint
         recorded = submission["recorded_results"][0]
         recorded["case_binding"] = case_corpus_binding(receipt_workspace["review_tool_evidence_refs"][0]["verification_binding"])
         recorded["command"] = ["/bin/sh", "-lc", f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py"]
@@ -1307,7 +1307,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         }
 
     def _record_current_corpus_check(self, workspace):
-        from pal.bunshin.v2.verification_readiness import (
+        from pal.bunshin.verification_readiness import (
             record_verification_execution, verification_corpus_snapshot,
         )
         call = new_tool_call(name="op_exec_shell", args={
@@ -2364,7 +2364,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
     def test_candidate_checklist_contract_is_reloadable_and_evidence_free(self) -> None:
         self.assertEqual(
             BunshinUpdateChecklistInput.__module__,
-            "pal.bunshin.v2.work_items",
+            "pal.bunshin.work_items",
         )
         schema = BunshinUpdateChecklistInput.model_json_schema(
             mode="validation"
@@ -2431,12 +2431,12 @@ class BunshinV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] = []
         with (
             patch(
-                "pal.bunshin.v2.candidate_builder.SubmissionDraftStore.uses_role_gateway",
+                "pal.bunshin.candidate_builder.SubmissionDraftStore.uses_role_gateway",
                 new_callable=PropertyMock,
                 return_value=True,
             ),
             patch(
-                "pal.bunshin.v2.candidate_builder.SubmissionDraftStore.mark_submitted",
+                "pal.bunshin.candidate_builder.SubmissionDraftStore.mark_submitted",
                 side_effect=ValueError("role submission is missing required input reads: repair_bill"),
             ),
         ):
@@ -4738,7 +4738,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             os.environ,
             {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
         ), patch(
-            "pal.bunshin.v2.delivery.is_github_pull_request_remote",
+            "pal.bunshin.delivery.is_github_pull_request_remote",
             return_value=True,
         ):
             receipt_ref = DeliveryService(
@@ -4820,7 +4820,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             os.environ,
             {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
         ), patch(
-            "pal.bunshin.v2.delivery.is_github_pull_request_remote",
+            "pal.bunshin.delivery.is_github_pull_request_remote",
             return_value=True,
         ):
             receipt_ref = DeliveryService(
@@ -4891,7 +4891,7 @@ class BunshinV2DeliveryTests(unittest.TestCase):
             os.environ,
             {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
         ), patch(
-            "pal.bunshin.v2.delivery.is_github_pull_request_remote",
+            "pal.bunshin.delivery.is_github_pull_request_remote",
             return_value=True,
         ):
             receipt_ref = DeliveryService(

@@ -9,13 +9,13 @@ from unittest.mock import patch
 import pytest
 
 from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.contracts import AggregateType, SubmissionInvariantError
-from pal.bunshin.v2.dependency_repair_protocol import RepairIncarnation
-from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest, stable_hash
-from pal.bunshin.v2.semantic_orchestration.dependency_repair_capture import DependencyRepairCapture
-from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.contracts import AggregateType, SubmissionInvariantError
+from pal.bunshin.dependency_repair_protocol import RepairIncarnation
+from pal.bunshin.execution_values import workspace_content_fingerprint
+from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
+from pal.bunshin.semantic_orchestration.dependency_repair_capture import DependencyRepairCapture
+from pal.bunshin.verification_readiness import verification_corpus_snapshot
 
 
 @pytest.fixture

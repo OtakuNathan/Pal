@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import unittest
 
-from pal.bunshin.v2.background_assignments import BackgroundAssignments
+from pal.bunshin.background_assignments import BackgroundAssignments
 
 
 class BackgroundAssignmentsTests(unittest.IsolatedAsyncioTestCase):

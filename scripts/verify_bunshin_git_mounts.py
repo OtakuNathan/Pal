@@ -40,7 +40,7 @@ def main() -> None:
 import encodings, errno, json, os, pathlib, sqlite3, ssl, subprocess, sys, sysconfig
 import msgpack
 import pal.foundation.sidecar
-import pal.bunshin.v2.worker_main
+import pal.bunshin.worker_main
 host_net = sys.argv[1]
 assert str(pathlib.Path(sys.executable).resolve()) == sys.argv[2], 'wrong worker interpreter'
 for runtime_path in (sys.executable, sysconfig.get_path('stdlib')):

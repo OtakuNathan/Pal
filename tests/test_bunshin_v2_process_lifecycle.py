@@ -14,10 +14,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from pal.bunshin.manager import BunshinManager, BunshinRunState
-from pal.bunshin.v2.contracts import LeaseConflict
-from pal.bunshin.v2.coroutine_runtime import CoroutineRunSemaphore
-from pal.bunshin.v2.workspace_resources import WorkspaceLockRegistry
-from pal.bunshin.v2.process_lifecycle import RoleProcessShell, WorkerProcessOwner, WorkerProcessReapError
+from pal.bunshin.contracts import LeaseConflict
+from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry
+from pal.bunshin.process_lifecycle import RoleProcessShell, WorkerProcessOwner, WorkerProcessReapError
 from pal.shared import BunshinInvocationPack
 
 
@@ -201,7 +201,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
             original_killpg(process_group, signal_number)
 
         with patch(
-            "pal.bunshin.v2.process_lifecycle.os.killpg",
+            "pal.bunshin.process_lifecycle.os.killpg",
             side_effect=killpg,
         ):
             await owner.close()
@@ -244,7 +244,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         events = []
         owner = self.owner(invocation_id="memory-spawn-fail", script="pass", events=events)
         self.attach_memory_lease(owner, events)
-        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=OSError("spawn failed"))):
+        with patch("pal.bunshin.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=OSError("spawn failed"))):
             with self.assertRaisesRegex(OSError, "spawn failed"):
                 await owner.__aenter__()
         self.assertEqual(events, ["memory-acquired", "memory-released"])
@@ -261,7 +261,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         owner.memory_read_lease_factory = lease
         semaphore = CoroutineRunSemaphore(1)
         shell = RoleProcessShell(owner, semaphore, owner.run_id)
-        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with patch("pal.bunshin.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
             with self.assertRaisesRegex(OSError, "lease failed"):
                 await shell.__aenter__()
             spawn.assert_not_called()
@@ -305,7 +305,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         owner.on_started = fail_start
         semaphore = CoroutineRunSemaphore(1)
         shell = RoleProcessShell(owner, semaphore, owner.run_id)
-        with patch("pal.bunshin.v2.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(return_value=Process())), patch("pal.bunshin.v2.process_lifecycle.os.killpg") as kill:
+        with patch("pal.bunshin.process_lifecycle.asyncio.create_subprocess_exec", new=AsyncMock(return_value=Process())), patch("pal.bunshin.process_lifecycle.os.killpg") as kill:
             with self.assertRaises(WorkerProcessReapError):
                 await shell.__aenter__()
             self.assertEqual(events, ["memory-acquired"])

@@ -125,10 +125,10 @@ Raspberry Pi development host.
 Regenerate the implementation topology after changing an enum or transition:
 
 ```bash
-python -c "from pathlib import Path; from pal.bunshin.v2.formal import write_implementation_topology; write_implementation_topology(Path('spec/bunshin_v2/ImplementationTopology.tla'))"
+python -c "from pathlib import Path; from pal.bunshin.formal import write_implementation_topology; write_implementation_topology(Path('spec/bunshin_v2/ImplementationTopology.tla'))"
 ```
 
-`pal.bunshin.v2.machine_dsl.MachineSpec` is the concrete lifecycle source of
+`pal.bunshin.machine_dsl.MachineSpec` is the concrete lifecycle source of
 truth. Runtime dispatch, recovery classification, control reconciliation, and
 the generated TLA+ topology consume it. Dynamic target functions must use the
 `target_resolver` decorator to declare their complete finite target set; the

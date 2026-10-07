@@ -8,11 +8,11 @@ from unittest.mock import patch
 import pytest
 
 from pal.bunshin.ipc import BunshinManagerRpcError
-from pal.bunshin.v2.contracts import SubmissionInvariantError
-from pal.bunshin.v2.draft_values import recorded_cases, submission_work_items
-from pal.bunshin.v2.role_protocol import stable_hash
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+from pal.bunshin.contracts import SubmissionInvariantError
+from pal.bunshin.draft_values import recorded_cases, submission_work_items
+from pal.bunshin.role_protocol import stable_hash
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.verification_readiness import verification_corpus_snapshot
 from tests.test_bunshin_dependency_repair_capture import case
 from tests.test_bunshin_verifier_submission_freshness import managed_verifier
 from tests.test_bunshin_verifier_tool_feedback import payload, run_delta, verifier

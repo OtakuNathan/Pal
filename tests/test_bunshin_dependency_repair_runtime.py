@@ -16,18 +16,18 @@ from unittest.mock import patch
 import pytest
 
 from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
-from pal.bunshin.v2.architecture_templates import ArchitectureTemplateCompiler
-from pal.bunshin.v2.catalog import BunshinV2Catalog
-from pal.bunshin.v2.contract_protocol import validate_contract_payload
-from pal.bunshin.v2.contracts import ActionEnvelope, AggregateType, DeferredEffectError, SubmissionInvariantError
-from pal.bunshin.v2.execution_values import workspace_content_fingerprint
-from pal.bunshin.v2.graph_compiler import GraphCompileBindings, GraphCompiler
-from pal.bunshin.v2.graph_protocol import RoleBinding
-from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.v2.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.v2.role_protocol import RoleAssignmentRequest, stable_hash
-from pal.bunshin.v2.process_lifecycle import WorkerProcessOwner
-from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
+from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
+from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.contract_protocol import validate_contract_payload
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, DeferredEffectError, SubmissionInvariantError
+from pal.bunshin.execution_values import workspace_content_fingerprint
+from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.bunshin.graph_protocol import RoleBinding
+from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
+from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
+from pal.bunshin.process_lifecycle import WorkerProcessOwner
+from pal.bunshin.verification_readiness import verification_corpus_snapshot
 
 
 def _concurrent_software_graph(workflow_id):
@@ -361,7 +361,7 @@ def test_provider_release_waits_for_real_peer_process_task_lock_and_submit_cut(c
         case.worker.background.bind(effect["effect_key"], peer["assignment"]["assignment_id"])
         case.worker.background.bind_lease(effect["effect_key"], node.payload["active_worker_id"],
                                          node.payload["lease_resource_key"], node.payload["fencing_token"])
-        from pal.bunshin.v2.semantic_orchestration.dependency_repair_apply import apply_dependency_repair_cohort
+        from pal.bunshin.semantic_orchestration.dependency_repair_apply import apply_dependency_repair_cohort
         apply_observed = []
 
         def checked_apply(**kwargs):
@@ -378,7 +378,7 @@ def test_provider_release_waits_for_real_peer_process_task_lock_and_submit_cut(c
             apply_observed.append(kwargs["cohort_key"])
             return apply_dependency_repair_cohort(**kwargs)
 
-        apply_spy = patch("pal.bunshin.v2.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort", side_effect=checked_apply)
+        apply_spy = patch("pal.bunshin.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort", side_effect=checked_apply)
         apply_spy.start()
         repairing = None
         try:
@@ -480,8 +480,8 @@ def test_independent_submitted_report_waits_for_later_cohort_without_global_barr
 
 
 def test_claimed_apply_crash_retries_exact_effect_after_source_stale_and_manager_restart(case):
-    from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-    from pal.bunshin.v2.storage.serialization import _utc_datetime
+    from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+    from pal.bunshin.storage.serialization import _utc_datetime
 
     async def run():
         await case.start_checker("archive_verify")
@@ -491,7 +491,7 @@ def test_claimed_apply_crash_retries_exact_effect_after_source_stale_and_manager
         await case.prepare_source()
         await case.prepare_source("index_verify")
         original = case.claim("archive_verify", "reconcile_dependency_repairs")
-        with patch("pal.bunshin.v2.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort",
+        with patch("pal.bunshin.semantic_orchestration.dependency_repair_apply.apply_dependency_repair_cohort",
                    side_effect=RuntimeError("deterministic crash after all closures")):
             assert await case.processor._process_effect(original) == "failed"
         cohort = case.graph().dependency_repairs.pending
@@ -503,7 +503,7 @@ def test_claimed_apply_crash_retries_exact_effect_after_source_stale_and_manager
         # registry; immutable effect authority must be sufficient for retry.
         case.worker = SemanticOrchestrator(case.service)
         case.processor.semantic_effects = case.worker
-        with patch("pal.bunshin.v2.storage.outbox_claims._utc_datetime", return_value=_utc_datetime() + timedelta(seconds=6)):
+        with patch("pal.bunshin.storage.outbox_claims._utc_datetime", return_value=_utc_datetime() + timedelta(seconds=6)):
             retry = case.claim("archive_verify", "reconcile_dependency_repairs")
         assert retry["effect_id"] == original["effect_id"]
         assert retry["effect_key"] == original["effect_key"]
@@ -656,8 +656,8 @@ def test_claimed_snapshot_rebind_preserves_original_fence_and_closes_both_incarn
 
 def _seed_two_identical_dependency_failures(case, name):
     """Derive the real report hash, then seed prior attempts via public rebind."""
-    from pal.bunshin.v2.semantic_orchestration.dependency_repair_facts import freeze_incarnation
-    from pal.bunshin.v2.semantic_orchestration.role_inputs import _candidate_tree_fingerprint
+    from pal.bunshin.semantic_orchestration.dependency_repair_facts import freeze_incarnation
+    from pal.bunshin.semantic_orchestration.role_inputs import _candidate_tree_fingerprint
 
     case.submit(name)
     node = case.node(name)

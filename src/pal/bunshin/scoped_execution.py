@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pal.bunshin.v2.review_receipts import _review_tool_evidence_ref
+from pal.bunshin.review_receipts import _review_tool_evidence_ref
 
 from pal.shared.tool_protocol import ToolCallIR
 
@@ -52,33 +52,33 @@ from pal.bunshin.tool_admission import (
     effective_bunshin_capability_name,
     effective_bunshin_tool_args,
 )
-from pal.bunshin.v2.ask_question import (
+from pal.bunshin.ask_question import (
     ASK_QUESTION_CAPABILITY,
     ASK_QUESTION_TOOL_SPEC,
     ask_question_tool_result,
 )
-from pal.bunshin.v2.contract_submission import (
+from pal.bunshin.contract_submission import (
     CONTRACT_SUBMIT_CAPABILITY,
     CONTRACT_SUBMIT_TOOL_SPEC,
     contract_submit_tool_result,
 )
-from pal.bunshin.v2.candidate_builder import (
+from pal.bunshin.candidate_builder import (
     CANDIDATE_BUILDER_TOOL_SPECS,
     candidate_builder_tool_result,
     is_candidate_builder_capability,
 )
-from pal.bunshin.v2.review_findings import (
+from pal.bunshin.review_findings import (
     ADD_FINDING_CAPABILITY,
     ADD_FINDING_TOOL_SPEC,
     review_finding_tool_result,
     is_review_finding_capability,
 )
-from pal.bunshin.v2.review_submission import (
+from pal.bunshin.review_submission import (
     REVIEW_SUBMIT_CAPABILITY,
     REVIEW_SUBMIT_TOOL_SPEC,
     review_submit_tool_result,
 )
-from pal.bunshin.v2.work_items import (
+from pal.bunshin.work_items import (
     REMOVE_FINDING_CAPABILITY,
     REMOVE_FINDING_TOOL_SPEC,
     UPDATE_FINDING_CAPABILITY,
@@ -87,13 +87,13 @@ from pal.bunshin.v2.work_items import (
     UPDATE_CHECKLIST_TOOL_SPEC,
     update_checklist_tool_result,
 )
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.swe_verification import (
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.swe_verification import (
     SWE_VERIFICATION_TOOL_SPECS,
     is_swe_verification_capability,
     swe_verification_tool_result,
 )
-from pal.bunshin.v2.verification_builder import (
+from pal.bunshin.verification_builder import (
     SHELL_EVIDENCE_CAPABILITIES,
     VERIFICATION_BUILDER_TOOL_SPECS,
     is_verification_builder_capability,
@@ -964,7 +964,7 @@ class BunshinScopedExecutionRuntime:
     async def _execute_verifier_authoring(
         self, call: ToolCallIR, *, target_name: str, budget: Any, turn_id: str,
     ) -> ToolExecutionResult:
-        from pal.bunshin.v2.verification_readiness import (
+        from pal.bunshin.verification_readiness import (
             record_verification_execution, verification_corpus_snapshot,
         )
 

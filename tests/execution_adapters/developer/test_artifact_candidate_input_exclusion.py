@@ -23,15 +23,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pal.bunshin.v2 import adapters, input_binding
-from pal.bunshin.v2.adapters import (
+from pal.bunshin import adapters, input_binding
+from pal.bunshin.adapters import (
     ArtifactBundleAdapter,
     artifact_tree_fingerprint,
     provision_artifact_workspaces,
 )
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.input_binding import BOUND_INPUTS_ROOT
-from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.input_binding import BOUND_INPUTS_ROOT
+from pal.bunshin.repository import BunshinV2Repository
 
 WORKER_FILES = {
     "report.md",

@@ -4,9 +4,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from pal.bunshin.ipc import BunshinManagerRpcError
-from pal.bunshin.v2 import contract_submission, review_submission
-from pal.bunshin.v2.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftStore
-from pal.bunshin.v2.submission_errors import (
+from pal.bunshin import contract_submission, review_submission
+from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, SubmissionDraftStore
+from pal.bunshin.submission_errors import (
     SubmissionValidationError, role_gateway_error_kind, submission_validation,
 )
 from pal.foundation.sidecar import dispatch_sidecar_request
@@ -99,7 +99,7 @@ def test_validation_category_survives_rpc_serialization(exc, kind):
 
 
 def test_pinned_manager_state_error_is_not_content_validation():
-    from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
+    from pal.bunshin.role_gateway import RoleAssignmentGateway
 
     gateway = RoleAssignmentGateway(Mock())
     gateway.service.repository.artifacts.read_artifact_record.return_value = None
@@ -125,8 +125,8 @@ def test_known_validation_rejection_does_not_query_receipt():
 
 
 def test_wrapped_yaml_io_error_is_infrastructure(tmp_path):
-    from pal.bunshin.v2.contract_protocol import read_architect_yaml
-    from pal.bunshin.v2.submission_errors import submission_error_result
+    from pal.bunshin.contract_protocol import read_architect_yaml
+    from pal.bunshin.submission_errors import submission_error_result
 
     with pytest.raises(ValueError) as caught:
         with submission_validation():

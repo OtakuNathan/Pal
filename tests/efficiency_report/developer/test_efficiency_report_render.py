@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 
-from pal.bunshin.v2.efficiency_metrics import (
+from pal.bunshin.efficiency_metrics import (
     MetricValue,
     RoleEfficiencyTotals,
     WorkflowEfficiencyMetrics,
 )
-from pal.bunshin.v2.efficiency_report import render_json, render_text
+from pal.bunshin.efficiency_report import render_json, render_text
 
 
 def _available(value: float | int) -> MetricValue:

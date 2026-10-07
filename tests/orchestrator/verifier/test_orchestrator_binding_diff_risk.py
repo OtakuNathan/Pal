@@ -20,10 +20,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.v2.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.v2.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.v2.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
-from pal.bunshin.v2.service import BunshinV2WorkflowService
+from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+from pal.bunshin.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
+from pal.bunshin.service import BunshinV2WorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
 WORKSPACE_REPO = Path(__file__).resolve().parents[3]

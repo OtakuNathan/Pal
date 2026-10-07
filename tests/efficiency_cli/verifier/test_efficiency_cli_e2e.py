@@ -29,7 +29,7 @@ import pytest
 
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.v2.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_v2_schema
 from pal.shared import BunshinInvocationPack
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -354,7 +354,7 @@ def test_cli_corrupt_storage_reports_diagnostic(tmp_path: Path) -> None:
 
 
 def test_operator_docs_match_metrics_and_json_shape(tmp_path: Path) -> None:
-    from pal.bunshin.v2.efficiency_metrics import WorkflowEfficiencyMetrics
+    from pal.bunshin.efficiency_metrics import WorkflowEfficiencyMetrics
 
     doc_path = _REPO_ROOT / "docs" / "bunshin_efficiency.md"
     doc = doc_path.read_text(encoding="utf-8")

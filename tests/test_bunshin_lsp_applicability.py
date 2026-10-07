@@ -9,18 +9,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.v2.semantic_orchestration.attempt_verifier_context import VerifierContext
-from pal.bunshin.v2.semantic_orchestration.role_inputs import _semantic_role_input_refs
-from pal.bunshin.v2.submission_drafts import authoring_input_fingerprint
-from pal.bunshin.v2.swe_verification import (
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+from pal.bunshin.semantic_orchestration.role_inputs import _semantic_role_input_refs
+from pal.bunshin.submission_drafts import authoring_input_fingerprint
+from pal.bunshin.swe_verification import (
     semantic_verification_submission_errors,
     verification_outcome_readiness,
 )
-from pal.bunshin.v2.verification_builder import compile_verification_invocation_tool_contract
-from pal.bunshin.v2.verification_lsp_policy import lsp_evidence_required
+from pal.bunshin.verification_builder import compile_verification_invocation_tool_contract
+from pal.bunshin.verification_lsp_policy import lsp_evidence_required
 from tests.test_bunshin_historical_contract import modern_bill
 from tests.test_bunshin_verifier_tool_feedback import verifier, payload, run_delta, status
 

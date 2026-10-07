@@ -10,8 +10,8 @@ import pytest
 from pal.bunshin.runner_components.agent_session import _build_scoped_execution_runtime
 from pal.bunshin.runner_components.tool_session import ToolSession
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime, BunshinScopedExecutionShellInput
-from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.work_items import ADD_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY
+from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.bunshin.work_items import ADD_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
     EffectOutcome, EffectReceipt, EmptyToolInput, StructuredToolOutput, ToolHandlerResult,
@@ -98,7 +98,7 @@ def test_consumed_finding_edit_contracts_hydrate_fresh_and_resumed_pack(verifier
 
 
 def test_consumed_finding_aliases_edit_then_delete_current_completed_finding(verifier):
-    from pal.bunshin.v2.work_items import findings_from_work_items
+    from pal.bunshin.work_items import findings_from_work_items
 
     _, workspace, _, call, _, _ = verifier
     created = payload(call('update_finding', finding_id='probe-assertion', expected_revision=0,
@@ -248,7 +248,7 @@ def test_hydration_keeps_invocation_evidence_contract_filter(verifier, allowed, 
 
 def test_submit_serializes_corpus_writer_across_runtime_views_and_rechecks_freeze(verifier, monkeypatch):
     from pal.bunshin import scoped_execution
-    from pal.bunshin.v2.swe_verification import verification_outcome_readiness
+    from pal.bunshin.swe_verification import verification_outcome_readiness
 
     _, workspace, probe, _, current, _ = verifier
     payload(run_delta(verifier))
@@ -306,7 +306,7 @@ def test_submit_serializes_corpus_writer_across_runtime_views_and_rechecks_freez
 ])
 def test_direct_execution_records_receipt_before_waiting_submit_enters(verifier, monkeypatch, canonical, alias, output):
     from pal.bunshin import scoped_execution
-    from pal.bunshin.v2 import verification_readiness
+    from pal.bunshin import verification_readiness
 
     _, workspace, _, _, current, _ = verifier
     payload(run_delta(verifier))
