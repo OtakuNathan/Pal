@@ -216,7 +216,7 @@ submits the assignment.
 
 | Model action/property | Required implementation boundary | Concrete conformance coverage |
 | --- | --- | --- |
-| `EditFinding`, `DraftAllowsFindingCRUD` | Current-owned finding create/update/delete in `work_items`; stable identity on update, fresh identity after delete/recreate; reducer and Manager persistence validate the target | All allowed finding kinds/dispositions; completed finding edit/delete; rejected stale/deleted target; caller-forged `origin` cannot grant ownership |
+| `EditFinding`, `DraftAllowsFindingCRUD` | Canonical `update_finding` inserts or updates current-owned findings; `remove_finding` removes them. Caller IDs stay stable while current; removed/protected IDs remain reserved. `VerifierFindingUpsert` refines this API convention | All allowed finding kinds/dispositions; completed finding edit/delete; rejected stale/deleted target; caller-forged `origin` cannot grant ownership |
 | `EditCase`, `RecordEvidence`, `DraftAllowsCaseCRUD` | Case definition changes and execution-result upserts in the verification draft; current case content and evidence remain distinct | Add/replace/remove current cases; definition/content changes stale old evidence; execution can create fresh evidence; deleting an unrelated result cannot waive mandatory historical replay |
 | `CommitSubmit`, `AtomicSubmissionSnapshot` | `role_gateway._draft_submit` passes both observed versions; `RoleSubmissionsStore.record_role_submission` rechecks both versions and authority inside its write transaction before accepting the receipt | Barrier-controlled finding-edit/submit and case-edit/submit races: edit first rejects stale submit; receipt first rejects either edit; do not reconcile stale submit into a newer draft |
 | `ReceiptFreezesBothDrafts`, `ProjectSubmitted` | Every local/Manager draft write checks the authoritative assignment receipt in the same transaction as its write, including sibling authoring drafts | Inject failure after receipt persistence and before projection; both findings and cases remain frozen; exact receipt replay/recovery never changes sealed content |
@@ -245,6 +245,11 @@ with absent/pending/accepted receipt states, stored ownership and matching input
 Actual payload parsing, stable record IDs, content hashes, artifact durability,
 schema validation and history partitioning still require the conformance tests
 above. The model deliberately has no liveness claim or promise that tests pass.
+`CurrentEvidence` abstracts the conjunction of retained case bindings and
+required historical coverage; one unrelated fresh execution cannot satisfy it
+for stale cases. `Authorized` abstracts a currently running authenticated
+attempt as well as matching identity and fence: retirement must invalidate
+preauthenticated writes even if the lease has not yet been removed.
 Bounded edit/version counts constrain model exploration, not user authoring.
 The checked configurations allow two revisions per draft, one physical corpus
 write, two generations and two fence values. One physical write exercises both
@@ -269,3 +274,65 @@ counterexamples are part of `scripts/check_bunshin_v2_tla.sh`.
 `TLA2TOOLS_JAR` is supplied, otherwise explicitly skips TLC. Its supplemental
 Python scenarios exhaust four smaller finite spaces and source classifications;
 they are neither a TLA parser nor the full model nor production refinement proof.
+
+### Consumed authoring contract and recovery
+
+Before submission, the canonical verifier API is `update_finding` plus
+`remove_finding`. A caller-supplied finding ID with `expected_revision=0` inserts
+a never-used current finding; the same API updates an existing ID at its matching
+positive revision. Removed IDs and external/submitted history IDs stay reserved;
+new findings use fresh IDs. Removals require a reason and report the removed
+record's last revision. Completed findings remain editable. Executing a
+verification case with its existing semantic name replaces its current result;
+`remove_verification_case` removes a current case separately from findings.
+`read_verification_draft_status` exposes the current findings, revisions and
+outcome blockers. Durable operation records preserve edits and removals, while
+external and submitted source records remain separate immutable history.
+
+Testcase edits invalidate previously recorded execution receipts for final
+submission. A retained case also needs its own matching Candidate, corpus and case-definition binding: an
+unrelated successful command cannot refresh another case's old PASS. Legacy
+case results without those bindings must be rerun. Mandatory historical
+coverage and current blocking findings still gate submission.
+
+Supported foreground verifier writers, their completed execution receipts and
+submission share an authoring lock. SQLite rechecks both draft versions and
+assignment authority when accepting the durable receipt. This does not lock
+detached descendants or external filesystem writers; the final corpus is
+checked again at receipt acceptance. Resume preserves the immutable invocation
+identity and restores compatible authoring tools while honoring explicit
+capability denials. Loading this implementation does not submit or resume a
+paused workflow automatically.
+
+### Focused canonical finding upsert refinement
+
+`VerifierFindingUpsert.tla` checks the canonical API convention independently of
+the unchanged, already-checked `VerifierDraftLifecycle` submission/evidence
+protocol. It models one arbitrary current ID, one protected history ID, three
+operation keys, two content values and revisions through three. Its `Freeze`
+action abstracts an already-valid durable submission from the lifecycle model;
+it does not bypass or replace PASS readiness, fencing or the two-draft CAS.
+
+| Focused action/property | Implementation requirement | Required concrete test |
+| --- | --- | --- |
+| `UpdateFinding`, `CanonicalUpdateAvailable` | Route canonical `update_finding` to one reducer: never-used ID plus semantic `expected_revision=0` inserts at revision 1; present ID plus matching positive revision replaces content under the same ID | Same tool creates then updates; wrong insert/existing revision fails; two concurrent insert-at-zero calls cannot both create the same ID |
+| `RemoveFinding`, `RemovedIDsStayAbsent` | Reserve removed IDs using trusted durable current/history/audit/source lineage. Removal preserves the last record revision in its audit result while advancing the draft version | Remove then retry an old create/update operation; exact replay returns its immutable prior result without restoring the record; a new operation cannot reuse the removed ID |
+| `ProtectedIDsNeverCurrent` | Validate protected/reserved IDs inside the persistence transaction as well as the reducer; caller payload cannot supply trusted ownership or tombstones | Direct Manager update with a protected source ID cannot shadow immutable history into the editable current map |
+| `Replay`, `ConflictReplayRejected`, `ExactlyOneWritePerOperation` | Scope operation keys to the draft and hash the complete semantic request, including finding ID, semantic `expected_revision`, content and removal reason. Exact duplicate returns recorded result without another write | Same key/same request keeps draft version unchanged; changed content or semantic revision with that key conflicts, including after the original finding was removed |
+| `ReceiptFreezesFindings`, `RecordedOperationsNeverChange` | Keep existing receipt/fence/CAS admission and immutable operation results; upsert does not open another authoring route | Upsert/remove after pending durable receipt cannot write; completed current findings remain editable before that boundary |
+
+Store transport `expected_version` and authenticated context remain outside the
+semantic request hash; the exposed per-finding `expected_revision` is inside it.
+Tombstones above are a protocol abstraction over trusted durable audit/lineage,
+not a request for new caller-controlled fields or a schema migration. Legacy
+`add_finding` compatibility, if retained internally, must use the same guarded
+creation path and allocate a fresh ID; it is absent from the new canonical tool
+surface. The model does not equate absence from the current map with permission
+to overwrite an ID reserved by history or a prior removal.
+
+The focused positive configuration checks safety and upsert/remove availability.
+Six guard mutants require counterexamples. The `CRUDWitness` configuration
+requires a reachable canonical insert, canonical update and removal of the same
+ID, with all operation requests/results retained for exact replay. Actual TLC
+checks live in `tests/test_bunshin_verifier_finding_upsert_model.py`; its static
+wiring assertion alone is not a model-checking claim.

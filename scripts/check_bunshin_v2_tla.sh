@@ -15,6 +15,7 @@ models=(
     ModuleLifecycle
     ProduceCheckCycle
     VerifierDraftLifecycle
+    VerifierFindingUpsert
     ImportedPlanLifecycle
     GraphGenerationLifecycle
     GraphExecutionLifecycle
@@ -86,6 +87,34 @@ for entry in \
     if [[ ${draft_status} -eq 0 ]] || [[ "${draft_output}" != *"Invariant ${invariant} is violated"* ]]; then
         echo "VerifierDraftLifecycle${suffix} did not reproduce ${invariant}" >&2
         echo "${draft_output}" >&2
+        exit 1
+    fi
+done
+
+# Focused canonical update_finding upsert guards and its insert/update/remove witness.
+for entry in \
+    StaleRevision:ExpectedRevisionWasCurrent \
+    HistoryID:ProtectedIDsNeverCurrent \
+    Resurrect:RemovedIDsStayAbsent \
+    ReceiptBlind:ReceiptFreezesFindings \
+    ConflictingReplay:ConflictReplayRejected \
+    ReplayWrite:ExactlyOneWritePerOperation \
+    CRUDWitness:NoCRUDWitness; do
+    suffix="${entry%%:*}"
+    invariant="${entry#*:}"
+    echo "==> TLC VerifierFindingUpsert${suffix} (expected ${invariant} counterexample)"
+    set +e
+    upsert_output="$({
+        java -XX:+UseParallelGC -jar "${tla_jar}" \
+            -workers "${workers}" -cleanup \
+            -config "spec/bunshin_v2/VerifierFindingUpsert${suffix}.cfg" \
+            spec/bunshin_v2/VerifierFindingUpsert.tla
+    } 2>&1)"
+    upsert_status=$?
+    set -e
+    if [[ ${upsert_status} -eq 0 ]] || [[ "${upsert_output}" != *"Invariant ${invariant} is violated"* ]]; then
+        echo "VerifierFindingUpsert${suffix} did not reproduce ${invariant}" >&2
+        echo "${upsert_output}" >&2
         exit 1
     fi
 done
