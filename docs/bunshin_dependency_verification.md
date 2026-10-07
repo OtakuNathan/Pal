@@ -10,6 +10,15 @@ its assembled candidate. True `contract_only` modules remain contract/interface
 inputs and never become executable provider repair targets. The declared sink also
 waits for every produced module, including synthetic checker dependencies.
 
+An already accepted module may have no changes from the existing repository
+baseline. Its durable checkpoint remains a real product: assembly validates its
+node/epoch, contract, environment, commit/tree and empty-diff checksum, then binds
+it without creating a commit when that baseline is already in the consumer's
+history. `delta_patch_sha` is a checksum of Git diff bytes, not an artifact ref;
+no separate empty blob is required. Producer checkpoint metadata and the node's
+later verifier dependency bindings remain distinct, including through chains of
+unchanged modules. Missing or inconsistent checkpoint evidence still fails closed.
+
 GraphIR generations are immutable. Loading an existing generation does not change
 its edge kinds or dependency bindings. Resolving a terminal UNKNOWN on an old
 contract-only intermediate graph does not retroactively assemble provider products.

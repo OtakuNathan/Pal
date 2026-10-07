@@ -24,6 +24,7 @@ def prepare_node_dependency_baseline(
     node_by_id: Mapping[str, AggregateSnapshot],
     *,
     apply_candidates: bool = True,
+    artifacts: ContentAddressedArtifactStore | None = None,
 ) -> dict[str, Any]:
     workspace = Path(str(node.payload.get("workspace_path") or ""))
     if not workspace.is_dir():
@@ -67,12 +68,16 @@ def prepare_node_dependency_baseline(
             if not candidate_digest:
                 raise ValueError(f"accepted dependency has no candidate digest: {dependency_id}")
             if adapter == SOFTWARE_GIT_ADAPTER:
-                if (
-                    apply_candidates
-                    and recorded_applied_digests.get(dependency_id)
-                    != candidate_digest
-                ):
-                    _apply_dependency_candidate_delta(workspace, dependency)
+                if apply_candidates and candidate_digest == str(dependency.payload.get("base_sha") or ""):
+                    # Revalidate even on replay: a cached digest cannot excuse
+                    # a missing or changed immutable checkpoint reference.
+                    _validate_unchanged_dependency_candidate(
+                        workspace, dependency, consumer=node, artifacts=artifacts,
+                    )
+                elif apply_candidates and recorded_applied_digests.get(dependency_id) != candidate_digest:
+                    _apply_dependency_candidate_delta(
+                        workspace, dependency, consumer=node, artifacts=artifacts,
+                    )
             elif adapter != ARTIFACT_BUNDLE_ADAPTER:
                 raise ValueError(f"unsupported execution adapter: {adapter}")
             accepted_digests.append(candidate_digest)
@@ -133,6 +138,7 @@ def prepare_node_verification_baseline(
         node,
         node_by_id,
         apply_candidates=True,
+        artifacts=artifacts,
     )
     verification_digest = str(
         baseline.pop("base_sha", "") or baseline.pop("base_digest", "")
@@ -243,6 +249,9 @@ def prepare_node_verification_baseline(
 def _apply_dependency_candidate_delta(
     workspace: Path,
     dependency: AggregateSnapshot,
+    *,
+    consumer: AggregateSnapshot,
+    artifacts: ContentAddressedArtifactStore | None,
 ) -> None:
     candidate_digest = str(dependency.payload.get("candidate_digest") or "")
     candidate_base = str(dependency.payload.get("base_sha") or "")
@@ -267,9 +276,10 @@ def _apply_dependency_candidate_delta(
         if line.strip()
     ]
     if not commits:
-        raise ValueError(
-            f"accepted dependency Candidate contains no delta: {dependency.aggregate_id}"
+        _validate_unchanged_dependency_candidate(
+            workspace, dependency, consumer=consumer, artifacts=artifacts,
         )
+        return
     patch_equivalence = {
         parts[1]: parts[0]
         for line in _git(
@@ -295,6 +305,59 @@ def _apply_dependency_candidate_delta(
                     f"workspace: {dependency.aggregate_id}"
                 ) from exc
             raise
+
+
+def _validate_unchanged_dependency_candidate(
+    workspace: Path, dependency: AggregateSnapshot, *, consumer: AggregateSnapshot,
+    artifacts: ContentAddressedArtifactStore | None,
+) -> None:
+    """Accept a proven existing product, without manufacturing a content commit.
+
+    An empty rev-list alone is insufficient: the accepted checkpoint must be
+    durable, describe this exact unchanged baseline, and belong to this epoch.
+    delta_patch_sha is a checksum of Git diff bytes, never an artifact reference.
+    """
+    if artifacts is None:
+        raise ValueError("unchanged dependency requires its durable Candidate artifact")
+    supplied = ArtifactRef.from_mapping(dict(dependency.payload.get("candidate_ref") or {}))
+    record = artifacts.metadata_repository.read_artifact_record(supplied.sha256)
+    if (record is None or not record.get("durable") or not supplied.durable
+            or supplied.artifact_type != "GitCheckpointArtifact"
+            or supplied != ArtifactRef.from_mapping(record)):
+        raise ValueError("unchanged dependency has no matching durable Git checkpoint")
+    data = artifacts.read_bytes(supplied)
+    if len(data) != supplied.byte_size:
+        raise ValueError("unchanged dependency checkpoint byte size is inconsistent")
+    candidate = dict(json.loads(data.decode("utf-8")))
+    baseline = str(dependency.payload.get("base_sha") or "")
+    digest = str(dependency.payload.get("candidate_digest") or "")
+    contract = str(dict(dependency.payload.get("unit_contract_ref") or {}).get("sha256") or "")
+    if (dependency.workflow_id != consumer.workflow_id
+            or not dependency.payload.get("epoch_id")
+            or dependency.payload.get("epoch_id") != consumer.payload.get("epoch_id")
+            or int(dependency.payload.get("graph_generation") or 0) <= 0
+            or int(dependency.payload.get("graph_generation") or 0) != int(consumer.payload.get("graph_generation") or 0)):
+        raise ValueError("unchanged dependency belongs to another execution baseline")
+    expected = {
+        "schema_version": "3", "node_run_id": dependency.aggregate_id,
+        "candidate_digest": digest, "base_sha": baseline, "previous_head_sha": baseline,
+        "architecture_base_sha": baseline, "unit_contract_hash": contract,
+        "environment_fingerprint": str(dependency.payload.get("environment_fingerprint") or "default"),
+    }
+    if (not baseline or digest != baseline or not contract
+            or any(candidate.get(key) != value for key, value in expected.items())
+            or candidate.get("changed_paths") != []):
+        raise ValueError("unchanged dependency checkpoint does not match its accepted node")
+    # The checkpoint describes the producer boundary. An unchanged verifier
+    # assembly keeps that checkpoint and stores newly accepted dependency
+    # bindings on the node; those two hash maps need not be identical.
+    if not _git_is_ancestor(workspace, baseline, "HEAD"):
+        raise ValueError("unchanged dependency baseline is not present in the consumer history")
+    tree = _git(workspace, "rev-parse", f"{baseline}^{{tree}}").strip()
+    delta = _git_bytes(workspace, "diff", "--binary", baseline, digest, "--")
+    if (candidate.get("baseline_tree_sha") != tree or candidate.get("candidate_tree_sha") != tree
+            or delta or candidate.get("delta_patch_sha") != hashlib.sha256(delta).hexdigest()):
+        raise ValueError("unchanged dependency checkpoint tree or delta evidence is inconsistent")
 
 
 def _recorded_applied_dependency_digests(

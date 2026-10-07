@@ -59,6 +59,7 @@ class DagScheduler:
                     node,
                     node_by_id,
                     apply_candidates=True,
+                    artifacts=ContentAddressedArtifactStore(self.repository.runtime_root, self.repository.artifacts),
                 )
                 if producer_dependencies
                 else {}
