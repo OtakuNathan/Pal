@@ -18,6 +18,8 @@ from pal.bunshin.git_gateway_diagnostics import (
     MAX_GIT_DIAGNOSTIC_SESSIONS,
 )
 from pal.bunshin.v2.role_gateway import RoleAssignmentGateway
+from pal.execution.contracts import CapabilityResult
+from pal.shared import RuntimeStatus
 
 
 ATTEMPT = "att_" + "a" * 24
@@ -261,7 +263,8 @@ def test_existing_git_operation_runs_once_and_raw_classification_is_not_recorded
         read_role_attempt=Mock(return_value={"prompt_pack_ref": {"sha256": "fixture"}}))
     gateway.service.artifacts = SimpleNamespace(read_json=Mock(return_value={
         "workspace": {"repo_path": str(tmp_path)}}))
-    result = SimpleNamespace(structured={"returncode": 1, "stdout": SECRET,
+    result = CapabilityResult(status=RuntimeStatus.ERROR, llm_text=SECRET,
+        structured={"returncode": 1, "stdout": SECRET,
         "stderr": SECRET, "classification": {"raw": SECRET}})
     with patch("pal.bunshin.v2.role_gateway.GitTool") as tool, patch(
         "pal.bunshin.v2.role_gateway.scoped_role_git_read_command", return_value="status --short"

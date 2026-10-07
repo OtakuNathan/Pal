@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
+from pal.execution.tool_facade import ToolExecutionError, ToolRejectedError
+from pal.shared import RuntimeStatus
 from pal.bunshin.git_gateway_diagnostics import GitGatewayDiagnostics
 from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env, RoleGatewayArtifactStore
@@ -810,10 +812,27 @@ class RoleAssignmentGateway:
 
         result = GitTool().invoke({"cmd": scoped_command, "cwd": str(cwd)})
         structured = dict(result.structured or {})
+        # A pre-execution refusal has no native Git process result. Keep it on
+        # the gateway error path, which the worker shim reports as a refusal.
+        if result.status in {RuntimeStatus.FORBIDDEN, RuntimeStatus.INVALID}:
+            raise ToolRejectedError(
+                "Git wrapper rejected the scoped command before execution.",
+                error_code=str(structured.get("error_code") or "git_read_rejected"),
+            )
+        if (
+            result.status not in {RuntimeStatus.OK, RuntimeStatus.ERROR}
+            or type(structured.get("returncode")) is not int
+            or type(structured.get("stdout")) is not str
+            or type(structured.get("stderr")) is not str
+        ):
+            raise ToolExecutionError(
+                "Git wrapper did not return a valid process result.",
+                error_code="git_read_invalid_result",
+            )
         return {
-            "returncode": int(structured.get("returncode", 1)),
-            "stdout": str(structured.get("stdout") or ""),
-            "stderr": str(structured.get("stderr") or ""),
+            "returncode": structured["returncode"],
+            "stdout": structured["stdout"],
+            "stderr": structured["stderr"],
             "classification": dict(structured.get("classification") or policy.to_dict()),
         }
 
