@@ -10,30 +10,11 @@ from pal.bunshin.v2.role_contracts import OrchestrationRole, RoleActivation
 from pal.bunshin.v2.semantic_orchestration.review_results import _ref_from_mapping
 
 
-EPHEMERAL_ROLE_INPUT_NAMES = frozenset({"workspace_preparation"})
-
-
-def _role_input_is_semantic(name: str, *, role: str, mode: str = "") -> bool:
-    # Workspace preparation is an attempt-local observation. It may contain
-    # paths, scanned-file counts, and optional LSP observations that naturally
-    # change when a verifier writes a corpus case or a process is restarted.
-    # Those changes must not create a new logical assignment or invalidate the
-    # durable role Draft. Evidence records carry their own environment
-    # fingerprint when that distinction matters.
-    return str(name) not in EPHEMERAL_ROLE_INPUT_NAMES
-
-
-def _semantic_role_input_refs(
-    input_refs: Mapping[str, Mapping[str, Any]],
-    *,
-    role: str = "",
-    mode: str = "",
-) -> dict[str, dict[str, Any]]:
-    return {
-        str(name): dict(ref)
-        for name, ref in sorted(input_refs.items())
-        if _role_input_is_semantic(str(name), role=role, mode=mode)
-    }
+from pal.bunshin.v2.role_input_identity import (
+    EPHEMERAL_ROLE_INPUT_NAMES as EPHEMERAL_ROLE_INPUT_NAMES,
+    _role_input_is_semantic as _role_input_is_semantic,
+    _semantic_role_input_refs as _semantic_role_input_refs,
+)
 
 
 def _assignment_role_input_refs(

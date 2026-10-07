@@ -5,6 +5,9 @@ import json
 import sqlite3
 from typing import Any, Mapping
 
+from pal.bunshin.v2.contracts import SubmissionInvariantError
+from pal.bunshin.v2.role_input_identity import _semantic_role_input_refs
+
 
 def receipt_freezes_authoring(connection: sqlite3.Connection, context: Any) -> bool:
     """A receipt freezes all sibling drafts, even before their projections catch up."""
@@ -198,6 +201,20 @@ def assert_draft_versions(connection: sqlite3.Connection, versions: Mapping[str,
             raise SubmissionValidationError("submission Draft CAS conflict before receipt acceptance")
 
 
+def _stored_retry_inputs(assignment: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], int]:
+    try:
+        references = json.loads(assignment["input_refs_json"])
+        execution = json.loads(assignment["execution_spec_json"])
+        if not isinstance(execution, Mapping):
+            raise ValueError("execution spec must be an object")
+        generation = execution.get("evaluation_generation", 0)
+        if type(generation) is not int or generation < 0:
+            raise ValueError("evaluation generation must be a nonnegative integer")
+        return _semantic_role_input_refs(references, role=str(assignment["role"]), mode=str(assignment["mode"])), generation
+    except (TypeError, ValueError) as exc:
+        raise SubmissionInvariantError(f"verifier draft source identity is malformed: {exc}") from exc
+
+
 def source_is_owned_retry(connection: sqlite3.Connection, context: Any, source: Mapping[str, Any]) -> bool:
     attempts = connection.execute(
         """SELECT t.attempt_id, a.* FROM bunshin_v2_role_attempts t
@@ -210,11 +227,12 @@ def source_is_owned_retry(connection: sqlite3.Connection, context: Any, source: 
         if context.invocation_id not in identities or source["invocation_id"] not in identities:
             return False
         current, prior = identities[context.invocation_id], identities[source["invocation_id"]]
+        current_inputs, current_generation = _stored_retry_inputs(current)
+        prior_inputs, prior_generation = _stored_retry_inputs(prior)
         return (all(current[key] == prior[key] for key in (
             "session_id", "workflow_id", "aggregate_type", "aggregate_id", "role", "mode",
-            "input_fingerprint", "input_refs_json", "submission_kind",
-        )) and int(json.loads(current["execution_spec_json"]).get("evaluation_generation") or 0)
-            == int(json.loads(prior["execution_spec_json"]).get("evaluation_generation") or 0))
+            "input_fingerprint", "submission_kind",
+        )) and current_inputs == prior_inputs and current_generation == prior_generation)
     # Local authoring without a role assignment may recover only its own lease lineage.
     return (context.invocation_id == source["invocation_id"]
             or context.lease_resource_key == source["lease_resource_key"])
