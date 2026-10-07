@@ -1,9 +1,12 @@
 from __future__ import annotations
+from pal.bunshin.v2.draft_values import (partition_findings, _without_manager_identity)
 
 from typing import Any, Mapping
 
 from pal.bunshin.v2.work_items import (
     ADD_FINDING_CAPABILITY,
+    UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
+    UPDATE_FINDING_TOOL_SPEC, REMOVE_FINDING_TOOL_SPEC, edit_finding_tool_result,
     ADD_FINDING_EXAMPLES,
     ADD_FINDING_TOOL_SPEC,
     FINDING_DISPOSITIONS,
@@ -17,31 +20,18 @@ from pal.bunshin.v2.work_items import (
 
 
 def is_review_finding_capability(name: str) -> bool:
-    return str(name or "") == ADD_FINDING_CAPABILITY
+    return str(name or "") in {ADD_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY}
+
+
+def review_finding_tool_result(call, workspace):
+    if call.name == ADD_FINDING_CAPABILITY:
+        return add_finding_tool_result(call, workspace)
+    return edit_finding_tool_result(call, workspace)
 
 
 def review_finding_draft_kind(workspace: Mapping[str, Any]) -> str:
     del workspace
     return "work_items"
-
-
-def partition_findings(
-    findings: list[Mapping[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    blocking: list[dict[str, Any]] = []
-    advisories: list[dict[str, Any]] = []
-    for raw in findings:
-        source = dict(raw)
-        finding_id = str(source.get("finding_id") or "").strip()
-        item = {
-            **normalize_finding(_without_manager_identity(source)),
-            **({"finding_id": finding_id} if finding_id else {}),
-        }
-        if item["disposition"] == "advisory":
-            advisories.append(item)
-        else:
-            blocking.append(item)
-    return blocking, advisories
 
 
 def structured_advisories(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -90,12 +80,6 @@ def empty_review_draft() -> dict[str, Any]:
 
 def finding_severity(finding: Mapping[str, Any]) -> str:
     return PRIORITY_TO_SEVERITY[str(finding.get("priority") or "p1")]
-
-
-def _without_manager_identity(value: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(value)
-    result.pop("finding_id", None)
-    return result
 
 
 def _semantic_identity(value: Mapping[str, Any]) -> str:

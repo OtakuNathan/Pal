@@ -4,7 +4,7 @@ from pal.bunshin.v2.storage.serialization import _json
 import json
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
 from pal.foundation import utc_now
 from pal.bunshin.v2.role_protocol import RoleAssignmentAction, RoleAssignmentState, RoleAttemptState, RoleSessionAction, RoleSubmissionReceipt, role_assignment_target
 from pal.bunshin.v2.storage.artifacts import ArtifactsStore
@@ -31,6 +31,8 @@ class RoleSubmissionsStore:
         artifact_ref: Mapping[str, Any],
         payload_hash: str,
         settlement_action: Mapping[str, Any],
+        draft_versions: Mapping[str, int] | None = None,
+        validate_before_receipt: Callable[[], None] | None = None,
     ) -> RoleSubmissionReceipt:
         if not str(payload_hash or "").strip():
             raise ValueError("role submission requires a payload hash")
@@ -78,6 +80,10 @@ class RoleSubmissionsStore:
                 str(attempt_id_value),
                 int(fencing_token),
             )
+            from pal.bunshin.v2.draft_integrity import assert_draft_versions
+            assert_draft_versions(connection, draft_versions or {})
+            if validate_before_receipt is not None:
+                validate_before_receipt()
             self.artifacts.assert_artifact_refs_durable(connection, artifact_ref)
             now = utc_now()
             connection.execute(

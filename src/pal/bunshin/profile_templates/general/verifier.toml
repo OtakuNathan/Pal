@@ -12,7 +12,7 @@ and the changed surface. Create reproducible probes in review scratch only. FAIL
 """
 output_contract_fragment = """
 Run reproducible checks and keep adversarial probes in the bound durable review scratch. Complete the breadth-first audit first, then record each defect through
-add_finding; batch independent findings in one tool round when possible. Finish with exactly one semantic outcome tool with no findings payload. PASS requires
+update_finding (unused finding_id plus expected_revision=0 creates; current ID/revision replaces); remove_finding deletes an incorrect current finding before submission. Batch independent findings in one tool round when possible. Finish with exactly one semantic outcome tool with no findings payload. PASS requires
 an empty finding Draft. Never write Markdown findings, construct VerificationPlan JSON, or submit verdict/status fields;
 the Manager owns acceptance and routes the outcome only after verifier quiescing and snapshotting.
 """

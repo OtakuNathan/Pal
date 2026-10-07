@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.v2.draft_values import (recorded_cases, _recorded_sequence)
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
@@ -15,7 +16,7 @@ from typing import Any, Mapping
 
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.repository import BunshinV2Repository
-from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot, record_verification_execution, lsp_verification_status, shell_execution_output
+from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot, record_verification_execution, lsp_verification_status, shell_execution_output, bind_recorded_case_execution, case_corpus_binding, case_definition_fingerprint
 from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.shared import RuntimeStatus, ToolExecutionResult
 
@@ -44,6 +45,12 @@ async def run_shell_evidence(
             return _error_result(call, exc, execution_started=False, input_rejected=True)
         context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
         store = SubmissionDraftStore(_runtime_root(workspace))
+        store.assert_editable(context)
+        if call.call_id:
+            replay = store.read_operation(context, operation_key=call.call_id, request=args)
+            if replay is not None:
+                return _success_result(call, "Replayed recorded operation; no fresh execution occurred.",
+                                       {**replay, "replayed": True})
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
         artifacts = _artifact_store(workspace)
@@ -61,6 +68,7 @@ async def run_shell_evidence(
             isinstance(existing, Mapping)
             and str(existing.get("request_fingerprint") or "") == request_fingerprint
             and str(existing.get("status") or "") != "UNKNOWN"
+            and int(existing.get("recorded_case_revision", -1)) == int(snapshot.payload.get("case_revision") or 0)
         ):
             stdout = _artifact_text(artifacts, existing.get("stdout_ref"))
             stderr = _artifact_text(artifacts, existing.get("stderr_ref"))
@@ -132,19 +140,15 @@ async def run_shell_evidence(
             "environment": {"cwd": cwd or "", "runner": "scoped_shell"},
             "summary": f"exit {exit_code}; expected {expected_exit_codes}" if exit_code is not None else stderr[:500],
             "request_fingerprint": request_fingerprint,
+            "recorded_case_revision": (int(snapshot.payload.get("case_revision") or 0) + 1
+                                       if context.role == "verifier" else 0),
+            "execution_id": str(call.call_id or request_fingerprint),
+            "case_binding": case_corpus_binding(before),
             "input_fingerprint": context.input_fingerprint,
         }
 
-        def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-            recorded = _upsert_recorded_case(payload, name=name, case=case)
-            return payload, {"recorded": True, "case": recorded}
-
-        mutation = store.mutate(
-            context,
-            operation_key=_operation_key(call, request_fingerprint),
-            request=args,
-            reducer=reducer,
-            seed=_empty_payload(),
+        mutation = _commit_executed_case(
+            store, context, snapshot, call, args, case, workspace, before, request_fingerprint,
         )
         execution = _shell_execution_projection(
             case,
@@ -183,6 +187,12 @@ async def run_lsp_evidence(
         ).strip()
         context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
         store = SubmissionDraftStore(_runtime_root(workspace))
+        store.assert_editable(context)
+        if call.call_id:
+            replay = store.read_operation(context, operation_key=call.call_id, request=args)
+            if replay is not None:
+                return _success_result(call, "Replayed recorded operation; no fresh execution occurred.",
+                                       {**replay, "replayed": True})
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
         artifacts = _artifact_store(workspace)
@@ -200,6 +210,7 @@ async def run_lsp_evidence(
             isinstance(existing, Mapping)
             and str(existing.get("request_fingerprint") or "") == request_fingerprint
             and str(existing.get("status") or "") != "UNKNOWN"
+            and int(existing.get("recorded_case_revision", -1)) == int(snapshot.payload.get("case_revision") or 0)
         ):
             recorded_result = _artifact_json(artifacts, existing.get("stdout_ref"))
             return _success_result(
@@ -274,19 +285,15 @@ async def run_lsp_evidence(
             },
             "summary": str(result.text or result.llm_text or status)[:500],
             "request_fingerprint": request_fingerprint,
+            "recorded_case_revision": (int(snapshot.payload.get("case_revision") or 0) + 1
+                                       if context.role == "verifier" else 0),
+            "execution_id": str(call.call_id or request_fingerprint),
+            "case_binding": case_corpus_binding(before),
             "input_fingerprint": context.input_fingerprint,
         }
 
-        def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-            recorded = _upsert_recorded_case(payload, name=name, case=case)
-            return payload, {"recorded": True, "case": recorded}
-
-        mutation = store.mutate(
-            context,
-            operation_key=_operation_key(call, request_fingerprint),
-            request=args,
-            reducer=reducer,
-            seed=_empty_payload(),
+        mutation = _commit_executed_case(
+            store, context, snapshot, call, args, case, workspace, before, request_fingerprint,
         )
         return _success_result(
             call,
@@ -347,30 +354,23 @@ def record_unavailable_evidence(
         return _error_result(call, exc)
 
 
-def recorded_cases(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    cases = dict(dict(payload.get("evidence") or {}).get("cases") or {})
-    recorded = [dict(item) for item in cases.values()]
-    if recorded and all(_recorded_sequence(item) > 0 for item in recorded):
-        return sorted(recorded, key=lambda item: (_recorded_sequence(item), str(item.get("name") or "")))
-    return sorted(
-        recorded,
-        key=lambda item: (
-            _CASE_KIND_ORDER.get(str(item.get("case_kind") or ""), 99),
-            str(item.get("name") or ""),
-        ),
+def _commit_executed_case(store, context, snapshot, call, args, case, workspace, before, request_fingerprint):
+    case["definition_fingerprint"] = case_definition_fingerprint(case)
+
+    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        recorded = _upsert_recorded_case(payload, name=str(case["name"]), case=case)
+        return payload, {"recorded": True, "case": recorded}
+
+    mutation = store.mutate(
+        context,
+        operation_key=_operation_key(call, request_fingerprint),
+        request=args,
+        reducer=reducer,
+        seed=_empty_payload(),
+        expected_version=snapshot.version,
     )
-
-
-_CASE_KIND_ORDER = {
-    "historical_regression": 0,
-    "contract_adversarial": 1,
-    "diff_risk": 2,
-    "compile": 3,
-    "lsp": 3,
-    "unit": 3,
-    "consumer_probe": 3,
-    "platform_assumption": 4,
-}
+    bind_recorded_case_execution(workspace, before, int(mutation.get("case_revision") or 0))
+    return mutation
 
 
 def _upsert_recorded_case(
@@ -399,11 +399,6 @@ def _upsert_recorded_case(
             if str(dict(item).get("case") or "") != name
         ]
     return recorded
-
-
-def _recorded_sequence(value: Mapping[str, Any]) -> int:
-    sequence = value.get("recorded_sequence")
-    return int(sequence) if type(sequence) is int and sequence > 0 else 0
 
 
 def scratch_fingerprint(workspace: Mapping[str, Any]) -> str:

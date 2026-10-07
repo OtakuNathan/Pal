@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from pal.execution import ApprovalExecutionDecorator, ExecutionApprovalRequest
 from pal.bunshin.profiles import filter_bunshin_allowed_capabilities
-from pal.bunshin.scoped_execution import _effective_capability_name, _effective_tool_args
+from pal.bunshin.scoped_execution import _bound_verifier_context, _effective_capability_name, _effective_tool_args
 from pal.bunshin.tool_admission import admit_bunshin_tool_call
 from pal.shared import ToolExecutionResult, BunshinInvocationPack
 from pal.bunshin.runner_components.control import Control
@@ -58,8 +58,13 @@ class ToolExecution:
             self.status.block(f"{admission.message}: {target_name}")
             return admission.to_result()
         delegate = execution_runtime
+        evidence_workspace = dict(getattr(execution_runtime, "workspace", self.pack.workspace) or {})
+        scoped_verifier_sessions = (
+            _bound_verifier_context(evidence_workspace) is not None
+            and execution_runtime.role_execution_sessions is self.tool_session.execution_sessions
+        )
         if self.tool_session.execution_sessions is not None:
-            if self.tool_session.execution_sessions.handles_capability(target_name):
+            if self.tool_session.execution_sessions.handles_capability(target_name) and not scoped_verifier_sessions:
                 # Approval and cancellation share the Manager control reader.
                 # Start the cancellation watcher only after approval settles.
                 delegate = self.tool_session.execution_sessions.execution_delegate(execution_runtime, self.control.raise_if_cancel_requested)
@@ -72,15 +77,10 @@ class ToolExecution:
                 capability_name=target_name,
             ),
         )
-        from pal.bunshin.v2.verification_readiness import (
-            record_verification_execution, verification_corpus_snapshot,
-        )
-        evidence_workspace = dict(getattr(execution_runtime, "workspace", self.pack.workspace) or {})
         bound_execution = (
             dict(evidence_workspace.get("bunshin_v2") or {}).get("role") == "verifier"
             and (target_name == "op_exec_shell" or target_name.startswith("op_lsp_"))
         )
-        before = verification_corpus_snapshot(evidence_workspace) if bound_execution else None
         result = await approval_runtime.execute_tool_async(
             tool_call,
             allow_tools=allow_tools,
@@ -92,12 +92,9 @@ class ToolExecution:
             self.status.block(f"approval {decision} for {target_name}")
             result.structured["capability"] = target_name
         self.research_budget.record_web_research_usage(target_name)
-        if before is not None:
-            evidence_workspace["review_tool_evidence_refs"] = self.review_evidence.review_tool_evidence_refs
-            record_verification_execution(evidence_workspace, new_tool_call(
-                name=target_name, args=_effective_tool_args(policy_call), call_id=policy_call.call_id,
-            ), result, before)
-        else:
+        # The scoped verifier runtime records direct execution under its
+        # authoring lock, before a competing submit can observe the corpus.
+        if not bound_execution:
             self.review_evidence.record_review_tool_evidence(target_name, policy_call, result)
         return result
 

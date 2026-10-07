@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -13,6 +13,12 @@ from pal.foundation import utc_now
 from pal.bunshin.config import bunshin_db_path
 from pal.bunshin.v2.role_contracts import RoleActivation
 from pal.bunshin.v2.schema import ensure_bunshin_v2_schema
+from pal.bunshin.v2.draft_integrity import (
+    assert_authoring_open, assert_local_submission_authority, reserved_finding_ids,
+    assert_draft_versions, assert_verifier_projection, audited_result, prepare_mutation,
+    public_operation_result, receipt_freezes_authoring, inherit_verifier_payload, source_is_owned_retry,
+    recorded_execution_proofs,
+)
 
 
 AUTHORING_CONTRACT_VERSION = "8"
@@ -205,6 +211,7 @@ class SubmissionDraftStore:
         request: Mapping[str, Any],
         reducer: DraftReducer,
         seed: Mapping[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> Mapping[str, Any]:
         self._assert_authoring_contract(context)
         operation = str(operation_key or "").strip()
@@ -214,7 +221,11 @@ class SubmissionDraftStore:
             snapshot = self.read(context, seed=seed)
             if snapshot.status != ACTIVE_DRAFT_STATUS:
                 raise ValueError("submission Draft is already frozen; start a new fenced invocation")
-            next_payload, result = reducer(_deepcopy_json(snapshot.payload))
+            if context.role == "verifier" and context.draft_kind == "work_items":
+                # Manager reduces semantic requests after its durable replay check.
+                next_payload, result = {}, {}
+            else:
+                next_payload, result = reducer(_deepcopy_json(snapshot.payload))
             if not isinstance(next_payload, dict):
                 raise TypeError("Draft reducer must return an object payload")
             response = self._role_gateway.request_sync(
@@ -223,7 +234,7 @@ class SubmissionDraftStore:
                     "context": context.to_dict(),
                     "operation_key": operation,
                     "request": dict(request),
-                    "expected_version": snapshot.version,
+                    "expected_version": snapshot.version if expected_version is None else int(expected_version),
                     "next_payload": next_payload,
                     "result": dict(result),
                     "seed": dict(seed or {}),
@@ -234,6 +245,7 @@ class SubmissionDraftStore:
         self._ensure_schema()
         with self._transaction() as connection:
             self._assert_fence(connection, context)
+            assert_authoring_open(connection, context)
             snapshot = self._read_or_create_locked(connection, context, seed=seed)
             if snapshot.status != ACTIVE_DRAFT_STATUS:
                 raise ValueError("submission Draft is already frozen; start a new fenced invocation")
@@ -248,10 +260,20 @@ class SubmissionDraftStore:
             if duplicate is not None:
                 if str(duplicate["request_hash"]) != request_hash:
                     raise ValueError("Draft operation key was reused with different arguments")
-                return dict(json.loads(str(duplicate["result_json"])))
-            next_payload, result = reducer(_deepcopy_json(snapshot.payload))
+                return public_operation_result(json.loads(str(duplicate["result_json"])))
+            if expected_version is not None and snapshot.version != int(expected_version):
+                raise RuntimeError("submission Draft CAS conflict")
+            reducer_payload = _deepcopy_json(snapshot.payload)
+            if context.role == "verifier" and context.draft_kind == "work_items":
+                reducer_payload["_reserved_finding_ids"] = sorted(reserved_finding_ids(connection, context.draft_key))
+            next_payload, result = reducer(reducer_payload)
+            if isinstance(next_payload, dict):
+                next_payload.pop("_reserved_finding_ids", None)
             if not isinstance(next_payload, dict):
                 raise TypeError("Draft reducer must return an object payload")
+            next_payload = prepare_mutation(context, snapshot.payload, next_payload,
+                execution_proofs=(recorded_execution_proofs(connection, context.draft_key)
+                    if context.role == "verifier" and context.draft_kind == "verification" else None))
             next_version = snapshot.version + 1
             updated = connection.execute(
                 """
@@ -273,6 +295,7 @@ class SubmissionDraftStore:
             encoded_result = {
                 **dict(result),
                 "draft_version": next_version,
+                **({"case_revision": next_payload["case_revision"]} if "case_revision" in next_payload else {}),
             }
             connection.execute(
                 """
@@ -280,7 +303,8 @@ class SubmissionDraftStore:
                     draft_key, operation_key, request_hash, result_json, created_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (context.draft_key, operation, request_hash, _json(encoded_result), utc_now()),
+                (context.draft_key, operation, request_hash,
+                 _json(audited_result(encoded_result, request, snapshot.payload, next_payload, snapshot.version)), utc_now()),
             )
             return encoded_result
 
@@ -295,73 +319,45 @@ class SubmissionDraftStore:
         result: Mapping[str, Any],
         seed: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        """CAS a reducer result computed by an assignment-scoped role invocation.
+        """Persist only through the same fenced, receipt-aware transaction as local edits."""
+        return self.mutate(
+            context, operation_key=operation_key, request=request,
+            reducer=lambda _payload: (dict(next_payload), dict(result)),
+            seed=seed, expected_version=expected_version,
+        )
 
-        The Manager still owns idempotency, fencing and the durable mutation;
-        only the pure reducer runs in the sandbox process.
-        """
-
+    def assert_editable(self, context: SubmissionDraftContext) -> None:
         self._assert_authoring_contract(context)
-        operation = str(operation_key or "").strip()
-        if not operation:
-            raise ValueError("Draft mutation requires an operation key")
-        if not isinstance(next_payload, Mapping):
-            raise TypeError("Draft reducer must return an object payload")
-        request_hash = _stable_hash(dict(request))
+        if self._role_gateway is not None:
+            if self.read(context).status != ACTIVE_DRAFT_STATUS:
+                raise ValueError("submission Draft is already frozen")
+            return
         self._ensure_schema()
         with self._transaction() as connection:
             self._assert_fence(connection, context)
-            snapshot = self._read_or_create_locked(connection, context, seed=seed)
-            duplicate = connection.execute(
-                """
-                SELECT request_hash, result_json
-                FROM bunshin_v2_submission_draft_ops
-                WHERE draft_key = ? AND operation_key = ?
-                """,
-                (context.draft_key, operation),
+            assert_authoring_open(connection, context)
+
+    def read_operation(self, context: SubmissionDraftContext, *, operation_key: str,
+                       request: Mapping[str, Any]) -> dict[str, Any] | None:
+        self._assert_authoring_contract(context)
+        if self._role_gateway is not None:
+            value = self._role_gateway.request_sync("draft_operation_result", {
+                "context": context.to_dict(), "operation_key": operation_key, "request": dict(request),
+            })
+            return dict(value["result"]) if value.get("found") else None
+        self._ensure_schema()
+        with self._transaction() as connection:
+            self._assert_fence(connection, context)
+            assert_authoring_open(connection, context)
+            row = connection.execute(
+                "SELECT request_hash, result_json FROM bunshin_v2_submission_draft_ops WHERE draft_key = ? AND operation_key = ?",
+                (context.draft_key, operation_key),
             ).fetchone()
-            if duplicate is not None:
-                if str(duplicate["request_hash"]) != request_hash:
-                    raise ValueError("Draft operation key was reused with different arguments")
-                return dict(json.loads(str(duplicate["result_json"])))
-            if snapshot.status != ACTIVE_DRAFT_STATUS:
-                raise ValueError("submission Draft is already frozen; start a new fenced invocation")
-            if snapshot.version != int(expected_version):
-                raise RuntimeError("submission Draft CAS conflict")
-            next_version = snapshot.version + 1
-            updated = connection.execute(
-                """
-                UPDATE bunshin_v2_submission_drafts
-                SET payload_json = ?, version = ?, updated_at = ?
-                WHERE draft_key = ? AND version = ? AND status = ?
-                """,
-                (
-                    _json(dict(next_payload)),
-                    next_version,
-                    utc_now(),
-                    context.draft_key,
-                    snapshot.version,
-                    ACTIVE_DRAFT_STATUS,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError("submission Draft CAS conflict")
-            encoded_result = {**dict(result), "draft_version": next_version}
-            connection.execute(
-                """
-                INSERT INTO bunshin_v2_submission_draft_ops(
-                    draft_key, operation_key, request_hash, result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    context.draft_key,
-                    operation,
-                    request_hash,
-                    _json(encoded_result),
-                    utc_now(),
-                ),
-            )
-            return encoded_result
+            if row is None:
+                return None
+            if row["request_hash"] != _stable_hash(dict(request)):
+                raise ValueError("Draft operation key was reused with different arguments")
+            return public_operation_result(json.loads(row["result_json"]))
 
     def read(
         self,
@@ -390,6 +386,8 @@ class SubmissionDraftStore:
         submission_artifact_ref: Mapping[str, Any] | None = None,
         submission_payload_hash: str = "",
         submission_payload: Mapping[str, Any] | None = None,
+        expected_work_item_version: int | None = None,
+        verification_workspace: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         self._assert_authoring_contract(context)
         if self._role_gateway is not None:
@@ -401,6 +399,7 @@ class SubmissionDraftStore:
                     {
                         "context": context.to_dict(),
                         "expected_version": int(expected_version),
+                        "expected_work_item_version": expected_work_item_version,
                         "submission": dict(submission_payload),
                     },
                 ))
@@ -419,6 +418,8 @@ class SubmissionDraftStore:
                     status.get("recorded")
                     and status.get("submission_artifact_ref")
                     and status.get("submission_payload_hash")
+                    and (context.role != "verifier"
+                         or status["submission_payload_hash"] == _stable_hash(dict(submission_payload)))
                 ):
                     return {
                         "submitted": True,
@@ -437,6 +438,29 @@ class SubmissionDraftStore:
         with self._transaction() as connection:
             self._assert_fence(connection, context)
             self._assert_submission_artifact_locked(connection, artifact_ref)
+            row = connection.execute("SELECT status FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                                     (context.draft_key,)).fetchone()
+            if row is not None and row["status"] == ACTIVE_DRAFT_STATUS:
+                assert_local_submission_authority(connection, context, artifact_ref, payload_hash)
+            if row is not None and row["status"] == ACTIVE_DRAFT_STATUS and expected_work_item_version is not None:
+                assert_draft_versions(connection, {
+                    context.draft_key: expected_version,
+                    replace(context, draft_kind="work_items").draft_key: expected_work_item_version,
+                })
+            if context.role == "verifier" and submission_payload is not None and row is not None and row["status"] == ACTIVE_DRAFT_STATUS:
+                draft_row = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                                               (context.draft_key,)).fetchone()
+                work_row = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                                              (replace(context, draft_kind="work_items").draft_key,)).fetchone()
+                assert_verifier_projection(submission_payload, json.loads(draft_row["payload_json"]),
+                                          json.loads(work_row["payload_json"]) if work_row else {})
+                if verification_workspace is not None and isinstance(submission_payload.get("verification_binding"), Mapping):
+                    from pal.bunshin.v2.verification_corpus import verification_corpus_snapshot
+                    from pal.bunshin.v2.submission_errors import SubmissionValidationError
+                    current = verification_corpus_snapshot({**dict(verification_workspace),
+                        "verification_case_revision": int(json.loads(draft_row["payload_json"]).get("case_revision") or 0)})
+                    if submission_payload["verification_binding"] != current:
+                        raise SubmissionValidationError("verification corpus changed before receipt acceptance")
             updated = connection.execute(
                 """
                 UPDATE bunshin_v2_submission_drafts
@@ -687,14 +711,12 @@ class SubmissionDraftStore:
     ) -> tuple[dict[str, Any], str]:
         rows = connection.execute(
             """
-            SELECT draft_key, invocation_id, lease_resource_key, fencing_token,
-                   payload_json
+            SELECT *
             FROM bunshin_v2_submission_drafts
             WHERE workflow_id = ? AND role = ? AND mode = ? AND draft_kind = ?
               AND input_fingerprint = ? AND authoring_contract_version = ?
               AND draft_key != ?
             ORDER BY updated_at DESC
-            LIMIT 16
             """,
             (
                 context.workflow_id,
@@ -706,10 +728,23 @@ class SubmissionDraftStore:
                 context.draft_key,
             ),
         ).fetchall()
+        if context.role == "verifier":
+            rows = sorted(rows, key=lambda row: not (
+                source_is_owned_retry(connection, context, dict(row))
+                and not receipt_freezes_authoring(connection, SubmissionDraftContext.from_mapping(dict(row)))
+            ))
         for row in rows:
             if self._draft_worker_is_live_locked(connection, row):
                 continue
             payload = dict(json.loads(str(row["payload_json"])))
+            if context.role == "verifier" and context.draft_kind in {"work_items", "verification"}:
+                source = SubmissionDraftContext.from_mapping(dict(row))
+                has_receipt = receipt_freezes_authoring(connection, source)
+                payload = inherit_verifier_payload(
+                    payload, source=dict(row), frozen=(has_receipt or not source_is_owned_retry(connection, context, dict(row))),
+                    reason="submitted_receipt" if has_receipt else "external_source",
+                )
+                return payload, str(row["draft_key"])
             return _inherited_payload(context.draft_kind, payload), str(row["draft_key"])
         return {}, ""
 
@@ -753,6 +788,21 @@ class SubmissionDraftStore:
             raise ValueError("submission Draft lease does not exist")
         if str(row["owner_id"]) != context.invocation_id or int(row["fencing_token"]) != context.fencing_token:
             raise ValueError("submission Draft write rejected by stale fencing token")
+        assignment = connection.execute(
+            """SELECT a.*, t.lease_resource_key AS attempt_resource, t.fencing_token AS attempt_fence
+               FROM bunshin_v2_role_attempts t JOIN bunshin_v2_role_assignments a
+               ON a.assignment_id = t.assignment_id WHERE t.attempt_id = ?""",
+            (context.invocation_id,),
+        ).fetchone()
+        if assignment is not None and (
+            str(assignment["active_attempt_id"]) != context.invocation_id
+            or str(assignment["workflow_id"]) != context.workflow_id
+            or str(assignment["role"]) != context.role or str(assignment["mode"]) != context.mode
+            or str(assignment["input_fingerprint"]) != context.input_fingerprint
+            or str(assignment["attempt_resource"]) != context.lease_resource_key
+            or int(assignment["attempt_fence"]) != context.fencing_token
+        ):
+            raise ValueError("submission Draft identity does not match its current assignment")
         expires_at = _parse_datetime(str(row["expires_at"] or ""))
         if expires_at <= datetime.now(timezone.utc):
             raise ValueError("submission Draft write rejected because the worker lease expired")
@@ -861,6 +911,12 @@ def assert_authoring_schema_budget(schema: Mapping[str, Any], *, owner: str) -> 
         for key in ("properties",):
             for property_name, child in dict(node.get(key) or {}).items():
                 normalized_name = str(property_name).casefold()
+                if normalized_name == "finding_id" and owner in {
+                    "op_bunshin_update_finding", "op_bunshin_remove_finding",
+                }:
+                    # A bounded finding key is draft-local authoring data, not Manager authority.
+                    visit(child, depth=depth + 1)
+                    continue
                 if (
                     normalized_name in {
                         "handle",

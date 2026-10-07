@@ -38,7 +38,7 @@ from pal.bunshin.v2.cycle_protocol import (
     CycleSlot,
 )
 from pal.bunshin.v2.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
+from pal.bunshin.v2.review_findings import ADD_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY, add_finding_tool_result
 from pal.bunshin.v2.verification import (
     DefectKind,
     DefectPropagationService,
@@ -293,7 +293,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
         self.assertNotIn("dependency_targets", contract)
         performance_guidance = contract["guidance_overrides"][
-            ADD_FINDING_CAPABILITY
+            UPDATE_FINDING_CAPABILITY
         ]["use_when"]
         self.assertIn("performance finding", performance_guidance)
         self.assertIn("representative workload", performance_guidance)
@@ -462,7 +462,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertIn("blocking add_finding", result.llm_text)
+        self.assertIn("blocking update_finding", result.llm_text)
         self.assertIn("advisory findings do not reconcile FAIL", result.llm_text)
 
     def test_swe_verifier_requires_a_case_when_corpus_is_empty(self) -> None:
@@ -753,6 +753,12 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 }
             ],
         }
+
+        from pal.bunshin.v2.verification_readiness import case_corpus_binding, case_definition_fingerprint
+        recorded = submission["recorded_results"][0]
+        recorded["case_binding"] = case_corpus_binding(receipt_workspace["review_tool_evidence_refs"][0]["verification_binding"])
+        recorded["command"] = ["/bin/sh", "-lc", f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py"]
+        recorded["definition_fingerprint"] = case_definition_fingerprint(recorded)
 
         with (
             patch.object(
@@ -2766,7 +2772,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             first["guidance_overrides"],
         )
         performance_guidance = first["guidance_overrides"][
-            ADD_FINDING_CAPABILITY
+            UPDATE_FINDING_CAPABILITY
         ]["use_when"]
         self.assertIn("Performance findings require", performance_guidance)
         self.assertIn("representative workload", performance_guidance)
@@ -3058,7 +3064,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.assertEqual(result.structured["case"]["requirements"], [])
         self.assertEqual(len(self.adapter.calls), 1)
 
-    def test_case_is_replaceable_and_findings_are_append_only_work_items(self) -> None:
+    def test_case_replacement_preserves_findings_until_explicit_edit(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)}, role="verifier"
         )
@@ -3356,7 +3362,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, VerificationStatus.PASS)
 
-    def test_retry_fence_keeps_append_only_finding_work_items(self) -> None:
+    def test_retry_fence_keeps_current_findings_until_explicit_edit(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)},
             role="verifier",
@@ -3395,11 +3401,9 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
         self.assertEqual(len(passed_status.structured["findings"]), 1)
 
-    def test_finding_withdrawal_is_not_a_verifier_capability(self) -> None:
-        self.assertNotIn(
-            "op_bunshin_verification_remove_finding",
-            VERIFICATION_BUILDER_TOOL_SPECS,
-        )
+    def test_current_finding_edit_tools_are_verifier_capabilities(self) -> None:
+        self.assertIn("op_bunshin_update_finding", VERIFICATION_BUILDER_TOOL_SPECS)
+        self.assertIn("op_bunshin_remove_finding", VERIFICATION_BUILDER_TOOL_SPECS)
 
     def test_case_order_uses_manager_recording_sequence_not_case_name(self) -> None:
         workspace = self._bind_workspace(

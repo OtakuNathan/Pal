@@ -431,7 +431,14 @@ workspace_policy: {}
                     bound = apply_v2_role_capability_policy(
                         self._pack(profile), activation=activation
                     )
-                    self.assertIn("op_bunshin_add_finding", bound.allowed_capabilities)
+                    if activation.role == OrchestrationRole.VERIFIER:
+                        self.assertNotIn("op_bunshin_add_finding", bound.allowed_capabilities)
+                        self.assertIn("op_bunshin_update_finding", bound.allowed_capabilities)
+                        self.assertIn("op_bunshin_remove_finding", bound.allowed_capabilities)
+                    else:
+                        self.assertIn("op_bunshin_add_finding", bound.allowed_capabilities)
+                        self.assertNotIn("op_bunshin_update_finding", bound.allowed_capabilities)
+                        self.assertNotIn("op_bunshin_remove_finding", bound.allowed_capabilities)
                     if activation.role == OrchestrationRole.VERIFIER:
                         self.assertIn(
                             "op_bunshin_verification_pass",
@@ -1227,7 +1234,10 @@ workspace_policy: {}
         ):
             output_contract = str(self._pack(profile_name).resolved_profile["output_contract_fragment"])
             for field_name in forbidden_author_fields:
-                self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
+                if profile_name == "software_engineering.v2_verifier" and field_name == "finding_id":
+                    self.assertIn(field_name, output_contract)  # Caller-owned UPSERT key.
+                else:
+                    self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
 
     def test_worker_authoring_tools_never_expose_manager_identity_fields(self) -> None:
         from pal.bunshin.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
@@ -1275,7 +1285,15 @@ workspace_policy: {}
                     for name in property_names(spec["InputModel"].model_json_schema(mode="validation")):
                         lowered = name.casefold()
                         self.assertNotIn(lowered, forbidden_exact)
-                        self.assertFalse(lowered.endswith("_id"), name)
+                        draft_finding_target = (
+                            lowered == "finding_id" and capability in {
+                                "op_bunshin_update_finding", "op_bunshin_remove_finding",
+                            }
+                        )
+                        # Editing targets a returned current-draft finding;
+                        # creation and every other Manager identity stay hidden.
+                        if not draft_finding_target:
+                            self.assertFalse(lowered.endswith("_id"), name)
                         self.assertFalse(lowered.endswith("_ref"), name)
                         self.assertFalse(lowered.endswith("_sha"), name)
 

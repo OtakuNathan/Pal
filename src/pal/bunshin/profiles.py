@@ -586,7 +586,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "v2_swe_verification": (
         *SWE_VERIFICATION_CAPABILITIES,
         *VERIFICATION_EVIDENCE_CAPABILITIES,
-        ADD_FINDING_CAPABILITY,
         UPDATE_CHECKLIST_CAPABILITY,
         "op_bunshin_verification_scratch_write",
     ),

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.v2.review_receipts import _review_tool_evidence_ref
 
 from pal.shared.tool_protocol import ToolCallIR
 
@@ -10,14 +11,13 @@ from pal.execution.generated_tool_models import (
 )
 
 import asyncio
-import hashlib
 import inspect
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
-from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from pal.execution.runtime import ExecutionRuntime
 from pydantic import Field, create_model
@@ -38,6 +38,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
     ToolInvocationResult,
+    rejection,
 )
 from pal.execution.tool_registry import _example_from_schema
 from pal.shared import ToolExecutionResult
@@ -69,7 +70,7 @@ from pal.bunshin.v2.candidate_builder import (
 from pal.bunshin.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     ADD_FINDING_TOOL_SPEC,
-    add_finding_tool_result,
+    review_finding_tool_result,
     is_review_finding_capability,
 )
 from pal.bunshin.v2.review_submission import (
@@ -78,10 +79,15 @@ from pal.bunshin.v2.review_submission import (
     review_submit_tool_result,
 )
 from pal.bunshin.v2.work_items import (
+    REMOVE_FINDING_CAPABILITY,
+    REMOVE_FINDING_TOOL_SPEC,
+    UPDATE_FINDING_CAPABILITY,
+    UPDATE_FINDING_TOOL_SPEC,
     UPDATE_CHECKLIST_CAPABILITY,
     UPDATE_CHECKLIST_TOOL_SPEC,
     update_checklist_tool_result,
 )
+from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.v2.swe_verification import (
     SWE_VERIFICATION_TOOL_SPECS,
     is_swe_verification_capability,
@@ -180,6 +186,8 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     CONTRACT_SUBMIT_CAPABILITY: CONTRACT_SUBMIT_TOOL_SPEC,
     REVIEW_SUBMIT_CAPABILITY: REVIEW_SUBMIT_TOOL_SPEC,
     ADD_FINDING_CAPABILITY: ADD_FINDING_TOOL_SPEC,
+    UPDATE_FINDING_CAPABILITY: UPDATE_FINDING_TOOL_SPEC,
+    REMOVE_FINDING_CAPABILITY: REMOVE_FINDING_TOOL_SPEC,
 }
 
 _WORKSPACE_TOOL_SPECS.update(SWE_VERIFICATION_TOOL_SPECS)
@@ -369,6 +377,115 @@ _WORKFLOW_EFFECTS = {
     for name in _WORKSPACE_TOOL_SPECS
 }
 
+_FINDING_EDIT_CAPABILITIES = (UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY)
+_VERIFIER_AUTHORING_LOCKS: WeakValueDictionary[tuple[str, str, str, int], asyncio.Lock] = WeakValueDictionary()
+_VERIFIER_WRITER_GUIDANCE = (
+    "Verifier authoring is available only before durable submission. Complete corpus-writing "
+    "commands in the foreground before submitting; detached/background writers and external "
+    "filesystem edits are outside this invocation's authoring serialization."
+)
+
+
+def _bound_verifier_context(workspace: dict[str, Any]) -> SubmissionDraftContext | None:
+    if dict(workspace.get("bunshin_v2") or {}).get("role") != "verifier":
+        return None
+    try:
+        return SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
+    except ValueError:
+        return None
+
+
+def _verifier_authoring_lock(workspace: dict[str, Any]) -> asyncio.Lock:
+    """Share foreground authoring across runtime views of one fenced invocation.
+
+    This process-local lock does not exclude external filesystem writers. The
+    Manager must still validate the final corpus when it accepts the receipt.
+    """
+    context = _bound_verifier_context(workspace)
+    if context is None:
+        return asyncio.Lock()
+    key = (str(Path(str(workspace.get("runtime_root") or "")).resolve()),
+           context.workflow_id, context.invocation_id, context.fencing_token)
+    lock = _VERIFIER_AUTHORING_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _VERIFIER_AUTHORING_LOCKS[key] = lock
+    return lock
+
+
+def _profile_allows_capability(name: str, policy: dict[str, Any]) -> bool:
+    # Explicit persisted denials also apply to new internal workflow tools.
+    # Their internal allowlist bypasses the generic default prefix exclusions.
+    return not (
+        is_bunshin_capability_denied(name, capability_policy=policy)
+        or any(name.startswith(str(prefix)) for prefix in (policy.get("deny_prefixes") or ()) if prefix)
+        or any(str(fragment) in name for fragment in (policy.get("deny_fragments") or ()) if fragment)
+    )
+
+
+def _with_verifier_writer_guidance(descriptor: CapabilityDescriptor) -> CapabilityDescriptor:
+    guidance = descriptor.guidance.model_copy(update={
+        "do_not_use_when": f"{descriptor.guidance.do_not_use_when} {_VERIFIER_WRITER_GUIDANCE}",
+    })
+    return replace(descriptor, guidance=guidance)
+
+
+def _requires_verifier_authoring_lock(runtime: "BunshinScopedExecutionRuntime", name: str) -> bool:
+    binding = dict(runtime.workspace.get("bunshin_v2") or {})
+    if binding.get("role") != "verifier" or not any(key in binding for key in (
+        "workflow_id", "invocation_id", "fencing_token", "lease_resource_key",
+        "lease_resource", "authoring_input_fingerprint", "authoring_contract_version",
+    )):
+        return False
+    if name in {ASK_QUESTION_CAPABILITY, "op_bunshin_memory_candidate_write"}:
+        return False
+    if is_review_finding_capability(name) or name == "op_exec_shell" or name.startswith("op_lsp_"):
+        return True
+    if runtime.role_execution_sessions is not None and runtime.role_execution_sessions.handles_capability(name):
+        return True
+    index = runtime.registry_generation.capability_index
+    return any(index.records[alias].execution.effect_kind in {
+        EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL,
+    } for alias in index.by_canonical.get(name, ()))
+
+
+async def _no_cancel_check() -> None:
+    pass
+
+
+def _verifier_execution_delegate(runtime: "BunshinScopedExecutionRuntime", name: str, delegate: Any) -> Any:
+    """Await native completion under the outer lock, without scoped reentry."""
+    sessions = runtime.role_execution_sessions
+    if (_bound_verifier_context(runtime.workspace) is not None and sessions is not None
+            and sessions.handles_capability(name)):
+        return sessions.execution_delegate(delegate, runtime.check_cancel or _no_cancel_check)
+    return delegate
+
+
+def _capture_legacy_finding_generation(runtime: ExecutionRuntime, subtree: MountedSubtreeHandle) -> Any:
+    """Keep strict persisted-call dispatch outside the live discovery surface."""
+    handle = SimpleNamespace(mounted_subtree=subtree)
+    runtime.mount_subtree(handle)
+    generation = runtime.registry_generation
+    runtime.unmount_subtree(handle)
+    return generation
+
+
+def _scoped_tool_destination(name: str, workspace: dict[str, Any], primary: Any, legacy: Any) -> Any:
+    if name == ADD_FINDING_CAPABILITY and dict(workspace.get("bunshin_v2") or {}).get("role") == "verifier":
+        return legacy if _bound_verifier_context(workspace) is not None else None
+    return primary
+
+
+async def _execute_legacy_finding(runtime: "BunshinScopedExecutionRuntime", call: ToolCallIR,
+                                  *, budget: Any, turn_id: str) -> ToolExecutionResult:
+    alias = str(ADD_FINDING_TOOL_SPEC["alias"])
+    provider_call = new_tool_call(name=alias, args=dict(call.args or {}), call_id=call.call_id)
+    execution = runtime.base_runtime.runtime
+    invocation = await execution.invoke_direct_tool_async(provider_call, allow_tools=True,
+        budget=budget, turn_id=turn_id, generation=runtime._legacy_finding_generation)
+    return execution._canonical_result_from_invocation(alias, call.call_id, invocation)
+
 
 class _ExecutionOverlay:
     def __init__(
@@ -377,8 +494,10 @@ class _ExecutionOverlay:
         allowed_capabilities: list[str],
         *,
         guidance_overrides: dict[str, dict[str, str]],
+        verifier_authoring: bool = False,
     ) -> None:
         self.delegate = delegate
+        self.verifier_authoring = verifier_authoring
         self.runtime = ExecutionRuntime(
             runtime_root=getattr(delegate, "runtime_root", None),
             sync_executor=getattr(delegate, "sync_executor", None),
@@ -426,6 +545,11 @@ class _ExecutionOverlay:
                 guidance_overrides=guidance_overrides,
             )
             descriptor = getattr(self.delegate, "project_role_descriptor", lambda d: d)(descriptor)
+            if self.verifier_authoring and (
+                record.canonical_path == "op_exec_shell"
+                or descriptor.execution.effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE}
+            ):
+                descriptor = _with_verifier_writer_guidance(descriptor)
             binding = replace(record.binding, descriptor=descriptor)
             subtree.descriptors.append(descriptor)
             subtree.bound_actions.append(binding)
@@ -484,7 +608,6 @@ class _ExecutionOverlay:
             begin(**kwargs)
 
 
-
 class _OriginalAdapter:
     def __init__(self, owner: "BunshinScopedExecutionRuntime") -> None:
         self.owner = owner
@@ -502,8 +625,13 @@ class BunshinScopedExecutionRuntime:
     capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     request_user_clarification: Any | None = None
     memory_candidate_sink: Any | None = None
+    capability_policy: dict[str, Any] = field(default_factory=dict)
+    role_execution_sessions: Any | None = None
+    check_cancel: Any | None = None
     _original_runtime: Any = field(default=None, init=False, repr=False)
     _direct_turn_id: str = field(default="", init=False, repr=False)
+    _authoring_lock: asyncio.Lock = field(init=False, repr=False)
+    _legacy_finding_generation: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._original_runtime = self.base_runtime if callable(getattr(self.base_runtime, "execute_tool_async", None)) else ExecutionRuntime()
@@ -513,10 +641,28 @@ class BunshinScopedExecutionRuntime:
             or ""
         ).strip()
         self._direct_turn_id = f"{lifetime_id}:direct" if lifetime_id else ""
-        self.allowed_capabilities = filter_bunshin_allowed_capabilities(list(self.allowed_capabilities or []))
+        self._authoring_lock = _verifier_authoring_lock(self.workspace)
+        self.allowed_capabilities = filter_bunshin_allowed_capabilities(
+            list(self.allowed_capabilities or []), capability_policy=self.capability_policy,
+        )
+        bound_verifier = _bound_verifier_context(self.workspace) is not None
+        legacy_finding_grant = (bound_verifier and ADD_FINDING_CAPABILITY in self.allowed_capabilities
+                               and _profile_allows_capability(ADD_FINDING_CAPABILITY, self.capability_policy))
+        finding_permissions = [name for name in _FINDING_EDIT_CAPABILITIES
+                               if bound_verifier and (name in self.allowed_capabilities or legacy_finding_grant)]
         expand = getattr(self._original_runtime, "role_capabilities", None)
         if expand is not None:
             self.allowed_capabilities = expand(self.allowed_capabilities)
+        # Resumed packs retain their immutable allowed list and prompt identity.
+        # Hydrate compatible tools only in the consumed runtime projection.
+        self.allowed_capabilities = filter_bunshin_allowed_capabilities([
+            *[name for name in self.allowed_capabilities if name not in _FINDING_EDIT_CAPABILITIES],
+            *finding_permissions,
+        ], capability_policy=self.capability_policy)
+        self.allowed_capabilities = [name for name in self.allowed_capabilities
+                                     if _profile_allows_capability(name, self.capability_policy)]
+        if bound_verifier and not legacy_finding_grant:
+            self.allowed_capabilities = [name for name in self.allowed_capabilities if name != ADD_FINDING_CAPABILITY]
 
         verification_contract = dict(
             dict(self.workspace.get("bunshin_v2") or {}).get("verification_tool_contract") or {}
@@ -524,14 +670,17 @@ class BunshinScopedExecutionRuntime:
         verification_allowed = {
             str(item) for item in list(verification_contract.get("allowed_capabilities") or [])
         }
-        if verification_allowed:
+        if "allowed_capabilities" in verification_contract:
             # Match the invocation-local guard before mounting either provider
             # contracts or discovery. Role-wide evidence permissions include
             # tools that do not apply to this node. Keep separately governed
             # outcome, checklist, finding, and ordinary execution capabilities.
             self.allowed_capabilities = [
                 name for name in self.allowed_capabilities
-                if not is_verification_builder_capability(name) or name in verification_allowed
+                if (not is_verification_builder_capability(name)
+                    and not (bound_verifier and name == ADD_FINDING_CAPABILITY)) or name in verification_allowed
+                or (name in _FINDING_EDIT_CAPABILITIES and ADD_FINDING_CAPABILITY in verification_allowed
+                    and str(verification_contract.get("contract_version") or "1") == "1")
             ]
         self.capability_guidance_overrides = merge_tool_guidance_overrides(
             self.capability_guidance_overrides,
@@ -541,6 +690,7 @@ class BunshinScopedExecutionRuntime:
             self._original_runtime,
             self.allowed_capabilities,
             guidance_overrides=self.capability_guidance_overrides,
+            verifier_authoring=_bound_verifier_context(self.workspace) is not None,
         )
         self._original_adapter = _OriginalAdapter(self)
         self._mount_scoped_generation()
@@ -548,6 +698,7 @@ class BunshinScopedExecutionRuntime:
     def _mount_scoped_generation(self) -> None:
         allowed = set(self.allowed_capabilities)
         subtree = MountedSubtreeHandle(module_id="workflow_scoped")
+        legacy = MountedSubtreeHandle(module_id="workflow_scoped_legacy_finding")
         for name, raw_spec in _WORKSPACE_TOOL_SPECS.items():
             if name not in allowed or is_bunshin_capability_denied(name):
                 continue
@@ -560,14 +711,24 @@ class BunshinScopedExecutionRuntime:
                     handler=handler,
                     guidance_patch=self.capability_guidance_overrides.get(name),
                 )
-                subtree.descriptors.append(descriptor)
-                subtree.bound_actions.append(action)
-                subtree.bound_action_keys.append((action.canonical_path, action.target_id))
-                subtree.search_record_ids.append(descriptor.name)
+                if _bound_verifier_context(self.workspace) is not None and (
+                    is_verification_builder_capability(name) or is_swe_verification_capability(name)
+                ) and name not in _WORKFLOW_READ_CAPABILITIES:
+                    descriptor = _with_verifier_writer_guidance(descriptor)
+                    action = replace(action, descriptor=descriptor)
+                destination = _scoped_tool_destination(name, self.workspace, subtree, legacy)
+                if destination is None:
+                    continue
+                destination.descriptors.append(descriptor)
+                destination.bound_actions.append(action)
+                destination.bound_action_keys.append((action.canonical_path, action.target_id))
+                destination.search_record_ids.append(descriptor.name)
         if subtree.descriptors:
             self.base_runtime.runtime.mount_subtree(
                 SimpleNamespace(mounted_subtree=subtree)
             )
+        if legacy.descriptors:
+            self._legacy_finding_generation = _capture_legacy_finding_generation(self.base_runtime.runtime, legacy)
 
     @property
     def registry_generation(self):
@@ -587,7 +748,7 @@ class BunshinScopedExecutionRuntime:
         if name == "op_bunshin_memory_candidate_write":
             return self._propose_memories
         if is_review_finding_capability(name):
-            return lambda call, _ctx: add_finding_tool_result(call, self.workspace)
+            return lambda call, _ctx: review_finding_tool_result(call, self.workspace)
         if name == UPDATE_CHECKLIST_CAPABILITY:
             return lambda call, _ctx: update_checklist_tool_result(
                 call, self.workspace
@@ -645,15 +806,16 @@ class BunshinScopedExecutionRuntime:
             text=json.dumps(result), llm_text=json.dumps(result), structured=result)
 
     async def _execute_original(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
-        execute = getattr(self._original_runtime, "execute_tool_async", None)
-        if callable(execute):
-            facade_call = _manager_call_to_facade(self._original_runtime, call)
-            result = await execute(facade_call, **_supported_kwargs(execute, kwargs))
-            complete = getattr(self._original_runtime, "complete_evidence", None)
-            if complete is not None:
-                result = await complete(call, result, **kwargs)
-            return result
-        return _error_result(call, "unknown tool", "unknown_tool")
+        # Semantic execution is awaited by its scoped handler under the outer
+        # authoring lock. Reacquiring here would deadlock that nested call.
+        delegate = _verifier_execution_delegate(self, call.name, self._original_runtime)
+        execute = delegate.execute_tool_async
+        facade_call = _manager_call_to_facade(self._original_runtime, call)
+        result = await execute(facade_call, **_supported_kwargs(execute, kwargs))
+        complete = getattr(self._original_runtime, "complete_evidence", None)
+        if complete is not None:
+            result = await complete(call, result, **kwargs)
+        return result
 
     def begin_tool_result_turn(self, **kwargs: Any) -> None:
         self.base_runtime.begin_tool_result_turn(**kwargs)
@@ -676,7 +838,6 @@ class BunshinScopedExecutionRuntime:
     def stagnation_payload(self, call, result):
         hook = getattr(self._original_runtime, "stagnation_payload", None)
         return hook(call, result) if hook else {"ok": result.ok, "text": result.text, "structured": result.structured}
-
 
     def advance_tool_result_clock(self, **kwargs: Any) -> Any:
         advance = getattr(self._original_runtime, "advance_tool_result_clock", None)
@@ -727,6 +888,8 @@ class BunshinScopedExecutionRuntime:
         return discard(**kwargs) if callable(discard) else None
 
     def resolve_capability_address(self, name: object) -> str:
+        if self._legacy_finding_generation is not None and str(name) == ADD_FINDING_TOOL_SPEC["alias"]:
+            return ADD_FINDING_CAPABILITY
         return self.base_runtime.resolve_capability_address(name)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
@@ -790,13 +953,68 @@ class BunshinScopedExecutionRuntime:
                 "scoped tool execution requires an explicit logical lifetime",
                 "missing_execution_lifetime",
             )
-        result = await self.base_runtime.execute_tool_async(
-            guarded_call,
+        if _requires_verifier_authoring_lock(self, admission.target_name):
+            async with self._authoring_lock:
+                return await self._execute_verifier_authoring(
+                    guarded_call, target_name=admission.target_name,
+                    budget=budget, turn_id=effective_turn_id,
+                )
+        return await self._execute_admitted(guarded_call, budget=budget, turn_id=effective_turn_id)
+
+    async def _execute_verifier_authoring(
+        self, call: ToolCallIR, *, target_name: str, budget: Any, turn_id: str,
+    ) -> ToolExecutionResult:
+        from pal.bunshin.v2.verification_readiness import (
+            record_verification_execution, verification_corpus_snapshot,
+        )
+
+        is_submit = (is_swe_verification_capability(target_name)
+                     or target_name == "op_bunshin_verification_submit")
+        if is_submit:
+            if self.role_execution_sessions is not None and self.role_execution_sessions.has_work:
+                return _error_result(call, "Complete pending execution before submitting verification.",
+                                     "verification_execution_pending")
+        else:
+            try:
+                context = SubmissionDraftContext.from_workspace(self.workspace, draft_kind="verification")
+                SubmissionDraftStore(Path(str(self.workspace["runtime_root"]))).assert_editable(context)
+            except (ValueError, RuntimeError) as exc:
+                from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
+                record_verifier_failure(exc)
+                result = _error_result(call, str(exc), "verification_authoring_closed")
+                return replace(result, invocation_result=rejection("verification_authoring_closed", str(exc),
+                                        details={"reason": "verification_authoring_closed"}))
+        # Another serialized writer may have changed a path while this call
+        # waited. Resolve its write scope again under the authoring lock.
+        call, guard_error = _guard_scoped_workspace_mutation(
+            call, target_name=target_name, workspace=self.workspace,
+        )
+        if guard_error is not None:
+            return guard_error
+        direct_execution = target_name == "op_exec_shell" or target_name.startswith("op_lsp_")
+        before = verification_corpus_snapshot(self.workspace) if direct_execution else None
+        result = await self._execute_admitted(call, budget=budget, turn_id=turn_id,
+            delegate=_verifier_execution_delegate(self, target_name, self.base_runtime))
+        if before is not None:
+            record_verification_execution(self.workspace, new_tool_call(
+                name=target_name, args=effective_bunshin_tool_args(call), call_id=call.call_id,
+            ), result, before)
+        return result
+
+    async def _execute_admitted(
+        self, call: ToolCallIR, *, budget: Any, turn_id: str, delegate: Any | None = None,
+    ) -> ToolExecutionResult:
+        if call.name == ADD_FINDING_CAPABILITY and self._legacy_finding_generation is not None:
+            return await _execute_legacy_finding(self, call, budget=budget, turn_id=turn_id)
+        dispatch_call = (_manager_call_to_facade(self.base_runtime.runtime, call)
+                         if delegate is not None else call)
+        result = await (delegate or self.base_runtime).execute_tool_async(
+            dispatch_call,
             allow_tools=True,
             budget=budget,
-            turn_id=effective_turn_id,
+            turn_id=turn_id,
         )
-        if admission.call.name in {"op_bunshin_artifact_write", "op_bunshin_artifact_edit"} and result.ok:
+        if call.name in {"op_bunshin_artifact_write", "op_bunshin_artifact_edit"} and result.ok:
             artifact = dict((result.structured or {}).get("artifact") or {})
             if artifact:
                 _append_unique_artifact(self.produced_artifacts, artifact)
@@ -1079,55 +1297,3 @@ def _effective_capability_name(tool_call: ToolCallIR) -> str:
 
 def _effective_tool_args(tool_call: ToolCallIR) -> dict[str, Any]:
     return effective_bunshin_tool_args(tool_call)
-
-
-def _review_tool_evidence_ref(
-    target_name: str,
-    tool_call: ToolCallIR,
-    result: ToolExecutionResult,
-) -> dict[str, Any]:
-    if not (
-        str(target_name).startswith(("op_exec_shell", "op_lsp_"))
-        or str(target_name) in {
-            "op_file_write",
-            "op_file_edit",
-            "op_bunshin_verification_scratch_write",
-        }
-    ):
-        return {}
-    output_text = str(result.text or result.llm_text or "")
-    structured = json.loads(
-        json.dumps(dict(result.structured or {}), ensure_ascii=False, default=str)
-    )
-    args = json.loads(
-        json.dumps(_effective_tool_args(tool_call), ensure_ascii=False, default=str)
-    )
-    encoded = json.dumps(
-        {"text": output_text, "structured": structured},
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    ).encode("utf-8")
-    return {
-        "evidence_ref_id": f"tev_{uuid4().hex[:12]}",
-        "kind": (
-            "test_write"
-            if str(target_name) in {
-                "op_file_write",
-                "op_file_edit",
-                "op_bunshin_verification_scratch_write",
-            }
-            else "lsp"
-            if str(target_name).startswith("op_lsp_")
-            else "command"
-        ),
-        "tool_name": str(target_name),
-        "call_id": str(tool_call.call_id or ""),
-        "ok": bool(result.ok),
-        "status": str(result.status or ""),
-        "args": args,
-        "summary": output_text[:500],
-        "output_sha256": hashlib.sha256(encoded).hexdigest(),
-        "output_text": output_text[:65536],
-        "structured": structured,
-    }

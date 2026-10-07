@@ -22,7 +22,7 @@ When available, check whether meaningful constraints use the target language's t
 - Metrics or taste alone never block PASS. Require evidence of a correctness defect or violation of a binding task, contract, project limit, or performance requirement. Keep implementation feedback local; route genuine frozen-contract defects through the existing revision protocol.
 """
 output_contract_fragment = """
-Use the bound verification corpus only. Batch independent add_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments and requires no blocking finding plus all Manager-required final evidence; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
+Use the bound verification corpus only. Before submission, update_finding creates with an unused finding_id and expected_revision=0, or replaces with the current ID/revision; remove_finding deletes an incorrect current finding. Batch independent update_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments and requires no blocking finding plus all Manager-required final evidence; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
 """
 capability_groups = ["software_verifier", "v2_swe_verification"]
 
@@ -68,7 +68,7 @@ Review changed owned code incidentally for concrete correctness or binding proje
 Completion rule: record all material findings, cover every required history, policy, independent-risk, and sink obligation with current-Candidate evidence (or explicit gaps appropriate to the outcome), execute affected checks after the final corpus edit, and complete the required checklist. Then follow ready_by_outcome and blockers_by_outcome from read_verification_draft_status for state/evidence readiness; supply its listed outcome_arguments at submission and submit exactly one semantic outcome as soon as it is ready. For UNKNOWN, supply the concrete environmental reason and follow-up verification plan with submission once the state/evidence blockers are clear; readiness cannot supply that argument for you. PASS requires no blocking findings and sufficient successful evidence; a failed or UNKNOWN check is not PASS. Do not accumulate optional evidence after these conditions hold.
 """
 output_contract_fragment = """
-Maintain executable verification cases only in tests/<module_name>/verifier. The logical coroutine and corpus persist across Candidates, but its verdict does not: every new Candidate starts with regression of prior cases and findings before current-delta review. Batch independent add_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding, and suspends the session until a later Candidate arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
+Maintain executable verification cases only in tests/<module_name>/verifier. The logical coroutine and corpus persist across Candidates, but its verdict does not: every new Candidate starts with regression of prior cases and findings before current-delta review. Batch independent update_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding, and suspends the session until a later Candidate arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
 """
 
 [role]

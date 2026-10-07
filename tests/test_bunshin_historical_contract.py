@@ -166,7 +166,13 @@ def test_modern_identity_is_only_a_legacy_compatible_fallback(finding, bill_case
 def scoped_for(view, *, guidance=None, contract=None):
     if contract is None:
         contract = compile_verification_invocation_tool_contract(work_view=view, verification_policy={})
-    workspace = {"bunshin_v2": {"verification_tool_contract": contract}}
+    workspace = {"bunshin_v2": {
+        "workflow_id": "projection-workflow", "invocation_id": "projection-test",
+        "lease_resource_key": "projection-lease", "fencing_token": 1,
+        "role": "verifier", "mode": "module", "authoring_input_fingerprint": "projection-input",
+        "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+        "verification_tool_contract": contract,
+    }}
     pack = apply_v2_role_capability_policy(BunshinInvocationPack(
         invocation_id="projection-test", workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
@@ -198,8 +204,9 @@ def test_evidence_provider_discovery_and_admission_match_bound_contract(view):
             assert (runtime.get_capability_spec(alias) is not None) == (canonical in expected)
             assert (canonical in runtime.allowed_capabilities) == (canonical in expected)
         assert {"submit_verification_pass", "submit_verification_unknown",
-                "request_verification_module_repair", "update_checklist", "add_finding",
+                "request_verification_module_repair", "update_checklist", "update_finding", "remove_finding",
                 "read_verification_draft_status", "run_verification_diff_risk"} <= set(advertised)
+        assert "add_finding" not in advertised
         assert "submit_verification" not in advertised
         if HISTORICAL not in expected:
             result = asyncio.run(runtime.execute_tool_async(new_tool_call(

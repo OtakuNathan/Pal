@@ -147,7 +147,7 @@ def apply_v2_role_capability_policy(
 
 def _is_authoring_capability_name(name: str) -> bool:
     value = str(name or "")
-    return value == "op_bunshin_add_finding" or value.startswith(
+    return value in {"op_bunshin_add_finding", "op_bunshin_update_finding", "op_bunshin_remove_finding"} or value.startswith(
         (
             "op_bunshin_update_checklist",
             "op_bunshin_requirement",

@@ -90,6 +90,11 @@ class DependencyRepairCapture:
                 raise SubmissionInvariantError("verifier capture has no frozen candidate")
             return self._publish(base)
         prompt_ref, workspace = self._prompt(node, incarnation, assignment, candidate_ref, digest)
+        # A stopped worker's lease is not read authority for receipt recovery.
+        # The artifact above was loaded from its verified assignment receipt.
+        workspace["verification_case_revision"] = int(
+            dict(submission.get("verification_binding") or {}).get("case_revision") or 0
+        )
         review_workspace = Path(str(workspace.get("repo_path") or node.payload.get("workspace_path") or ""))
         review_scratch = Path(str(workspace.get("review_scratch_dir") or review_workspace / ".review-scratch"))
         adapter = str(node.payload.get("execution_adapter") or "")
@@ -343,11 +348,17 @@ class DependencyRepairCapture:
             **dict(workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}), **scope,
         }
         view = self.artifacts.read_json(self._durable(dict(dict(assignment.get("input_refs") or {}).get("module_work_view") or {})))
+        receipt = self._durable(dict(assignment.get("submission_artifact_ref") or {}))
+        if (assignment.get("state") not in {RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value}
+                or stable_hash(submission) != assignment.get("submission_payload_hash")
+                or self.artifacts.read_json(receipt) != dict(submission)):
+            raise SubmissionInvariantError("capture submission differs from its authoritative assignment receipt")
         errors = semantic_verification_submission_errors(
             submission, work_view=view, changed_paths=changed,
             current_case_paths=(_verification_scratch_paths(Path(workspace["review_scratch_dir"])) if workspace["verification_scratch_only"]
                                 else _verification_corpus_files(Path(workspace["repo_path"]), corpus)),
             corpus_scope=corpus, scratch_only=workspace["verification_scratch_only"], workspace=workspace,
+            accepted_legacy_receipt="verification_binding" not in submission,
         )
         routes = set(verification_finding_route_errors(structured_findings(submission), scope))
         errors = tuple(error for error in errors if error not in routes)
@@ -389,6 +400,9 @@ class DependencyRepairCapture:
         # A Manager verifier checkpoint changes HEAD, never the authored corpus.
         current.pop("candidate_digest", None)
         expected.pop("candidate_digest", None)
+        if "case_revision" not in expected:
+            # Older Manager capture artifacts predate the draft-revision field.
+            current.pop("case_revision", None)
         if current != expected or (previous.get("workspace_fingerprint") and previous["workspace_fingerprint"] != workspace_content_fingerprint(Path(workspace["repo_path"]))):
             raise SubmissionInvariantError("capture workspace changed after evidence preservation")
 

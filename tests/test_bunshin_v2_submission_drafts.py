@@ -118,7 +118,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
         self.assertEqual(changed.payload, {"definitions": {"fresh": True}})
         self.assertEqual(changed.source_draft_key, "")
 
-    def test_replacement_invocation_inherits_identical_verification_input(self) -> None:
+    def test_unrelated_invocation_retains_identical_input_as_immutable_history(self) -> None:
         first_token = self.claim()
         first = self.context(token=first_token)
         store = SubmissionDraftStore(self.root)
@@ -157,15 +157,16 @@ class SubmissionDraftStoreTests(unittest.TestCase):
 
         inherited = store.read(replacement)
 
-        self.assertEqual(
-            inherited.payload["evidence"],
-            {"cases": {"priority shape": {"status": "FAIL"}}},
-        )
-        self.assertEqual(
-            inherited.payload["findings"],
-            [{"case": "priority shape", "summary": "fraction accepted"}],
-        )
+        self.assertEqual(inherited.payload["evidence"], {"cases": {}})
+        self.assertEqual(inherited.payload["findings"], [])
+        history = inherited.payload["history"][0]
+        self.assertEqual(history["source_draft_key"], first.draft_key)
+        self.assertEqual(history["payload"]["findings"],
+                         [{"case": "priority shape", "summary": "fraction accepted"}])
         self.assertEqual(inherited.source_draft_key, first.draft_key)
+        with self.assertRaisesRegex(ValueError, "history is immutable"):
+            store.mutate(replacement, operation_key="erase-history", request={},
+                         reducer=lambda payload: ({**payload, "history": []}, {}))
 
     def test_non_verification_retry_inherits_definitions_but_not_conclusions(self) -> None:
         first_token = self.claim()

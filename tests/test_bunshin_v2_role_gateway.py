@@ -263,7 +263,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         self.assertEqual(status["submission_artifact_ref"], receipt["submission_artifact_ref"])
         self.assertEqual(status["submission_payload_hash"], receipt["submission_payload_hash"])
 
-    def test_gateway_reconciles_draft_cas_race_after_canonical_receipt(self) -> None:
+    def test_gateway_receipt_blocks_draft_race_before_projection(self) -> None:
         first = self.call("draft_read", context=self.context, seed={"checks": []})
         self.assertEqual(first["snapshot"]["version"], 0)
         original = self.service.repository.role_submissions.record_role_submission
@@ -272,15 +272,16 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             receipt = original(**kwargs)
             store = SubmissionDraftStore(self.runtime_root)
             context = SubmissionDraftContext.from_mapping(self.context)
-            store.mutate_precomputed(
-                context,
-                operation_key="late-draft-race",
-                request={"check": "late"},
-                expected_version=0,
-                next_payload={"checks": ["late"]},
-                result={"recorded": True},
-                seed={"checks": []},
-            )
+            with self.assertRaisesRegex(ValueError, "frozen"):
+                store.mutate_precomputed(
+                    context,
+                    operation_key="late-draft-race",
+                    request={"check": "late"},
+                    expected_version=0,
+                    next_payload={"checks": ["late"]},
+                    result={"recorded": True},
+                    seed={"checks": []},
+                )
             return receipt
 
         self.service.repository.role_submissions.record_role_submission = record_then_race
@@ -294,7 +295,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         self.assertTrue(receipt["submitted"])
         draft = self.call("draft_read", context=self.context, seed={})
         self.assertEqual(draft["snapshot"]["status"], "submitted")
-        self.assertEqual(draft["snapshot"]["version"], 1)
+        self.assertEqual(draft["snapshot"]["version"], 0)
         with self.assertRaisesRegex(ValueError, "receipt already froze authoring"):
             self.call(
                 "draft_mutate",
@@ -461,6 +462,12 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             ],
         }
 
+        self.gateway.call("draft_mutate", {"access_token": token, "context": context,
+            "operation_key": "record-current-case", "request": {"case": "candidate diff risk"},
+            "expected_version": 0, "next_payload": {"evidence": {"cases": {
+                "candidate diff risk": submission["recorded_results"][0]}}}, "result": {}})
+        receipt_workspace["verification_case_revision"] = 1
+
         build_file = self.workspace / "build" / "CMakeCache.txt"
         build_file.parent.mkdir()
         build_file.write_text("transient\n", encoding="utf-8")
@@ -470,7 +477,8 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
                 {
                     "access_token": token,
                     "context": context,
-                    "expected_version": 0,
+                    "expected_version": 1,
+                    "expected_work_item_version": 0,
                     "submission": submission,
                 },
             )
@@ -490,7 +498,8 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         build_file.parent.rmdir()
         with self.assertRaisesRegex(SubmissionValidationError, "fresh validation required"):
             self.gateway.call("draft_submit", {
-                "access_token": token, "context": context, "expected_version": 0,
+                "access_token": token, "context": context, "expected_version": 1,
+                "expected_work_item_version": 0,
                 "submission": submission,
             })
         # A legacy checkpoint stays readable, but requires an actual fresh run.
@@ -503,17 +512,26 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             "cmd": f"{sys.executable} -B -m pytest -p no:cacheprovider tests/router/verifier/test_router.py",
             "cwd": str(self.workspace),
         })
-        before = verification_corpus_snapshot(receipt_workspace)
-        result = asyncio.run(_FakeExecutionAdapter().execute_tool_async(call))
-        self.assertEqual(result.structured["returncode"], 0)
-        record_verification_execution(receipt_workspace, call, result, before)
+        from pal.bunshin.v2.semantic_evidence import run_shell_evidence, recorded_cases
+        receipt_workspace["runtime_root"] = str(self.runtime_root)
+        receipt_workspace["bunshin_v2"].update(context)
+        receipt_workspace.pop("verification_case_revision", None)
+        result = asyncio.run(run_shell_evidence(new_tool_call(
+            name="op_bunshin_verification_run_diff_risk", call_id="fresh-semantic-case",
+            args={"name": "candidate diff risk", "command": call.args["cmd"]}),
+            workspace=receipt_workspace, original_adapter=_FakeExecutionAdapter(), draft_kind="verification",
+            case_kind="diff_risk", obligation_tag="candidate_delta_review"))
+        self.assertTrue(result.ok, result.llm_text)
+        fresh = SubmissionDraftStore(self.runtime_root).read(SubmissionDraftContext.from_mapping(context))
+        submission["recorded_results"] = recorded_cases(fresh.payload)
         submission["tool_receipts"] = receipt_workspace["review_tool_evidence_refs"]
         receipt = self.gateway.call(
             "draft_submit",
             {
                 "access_token": token,
                 "context": context,
-                "expected_version": 0,
+                "expected_version": fresh.version,
+                "expected_work_item_version": 0,
                 "submission": submission,
             },
         )

@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pal.bunshin.v2.verification_policy_validation import (
+    _verification_submission_errors, semantic_verification_draft_errors, _policy_exceptions,
+)
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
@@ -24,8 +27,11 @@ from typing import Any, Mapping
 
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.repository import BunshinV2Repository
+from pal.bunshin.v2.verification_readiness import verification_corpus_snapshot
 from pal.bunshin.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
+    UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
+    UPDATE_FINDING_TOOL_SPEC, REMOVE_FINDING_TOOL_SPEC,
     finding_severity,
     partition_findings,
     structured_findings,
@@ -33,7 +39,7 @@ from pal.bunshin.v2.review_findings import (
 from pal.bunshin.v2.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
-    submission_work_items,
+    submission_work_items, read_work_items,
 )
 from pal.bunshin.v2.semantic_evidence import (
     record_unavailable_evidence,
@@ -54,7 +60,6 @@ from pal.bunshin.v2.submission_preflight import (
 from pal.bunshin.v2.verification_lsp_policy import (
     compile_lsp_applicability,
     lsp_evidence_required,
-    lsp_policy_errors,
 )
 from pal.bunshin.v2.verification import (
     historical_repair_checklist_items,
@@ -170,7 +175,7 @@ _COMMON_VERIFICATION_CAPABILITIES = frozenset(
         "op_bunshin_verification_run_warning_check",
         "op_bunshin_verification_run_lsp_check",
         "op_bunshin_verification_check_unavailable",
-        ADD_FINDING_CAPABILITY,
+        UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
         "op_bunshin_verification_set_summary",
         "op_bunshin_verification_draft_status",
         "op_bunshin_verification_remove_case",
@@ -185,7 +190,7 @@ _EXECUTION_CAPABILITIES = (
     "op_bunshin_verification_check_unavailable",
 )
 _FINDING_CAPABILITIES = (
-    ADD_FINDING_CAPABILITY,
+    UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
     "op_bunshin_verification_set_summary",
 )
 VERIFICATION_BUILDER_CAPABILITIES = (
@@ -217,6 +222,8 @@ _DEFECT_PRECEDENCE = {
 }
 
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    UPDATE_FINDING_CAPABILITY: UPDATE_FINDING_TOOL_SPEC,
+    REMOVE_FINDING_CAPABILITY: REMOVE_FINDING_TOOL_SPEC,
     "op_bunshin_verification_scratch_write": {
         "alias": "write_verification_scratch",
         "guidance": {
@@ -240,7 +247,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         name: {
             "alias": "run_verification_" + name.removeprefix("op_bunshin_verification_run_"),
             "guidance": {
-                "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case.",
+                "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case; rerun the same name to replace it before submission.",
                 "use_when": " ".join(
                     [
                         str(_VERIFICATION_ACTION_TEMPLATES[tag]["when"]),
@@ -318,7 +325,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_remove_case": {
         "alias": "remove_verification_case",
         "guidance": {
-            "purpose": "Withdraw one recorded verification case and its attached findings by semantic name.",
+            "purpose": "Remove one current recorded verification case by semantic name; findings are edited separately.",
             "use_when": "Use only when a recorded case itself is invalid, duplicate, or no longer applicable.",
             "do_not_use_when": "Do not hide a legitimate failure; rerun that case after a real fix instead.",
             "failure_next_steps": "Correct the exact semantic case name and audit reason before retrying.",
@@ -328,7 +335,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_submit": {
         "alias": "submit_verification",
         "guidance": {
-            "purpose": "Submit the current immutable verification evidence and findings for Manager-derived routing.",
+            "purpose": "Submit and freeze the current verification evidence and findings for Manager-derived routing.",
             "use_when": "Use with no arguments after every required obligation and checklist item is closed.",
             "do_not_use_when": "Do not use with missing evidence, incomplete findings, or unfinished checklist work.",
             "failure_next_steps": "Resolve every returned draft consistency error before retrying.",
@@ -494,7 +501,7 @@ def compile_verification_invocation_tool_contract(
     if not historical_regressions:
         allowed_capabilities.discard("op_bunshin_verification_run_historical_regression")
     contract: dict[str, Any] = {
-        "contract_version": "1",
+        "contract_version": "2",
         "module_name": module_name,
         "contract_paths": contract_paths,
         "contract_consumption": consumption,
@@ -555,8 +562,8 @@ def compile_verification_invocation_tool_contract(
             "findings, and then submit one outcome. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )}
-    overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-        "Record one independently actionable, evidence-backed finding with p0/p1/p2 priority, "
+    overrides[UPDATE_FINDING_CAPABILITY] = {"use_when": (
+        "Upsert one independently actionable, evidence-backed finding: choose an unused finding_id and expected_revision=0 to create, or the current ID/revision from read_verification_draft_status to replace. Use p0/p1/p2 priority, "
         "a self-contained summary, and exact task_ledger or workspace locations when available. "
         "Use verification_defect for an incorrect Verifier-owned probe or corpus, module_defect "
         "for the current implementation, dependency_defect for upstream code, contract_defect "
@@ -759,8 +766,11 @@ def _draft_status(
             next_actions.append({"action": "resolve_submission_blockers",
                                  "blockers_by_outcome": {outcome: state["blockers"]
                                                          for outcome, state in readiness.items()}})
+    ledger = read_work_items(workspace)
+    revisions = {item["item_id"]: int(item.get("revision") or 1) for item in ledger["items"]}
     result = {
         "draft_version": snapshot.version,
+        "finding_history": ledger["history"],
         "status": snapshot.status,
         "cases": [
             {"name": str(item.get("name") or ""), "status": str(item.get("status") or "")}
@@ -769,6 +779,7 @@ def _draft_status(
         "findings": [
             {
                 "finding_id": str(item.get("finding_id") or ""),
+                "revision": revisions.get(str(item.get("finding_id") or ""), 1),
                 "finding_kind": str(item.get("finding_kind") or ""),
                 "priority": str(item.get("priority") or ""),
                 "summary": str(item.get("summary") or ""),
@@ -778,6 +789,7 @@ def _draft_status(
         "advisories": [
             {
                 "finding_id": str(item.get("finding_id") or ""),
+                "revision": revisions.get(str(item.get("finding_id") or ""), 1),
                 "finding_kind": str(item.get("finding_kind") or ""),
                 "priority": str(item.get("priority") or ""),
                 "summary": str(item.get("summary") or ""),
@@ -871,6 +883,7 @@ def _submit(
     _validate_case_references(cases, workspace=workspace)
     defect_kind = dominant_verification_defect_kind(findings)
     output = {
+        "verification_binding": verification_corpus_snapshot(workspace),
         "cases": [_case_declaration(item) for item in cases],
         "findings": [_public_finding(item) for item in findings],
         "advisories": [_public_finding(item) for item in advisories],
@@ -903,6 +916,8 @@ def _submit(
         receipt = store.mark_submitted(
             context,
             expected_version=snapshot.version,
+            expected_work_item_version=int(work_items["version"]),
+            verification_workspace=workspace,
             submission_payload=output,
         )
         submission_ref = dict(receipt.get("submission_artifact_ref") or {})
@@ -928,6 +943,8 @@ def _submit(
         store.mark_submitted(
             context,
             expected_version=snapshot.version,
+            expected_work_item_version=int(work_items["version"]),
+            verification_workspace=workspace,
             submission_artifact_ref=local_submission_ref.to_dict(),
             submission_payload_hash=submission_payload_hash,
             submission_payload=output,
@@ -984,103 +1001,6 @@ def validate_semantic_verification_plan_shape(
         raise ValueError("compiled review advisories must use disposition=advisory")
     if not isinstance(value.get("recorded_results"), list) or len(value["recorded_results"]) != len(value["cases"]):
         raise ValueError("every case requires one Manager-recorded result")
-def _verification_submission_errors(
-    value: Mapping[str, Any], workspace: Mapping[str, Any]
-) -> tuple[list[str], tuple[str, ...]]:
-    errors: list[str] = []
-    reference_warnings: tuple[str, ...] = ()
-    work_view = bound_reference_payload(workspace, "module_work_view", required=False)
-    if work_view:
-        reference_warnings = ()
-    historical = list(work_view.get("historical_repair_bills") or []) or list(
-        work_view.get("historical_repair_bill_refs") or []
-    )
-    required_historical = historical_repair_checklist_items(work_view)
-    recorded_results = [dict(item) for item in list(value.get("recorded_results") or [])]
-    try:
-        validate_verification_case_order(
-            [str(item.get("case_kind") or "") for item in recorded_results],
-            historical_required=bool(historical),
-        )
-    except ValueError as exc:
-        errors.append(str(exc))
-    if required_historical:
-        historical_status = {
-            str(item.get("name") or ""): str(item.get("status") or "")
-            for item in recorded_results
-            if str(item.get("case_kind") or "") == "historical_regression"
-        }
-        missing = [
-            str(item["case"])
-            for item in required_historical
-            if str(item["case"]) not in historical_status
-        ]
-        if missing:
-            errors.append(
-                "verification must replay every historical RepairBill case before submit: "
-                + ", ".join(missing)
-            )
-    policy = bound_reference_payload(workspace, "verification_policy", required=False)
-    if not policy:
-        return errors, reference_warnings
-    tags = {str(tag) for item in list(value.get("recorded_results") or []) for tag in list(dict(item).get("obligation_tags") or [])}
-    exceptions = dict(value.get("policy_exceptions") or {})
-    obligations = (
-        ("require_focused_tests", "focused_tests"),
-        ("require_warning_clean", "warning_clean"),
-        ("require_consumer_probe", "consumer_probe"),
-        ("require_public_surface_dogfood", "public_surface_dogfood"),
-        ("require_platform_probe", "platform_probe"),
-        ("require_candidate_delta_review", "candidate_delta_review"),
-    )
-    for policy_key, tag in obligations:
-        if bool(policy.get(policy_key, False)) and tag not in tags and not str(exceptions.get(tag) or "").strip():
-            errors.append(f"VerificationPolicy requires {tag} evidence or an explicit UNKNOWN reason")
-    if bool(policy.get("require_historical_regressions", False)) and historical and "historical_regressions" not in tags:
-        errors.append("VerificationPolicy requires historical RepairBill regression evidence")
-    errors.extend(lsp_policy_errors(policy, recorded_results, exceptions))
-    allowed_obligations = {
-        str(item) for item in list(policy.get("allowed_obligations") or []) if str(item)
-    }
-    unexpected = tags - allowed_obligations if allowed_obligations else set()
-    if unexpected:
-        errors.append(
-            "verification submission contains obligations outside this node's scope: "
-            + ", ".join(sorted(unexpected))
-        )
-    failed_cases = [
-        str(item.get("name") or "")
-        for item in list(value.get("recorded_results") or [])
-        if str(item.get("status") or "") == "FAIL"
-    ]
-    if failed_cases and not list(value.get("findings") or []):
-        errors.append(
-            "FAIL evidence requires at least one blocking add_finding call; "
-            "advisory findings do not reconcile FAIL: "
-            + ", ".join(sorted(failed_cases))
-        )
-    return errors, reference_warnings
-
-
-def semantic_verification_draft_errors(
-    payload: Mapping[str, Any],
-    workspace: Mapping[str, Any],
-) -> tuple[str, ...]:
-    """Return policy errors for the current assignment-local verifier Draft."""
-
-    cases = recorded_cases(payload)
-    findings, _advisories = partition_findings(
-        findings_from_work_items(workspace)
-    )
-    errors, _warnings = _verification_submission_errors(
-        {
-            "recorded_results": cases,
-            "findings": findings,
-            "policy_exceptions": _policy_exceptions(cases),
-        },
-        workspace,
-    )
-    return tuple(dict.fromkeys(errors))
 
 
 def _preflight_verification_submission(
@@ -1178,16 +1098,6 @@ def _internal_context(context: SubmissionDraftContext, workspace: Mapping[str, A
         "input_fingerprint": context.input_fingerprint,
         "scratch_fingerprint": scratch_fingerprint(workspace),
     }
-
-
-def _policy_exceptions(cases: list[Mapping[str, Any]]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for item in cases:
-        if str(item.get("status") or "") != "UNKNOWN":
-            continue
-        for tag in list(item.get("obligation_tags") or []):
-            result[str(tag)] = str(item.get("summary") or "UNKNOWN")
-    return result
 
 
 def _default_summary(cases: list[Mapping[str, Any]], findings: list[Mapping[str, Any]]) -> str:

@@ -139,6 +139,8 @@ def test_required_unavailable_is_unknown_not_pass(verifier):
     delta = payload(run_delta(verifier))["case"]
     gap = payload(call("record_unavailable_verification", name="required LSP", obligation="lsp",
                        reason="Required language-server service unavailable; rerun after recovery."))["case"]
+    # Recording a new case changes the corpus revision; refresh the final execution.
+    delta = payload(run_delta(verifier))["case"]
     state = status(verifier)
     assert not state["ready_by_outcome"]["pass"]
     assert state["ready_by_outcome"]["unknown"]

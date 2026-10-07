@@ -207,9 +207,9 @@ def test_uncertain_execution_failure_stays_unknown_effect(verifier):
 
 def test_candidate_change_and_manager_freshness_reject_stale_receipt(verifier):
     _, workspace, probe, _, _, view = verifier
-    payload(run_delta(verifier))
+    recorded_case = payload(run_delta(verifier))['case']
     submission = {'outcome': 'pass', 'findings': [], 'advisories': [],
-                  'recorded_results': [{'name': 'delta', 'case_kind': 'diff_risk', 'obligation_tags': ['candidate_delta_review']}],
+                  'recorded_results': [recorded_case],
                   'tool_receipts': workspace['review_tool_evidence_refs']}
     def manager_errors():
         return semantic_verification_submission_errors(submission, work_view=view,
@@ -385,7 +385,7 @@ def test_snapshot_refuses_symlink_swap_during_file_open(verifier, tmp_path):
             probe.unlink()
             probe.symlink_to(outside)
         return original(path, flags, *args, **kwargs)
-    with patch('pal.bunshin.v2.verification_readiness.os.open', side_effect=swap):
+    with patch('pal.bunshin.v2.verification_corpus.os.open', side_effect=swap):
         with pytest.raises(OSError):
             verification_corpus_snapshot(workspace)
     assert swapped

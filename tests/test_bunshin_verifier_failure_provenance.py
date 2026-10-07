@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ from pal.bunshin.verifier_tool_diagnostics import (
     record_verifier_failure,
 )
 from pal.bunshin.v2.semantic_evidence import _error_result
+from pal.bunshin.v2.submission_drafts import SubmissionDraftContext
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared import BunshinInvocationPack, ToolExecutionResult
 from pal.shared.tool_protocol import new_tool_call
@@ -65,15 +67,18 @@ def test_real_wrapper_and_heartbeat_preserve_original_failure_without_public_cha
                 SimpleNamespace(execution_runtime=SimpleNamespace(), llm_round_count=87, tool_call_count=0),
                 SimpleNamespace(pending_tool_results=[], turn_id="turn"), tool_call())
             assert public_result(result) == public_result(baseline)
-            assert result.status == "handler_exception"
+            assert result.status == ("error" if stale else "handler_exception")
             item = next(event["payload"] for event in events
                         if event["event_kind"] == "verifier_tool_diagnostic" and event["payload"]["stage"] == "completed")
             provenance = item["provenance"]
             assert provenance["error_type"] == "ValueError"
             assert provenance["frames"][-1]["file"] == "submission_drafts.py"
             assert provenance["frames"][-1]["function"] == "SubmissionDraftContext.from_workspace"
-            # These errors originate on different source lines, before any DB read.
-            expected_line = 114 if stale else 112
+            # Resolve the original validation statement rather than pinning unrelated import counts.
+            source, first_line = inspect.getsourcelines(SubmissionDraftContext.from_workspace)
+            marker = 'raise ValueError(' if stale else 'raise ValueError("submission Draft is missing'
+            candidates = [first_line + offset for offset, line in enumerate(source) if marker in line]
+            expected_line = candidates[-1] if stale else candidates[0]
             assert provenance["frames"][-1]["line"] == expected_line
             assert SECRET not in json.dumps(item)
             assert "provenance" not in result.llm_text

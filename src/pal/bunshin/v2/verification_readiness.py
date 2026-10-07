@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import subprocess
-import stat
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Mapping
 
 from pal.shared.tool_protocol import FailedResult
@@ -21,147 +18,70 @@ def shell_execution_output(result: Any) -> dict[str, Any]:
 
 def verification_case_errors(
     cases: list[dict[str, Any]], *, outcome: str, workspace: Mapping[str, Any] | None,
+    allow_legacy: bool = False,
 ) -> list[str]:
     """Shared local/Manager status and assignment-freshness gate."""
     errors = []
     if outcome == "pass":
         unresolved = [str(item.get("name") or "") for item in cases
-                      if item.get("status") in {"FAIL", "UNKNOWN"}]
+                      if item.get("status") != "PASS"]
         if unresolved:
-            errors.append("PASS requires resolved PASS evidence; failed or UNKNOWN cases: " + ", ".join(unresolved))
+            errors.append("PASS requires resolved PASS evidence; failed or UNKNOWN cases (including unrecognized statuses): " + ", ".join(unresolved))
     if workspace is not None:
         current_input = str(dict(workspace.get("bunshin_v2") or {}).get("authoring_input_fingerprint") or "")
         stale = [str(item.get("name") or "") for item in cases
                  if item.get("input_fingerprint") and item["input_fingerprint"] != current_input]
         if stale:
             errors.append("rerun evidence for the current Candidate: " + ", ".join(stale))
+        executed = [item for item in cases if item.get("status") in {"PASS", "FAIL"}]
+        current = case_corpus_binding(verification_corpus_snapshot(workspace)) if executed else {}
+        stale_cases = [str(item.get("name") or "") for item in executed if (
+                           (not allow_legacy or "case_binding" in item) and item.get("case_binding") != current
+                           or (not allow_legacy or "definition_fingerprint" in item)
+                           and item.get("definition_fingerprint") != case_definition_fingerprint(item))]
+        if stale_cases:
+            errors.append("rerun stale recorded cases for the current Candidate, corpus and case definition: "
+                          + ", ".join(stale_cases))
     return errors
 
 
-def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]:
-    """Snapshot explicit corpus scopes with bounded, no-follow descriptor reads.
+def case_corpus_binding(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in snapshot.items() if key != "case_revision"}
 
-    Relative paths agree across Manager/sandbox mounts. Races, unreadable files,
-    and exceeded limits fail closed; no partial digest can qualify a receipt.
-    """
+
+def case_definition_fingerprint(case: Mapping[str, Any]) -> str:
+    definition = {key: case.get(key) for key in (
+        "name", "case_kind", "command", "expected_exit_codes", "requirements",
+        "locations", "invariants", "obligation_tags",
+    )}
+    import json
+    return hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def verification_case_revision(workspace: Mapping[str, Any]) -> int:
+    if "verification_case_revision" in workspace:
+        return int(workspace["verification_case_revision"])
     binding = dict(workspace.get("bunshin_v2") or {})
-    root_value = str(workspace.get("repo_path") or "")
-    root = Path(root_value).resolve() if root_value else None
-    candidate = ""
-    if root is not None and (root / ".git").exists():
-        head = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=5,
-        )
-        candidate = head.stdout.strip()
-    entries: dict[str, str] = {}
-    count = total_bytes = 0
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if binding.get("role") != "verifier" or not workspace.get("runtime_root") or not binding.get("invocation_id"):
+        return 0
+    from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+    context = SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
+    snapshot = SubmissionDraftStore(Path(str(workspace["runtime_root"]))).read(context)
+    return int(snapshot.payload.get("case_revision") or 0)
 
-    def identity(info: os.stat_result) -> tuple[int, ...]:
-        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
-    def collect(parent: int, name: str, relative: str, depth: int = 0, kind: str = "") -> None:
-        nonlocal count, total_bytes
-        count += 1
-        if count > 10000 or depth > 64:
-            raise ValueError("verification corpus snapshot exceeds its file/depth limit")
-        try:
-            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        except FileNotFoundError:
-            entries[relative] = "missing"
-            return
-        if stat.S_ISLNK(before.st_mode):
-            entries[relative] = "symlink:" + os.readlink(name, dir_fd=parent)
-        elif kind == "file" and not stat.S_ISREG(before.st_mode):
-            entries[relative] = "not-a-file"
-        elif kind == "directory" and not stat.S_ISDIR(before.st_mode):
-            entries[relative] = "not-a-directory"
-        elif stat.S_ISREG(before.st_mode):
-            total_bytes += before.st_size
-            if total_bytes > 256 * 1024 * 1024:
-                raise ValueError("verification corpus snapshot exceeds its byte limit")
-            with os.fdopen(os.open(name, flags, dir_fd=parent), "rb") as stream:
-                if identity(os.fstat(stream.fileno())) != identity(before):
-                    raise ValueError("verification corpus changed during snapshot")
-                digest = hashlib.sha256()
-                remaining = before.st_size
-                while True:
-                    chunk = stream.read(min(1024 * 1024, remaining + 1))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    if remaining < 0:
-                        raise ValueError("verification corpus changed during snapshot")
-                    digest.update(chunk)
-                entries[relative] = digest.hexdigest()
-                if identity(os.fstat(stream.fileno())) != identity(before):
-                    raise ValueError("verification corpus changed during snapshot")
-        elif stat.S_ISDIR(before.st_mode):
-            fd = os.open(name, flags | os.O_DIRECTORY, dir_fd=parent)
-            try:
-                if identity(os.fstat(fd)) != identity(before):
-                    raise ValueError("verification corpus changed during snapshot")
-                with os.scandir(fd) as children:
-                    for child in children:
-                        collect(fd, child.name, f"{relative}/{child.name}".strip("/"), depth + 1)
-            finally:
-                os.close(fd)
-        else:
-            raise ValueError("verification corpus contains an unsupported file type")
-        if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(before):
-            raise ValueError("verification corpus changed during snapshot")
-
-    if workspace.get("verification_scratch_only"):
-        scratch = str(workspace.get("review_scratch_dir") or "")
-        if scratch:
-            path = Path(scratch)
-            parent = os.open(path.parent, flags | os.O_DIRECTORY)
-            try:
-                collect(parent, path.name, "review_scratch", kind="directory")
-            finally:
-                os.close(parent)
-    elif root is not None:
-        root_fd = os.open(root, flags | os.O_DIRECTORY)
-        try:
-            for raw in list(workspace.get("write_path_scopes") or []):
-                scope = dict(raw or {})
-                relative = PurePosixPath(str(scope.get("path") or ""))
-                if (str(relative) in {"", "."} or relative.is_absolute()
-                        or ".." in relative.parts or scope.get("kind") not in {"file", "directory"}):
-                    raise ValueError("verification corpus requires a safe bound path scope")
-                parent = os.dup(root_fd)
-                ancestors = []
-                try:
-                    for part in relative.parts[:-1]:
-                        try:
-                            info = os.stat(part, dir_fd=parent, follow_symlinks=False)
-                        except FileNotFoundError:
-                            entries[str(relative)] = "missing"
-                            break
-                        if stat.S_ISLNK(info.st_mode):
-                            entries[str(relative)] = "symlink:" + os.readlink(part, dir_fd=parent)
-                            break
-                        next_fd = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)
-                        if identity(os.fstat(next_fd)) != identity(info):
-                            os.close(next_fd)
-                            raise ValueError("verification corpus changed during snapshot")
-                        ancestors.append((parent, part, info))
-                        parent = next_fd
-                    else:
-                        collect(parent, relative.name, str(relative), kind=scope["kind"])
-                    for ancestor_fd, part, before in ancestors:
-                        if identity(os.stat(part, dir_fd=ancestor_fd, follow_symlinks=False)) != identity(before):
-                            raise ValueError("verification corpus changed during snapshot")
-                finally:
-                    os.close(parent)
-                    for ancestor_fd, _, _ in ancestors:
-                        os.close(ancestor_fd)
-        finally:
-            os.close(root_fd)
-    return {"input_fingerprint": str(binding.get("authoring_input_fingerprint") or ""),
-            "candidate_digest": candidate,
-            "corpus": [[name, digest] for name, digest in sorted(entries.items())]}
+def bind_recorded_case_execution(workspace: Mapping[str, Any], before: Mapping[str, Any], revision: int) -> None:
+    """Attach this execution to the case revision it just recorded; never revive old runs."""
+    refs = workspace.get("review_tool_evidence_refs")
+    if not isinstance(refs, list) or not refs:
+        return
+    receipt = refs[-1]
+    if receipt.get("verification_binding") != dict(before):
+        raise ValueError("case execution receipt changed before recording")
+    current = verification_corpus_snapshot(workspace)
+    expected = {**dict(before), "case_revision": revision}
+    receipt["verification_binding"] = expected
+    receipt["stale"] = bool(receipt.get("stale")) or expected != current
 
 
 def lsp_verification_status(result: Any) -> str:
@@ -186,6 +106,7 @@ def lsp_verification_status(result: Any) -> str:
 
 def current_verification_receipts(
     receipts: list[dict[str, Any]], workspace: Mapping[str, Any],
+    *, allow_legacy: bool = False,
 ) -> list[dict[str, Any]]:
     """Invalidate bound receipts on content/assignment changes, without re-stamping."""
     current = verification_corpus_snapshot(workspace)
@@ -195,7 +116,9 @@ def current_verification_receipts(
         bound = receipt.get("verification_binding")
         # Legacy receipts remain readable history, but cannot establish which
         # Candidate/corpus ran. Only a new execution can supply that proof.
-        if not isinstance(bound, Mapping) or dict(bound) != current:
+        expected = (case_corpus_binding(current) if allow_legacy and isinstance(bound, Mapping)
+                    and "case_revision" not in bound else current)
+        if not isinstance(bound, Mapping) or dict(bound) != expected:
             receipt["ok"] = False
             receipt["stale"] = True
         result.append(receipt)
@@ -227,7 +150,7 @@ def record_verification_execution(
     before: Mapping[str, Any],
 ) -> None:
     """Record the delegated execution, never a claimed receipt in its output."""
-    from pal.bunshin.scoped_execution import _review_tool_evidence_ref
+    from pal.bunshin.v2.review_receipts import _review_tool_evidence_ref
 
     receipt = _review_tool_evidence_ref(call.name, call, result)
     if not receipt:
@@ -247,3 +170,8 @@ def record_verification_execution(
         refs = workspace.setdefault("review_tool_evidence_refs", [])
     if isinstance(refs, list):
         refs.append(receipt)
+
+
+def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]:
+    from pal.bunshin.v2.verification_corpus import verification_corpus_snapshot as snapshot
+    return snapshot({**dict(workspace), "verification_case_revision": verification_case_revision(workspace)})

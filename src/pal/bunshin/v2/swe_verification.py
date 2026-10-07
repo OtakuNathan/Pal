@@ -22,7 +22,7 @@ from pal.execution.tool_facade import EmptyToolInput
 from pal.bunshin.v2.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.v2.workspace_git import git_changed_paths
 from pal.bunshin.v2.review_findings import (
-    ADD_FINDING_CAPABILITY,
+    ADD_FINDING_CAPABILITY, UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
     empty_review_draft,
     partition_findings,
     structured_advisories,
@@ -30,10 +30,10 @@ from pal.bunshin.v2.review_findings import (
 )
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.semantic_evidence import recorded_cases
-from pal.bunshin.v2.verification_readiness import current_verification_receipts, final_verification_errors, verification_case_errors
+from pal.bunshin.v2.verification_readiness import current_verification_receipts, final_verification_errors, verification_case_errors, verification_corpus_snapshot
 from pal.bunshin.v2.submission_errors import submission_error_result, submission_validation
 from pal.bunshin.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.bunshin.v2.verification_builder import semantic_verification_draft_errors
+from pal.bunshin.v2.verification_policy_validation import semantic_verification_draft_errors
 from pal.bunshin.v2.verification_lsp_policy import bound_verification_policy, lsp_policy_errors
 from pal.bunshin.v2.verification import (
     historical_repair_checklist_items,
@@ -50,7 +50,7 @@ from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 SWE_VERIFICATION_CAPABILITIES = (
-    ADD_FINDING_CAPABILITY,
+    UPDATE_FINDING_CAPABILITY, REMOVE_FINDING_CAPABILITY,
     "op_bunshin_verification_pass",
     "op_bunshin_verification_request_module_repair",
     "op_bunshin_verification_request_contract_revision",
@@ -81,6 +81,7 @@ def semantic_verification_submission_errors(
     corpus_scope: Mapping[str, Any],
     scratch_only: bool,
     workspace: Mapping[str, Any] | None = None,
+    accepted_legacy_receipt: bool = False,
 ) -> tuple[str, ...]:
     """Validate one semantic verifier submission against Manager-owned facts.
 
@@ -92,6 +93,17 @@ def semantic_verification_submission_errors(
 
     outcome = str(submission.get("outcome") or "").strip()
     errors: list[str] = []
+    accepted_binding = submission.get("verification_binding")
+    # Callers may enable this only after matching a durable assignment receipt.
+    # A submitted field can never authorize the compatibility path.
+    allow_legacy = accepted_legacy_receipt and "verification_binding" not in submission
+    if allow_legacy and workspace is not None:
+        workspace = {**dict(workspace), "verification_case_revision": 0}
+    if workspace is not None and isinstance(accepted_binding, Mapping):
+        workspace = {**dict(workspace), "verification_case_revision": int(
+            workspace.get("verification_case_revision", accepted_binding.get("case_revision", 0)))}
+        if dict(accepted_binding) != verification_corpus_snapshot(workspace):
+            errors.append("accepted verification identity does not match the current corpus and case revision")
     if outcome not in SEMANTIC_VERIFICATION_OUTCOMES:
         errors.append(
             f"unknown semantic verification outcome: {outcome or '<missing>'}"
@@ -118,7 +130,7 @@ def semantic_verification_submission_errors(
         for item in list(submission.get("recorded_results") or [])
         if isinstance(item, Mapping)
     ]
-    errors.extend(verification_case_errors(recorded_results, outcome=outcome, workspace=workspace))
+    errors.extend(verification_case_errors(recorded_results, outcome=outcome, workspace=workspace, allow_legacy=allow_legacy))
     if workspace is not None:
         errors.extend(lsp_policy_errors(bound_verification_policy(workspace), recorded_results))
     required_historical = historical_repair_checklist_items(work_view)
@@ -179,7 +191,7 @@ def semantic_verification_submission_errors(
             "verification requires Manager-recorded shell, Git, or LSP evidence"
         )
     if workspace is not None:
-        receipts = current_verification_receipts(receipts, workspace)
+        receipts = current_verification_receipts(receipts, workspace, allow_legacy=allow_legacy)
     errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(changed_paths)))
     return tuple(dict.fromkeys(errors))
 
@@ -268,7 +280,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "purpose": "Submit reproduced implementation defects for module repair.",
             "use_when": (
                 "Use with no arguments after every current implementation defect is reproduced "
-                "and recorded with add_finding."
+                "and recorded with update_finding."
             ),
             "do_not_use_when": (
                 "Do not use for a verifier-corpus, frozen contract, architecture, requirements, "
@@ -286,7 +298,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "purpose": "Submit a frozen public-contract defect for contract revision.",
             "use_when": (
                 "Use after recording a contradictory, incomplete, or impossible public contract "
-                "or lifecycle/state-model defect with add_finding."
+                "or lifecycle/state-model defect with update_finding."
             ),
             "do_not_use_when": "Do not use when the current module can be repaired without changing its accepted contract.",
             "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
@@ -310,7 +322,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "alias": "request_verification_requirements_revision",
         "guidance": {
             "purpose": "Submit a contradictory or materially incomplete requirement for user revision.",
-            "use_when": "Use after recording the exact requirements conflict or omission with add_finding.",
+            "use_when": "Use after recording the exact requirements conflict or omission with update_finding.",
             "do_not_use_when": (
                 "Do not use for an implementation, contract, or architecture defect, and do not "
                 "author replacement requirement records."
@@ -377,8 +389,8 @@ def compile_swe_verification_tool_contract(
     )
     dependency_modules = sorted(str(item) for item in dict(repair_scope or {}).get("dependency_modules") or [])
     guidance_overrides: dict[str, dict[str, str]] = {}
-    guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-        "Record one evidence-backed verifier finding. Correct an incorrect Verifier-owned probe "
+    guidance_overrides[UPDATE_FINDING_CAPABILITY] = {"use_when": (
+        "Upsert one evidence-backed current verifier finding: unused finding_id with expected_revision=0 creates; current ID/revision from read_verification_draft_status replaces. Correct an incorrect Verifier-owned probe "
         "in this session before submission; use module_defect for the current implementation, "
         "dependency_defect only for an accepted upstream product bound to this check, contract_defect for a frozen public contract, "
         "architecture_defect for ownership/topology, requirements_defect for a contradictory task ledger, and "
@@ -449,6 +461,7 @@ def swe_verification_tool_result(
         cases = recorded_cases(snapshot.payload)
         submission = {
             "schema_version": "4",
+            "verification_binding": verification_corpus_snapshot(workspace),
             "outcome": outcome,
             "findings": findings,
             "advisories": advisories,
@@ -465,6 +478,8 @@ def swe_verification_tool_result(
             receipt = store.mark_submitted(
                 context,
                 expected_version=snapshot.version,
+                expected_work_item_version=int(work_items["version"]),
+                verification_workspace=workspace,
                 submission_payload=submission,
             )
             submission_ref = dict(receipt.get("submission_artifact_ref") or {})
@@ -489,6 +504,8 @@ def swe_verification_tool_result(
             store.mark_submitted(
                 context,
                 expected_version=snapshot.version,
+                expected_work_item_version=int(work_items["version"]),
+                verification_workspace=workspace,
                 submission_artifact_ref=ref.to_dict(),
                 submission_payload_hash=payload_hash,
                 submission_payload=submission,
@@ -533,6 +550,7 @@ def verification_outcome_readiness(
     outcome: str, reason: str = "", require_outcome_arguments: bool = True,
 ) -> dict[str, Any]:
     """The single read-only preflight used by status and semantic submit."""
+    workspace = {**dict(workspace), "verification_case_revision": int(payload.get("case_revision") or 0)}
     findings, _ = partition_findings(findings_from_work_items(workspace))
     errors = _submission_errors(outcome=outcome, findings=findings, reason=reason, workspace=workspace,
                                 require_outcome_arguments=require_outcome_arguments)
@@ -575,7 +593,7 @@ def _submission_errors(
     if outcome == "pass" and not any(bool(item.get("ok")) for item in receipts):
         errors.append("PASS requires at least one successful recorded verification tool result")
     if outcome not in {"pass", "unknown"} and not findings:
-        errors.append("repair or revision outcomes require at least one add_finding call")
+        errors.append("repair or revision outcomes require at least one update_finding call")
     if outcome in {"pass", "unknown"} and findings:
         errors.append(f"{outcome.upper()} requires an empty finding Draft")
     if outcome == "unknown" and require_outcome_arguments and not reason:

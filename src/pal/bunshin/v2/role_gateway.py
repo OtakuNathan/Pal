@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -52,7 +52,7 @@ from pal.bunshin.v2.swe_verification import (
 )
 from pal.bunshin.v2.work_items import (
     assert_work_items_complete,
-    submission_work_items,
+    submission_work_items, work_item_seed, prepare_work_item_mutation,
 )
 
 from pal.bunshin.v2.submission_errors import SubmissionValidationError, submission_validation
@@ -157,6 +157,13 @@ class RoleAssignmentGateway:
             return self._draft_read(authenticated, payload)
         if method == "draft_mutate":
             return self._draft_mutate(authenticated, payload)
+        if method == "draft_operation_result":
+            context = self._context(authenticated, payload, allow_work_items=True)
+            result = SubmissionDraftStore(self.service.runtime_root).read_operation(
+                context, operation_key=str(payload.get("operation_key") or ""),
+                request=dict(payload.get("request") or {}),
+            )
+            return {"found": result is not None, "result": result}
         if method == "draft_submit":
             return self._draft_submit(authenticated, payload)
         if method == "bound_input_json":
@@ -290,15 +297,14 @@ class RoleAssignmentGateway:
             allow_work_items=True,
         )
         store = SubmissionDraftStore(self.service.runtime_root)
-        self._reconcile_draft_from_assignment_receipt(
-            authenticated,
-            context,
-            store,
-        )
-        snapshot = store.read(
-            context,
-            seed=dict(params.get("seed") or {}),
-        )
+        from pal.bunshin.v2.review_findings import empty_review_draft
+        seed = (work_item_seed(self._authoring_workspace(authenticated, context))
+                if context.role == "verifier" and context.draft_kind == "work_items"
+                else empty_review_draft() if context.role == "verifier"
+                else dict(params.get("seed") or {}))
+        snapshot = store.read(context, seed=seed)
+        self._reconcile_draft_from_assignment_receipt(authenticated, context, store)
+        snapshot = store.read(context, seed=seed)
         return {"snapshot": snapshot.to_dict()}
 
     def _draft_mutate(
@@ -314,6 +320,17 @@ class RoleAssignmentGateway:
             params,
             allow_work_items=True,
         )
+        if context.role == "verifier" and context.draft_kind == "work_items":
+            workspace = self._authoring_workspace(authenticated, context)
+            request = dict(params.get("request") or {})
+            operation = str(params.get("operation_key") or "")
+            result = SubmissionDraftStore(self.service.runtime_root).mutate(
+                context, operation_key=operation, request=request,
+                expected_version=int(params.get("expected_version") or 0),
+                reducer=prepare_work_item_mutation(workspace, request, operation),
+                seed=work_item_seed(workspace),
+            )
+            return {"result": dict(result)}
         result = SubmissionDraftStore(self.service.runtime_root).mutate_precomputed(
             context,
             operation_key=str(params.get("operation_key") or ""),
@@ -321,9 +338,20 @@ class RoleAssignmentGateway:
             expected_version=int(params.get("expected_version") or 0),
             next_payload=dict(params.get("next_payload") or {}),
             result=dict(params.get("result") or {}),
-            seed=dict(params.get("seed") or {}),
+            seed={} if context.role == "verifier" else dict(params.get("seed") or {}),
         )
         return {"result": dict(result)}
+
+    def _authoring_workspace(self, authenticated, context):
+        pack = self._authenticated_prompt_pack(authenticated)
+        workspace = dict(pack.get("workspace") or {})
+        workspace["runtime_root"] = str(self.service.runtime_root)
+        workspace["bunshin_v2"] = {
+            **dict(dict(pack.get("metadata") or {}).get("bunshin_v2") or {}),
+            **dict(workspace.get("bunshin_v2") or {}),
+            **context.to_dict(), "authoring_input_fingerprint": context.input_fingerprint,
+        }
+        return workspace
 
     def _draft_submit(
         self,
@@ -336,6 +364,11 @@ class RoleAssignmentGateway:
         if not isinstance(submission, Mapping):
             raise SubmissionValidationError("role submission must be a JSON object")
         payload = dict(submission)
+        if context.role == "verifier" and assignment.get("submission_payload_hash"):
+            if stable_hash(payload) != assignment["submission_payload_hash"]:
+                raise SubmissionValidationError("role assignment already has a different submission receipt")
+            return {"submitted": True, "submission_artifact_ref": dict(assignment["submission_artifact_ref"]),
+                    "submission_payload_hash": assignment["submission_payload_hash"]}
         if context.draft_kind == "contract":
             payload = self._compile_architect_submission(
                 authenticated,
@@ -346,17 +379,24 @@ class RoleAssignmentGateway:
             raise ValueError(f"unsupported role submission kind: {context.draft_kind}")
         store = SubmissionDraftStore(self.service.runtime_root)
         snapshot = store.read(context, seed={})
+        draft_versions = {context.draft_key: int(params.get("expected_version") or 0)}
+        if context.role == "verifier":
+            work_context = replace(context, draft_kind="work_items")
+            work_snapshot = store.read(work_context, seed=work_item_seed(self._authoring_workspace(authenticated, context)))
+            expected_work_version = params.get("expected_work_item_version")
+            if expected_work_version is None:
+                raise SubmissionValidationError("verification submission requires the observed work-item draft version")
+            draft_versions[work_context.draft_key] = int(expected_work_version)
+            from pal.bunshin.v2.draft_integrity import assert_verifier_projection
+            assert_verifier_projection(payload, snapshot.payload, work_snapshot.payload)
         # Semantic verifier outcome tools always submit an explicit outcome.
         # Data-driven families may still use the distinct VerificationPlan
         # payload under the same durable submission kind; its own compiler
         # contract is outside this SWE outcome validator.
-        if context.draft_kind == "verification" and "outcome" in payload:
-            with submission_validation():
-                self._validate_verification_submission_before_receipt(
-                    authenticated,
-                    assignment,
-                    payload,
-                )
+        if context.role == "verifier":
+            self._validate_draft_submission_before_receipt(
+                authenticated, context, payload, case_revision=int(snapshot.payload.get("case_revision") or 0),
+            )
         artifact_ref = self.service.artifacts.put_json(
             payload,
             artifact_type=artifact_type,
@@ -375,6 +415,10 @@ class RoleAssignmentGateway:
             fencing_token=int(authenticated["fencing_token"]),
             artifact_ref=artifact_ref.to_dict(),
             payload_hash=payload_hash,
+            draft_versions=draft_versions,
+            validate_before_receipt=(lambda: self._validate_draft_submission_before_receipt(
+                authenticated, context, payload, case_revision=int(snapshot.payload.get("case_revision") or 0),
+            )) if context.role == "verifier" else None,
             settlement_action={
                 "action_type": "SETTLE_ROLE_SUBMISSION",
                 "aggregate_type": assignment["aggregate_type"],
@@ -414,7 +458,9 @@ class RoleAssignmentGateway:
         store: SubmissionDraftStore,
     ) -> None:
         assignment = dict(authenticated["assignment"])
-        if str(assignment.get("submission_kind") or "") != context.draft_kind:
+        if str(assignment.get("submission_kind") or "") != context.draft_kind and not (
+            context.role == "verifier" and context.draft_kind == "work_items"
+        ):
             return
         if str(assignment.get("state") or "") not in {
             RoleAssignmentState.RESULT_RECORDED.value,
@@ -431,11 +477,33 @@ class RoleAssignmentGateway:
             submission_payload_hash=payload_hash,
         )
 
+    def _validate_draft_submission_before_receipt(
+        self, authenticated: Mapping[str, Any], context: SubmissionDraftContext,
+        submission: Mapping[str, Any], *, case_revision: int,
+    ) -> None:
+        """Every verifier format revalidates content at the receipt boundary."""
+        from pal.bunshin.v2.verification_readiness import verification_case_errors, verification_corpus_snapshot
+
+        with submission_validation():
+            if "outcome" in submission:
+                self._validate_verification_submission_before_receipt(
+                    authenticated, authenticated["assignment"], submission, case_revision=case_revision,
+                )
+            workspace = {**self._authoring_workspace(authenticated, context), "verification_case_revision": case_revision}
+            errors = verification_case_errors(list(submission.get("recorded_results") or []),
+                                              outcome=str(submission.get("outcome") or "unknown"), workspace=workspace)
+            binding = submission.get("verification_binding")
+            if isinstance(binding, Mapping) and dict(binding) != verification_corpus_snapshot(workspace):
+                errors.append("verification corpus changed before receipt acceptance")
+            if errors:
+                raise ValueError("verification submission rejected before durable receipt:\n- " + "\n- ".join(errors))
+
     def _validate_verification_submission_before_receipt(
         self,
         authenticated: Mapping[str, Any],
         assignment: Mapping[str, Any],
         submission: Mapping[str, Any],
+        *, case_revision: int = 0,
     ) -> None:
         """Reject correctable verifier output before freezing its Draft."""
 
@@ -472,6 +540,7 @@ class RoleAssignmentGateway:
             **dict(workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
             **_verification_repair_scope(self.repository, node),
         }
+        workspace["verification_case_revision"] = case_revision
         review_workspace = Path(str(workspace.get("repo_path") or ""))
         review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
         scratch_only = bool(workspace.get("verification_scratch_only"))

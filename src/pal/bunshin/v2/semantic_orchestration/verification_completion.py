@@ -14,6 +14,7 @@ from pal.bunshin.v2.execution_values import workspace_content_fingerprint
 from pal.bunshin.v2.swe_verification import semantic_verification_submission_errors, verification_finding_route_errors
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.review_findings import structured_advisories, structured_findings
+from pal.bunshin.v2.role_protocol import RoleAssignmentState, stable_hash
 from pal.bunshin.v2.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.v2.semantic_orchestration.role_reports import RoleReports
 from pal.bunshin.v2.semantic_orchestration.verification_policy import _verification_repair_scope
@@ -76,6 +77,7 @@ class VerificationCompletion:
             **dict(receipt_workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
             **_verification_repair_scope(self.repository, node),
         }
+        accepted_legacy_receipt = self._bind_accepted_receipt(node, submission, terminal, receipt_workspace)
         errors = semantic_verification_submission_errors(
             submission,
             work_view=work_view,
@@ -84,6 +86,7 @@ class VerificationCompletion:
             corpus_scope=corpus_scope,
             scratch_only=scratch_only,
             workspace=receipt_workspace,
+            accepted_legacy_receipt=accepted_legacy_receipt,
         )
         # This role already has a durable submission receipt. A legacy pack
         # may have accepted an invalid repair route before the preflight was
@@ -166,6 +169,28 @@ class VerificationCompletion:
             "provider_request_id": invocation_id,
             "result_artifact_ref": pending_ref.to_dict(),
         }
+
+    def _bind_accepted_receipt(self, node, submission, terminal, workspace) -> bool:
+        """Only a verified Manager receipt grants legacy validation compatibility."""
+        assignment_id = str(dict(terminal.get("payload") or {}).get("role_assignment_id") or "")
+        assignment = self.repository.role_assignments.read_role_assignment(assignment_id) if assignment_id else None
+        if assignment is None or assignment.get("state") not in {
+            RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value,
+        }:
+            return False
+        receipt_ref = dict(assignment.get("submission_artifact_ref") or {})
+        record = self.repository.artifacts.read_artifact_record(str(receipt_ref.get("sha256") or ""))
+        identity = {"workflow_id": node.workflow_id, "aggregate_type": node.aggregate_type.value,
+                    "aggregate_id": node.aggregate_id, "role": "verifier", "submission_kind": "verification"}
+        if (any(assignment.get(key) != value for key, value in identity.items())
+                or record is None or not record.get("durable") or receipt_ref.get("durable") is False
+                or stable_hash(submission) != assignment.get("submission_payload_hash")
+                or self.artifacts.read_json(receipt_ref) != dict(submission)):
+            raise SubmissionInvariantError("verifier submission differs from its authoritative assignment receipt")
+        workspace["verification_case_revision"] = int(
+            dict(submission.get("verification_binding") or {}).get("case_revision") or 0
+        )
+        return "verification_binding" not in submission
 
     def publish_pending_verification(
         self, candidate_digest: str, candidate_ref: ArtifactRef, execution_adapter: str, fencing_token: int,

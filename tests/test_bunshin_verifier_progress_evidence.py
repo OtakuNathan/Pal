@@ -163,7 +163,7 @@ def test_durable_case_result_and_content_identity_are_observed(verifier, field, 
     before = verifier.completion_gate_progress_marker()
     mutate_draft(verifier, "changed-evidence", lambda payload: payload["evidence"]["cases"][
         "durable-check"
-    ].update({field: value}))
+    ].update({field: value, "execution_id": "new-execution"}))
     assert verifier.completion_gate_progress_marker() != before
 
 

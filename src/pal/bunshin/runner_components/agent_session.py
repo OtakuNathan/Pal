@@ -64,22 +64,9 @@ class AgentSession:
         session_id = str(session_metadata.get("session_id") or "").strip()
         restored = await self.restore_runtime(bundle, session_id, workspace)
         restored_state = dict(restored.get("coroutine_state") or {})
-        execution_runtime = BunshinScopedExecutionRuntime(
-            bundle.execution_runtime,
-            self.pack.allowed_capabilities,
-            workspace,
-            produced_artifacts=self.artifacts.produced_artifacts,
-            memory_candidate_sink=memory_candidate_sink,
-            capability_guidance_overrides=dict(
-                dict(self.pack.resolved_profile or {}).get("capability_guidance_overrides") or {}
-            ),
-            request_user_clarification=self.control.request_architecture_clarification,
+        execution_runtime = _build_scoped_execution_runtime(
+            self, bundle, workspace, memory_candidate_sink,
         )
-        self.tool_session.bind_capabilities([
-            str(dict(spec.get("function") or {}).get("name") or "").strip()
-            for spec in execution_runtime.build_llm_tool_contracts()
-            if str(dict(spec.get("function") or {}).get("name") or "").strip()
-        ])
         channel_envelope, current_channel_envelope, initial_instruction, response_key, response_keys, semantic_input_is_new = self.prepare_input(
             memory_candidate_sink, restored, restored_state, session_metadata,
         )
@@ -446,3 +433,27 @@ class AgentSession:
                 workspace["bunshin_v2"] = bound_bunshin_v2
         workspace.setdefault("review_tool_evidence_refs", self.review_evidence.review_tool_evidence_refs)
         return workspace
+
+
+def _build_scoped_execution_runtime(
+    session: AgentSession, bundle: BunshinRuntimeBundle,
+    workspace: dict[str, Any], memory_candidate_sink: Any,
+) -> BunshinScopedExecutionRuntime:
+    """Project current tool contracts without changing the persisted pack."""
+    profile = dict(session.pack.resolved_profile or {})
+    runtime = BunshinScopedExecutionRuntime(
+        bundle.execution_runtime, session.pack.allowed_capabilities, workspace,
+        produced_artifacts=session.artifacts.produced_artifacts,
+        memory_candidate_sink=memory_candidate_sink,
+        capability_guidance_overrides=dict(profile.get("capability_guidance_overrides") or {}),
+        capability_policy=dict(profile.get("effective_capability_policy", profile.get("capability_policy")) or {}),
+        role_execution_sessions=session.tool_session.execution_sessions,
+        check_cancel=session.control.raise_if_cancel_requested,
+        request_user_clarification=session.control.request_architecture_clarification,
+    )
+    session.tool_session.bind_capabilities([
+        str(dict(spec.get("function") or {}).get("name") or "").strip()
+        for spec in runtime.build_llm_tool_contracts()
+        if str(dict(spec.get("function") or {}).get("name") or "").strip()
+    ])
+    return runtime
