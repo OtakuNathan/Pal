@@ -890,7 +890,10 @@ class WorkflowCoordinator:
             if cycle.state in {
                 PlanCycleState.PAUSE_REQUESTED,
                 PlanCycleState.PAUSED,
+                PlanCycleState.TRIAGE_REQUIRED,
             }:
+                # Child triage already satisfies the aggregate pause policy.
+                # Nesting another pause would overwrite its original cursor.
                 return
             was_running = cycle.is_running
             cycle = cycle.transition(action)
@@ -961,6 +964,7 @@ class WorkflowCoordinator:
                 if current.state in {
                     NodeCycleState.PAUSE_REQUESTED,
                     NodeCycleState.PAUSED,
+                    NodeCycleState.TRIAGE_REQUIRED,
                 }:
                     continue
                 was_running = current.is_running or current.active_assignment is not None

@@ -287,6 +287,16 @@ class BunshinV2OutboxProcessor:
         if action is None:
             return
         coordinator = WorkflowCoordinator(self.repository)
+        if action.aggregate_type == AggregateType.WORKFLOW:
+            workflow = (unit_of_work or self.repository).snapshots.read_snapshot(
+                AggregateType.WORKFLOW, action.aggregate_id,
+            )
+            if workflow is not None and _workflow_pauses_cycles(workflow):
+                coordinator.request_workflow_pause(
+                    workflow_id=action.workflow_id,
+                    unit_of_work=unit_of_work,
+                )
+            return
         if action.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
             coordinator.require_plan_triage(
                 workflow_id=action.workflow_id,
@@ -2240,6 +2250,18 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
         )
 
 
+def _workflow_pauses_cycles(workflow: AggregateSnapshot) -> bool:
+    # An ACTIVE workflow's triage freezes its children through the ordinary
+    # pause protocol. The semantic cursors must receive that same intent
+    # before process retirement can confirm PAUSED and clear the old slot.
+    # Triage during cancellation/restart must not replace its cancel intent.
+    return workflow.state in {"PAUSE_REQUESTED", "PAUSED"} or (
+        workflow.state == "TRIAGE_REQUIRED"
+        and str(workflow.payload.get("triage_resume_state") or "")
+        in {"ACTIVE", "PAUSE_REQUESTED"}
+    )
+
+
 def _reconcile_cycle_control_projection(
     repository: Any,
     workflow: AggregateSnapshot,
@@ -2254,7 +2276,7 @@ def _reconcile_cycle_control_projection(
     """
 
     coordinator = WorkflowCoordinator(repository)
-    if workflow.state in {"PAUSE_REQUESTED", "PAUSED"}:
+    if _workflow_pauses_cycles(workflow):
         coordinator.request_workflow_pause(workflow_id=workflow.workflow_id)
     elif workflow.state in {"CANCEL_REQUESTED", "CANCELLED"}:
         coordinator.request_workflow_cancel(workflow_id=workflow.workflow_id)

@@ -42,6 +42,14 @@ not a second DAG scheduler or semantic lifecycle owner.
   terminal sink. It checks
   hierarchical control ownership, replan freeze, stale propagation, and
   completion safety.
+  `EnterWorkflowTriage` abstracts the completed child freeze. The runtime
+  first projects workflow triage from `ACTIVE` as the existing cycle
+  `REQUEST_PAUSE`, then confirms `PAUSED` after worker cleanup, and only
+  resumes an assignment boundary. Outbox failure records this intent in
+  its transaction; reconciliation repairs the same projection after restart.
+  Triage during cancellation/restart does not replace its cancel intent.
+  Already-triaged children are pause-settled and keep their own recovery cursor;
+  a parent freeze must not nest a second pause over that cursor.
 - `DurableEffects.tla` models Action deduplication, atomic event/outbox writes,
   atomic aggregate/cycle business projections, receipt lag across Manager
   crashes, at-least-once delivery without double advancement, leases,

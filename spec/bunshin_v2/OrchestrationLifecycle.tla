@@ -278,6 +278,13 @@ ResolveEpochTriage ==
         defectSource, generation, managerUp>>
 
 EnterWorkflowTriage ==
+    \* This action abstracts the complete freeze, including process retirement.
+    \* Runtime refinement: workflow ENTER_TRIAGE (resume ACTIVE) projects
+    \* REQUEST_PAUSE into PlanCycle/GraphExecution atomically with outbox failure;
+    \* restart reconciliation repeats that intent. Child PAUSE_CONFIRMED projects
+    \* PAUSED only after worker cleanup, clearing the old running slot. RESUME
+    \* restores the ready boundary before a new admission starts a role. Freezing only
+    \* aggregate nodes while retaining a running graph slot is not this action.
     /\ workflowState = "Active"
     /\ epochState \in EpochResumeStates
     /\ workflowState' = "Triage"
