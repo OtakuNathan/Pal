@@ -27,8 +27,8 @@ from pal.bunshin.profiles import (
     BunshinProfileProvider,
     BunshinProfileRegistry,
 )
-from pal.bunshin.repository import BunshinV2Repository
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.service import BunshinWorkflowService
 
 __all__ = [
     "ActionEnvelope",
@@ -46,8 +46,8 @@ __all__ = [
     "BunshinProfileProvider",
     "BunshinProfileRegistry",
     "BunshinSnapshot",
-    "BunshinV2Repository",
-    "BunshinV2WorkflowService",
+    "BunshinRepository",
+    "BunshinWorkflowService",
     "ContentAddressedArtifactStore",
     "DomainEvent",
     "EffectDraft",

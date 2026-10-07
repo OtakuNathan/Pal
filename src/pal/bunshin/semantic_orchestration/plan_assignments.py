@@ -4,12 +4,12 @@ from pal.bunshin.unit_of_work import BunshinUnitOfWork
 from typing import Any, Mapping
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 @dataclass
 class PlanAssignments:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def start_plan_cycle_assignment(
         self,

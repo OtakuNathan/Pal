@@ -13,7 +13,7 @@ from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.worker_processes import WorkerProcesses
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.role_runtime import RoleSupervisor
 from pal.bunshin.semantic_orchestration.attempt_composition import build_attempt_execution
 from pal.bunshin.semantic_orchestration.assignment_retries import AssignmentRetries
@@ -106,7 +106,7 @@ def build_semantic_components(
     register_broker_run: BrokerRunRegistrar | None,
     requests: WorkflowRequests,
     runtime_db_path: Path | None,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     settings: RoleRuntimeSettings,
     supervisor: RoleSupervisor,
     unregister_broker_run: BrokerRunUnregistrar | None,
@@ -189,7 +189,7 @@ def build_support(
     inject_skill: SkillInjector | None,
     processes: WorkerProcesses,
     requests: WorkflowRequests,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
 ) -> tuple[AssignmentRetries, AttemptInputs, EffectReads, PlanAssignments, RoleCheckpoints, RoleCleanup, RoleReports, WorkflowFacts]:
     assignment_retries = AssignmentRetries(
         background=background,
@@ -237,7 +237,7 @@ def build_role_resources(
     requests: WorkflowRequests,
     role_cleanup: RoleCleanup,
     role_reports: RoleReports,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     workflow_facts: WorkflowFacts,
     workspace_locks: WorkspaceLockRegistry,
 ) -> tuple[AssignmentIdentity, FinalDelivery, HumanReview, NullExecution, ReviewDelivery, RoleLeases, VerifierTests, ArchitectureSnapshot]:
@@ -322,7 +322,7 @@ def build_role_execution(
     role_leases: RoleLeases,
     role_reports: RoleReports,
     runtime_db_path: Path | None,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     settings: RoleRuntimeSettings,
     supervisor: RoleSupervisor,
     unregister_broker_run: BrokerRunUnregistrar | None,
@@ -430,7 +430,7 @@ def build_role_handlers(
     role_cleanup: RoleCleanup,
     role_leases: RoleLeases,
     role_reports: RoleReports,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     verification_completion: VerificationCompletion,
     verification_settlement: VerificationSettlement,
     workflow_facts: WorkflowFacts,
@@ -534,7 +534,7 @@ def build_dispatch(
     node_control: NodeControl,
     review_delivery: ReviewDelivery,
     role_cleanup: RoleCleanup,
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     standalone_review: StandaloneReview,
     verification_run: VerificationRun,
     verification_snapshot: VerificationSnapshot,

@@ -14,7 +14,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 MODULE = "VerifierFindingUpsert"
 CASES = [
     ("", "none", None),
@@ -29,7 +29,7 @@ CASES = [
 
 
 def test_upsert_model_config_and_runner_wiring():
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     assert f"    {MODULE}\n" in script
     for suffix, fault, invariant in CASES:
         cfg = (SPEC_ROOT / f"{MODULE}{suffix}.cfg").read_text()

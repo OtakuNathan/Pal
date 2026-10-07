@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin.runner import BunshinRunner
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.shared import BunshinInvocationPack
@@ -37,7 +37,7 @@ def runner(root, value):
 @pytest.mark.parametrize("response_key", ["original-assignment", "triage-resume-assignment"])
 def test_restored_native_loop_consumes_new_contract_without_rewriting_profile(tmp_path, response_key):
     async def scenario():
-        repository = BunshinV2Repository(tmp_path)
+        repository = BunshinRepository(tmp_path)
         lease = repository.leases.claim_lease("architect-guidance", "native-attempt", ttl_seconds=60)
         value = pack(tmp_path)
         value.metadata["bunshin_v2"].update({

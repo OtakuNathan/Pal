@@ -51,7 +51,7 @@ from pal.bunshin.graph_protocol import (
     graph_ir_from_mapping,
 )
 from pal.bunshin.role_runtime import RoleSupervisor
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.orchestration import reconcile_control_requests
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
@@ -868,7 +868,7 @@ class GraphExecutionTests(unittest.TestCase):
             for name, cycle in execution.cycles.items()
         })
         with tempfile.TemporaryDirectory() as root:
-            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            coordinator = WorkflowCoordinator(BunshinRepository(Path(root)))
             coordinator.install_graph(workflow_id=legacy.graph_id, graph=legacy)
             coordinator.repository.cycles.store_graph_execution(
                 workflow_id=legacy.graph_id, execution=execution,
@@ -946,7 +946,7 @@ class GraphExecutionTests(unittest.TestCase):
         execution = self._checking_execution(graph)
         for invalid in ("delivery", "missing", ""):
             with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as root:
-                coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+                coordinator = WorkflowCoordinator(BunshinRepository(Path(root)))
                 coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
                 coordinator.repository.cycles.store_graph_execution(
                     workflow_id=graph.graph_id, execution=execution,
@@ -1000,7 +1000,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_batch_dependency_replay_keeps_receipt_and_does_not_route_again(self):
         graph = self._provider_chain_graph()
         with tempfile.TemporaryDirectory() as root:
-            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            coordinator = WorkflowCoordinator(BunshinRepository(Path(root)))
             coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
             coordinator.repository.cycles.store_graph_execution(
                 workflow_id=graph.graph_id,
@@ -1016,7 +1016,7 @@ class GraphExecutionTests(unittest.TestCase):
             self.assertEqual(first.cycles["delivery"].last_verdict.finding_refs,
                              ("provider-finding", "other-provider-finding"))
             # Reconstruct the coordinator to exercise its persisted receipt.
-            coordinator = WorkflowCoordinator(BunshinV2Repository(Path(root)))
+            coordinator = WorkflowCoordinator(BunshinRepository(Path(root)))
             self.assertIsNone(coordinator.checker_verdict(
                 workflow_id=graph.graph_id, node_name="delivery", accepted=False,
                 finding_refs=("provider-finding", "other-provider-finding"),
@@ -1273,7 +1273,7 @@ class GraphExecutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             coordinator.install_graph(
                 workflow_id=source.graph_id,
@@ -1324,7 +1324,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_replan_rebinds_carried_acceptance_to_new_generation(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             source = self._graph()
             coordinator.install_graph(
@@ -1381,7 +1381,7 @@ class GraphExecutionTests(unittest.TestCase):
 
     def test_graph_generation_and_cycles_are_durable(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            repository = BunshinV2Repository(Path(root))
+            repository = BunshinRepository(Path(root))
             graph = self._graph()
             repository.cycles.store_graph_generation(
                 workflow_id="workflow-framepipe",
@@ -1408,7 +1408,7 @@ class GraphExecutionTests(unittest.TestCase):
 
     def test_graph_install_rolls_back_generation_when_execution_write_fails(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            repository = BunshinV2Repository(Path(root))
+            repository = BunshinRepository(Path(root))
             coordinator = WorkflowCoordinator(repository)
             graph = self._graph()
 
@@ -1439,7 +1439,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_coordinator_owns_readiness_and_sink_publication(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             graph = self._graph()
             coordinator.install_graph(
@@ -1521,7 +1521,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_dependency_repair_barrier_waits_for_provider_reacceptance(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             graph = self._graph()
             coordinator.install_graph(
@@ -1618,7 +1618,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_coordinator_replays_submission_and_verdict_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             graph = self._graph()
             coordinator.install_graph(
@@ -1708,7 +1708,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_pause_and_triage_resume_at_assignment_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             graph = self._graph()
             coordinator.install_graph(
@@ -1766,7 +1766,7 @@ class GraphExecutionTests(unittest.TestCase):
     def test_pause_resume_does_not_hide_replan_required(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
-                BunshinV2Repository(Path(root))
+                BunshinRepository(Path(root))
             )
             graph = self._graph()
             installed = coordinator.install_graph(
@@ -1790,7 +1790,7 @@ class GraphExecutionTests(unittest.TestCase):
 
     def test_control_reconciler_repairs_cycle_projection_after_crash(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            repository = BunshinV2Repository(Path(root))
+            repository = BunshinRepository(Path(root))
             coordinator = WorkflowCoordinator(repository)
             graph = self._graph()
             coordinator.install_graph(

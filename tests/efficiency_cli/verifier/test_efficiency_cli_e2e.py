@@ -29,7 +29,7 @@ import pytest
 
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_schema
 from pal.shared import BunshinInvocationPack
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -96,7 +96,7 @@ def _make_runtime_root(tmp_path: Path) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
     try:
-        ensure_bunshin_v2_schema(connection)
+        ensure_bunshin_schema(connection)
         # Invocation A: role "coder", rounds [1, 1, 3, 1].
         connection.execute(
             _INVOCATION_SQL,
@@ -205,7 +205,7 @@ def test_quiet_manager_round_flows_to_efficiency_cli(tmp_path: Path) -> None:
     db_path = bunshin_db_path(runtime_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as connection:
-        ensure_bunshin_v2_schema(connection)
+        ensure_bunshin_schema(connection)
         connection.execute(
             _INVOCATION_SQL,
             ("inv-quiet", "wf-quiet", "res-quiet", "coder", 0),
@@ -222,7 +222,7 @@ def test_quiet_manager_round_flows_to_efficiency_cli(tmp_path: Path) -> None:
     )
     manager.runs[state.run_id] = state
     asyncio.run(
-        manager._publish_v2_worker_event(
+        manager._publish_worker_event(
             {
                 "event_kind": "progress",
                 "run_id": state.run_id,

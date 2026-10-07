@@ -14,7 +14,7 @@ from pal.bunshin import (
     AggregateSnapshot,
     AggregateType,
     ContentAddressedArtifactStore,
-    BunshinV2Repository,
+    BunshinRepository,
     TransitionError,
     build_default_transition_engine,
 )
@@ -31,7 +31,7 @@ from pal.bunshin.contracts import (
     StandaloneReviewState,
     TaskState,
 )
-from pal.bunshin.recovery import BunshinV2Recovery
+from pal.bunshin.recovery import BunshinRecovery
 from pal.bunshin.storage.serialization import _active_projection_snapshot
 from pal.bunshin.sessions import (
     architecture_reviewer_session_id,
@@ -41,7 +41,7 @@ from pal.bunshin.sessions import (
     module_verifier_session_id,
     node_role_generation,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
 from pal.bunshin.machines import (
@@ -305,7 +305,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
     def test_role_invocation_terminal_status_is_persisted_under_fencing(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_status_"))
         self.addCleanup(shutil.rmtree, root, True)
-        repository = BunshinV2Repository(root)
+        repository = BunshinRepository(root)
         store = ContentAddressedArtifactStore(root, repository.artifacts)
         prompt_ref = store.put_json({"prompt": "bounded"}, artifact_type="RolePromptPackArtifact")
         lease = repository.leases.claim_lease("architecture:arch-status:requirements", "inv-status", ttl_seconds=60)
@@ -339,7 +339,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
     def test_role_session_suspends_and_resumes_from_dedicated_checkpoint(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_v2_role_session_v28_"))
         self.addCleanup(shutil.rmtree, root, True)
-        repository = BunshinV2Repository(root)
+        repository = BunshinRepository(root)
         artifacts = ContentAddressedArtifactStore(root, repository.artifacts)
         repository.role_sessions.ensure_role_session(
             session_id="inv-session-v28",
@@ -412,7 +412,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(invocation["status"], "suspended")
         self.assertNotIn("continuation_ref", invocation)
 
-        worker = SemanticOrchestrator(BunshinV2WorkflowService(root))
+        worker = SemanticOrchestrator(BunshinWorkflowService(root))
         restore_path, output_path = worker.components.role_checkpoints.prepare_agent_session_attempt(
             session_id="inv-session-v28",
             attempt_id="attempt-v28",
@@ -858,7 +858,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         )
 
     def test_generated_transition_topology_is_current(self) -> None:
-        generated = Path("spec/bunshin_v2/ImplementationTopology.tla").read_text(
+        generated = Path("spec/bunshin/ImplementationTopology.tla").read_text(
             encoding="utf-8"
         )
         self.assertEqual(generated, render_implementation_topology())
@@ -2054,7 +2054,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
 class BunshinV2PersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_"))
-        self.repository = BunshinV2Repository(self.runtime_root)
+        self.repository = BunshinRepository(self.runtime_root)
         self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
 
     def tearDown(self) -> None:
@@ -2693,7 +2693,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             metadata={"workflow_id": "wf_recover", "process_group_id": 99999999},
         )
         time.sleep(1.05)
-        result = BunshinV2Recovery(BunshinV2WorkflowService(self.runtime_root)).recover()
+        result = BunshinRecovery(BunshinWorkflowService(self.runtime_root)).recover()
         self.assertIn("worktree:recover", result["recovered_leases"])
         second = self.repository.leases.claim_lease("worktree:recover", "new_worker", ttl_seconds=60)
         self.assertGreater(second.fencing_token, first.fencing_token)

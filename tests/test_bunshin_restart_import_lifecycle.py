@@ -15,17 +15,17 @@ from unittest.mock import patch
 import yaml
 
 from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
-from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.bunshin.contract_submission import architect_path
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, CycleTransitionError, PlanCycleState
 from pal.bunshin.graph_compiler import GraphCompiler
 from pal.bunshin.graph_protocol import EdgeKind, graph_ir_from_mapping
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.orchestration import BunshinOutboxProcessor
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.role_protocol import RoleAssignmentRequest
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.execution.contracts import CapabilityCall
@@ -37,11 +37,11 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="pal-restart-import-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.service = BunshinV2WorkflowService(self.root)
+        self.service = BunshinWorkflowService(self.root)
         self.repository = self.service.repository
         self.worker = SemanticOrchestrator(self.service)
-        self.processor = BunshinV2OutboxProcessor(self.service, semantic_effects=self.worker)
-        self.provider = BunshinV2PublicProvider(runtime_root=self.root, wake_manager=lambda: None)
+        self.processor = BunshinOutboxProcessor(self.service, semantic_effects=self.worker)
+        self.provider = BunshinPublicProvider(runtime_root=self.root, wake_manager=lambda: None)
         self.gateway = RoleAssignmentGateway(self.service)
         self.source_id = "wf_restart_import_source"
         self.task_title = "Restart import regression"

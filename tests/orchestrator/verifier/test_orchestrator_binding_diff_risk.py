@@ -23,7 +23,7 @@ from pathlib import Path
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
 WORKSPACE_REPO = Path(__file__).resolve().parents[3]
@@ -53,7 +53,7 @@ class NoDeclaredInputsKeepsLegacyBehaviorTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         self.runtime_root = self.root / "runtime"
         self.runtime_root.mkdir()
-        self.service = BunshinV2WorkflowService(self.runtime_root)
+        self.service = BunshinWorkflowService(self.runtime_root)
         self.service.create_task(
             {
                 "task_id": "task-plain",

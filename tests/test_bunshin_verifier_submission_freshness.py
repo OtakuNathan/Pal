@@ -12,7 +12,7 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.role_protocol import RoleAssignmentRequest
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.submission_errors import SubmissionValidationError, role_gateway_error_kind
 from pal.bunshin.verification_builder import _submit
@@ -74,7 +74,7 @@ def test_generic_local_receipt_rechecks_corpus(verifier, monkeypatch):
 @pytest.fixture
 def managed_verifier(verifier):
     fixture, workspace, _, call, _, view = verifier
-    service = BunshinV2WorkflowService(fixture.runtime_root)
+    service = BunshinWorkflowService(fixture.runtime_root)
     repo = service.repository
     workflow, node = "submission-freshness", "submission-freshness-node"
     view_ref = service.artifacts.put_json(view, artifact_type="ModuleWorkViewArtifact")

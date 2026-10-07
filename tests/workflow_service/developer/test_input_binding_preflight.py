@@ -1,6 +1,6 @@
 """Developer tests for the workflow intake input-binding preflight.
 
-These tests exercise ``BunshinV2WorkflowService.start_workflow``'s
+These tests exercise ``BunshinWorkflowService.start_workflow``'s
 pre-dispatch binding stage: declared repo-relative inputs are captured and
 recorded before ``CREATE_WORKFLOW`` dispatch, and every binding failure
 fails closed before any workflow state exists.
@@ -34,7 +34,7 @@ from pal.bunshin.input_binding import (
     BoundInputError,
     DeclaredInput,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 
 SOURCE_COMMIT = "0" * 40
 
@@ -135,7 +135,7 @@ def environment(tmp_path: Path) -> SimpleNamespace:
     (repo / "docs").mkdir(parents=True)
     (repo / "docs" / "spec.md").write_text("# specification\n", encoding="utf-8")
     (repo / "docs" / "notes.md").write_text("meeting notes\n", encoding="utf-8")
-    service = BunshinV2WorkflowService(runtime_root)
+    service = BunshinWorkflowService(runtime_root)
     service.create_task(
         {
             "task_id": "task-bound",
@@ -309,7 +309,7 @@ def test_declared_inputs_without_workspace_repository_fail_closed(
 ) -> None:
     runtime_root = tmp_path / "runtime-no-repo"
     runtime_root.mkdir()
-    service = BunshinV2WorkflowService(runtime_root)
+    service = BunshinWorkflowService(runtime_root)
     service.create_task(
         {
             "task_id": "task-no-repo",

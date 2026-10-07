@@ -5,7 +5,7 @@ from pal.bunshin.storage.role_assignments import semantic_business_lease
 from pathlib import Path
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import invocation_root
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.bunshin.turns import sanitize_runner_session_pack
 from pal.bunshin.harnesses import HARNESS_LAUNCH_PAL_SANDBOX
@@ -23,7 +23,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import (
 @dataclass
 class AttemptPublication:
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     runtime_db_path: Path | None
     runtime_root: Path
 

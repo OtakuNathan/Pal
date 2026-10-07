@@ -109,7 +109,7 @@ def test_read_only_activity_cannot_keep_missing_submission_alive(tmp_path):
     base.pack.workspace["output_policy"] = {"primary_artifact": "expected.json"}
     runner = ReadingRunner(runtime_root=tmp_path, pack=base.pack,
                            bunshin_id="test", run_id="test", write_event=noop, read_decision=noop)
-    asyncio.run(runner.components.invocation.run_v2_invocation(None))
+    asyncio.run(runner.components.invocation.run_invocation(None))
     assert runner.calls == 2
     assert runner.components.status.blocked_kind == "completion_gate_stalled"
 
@@ -137,6 +137,6 @@ def test_checklist_progress_allows_another_completion_attempt(tmp_path):
     runner = RepairingRunner(runtime_root=tmp_path, pack=base.pack,
                             bunshin_id="test", run_id="test", write_event=noop, read_decision=noop)
     with patch("pal.bunshin.work_items.read_work_items", return_value=ledger):
-        asyncio.run(runner.components.invocation.run_v2_invocation(None))
+        asyncio.run(runner.components.invocation.run_invocation(None))
     assert runner.calls == 3
     assert runner.components.status.blocked_kind == "completion_gate_stalled"

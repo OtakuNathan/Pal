@@ -2,12 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 @dataclass
 class EffectReads:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def effect_causal_context(
         self,

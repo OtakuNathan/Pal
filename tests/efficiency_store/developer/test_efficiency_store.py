@@ -16,7 +16,7 @@ from pal.bunshin.efficiency_store import (
     open_readonly,
     read_workflow_telemetry,
 )
-from pal.bunshin.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_schema
 
 
 def _insert_role_invocation(
@@ -77,7 +77,7 @@ def _make_db(tmp_path: Path, name: str = "bunshin.sqlite3") -> Path:
     db_path = tmp_path / name
     connection = sqlite3.connect(db_path)
     try:
-        ensure_bunshin_v2_schema(connection)
+        ensure_bunshin_schema(connection)
         connection.commit()
     finally:
         connection.close()

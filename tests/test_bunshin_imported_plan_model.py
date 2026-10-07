@@ -26,7 +26,7 @@ from pal.bunshin.cycle_protocol import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 IMPORTED = "ImportedArchitecture"
 FRESH = "FreshArchitecture"
 REFS = ("", IMPORTED, FRESH, "OtherArchitecture")
@@ -322,7 +322,7 @@ def test_imported_model_config_wires_refinement_and_invariants():
         "InstalledGraphBelongsToWorkflow", "FreshGraphHasIndependentGeneration",
     ):
         assert f"INVARIANT {name}\n" in config
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     assert "    ImportedPlanLifecycle\n" in script
 
 

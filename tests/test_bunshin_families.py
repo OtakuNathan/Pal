@@ -22,26 +22,26 @@ from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
+from pal.bunshin.adapters import prepare_role_workspace, prepare_workspace_environment
 from pal.bunshin.contract_runtime import ContractArtifactAccess
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.epoch_compilation import ExecutionCompiler
 from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
 from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.graph_protocol import RoleBinding
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.orchestration import BunshinOutboxProcessor
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import (
     OrchestrationRole,
     RoleActivation,
     RoleMode,
     validate_family_binding_payload,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.semantic_orchestration import (
-    apply_v2_research_capability_policy,
-    apply_v2_role_capability_policy,
+    apply_research_capability_policy,
+    apply_role_capability_policy,
 )
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.role_inputs import _role_mode_profile_payload
@@ -53,7 +53,7 @@ from pal.shared import ToolExecutionResult
 class BunshinV2FamilyBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_family_"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
 
     def tearDown(self) -> None:
@@ -107,7 +107,7 @@ workspace_policy: {}
         self.assertIn("op_skill_inject", pack.allowed_capabilities)
 
     def test_lifestyle_binding_resolves_all_roles_and_artifact_adapters(self) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "lifestyle.nutritionist"
         )
         binding = self.store.read_json(ref)
@@ -173,7 +173,7 @@ workspace_policy: {}
         )
 
     def test_family_binding_rejects_legacy_implicit_profile_executor(self) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "lifestyle.nutritionist"
         )
         binding = dict(self.store.read_json(ref))
@@ -188,7 +188,7 @@ workspace_policy: {}
     def test_family_binding_requires_an_execution_adapter_strategy(
         self,
     ) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "generic"
         )
         binding = dict(self.store.read_json(ref))
@@ -197,7 +197,7 @@ workspace_policy: {}
             validate_family_binding_payload(binding)
 
     def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding("generic")
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding("generic")
         binding = self.store.read_json(ref)
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
         self.assertEqual(
@@ -208,7 +208,7 @@ workspace_policy: {}
         self.assertEqual(binding["primary_profile"]["canonical_profile_id"], "generic")
 
     def test_family_binding_pins_profile_definition_across_catalog_refresh(self) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "software_engineering.v2_coder"
         )
         binding = self.store.read_json(ref)
@@ -236,7 +236,7 @@ workspace_policy: {}
         self.assertEqual(resolved.resolved_profile["display_name"], original_name)
 
     def test_software_family_selects_internal_role_profiles_independent_of_task_profile(self) -> None:
-        ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "software_engineering.v2_architect"
         )
         binding = self.store.read_json(ref)
@@ -263,7 +263,7 @@ workspace_policy: {}
         )
 
     def test_software_task_creation_cannot_bind_architect_as_implementation(self) -> None:
-        service = BunshinV2WorkflowService(self.root)
+        service = BunshinWorkflowService(self.root)
         created = service.create_task(
             {
                 "title": "Software task",
@@ -286,7 +286,7 @@ workspace_policy: {}
         )
 
     def test_architect_authors_contract_and_task_profile_is_not_an_executor(self) -> None:
-        planner = apply_v2_role_capability_policy(
+        planner = apply_role_capability_policy(
             self._pack("lifestyle.architect"),
             activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
         )
@@ -295,7 +295,7 @@ workspace_policy: {}
         self.assertIn("op_file_edit", planner.allowed_capabilities)
         self.assertNotIn("op_bunshin_artifact_write", planner.allowed_capabilities)
 
-        task_profile = apply_v2_role_capability_policy(
+        task_profile = apply_role_capability_policy(
             self._pack("lifestyle.nutritionist"),
             activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
@@ -307,7 +307,7 @@ workspace_policy: {}
         )
 
     def test_task_creation_requires_primary_profile_and_ignores_no_family_shortcut(self) -> None:
-        service = BunshinV2WorkflowService(self.root)
+        service = BunshinWorkflowService(self.root)
         with self.assertRaisesRegex(ValueError, "explicit primary bunshin profile"):
             service.create_task(
                 {
@@ -361,7 +361,7 @@ workspace_policy: {}
         self.assertTrue(product.ok, product.text)
 
     def test_verifier_can_only_submit_through_the_schema_bound_protocol(self) -> None:
-        software = apply_v2_role_capability_policy(
+        software = apply_role_capability_policy(
             self._pack("software_engineering.v2_verifier"),
             activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
@@ -389,7 +389,7 @@ workspace_policy: {}
         )
         for profile in ("general.verifier",):
             with self.subTest(profile=profile):
-                verifier = apply_v2_role_capability_policy(
+                verifier = apply_role_capability_policy(
                     self._pack(profile),
                     activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
                 )
@@ -407,7 +407,7 @@ workspace_policy: {}
                 self.assertNotIn("op_bunshin_artifact_write", verifier.allowed_capabilities)
                 self.assertNotIn("op_bunshin_artifact_edit", verifier.allowed_capabilities)
 
-        standalone = apply_v2_role_capability_policy(
+        standalone = apply_role_capability_policy(
             self._pack("software_engineering.v2_reviewer"),
             activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
         )
@@ -428,7 +428,7 @@ workspace_policy: {}
                 RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
             ):
                 with self.subTest(profile=profile, activation=activation):
-                    bound = apply_v2_role_capability_policy(
+                    bound = apply_role_capability_policy(
                         self._pack(profile), activation=activation
                     )
                     if activation.role == OrchestrationRole.VERIFIER:
@@ -453,7 +453,7 @@ workspace_policy: {}
                             bound.allowed_capabilities,
                         )
 
-        coder = apply_v2_role_capability_policy(
+        coder = apply_role_capability_policy(
             self._pack("software_engineering.v2_coder"),
             activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
@@ -526,7 +526,7 @@ workspace_policy: {}
         )
         for profile, activation, primary_artifact, output_types in cases:
             with self.subTest(profile=profile, activation=activation):
-                bound = apply_v2_role_capability_policy(
+                bound = apply_role_capability_policy(
                     self._pack(profile),
                     activation=activation,
                 )
@@ -623,7 +623,7 @@ workspace_policy: {}
         architect = self._pack("lifestyle.architect")
         self.assertNotIn("op_web_search", architect.allowed_capabilities)
         self.assertNotIn("op_browser_read", architect.allowed_capabilities)
-        local = apply_v2_research_capability_policy(architect, research_mode="local_only")
+        local = apply_research_capability_policy(architect, research_mode="local_only")
         self.assertNotIn("op_web_search", local.allowed_capabilities)
         self.assertNotIn("op_browser_read", local.allowed_capabilities)
 
@@ -631,8 +631,8 @@ workspace_policy: {}
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_web_search", architect.allowed_capabilities)
         self.assertIn("op_browser_read", architect.allowed_capabilities)
-        local = apply_v2_research_capability_policy(architect, research_mode="local_only")
-        external = apply_v2_research_capability_policy(architect, research_mode="external_allowed")
+        local = apply_research_capability_policy(architect, research_mode="local_only")
+        external = apply_research_capability_policy(architect, research_mode="external_allowed")
         self.assertNotIn("op_web_search", local.allowed_capabilities)
         self.assertNotIn("op_browser_read", local.allowed_capabilities)
         self.assertIn("op_web_search", external.allowed_capabilities)
@@ -1204,7 +1204,7 @@ workspace_policy: {}
             reviewer_overrides["op_bunshin_add_finding"]["do_not_use_when"],
         )
 
-        binding_ref = BunshinV2Catalog(self.root, self.store).publish_family_binding(
+        binding_ref = BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
             "software_engineering.v2_coder"
         )
         binding = self.store.read_json(binding_ref)
@@ -1331,7 +1331,7 @@ workspace_policy: {}
         self.assertIn("architect.yaml", provider["description"])
 
     def test_product_requirements_do_not_absorb_family_workflow_policy(self) -> None:
-        service = BunshinV2WorkflowService(self.root)
+        service = BunshinWorkflowService(self.root)
         with self.assertRaisesRegex(ValueError, "normalized Requirements"):
             service.prepare_requirements(
                 {
@@ -1350,7 +1350,7 @@ workspace_policy: {}
         )
         task_ledger = self.store.read_json(prepared["requirements_ref"])
         binding = self.store.read_json(
-            BunshinV2Catalog(self.root, self.store).publish_family_binding(
+            BunshinWorkflowCatalog(self.root, self.store).publish_family_binding(
                 "software_engineering.v2_coder"
             )
         )
@@ -1624,14 +1624,14 @@ workspace_policy: {}
         source = self.root / "source"
         source.mkdir()
         (source / "reference.txt").write_text("truth", encoding="utf-8")
-        planner = apply_v2_role_capability_policy(
+        planner = apply_role_capability_policy(
             self._pack("lifestyle.architect"),
             activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
         )
         planner = BunshinInvocationPack.from_dict(
             {**planner.to_dict(), "workspace": {**dict(planner.workspace), "repo_path": str(source)}}
         )
-        prepared = prepare_v2_role_workspace(self.root, planner, run_id="planner-run")
+        prepared = prepare_role_workspace(self.root, planner, run_id="planner-run")
         self.assertEqual(prepared.allowed_capabilities, planner.allowed_capabilities)
         self.assertFalse(any("checkpoint" in item for item in prepared.allowed_capabilities))
         self.assertTrue((Path(prepared.workspace["repo_path"]) / "reference.txt").is_file())
@@ -1642,7 +1642,7 @@ workspace_policy: {}
         (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
         before = (source / "main.py").read_bytes()
 
-        workspace, report = prepare_v2_workspace_environment({"repo_path": str(source)})
+        workspace, report = prepare_workspace_environment({"repo_path": str(source)})
 
         self.assertIn("python", workspace["languages"])
         self.assertEqual(workspace["primary_language"], "python")
@@ -1656,7 +1656,7 @@ workspace_policy: {}
         (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
         (source / "native.cpp").write_text("int native_value = 1;\n", encoding="utf-8")
 
-        workspace, report = prepare_v2_workspace_environment(
+        workspace, report = prepare_workspace_environment(
             {
                 "repo_path": str(source),
                 "primary_language": "python",
@@ -1678,7 +1678,7 @@ workspace_policy: {}
         (include / "value.h").write_text("inline int value() { return 0; }\n", encoding="utf-8")
         before = sorted(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
 
-        workspace, report = prepare_v2_workspace_environment(
+        workspace, report = prepare_workspace_environment(
             {
                 "repo_path": str(source),
                 "primary_language": "cpp",
@@ -1695,7 +1695,7 @@ workspace_policy: {}
         self.assertFalse(report["source_modified"])
 
     def test_lifestyle_task_compiles_artifact_workspace_epoch(self) -> None:
-        service = BunshinV2WorkflowService(self.root)
+        service = BunshinWorkflowService(self.root)
         service.create_task(
             {
                 "task_id": "nutrition-task",
@@ -1824,7 +1824,7 @@ workspace_policy: {}
         self.assertTrue(Path(node.payload["workspace_path"]).is_dir())
 
     def test_nutritionist_null_executors_complete_delivery_end_to_end(self) -> None:
-        service = BunshinV2WorkflowService(self.root)
+        service = BunshinWorkflowService(self.root)
         created = service.create_task(
             {
                 "task_id": "nutritionist-e2e-task",
@@ -1866,7 +1866,7 @@ workspace_policy: {}
         # accepted ContractArtifact. First execute the Manager-owned START_WORKFLOW
         # action, then retire only the unexecuted architecture-routing effect.
         bootstrap = asyncio.run(
-            BunshinV2OutboxProcessor(service).process_once(limit=1)
+            BunshinOutboxProcessor(service).process_once(limit=1)
         )
         self.assertEqual(bootstrap["failed"], 0)
         for effect in service.repository.outbox_claims.claim_outbox(
@@ -1964,7 +1964,7 @@ workspace_policy: {}
             epoch_id="nutritionist-e2e-epoch",
             manifest_ref=manifest,
         )
-        processor = BunshinV2OutboxProcessor(
+        processor = BunshinOutboxProcessor(
             service,
             semantic_effects=SemanticOrchestrator(service),
         )

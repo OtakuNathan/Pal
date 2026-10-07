@@ -10,10 +10,10 @@ import pytest
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.execution.runtime import ExecutionRuntime
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_findings import structured_findings
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.semantic_orchestration.role_policy import apply_v2_role_capability_policy
+from pal.bunshin.semantic_orchestration.role_policy import apply_role_capability_policy
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, authoring_input_fingerprint
 from pal.bunshin.swe_verification import swe_verification_tool_result
 from pal.bunshin.verification import (
@@ -62,7 +62,7 @@ class RecordedCommands:
 
 
 def test_current_repair_packet_preserves_every_regression_through_submit(tmp_path):
-    repository = BunshinV2Repository(tmp_path)
+    repository = BunshinRepository(tmp_path)
     artifacts = ContentAddressedArtifactStore(tmp_path, repository.artifacts)
     packet = artifacts.put_json(modern_bill(), artifact_type="RepairPacketArtifact")
     view = {"module_name": "router", "historical_repair_bills": [
@@ -173,7 +173,7 @@ def scoped_for(view, *, guidance=None, contract=None):
         "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
         "verification_tool_contract": contract,
     }}
-    pack = apply_v2_role_capability_policy(BunshinInvocationPack(
+    pack = apply_role_capability_policy(BunshinInvocationPack(
         invocation_id="projection-test", workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
     runtime = BunshinScopedExecutionRuntime(
@@ -261,7 +261,7 @@ def test_roles_without_a_node_contract_keep_their_existing_surface():
 
 
 def test_rebuilding_corrected_history_policy_changes_semantic_input_identity(tmp_path):
-    repository = BunshinV2Repository(tmp_path)
+    repository = BunshinRepository(tmp_path)
     artifacts = ContentAddressedArtifactStore(tmp_path, repository.artifacts)
     view = {"module_name": "router", "historical_repair_bills": [modern_bill()]}
     view_ref = artifacts.put_json(view, artifact_type="ModuleWorkViewArtifact")

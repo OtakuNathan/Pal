@@ -20,14 +20,14 @@ from pal.bunshin.efficiency_store import (
     WorkflowTelemetryRecords,
     open_readonly,
     read_workflow_telemetry)
-from pal.bunshin.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_schema
 
 
 def _make_db(tmp_path: Path, name: str = "bunshin.sqlite3") -> Path:
     db_path = tmp_path / name
     connection = sqlite3.connect(db_path)
     try:
-        ensure_bunshin_v2_schema(connection)
+        ensure_bunshin_schema(connection)
         connection.commit()
     finally:
         connection.close()
@@ -65,7 +65,7 @@ def test_readonly_open_on_live_wal_database(tmp_path: Path) -> None:
     writer = sqlite3.connect(db_path)
     try:
         writer.execute("PRAGMA journal_mode=WAL")
-        ensure_bunshin_v2_schema(writer)
+        ensure_bunshin_schema(writer)
         writer.execute(
             """
             INSERT INTO bunshin_v2_role_invocations(

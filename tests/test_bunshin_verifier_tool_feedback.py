@@ -11,7 +11,7 @@ import pytest
 
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.bunshin.semantic_orchestration.role_policy import apply_v2_role_capability_policy
+from pal.bunshin.semantic_orchestration.role_policy import apply_role_capability_policy
 from pal.bunshin.swe_verification import semantic_verification_submission_errors
 from pal.bunshin.verification_builder import compile_verification_invocation_tool_contract
 from pal.bunshin.work_items import update_checklist_tool_result
@@ -27,7 +27,7 @@ from tests.test_bunshin_historical_contract import modern_bill
 
 @pytest.fixture
 def verifier(request):
-    from tests.test_bunshin_v2_verification import BunshinV2VerificationTests
+    from tests.test_bunshin_verification import BunshinV2VerificationTests
     fixture = BunshinV2VerificationTests()
     fixture.setUp()
     root = fixture.runtime_root
@@ -50,7 +50,7 @@ def verifier(request):
     }, role='verifier')
     workspace['bunshin_v2']['verification_tool_contract'] = contract
     workspace['invocation_id'] = workspace['bunshin_v2']['invocation_id']
-    pack = apply_v2_role_capability_policy(BunshinInvocationPack(
+    pack = apply_role_capability_policy(BunshinInvocationPack(
         invocation_id=workspace['invocation_id'], workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
     runtime = BunshinScopedExecutionRuntime(fixture.adapter, list(pack.allowed_capabilities), workspace=workspace)

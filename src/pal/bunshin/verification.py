@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 class VerificationStatus(StrEnum):
@@ -183,7 +183,7 @@ class VerificationCaseRunner:
 
 @dataclass
 class VerificationService:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     artifacts: ContentAddressedArtifactStore
 
     def publish_report(
@@ -516,7 +516,7 @@ class VerificationService:
 
 @dataclass
 class DefectPropagationService:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def propagate_dependency_defect(
         self,

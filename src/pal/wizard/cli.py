@@ -512,14 +512,14 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
     from pal.bunshin.cutover import cutover_bunshin_runtime
-    from pal.bunshin.schema import BUNSHIN_V2_SCHEMA_VERSION
+    from pal.bunshin.schema import BUNSHIN_SCHEMA_VERSION
 
     bunshin_cutover = cutover_bunshin_runtime(runtime_root)
 
     print(f"\n  Database configured at {db_path}")
     if bunshin_cutover.status == "archived_and_initialized":
         print(
-            f"  Bunshin runtime archived and initialized at schema v{BUNSHIN_V2_SCHEMA_VERSION} "
+            f"  Bunshin runtime archived and initialized at schema v{BUNSHIN_SCHEMA_VERSION} "
             f"(archive: {bunshin_cutover.archive_root})"
         )
 
@@ -571,7 +571,7 @@ def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
         )
         return 2
     from pal.bunshin.cutover import cutover_bunshin_runtime, require_bunshin_runtime_stopped
-    from pal.bunshin.schema import BUNSHIN_V2_SCHEMA_VERSION
+    from pal.bunshin.schema import BUNSHIN_SCHEMA_VERSION
     from pal.llm.schema import migrate_llm_endpoint_schema
     from pal.web_fetch.schema import migrate_web_fetch_schema
 
@@ -590,7 +590,7 @@ def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
     print(f"  Memory generation: {generation} ({memory_storage.path(generation)})")
     if web_fetch_result.archive_path:
         print(f"  Legacy browser providers archived at: {web_fetch_result.archive_path}")
-    print(f"  Bunshin schema: v{BUNSHIN_V2_SCHEMA_VERSION} ({result.status})")
+    print(f"  Bunshin schema: v{BUNSHIN_SCHEMA_VERSION} ({result.status})")
     if result.archive_root is not None:
         print(f"  Previous Bunshin runtime archive: {result.archive_root}")
     return 0

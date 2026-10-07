@@ -30,8 +30,7 @@ Continue with the contract for the subsystem you are changing:
 - [pal_control_plane.md](pal_control_plane.md)
 - [pal_introspection_contract.md](pal_introspection_contract.md)
 - [pal_tasking_contract.md](pal_tasking_contract.md)
-- [pal_bunshin_v1.md](pal_bunshin_v1.md)
-- [bunshin_v2_contract_orchestration.md](bunshin_v2_contract_orchestration.md)
+- [bunshin_contract_orchestration.md](bunshin_contract_orchestration.md)
 - [pal_proactive_contract.md](pal_proactive_contract.md)
 - [pal_memory_contract.md](pal_memory_contract.md)
 - [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
@@ -83,7 +82,7 @@ relevant validation report; do not add raw test logs to version control.
 - `pal_control_plane.md`: explicit control, approval, and governance flows.
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
 - `pal_tasking_contract.md`: tasking, bunshins, checkpoints, ledgers, and workspace governance.
-- `pal_bunshin_v1.md`: implemented bunshin sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
+- `bunshin_contract_orchestration.md`: current Bunshin contract graph, role protocol, durable execution, and publication boundaries.
 - `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and bunshin engineering-quality hardening.
 - `bunshin_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
 - `pal_proactive_contract.md`: proactive tasks, schedules, run history, and output-channel constraints.

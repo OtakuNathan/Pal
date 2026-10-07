@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
 from pal.bunshin.contracts import DeferredEffectError, PermanentEffectError, SubmissionInvariantError
 from pal.bunshin.background_assignments import BackgroundAssignments
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState
 from pal.bunshin.semantic_orchestration.assignment_failures import AssignmentFailures
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
@@ -23,7 +23,7 @@ class AssignmentExecution:
     assignment_retries: AssignmentRetries
     role_leases: RoleLeases
     background: BackgroundAssignments
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     async def background_worker_loop(
         self,

@@ -13,7 +13,7 @@ from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.role_protocol import RoleAssignmentRequest
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.semantic_evidence import recorded_cases
 from pal.bunshin.verification_readiness import verification_corpus_snapshot
@@ -25,7 +25,7 @@ from tests.test_bunshin_verifier_tool_feedback import payload, verifier
 @pytest.mark.parametrize("verifier", [True], indirect=True)
 def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier):
     fixture, workspace, probe, _, original_runtime, view = verifier
-    service = BunshinV2WorkflowService(fixture.runtime_root)
+    service = BunshinWorkflowService(fixture.runtime_root)
     repo = service.repository
     workflow, node = "manager-freshness", "manager-node"
     view_ref = service.artifacts.put_json(view, artifact_type="ModuleWorkViewArtifact")

@@ -16,8 +16,8 @@ from pal.bunshin.config import (
 )
 from pal.bunshin.ipc import BunshinManagerClient, bunshin_runtime_dir
 from pal.bunshin.schema import (
-    BUNSHIN_V2_SCHEMA_VERSION,
-    ensure_bunshin_v2_schema,
+    BUNSHIN_SCHEMA_VERSION,
+    ensure_bunshin_schema,
 )
 
 
@@ -36,11 +36,11 @@ def cutover_bunshin_runtime(runtime_root: Path) -> BunshinRuntimeCutoverResult:
     root = Path(runtime_root)
     source = bunshin_runtime_dir(root)
     previous_version = _bunshin_schema_version(source / BUNSHIN_DB_FILENAME)
-    if previous_version in {0, BUNSHIN_V2_SCHEMA_VERSION}:
+    if previous_version in {0, BUNSHIN_SCHEMA_VERSION}:
         return BunshinRuntimeCutoverResult(
             status=(
                 "already_current"
-                if previous_version == BUNSHIN_V2_SCHEMA_VERSION
+                if previous_version == BUNSHIN_SCHEMA_VERSION
                 else "not_required"
             ),
             previous_version=previous_version,
@@ -59,7 +59,7 @@ def cutover_bunshin_runtime(runtime_root: Path) -> BunshinRuntimeCutoverResult:
     version_label = str(previous_version) if previous_version >= 0 else "unknown"
     archive = archive_parent / f"{stamp}-v{version_label}"
     staging_runtime_root = data_root / (
-        f".bunshin-v{BUNSHIN_V2_SCHEMA_VERSION}-{uuid4().hex}"
+        f".bunshin-v{BUNSHIN_SCHEMA_VERSION}-{uuid4().hex}"
     )
     staging = bunshin_runtime_dir(staging_runtime_root)
     try:
@@ -111,7 +111,7 @@ def _build_staging_runtime(
         shutil.copy2(path, target)
     with sqlite3.connect(str(staging / BUNSHIN_DB_FILENAME)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        ensure_bunshin_v2_schema(connection)
+        ensure_bunshin_schema(connection)
         ensure_bunshin_runtime_settings_schema(connection)
         connection.commit()
     _fsync_directory(staging)

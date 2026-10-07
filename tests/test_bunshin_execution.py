@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.bunshin import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, BunshinV2Repository
+from pal.bunshin import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, BunshinRepository
 from pal.bunshin.contract_runtime import ContractArtifactAccess
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.adapters import (
     ARTIFACT_BUNDLE_ADAPTER,
     SOFTWARE_GIT_ADAPTER,
@@ -177,7 +177,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_exec_"))
-        self.repository = BunshinV2Repository(self.runtime_root)
+        self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.contracts = ContractArtifactAccess(self.store, self.repository)
 
@@ -292,7 +292,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
     def _bind_workflow(self, workflow_id: str, *, profile: str = "generic") -> None:
         if self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id) is not None:
             return
-        family_binding_ref = BunshinV2Catalog(
+        family_binding_ref = BunshinWorkflowCatalog(
             self.runtime_root,
             self.store,
         ).publish_family_binding(profile)

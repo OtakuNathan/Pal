@@ -343,7 +343,7 @@ def test_manager_rejects_stale_or_superseded_proposal_sources():
     repository = SimpleNamespace(snapshots=SimpleNamespace(
         read_snapshot=lambda kind, identity: workflow if kind == AggregateType.WORKFLOW else node,
     ))
-    manager = SimpleNamespace(v2_service=SimpleNamespace(repository=repository))
+    manager = SimpleNamespace(workflow_service=SimpleNamespace(repository=repository))
     source = {"task_id": "task", "workflow_id": "workflow",
               "source_dependencies": {"epoch_id": "epoch", "node_run_id": "node", "requires_accepted": True}}
     assert BunshinManager._validate_memory_proposal_source(manager, source)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 import contextlib
@@ -15,7 +15,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import (
 
 @dataclass
 class ProcessResult:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_checkpoints: RoleCheckpoints
 
     async def execute(

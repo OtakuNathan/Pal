@@ -1,5 +1,10 @@
 # Pal Bunshin V1 Implementation Notes
 
+Historical record of the retired work-order implementation. For the current
+contract graph implementation, see
+[Bunshin Contract-Driven Orchestration](../../bunshin_contract_orchestration.md).
+The original implementation description below is preserved as historical context.
+
 This file is the current-code sync point for the first implemented bunshin subsystem.
 
 ## Boundary

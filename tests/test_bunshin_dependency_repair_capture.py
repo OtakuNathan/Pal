@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from tests import test_bunshin_verifier_scope_recovery as scope_fixture
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contracts import AggregateType, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import RepairIncarnation
 from pal.bunshin.execution_values import workspace_content_fingerprint
@@ -42,7 +42,7 @@ class CaptureCase:
         self.view_ref = self.artifacts.put_json({"module_name": "archive_verify"}, artifact_type="ModuleWorkViewArtifact")
         self.diff_ref = self.artifacts.put_json({"target_sha": fx.digest}, artifact_type="GitReviewRangeArtifact",
                                                child_refs=((fx.candidate_ref.sha256, "checkpoint"),))
-        self.binding = BunshinV2Catalog(fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
+        self.binding = BunshinWorkflowCatalog(fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
         self.session = "capture-verifier-session"
         self.repository.role_sessions.ensure_role_session(
             session_id=self.session, workflow_id=fx.workflow_id, aggregate_type=AggregateType.DAG_NODE_RUN,

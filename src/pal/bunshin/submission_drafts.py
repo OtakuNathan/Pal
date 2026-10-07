@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from pal.foundation import utc_now
 from pal.bunshin.config import bunshin_db_path
 from pal.bunshin.role_contracts import RoleActivation
-from pal.bunshin.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_schema
 from pal.bunshin.draft_integrity import (
     assert_authoring_open, assert_local_submission_authority, reserved_finding_ids,
     assert_draft_versions, assert_verifier_projection, audited_result, prepare_mutation,
@@ -823,7 +823,7 @@ class SubmissionDraftStore:
                 connection.execute("PRAGMA busy_timeout=30000")
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA foreign_keys=ON")
-                ensure_bunshin_v2_schema(connection)
+                ensure_bunshin_schema(connection)
             stat = self.db_path.stat()
             _SCHEMA_FILE_IDENTITIES[cache_key] = (int(stat.st_dev), int(stat.st_ino))
 

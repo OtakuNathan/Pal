@@ -24,7 +24,7 @@ from pal.bunshin.contract_submission import (
     bind_architect_file,
     contract_submit_tool_result,
 )
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_submission import review_submit_tool_result
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.bunshin.skeleton import compile_skeleton_markdown
@@ -529,7 +529,7 @@ class ContractProtocolTests(unittest.TestCase):
 class WorkItemProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal-work-items-"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.repository.database.ensure_schema()
         self.invocation_id = "inv_contract_author"
         self.resource = "architecture:revision:author"

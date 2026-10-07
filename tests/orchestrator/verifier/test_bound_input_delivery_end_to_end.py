@@ -56,7 +56,7 @@ from pal.bunshin.input_binding import (
     verify_bound_inputs,
 )
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
 # The bound module workspace itself: a real read-only Git repository whose
@@ -123,7 +123,7 @@ class BoundInputDeliveryHarness(unittest.TestCase):
         self.runtime_root = self.root / "runtime"
         self.runtime_root.mkdir()
         self.head = _workspace_head()
-        self.service = BunshinV2WorkflowService(self.runtime_root)
+        self.service = BunshinWorkflowService(self.runtime_root)
         self.service.create_task(
             {
                 "task_id": "task-bound",
@@ -415,7 +415,7 @@ class RecoveryRematerializesIdenticalInputsTests(BoundInputDeliveryHarness):
         # Full service restart over the same durable runtime root: the
         # replacement attempt (fencing token 2) re-materializes from the same
         # immutable manifest recorded before the restart.
-        restarted = BunshinV2WorkflowService(self.runtime_root)
+        restarted = BunshinWorkflowService(self.runtime_root)
         replacement = SemanticOrchestrator(restarted)
         workflow_after = restarted.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW, "wf-task-bound"

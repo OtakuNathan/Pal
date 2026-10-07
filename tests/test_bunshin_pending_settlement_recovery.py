@@ -13,9 +13,9 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
-from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from tests import test_bunshin_verifier_scope_recovery as scope_fixture
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
+from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleAction, CycleSlot, CycleTransitionError, NodeCycleState
 from pal.bunshin.execution_values import workspace_content_fingerprint
@@ -41,7 +41,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.artifacts = self.fx.artifacts
         self.worker = self.fx.worker
         self.coordinator = self.fx.coordinator
-        self.binding_ref = BunshinV2Catalog(self.fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
+        self.binding_ref = BunshinWorkflowCatalog(self.fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
         self.binding = dict(self.artifacts.read_json(self.binding_ref))
         self.fx._accept_provider()
 
@@ -178,7 +178,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.assertEqual(self._graph_cycle().resume_state, NodeCycleState.CHECKER_READY)
         self.assertIsNone(self._graph_cycle().active_assignment)
         roles_before = self._role_rows()
-        provider = BunshinV2PublicProvider(runtime_root=self.fx.root, wake_manager=lambda: None)
+        provider = BunshinPublicProvider(runtime_root=self.fx.root, wake_manager=lambda: None)
         provider.service = self.service
         with patch.object(self.service, "resolve_task_workflow_selector", return_value=("task", self.fx.workflow_id)):
             result = provider.resolve_triage(CapabilityCall(name="resolve_bunshin_triage", meta={"actor_id": "operator"}, args={"task": "task", "subject": "module:archive_verify", "resolution": "Reevaluate the preserved FIFO and stub findings."}))
@@ -360,7 +360,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self._assert_restore_rolls_back(evaluation_generation=1)
 
     def test_claimed_outbox_reconciliation_commits_one_correction_receipt(self):
-        from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+        from pal.bunshin.orchestration import BunshinOutboxProcessor
         import json
 
         self._prepare_pending()
@@ -368,7 +368,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self._resolve()
         persisted = self._stored("reconcile_semantic_state")
         roles = self._role_rows()
-        processor = BunshinV2OutboxProcessor(self.service, semantic_effects=self.worker, worker_id="pending-recovery-outbox")
+        processor = BunshinOutboxProcessor(self.service, semantic_effects=self.worker, worker_id="pending-recovery-outbox")
         claimed = self.repository.outbox_claims.claim_outbox(processor.worker_id, limit=1000, lease_seconds=120)
         effect = next(item for item in claimed if item["effect_id"] == persisted["effect_id"])
         self.assertEqual(effect["status"], "inflight")

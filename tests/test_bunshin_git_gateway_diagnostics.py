@@ -280,10 +280,10 @@ def test_existing_git_operation_runs_once_and_raw_classification_is_not_recorded
 
 def test_durable_cap_survives_gateway_and_repository_reconstruction(tmp_path):
     from pal.bunshin.contracts import AggregateType
-    from pal.bunshin.service import BunshinV2WorkflowService
+    from pal.bunshin.service import BunshinWorkflowService
     from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 
-    service = BunshinV2WorkflowService(tmp_path)
+    service = BunshinWorkflowService(tmp_path)
     prompt = service.artifacts.put_json({"fixture": True}, artifact_type="RolePromptPackArtifact")
     lease = service.repository.leases.claim_lease("implementation:node", SESSION, ttl_seconds=60)
     service.repository.role_invocations.record_role_invocation(
@@ -295,7 +295,7 @@ def test_durable_cap_survives_gateway_and_repository_reconstruction(tmp_path):
     )
     for _ in range(2):
         gateway, _events = gateway_fixture(response={"returncode": 0, "stdout": SECRET, "stderr": ""})
-        gateway.service = BunshinV2WorkflowService(tmp_path)
+        gateway.service = BunshinWorkflowService(tmp_path)
         for _ in range(MAX_GIT_GATEWAY_DIAGNOSTICS):
             invoke(gateway)
     with service.repository.database.read_connection() as connection:

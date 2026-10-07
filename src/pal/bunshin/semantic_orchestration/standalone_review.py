@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import VerificationStatus
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
@@ -35,7 +35,7 @@ class StandaloneReview:
     role_reports: RoleReports
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     runtime_root: Path
     skeleton: GitBackedSkeletonService

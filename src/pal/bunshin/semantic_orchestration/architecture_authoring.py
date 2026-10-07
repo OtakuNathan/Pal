@@ -19,7 +19,7 @@ from pal.bunshin.contract_submission import architect_path
 from pal.bunshin.sessions import architect_session_id_for_revision
 from pal.bunshin.skeleton import architecture_revision_scope
 from pal.bunshin.cycle_protocol import CycleSlot
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.replan import architecture_revision_finding_value
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
@@ -39,7 +39,7 @@ class ArchitectureAuthoring:
     role_reports: RoleReports
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     skeleton: GitBackedSkeletonService
 

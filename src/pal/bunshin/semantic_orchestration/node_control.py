@@ -10,7 +10,7 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.implementation_snapshot import ImplementationSnapshot
@@ -27,7 +27,7 @@ class NodeControl:
     role_cleanup: RoleCleanup
     verification_snapshot: VerificationSnapshot
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     workspace_locks: WorkspaceLockRegistry
     dependency_repairs: DependencyRepairRuntime | None = None
 

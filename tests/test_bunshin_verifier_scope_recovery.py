@@ -28,7 +28,7 @@ from pal.bunshin.graph_protocol import EdgeKind, RoleBinding, graph_ir_from_mapp
 from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result, empty_review_draft, structured_findings
 from pal.bunshin.role_protocol import stable_hash
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.role_inputs import _verifier_reference_refs
 from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
@@ -128,7 +128,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="pal-verifier-scope-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.service = BunshinV2WorkflowService(self.root)
+        self.service = BunshinWorkflowService(self.root)
         self.repository = self.service.repository
         self.artifacts = self.service.artifacts
         self.coordinator = WorkflowCoordinator(self.repository)
@@ -517,7 +517,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.coordinator.execution(workflow_id=self.workflow_id), execution)
 
     def test_correction_findings_seed_required_next_verifier_tasks(self):
-        from pal.bunshin.workflow_catalog import BunshinV2Catalog
+        from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
         from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
         from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
         from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
@@ -533,7 +533,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         work_ref = self.artifacts.put_json({"module_name": "archive_verify", "graph_sink": False}, artifact_type="ModuleWorkViewArtifact")
         diff_ref = self.artifacts.put_json({"changed_paths": ["archive_verify.py"]}, artifact_type="CandidateDiffArtifact")
         refs = _verifier_reference_refs(artifacts=self.artifacts, node_payload=node.payload, module_work_view_ref=work_ref, candidate_diff_ref=diff_ref)
-        binding_ref = BunshinV2Catalog(self.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
+        binding_ref = BunshinWorkflowCatalog(self.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
         binding = dict(self.artifacts.read_json(binding_ref))
         lease = self.repository.leases.claim_lease("correction-prompt", "next-verifier", ttl_seconds=120)
         command = RoleAttemptRequest(
@@ -823,7 +823,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         # durable role receipt. Full cohort/public-outbox ownership is covered
         # in test_bunshin_dependency_repair_runtime, rather than fabricated here.
         self.worker.components.verification_settlement.dependency_repair_registration = None
-        from pal.bunshin.workflow_catalog import BunshinV2Catalog
+        from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
         from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
         from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
         from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
@@ -864,7 +864,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             "module_work_view": self.artifacts.put_json({"module_name": "backup_cli"}, artifact_type="ModuleWorkViewArtifact"),
             "repair_bill": self.artifacts.put_json(view, artifact_type="RepairBillSemanticViewArtifact"),
         }
-        binding_ref = BunshinV2Catalog(self.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
+        binding_ref = BunshinWorkflowCatalog(self.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
         binding = dict(self.artifacts.read_json(binding_ref))
         lease = self.repository.leases.claim_lease("requeued-coder", "next-coder", ttl_seconds=120)
         command = RoleAttemptRequest(

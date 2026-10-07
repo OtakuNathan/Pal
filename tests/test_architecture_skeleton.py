@@ -408,7 +408,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.llm": ("LLMIntrospectionProvider", "register_with_core", "inspect_llm"),
             "pal.memory": ("MemoryIntrospectionProvider", "register_with_core", "inspect_memory"),
             "pal.execution": ("ExecutionIntrospectionProvider", "register_with_core", "inspect_execution"),
-            "pal.bunshin": ("BunshinV2WorkflowService", "register_with_core", "inspect_bunshin"),
+            "pal.bunshin": ("BunshinWorkflowService", "register_with_core", "inspect_bunshin"),
             "pal.proactive": ("ProactiveIntrospectionProvider", "register_with_core", "inspect_proactive"),
             "pal.web_search": ("WebSearchIntrospectionProvider", "register_with_core", "inspect_web_search"),
             "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),

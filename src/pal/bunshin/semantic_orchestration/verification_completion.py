@@ -12,7 +12,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.swe_verification import semantic_verification_submission_errors, verification_finding_route_errors
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_findings import structured_advisories, structured_findings
 from pal.bunshin.role_protocol import RoleAssignmentState, stable_hash
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
@@ -25,7 +25,7 @@ class VerificationCompletion:
     assignment_identity: AssignmentIdentity
     role_reports: RoleReports
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def complete_semantic_verifier(
         self,

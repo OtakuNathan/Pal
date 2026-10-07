@@ -3,7 +3,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.graph_executor import GraphDiff, diff_graphs
 from pal.bunshin.graph_protocol import GraphIR
 from pal.bunshin.module_identity_facts import _artifact_is_contract
@@ -14,7 +14,7 @@ from pal.bunshin.graph_installation import _workflow_execution_adapter
 
 def reconcile_module_identities(
     *,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     contracts: ContractArtifactAccess,
     workflow_id: str,
     source_epoch_id: str,
@@ -87,7 +87,7 @@ def reconcile_module_identities(
 
 def _replan_graph_diff(
     *,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     workflow_id: str,
     source_epoch: AggregateSnapshot,
     target_graph: GraphIR,

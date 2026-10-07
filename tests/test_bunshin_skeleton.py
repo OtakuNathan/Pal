@@ -12,7 +12,7 @@ from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
 from pal.bunshin.contract_protocol import (
     software_contract_projection,
 )
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.skeleton import (
     ArchitectureValidationError,
     GitBackedSkeletonService,
@@ -70,7 +70,7 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             "// implementation placeholder\n",
             encoding="utf-8",
         )
-        repository = BunshinV2Repository(self.runtime_root)
+        repository = BunshinRepository(self.runtime_root)
         artifacts = ContentAddressedArtifactStore(
             self.runtime_root,
             repository.artifacts,

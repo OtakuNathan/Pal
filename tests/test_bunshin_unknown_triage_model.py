@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin import (
-    ActionEnvelope, AggregateSnapshot, AggregateType, BunshinV2Repository,
+    ActionEnvelope, AggregateSnapshot, AggregateType, BunshinRepository,
     build_default_transition_engine,
 )
 from pal.bunshin.contracts import StaleFencingToken, UnknownTransitionError
@@ -32,7 +32,7 @@ from pal.bunshin.sessions import module_verifier_session_id, node_role_generatio
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 GENERATION = "verifier_evaluation_generation"
 PENDING = {"sha256": "unknown-pending", "artifact_type": "PendingVerificationArtifact"}
 REPORT = {"sha256": "unknown-report", "artifact_type": "VerificationArtifact"}
@@ -159,7 +159,7 @@ def test_terminal_unknown_operator_retry_trace(initial_generation, tmp_path):
     assert reuse_lookup(receipts, generation + 1) is None
 
     # The real durable lease store advances fences; old attempts remain stale.
-    repository = BunshinV2Repository(tmp_path)
+    repository = BunshinRepository(tmp_path)
     old_lease = repository.leases.claim_lease("verifier", "old-attempt")
     repository.leases.release_lease("verifier", "old-attempt", old_lease.fencing_token)
     new_lease = repository.leases.claim_lease("verifier", "new-attempt")
@@ -358,7 +358,7 @@ def test_operator_triage_model_config_checks_recovery_contract():
         "TerminalCorrectionWaitsForOperator",
     ):
         assert f"PROPERTY {prop}\n" in config
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     assert "OperatorTriageRecoveryUnsafe.cfg" in script
     assert "Invariant NoOldUnknownReplay is violated" in script
 

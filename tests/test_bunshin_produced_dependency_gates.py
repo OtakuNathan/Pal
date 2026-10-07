@@ -25,7 +25,7 @@ from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
 from pal.bunshin.graph_executor import FindingClass
 from pal.bunshin.graph_protocol import EdgeKind, RoleBinding
 from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
 from pal.bunshin.skeleton_compilation import SkeletonEpochCompiler
 from pal.bunshin.swe_verification import verification_finding_route_errors
@@ -117,7 +117,7 @@ class ProducedDependencyGateTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="pal-produced-gates-")
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        self.repository = BunshinV2Repository(self.root / "runtime")
+        self.repository = BunshinRepository(self.root / "runtime")
         self.artifacts = ContentAddressedArtifactStore(
             self.repository.runtime_root, self.repository.artifacts,
         )

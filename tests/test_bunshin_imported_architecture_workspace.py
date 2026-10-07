@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import bunshin_data_root, cleanup_workflow_worktrees
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.skeleton import (
     ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT,
     GitBackedSkeletonService,
@@ -29,7 +29,7 @@ class ImportedArchitectureWorkspaceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="pal-imported-architecture-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.artifacts = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.skeleton = GitBackedSkeletonService(self.root, self.artifacts)
         self.requirements_ref = self.artifacts.put_json({}, artifact_type="TaskLedgerArtifact")

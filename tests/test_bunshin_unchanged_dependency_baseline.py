@@ -18,15 +18,15 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.cycle_protocol import CycleSlot
 from pal.bunshin.dag_scheduling import DagScheduler
 from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
 from pal.bunshin.execution_values import workspace_content_fingerprint
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.orchestration import BunshinOutboxProcessor
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.skeleton_compilation import SkeletonEpochCompiler
 from pal.bunshin.verification import VerificationService, VerificationStatus
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
@@ -45,12 +45,12 @@ class ExistingRepositoryCase:
 
     def __init__(self, root: Path, *, all_baseline_products=False):
         self.root = root
-        self.service = BunshinV2WorkflowService(root / "runtime")
+        self.service = BunshinWorkflowService(root / "runtime")
         self.repository, self.artifacts = self.service.repository, self.service.artifacts
         self.coordinator = WorkflowCoordinator(self.repository)
         self.scheduler = DagScheduler(self.repository)
         self.worker = SemanticOrchestrator(self.service)
-        self.processor = BunshinV2OutboxProcessor(
+        self.processor = BunshinOutboxProcessor(
             self.service, semantic_effects=self.worker, worker_id="unchanged-regression",
         )
         self.graph = gates._compile_graph()
@@ -58,7 +58,7 @@ class ExistingRepositoryCase:
         self.epoch_id = "epoch-existing-repository"
         self.node_ids = {name: f"{self.epoch_id}:{name}" for name in self.graph.nodes}
         self.claimed = {}
-        binding = BunshinV2Catalog(self.service.runtime_root, self.artifacts).publish_family_binding(
+        binding = BunshinWorkflowCatalog(self.service.runtime_root, self.artifacts).publish_family_binding(
             "software_engineering.v2_coder",
         )
         self.dispatch(AggregateType.WORKFLOW, self.workflow_id, "CREATE_WORKFLOW", {

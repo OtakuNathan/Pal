@@ -7,17 +7,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.bunshin.adapters import ArtifactBundleAdapter, prepare_v2_role_workspace, provision_artifact_workspaces
+from pal.bunshin.adapters import ArtifactBundleAdapter, prepare_role_workspace, provision_artifact_workspaces
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import resolve_project_git_layout
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.shared import BunshinInvocationPack
 
 
 class ArtifactBundleAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_artifact_adapter_"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.adapter = ArtifactBundleAdapter(self.root, self.store)
 
@@ -96,7 +96,7 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
             workspace={"repo_path": str(source)},
         )
 
-        prepared = prepare_v2_role_workspace(self.root, pack, run_id="run-role-workspace")
+        prepared = prepare_role_workspace(self.root, pack, run_id="run-role-workspace")
 
         role_workspace = Path(prepared.workspace["repo_path"])
         self.assertEqual((role_workspace / "input.txt").read_text(encoding="utf-8"), "truth")
@@ -127,14 +127,14 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
             workspace={"repo_path": str(source)},
         )
 
-        first = prepare_v2_role_workspace(
+        first = prepare_role_workspace(
             self.root,
             pack,
             run_id="run-attempt-isolation",
             attempt_key="fence-1",
         )
         (source / "candidate.txt").write_text("second", encoding="utf-8")
-        second = prepare_v2_role_workspace(
+        second = prepare_role_workspace(
             self.root,
             pack,
             run_id="run-attempt-isolation",
@@ -202,7 +202,7 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
             workspace={"repo_path": str(linked_worktree)},
         )
 
-        prepared = prepare_v2_role_workspace(
+        prepared = prepare_role_workspace(
             self.root,
             pack,
             run_id="run-linked-role-workspace",

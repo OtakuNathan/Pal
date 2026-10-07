@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
 from pal.bunshin.semantic_orchestration.role_inputs import _semantic_role_input_refs
@@ -195,7 +195,7 @@ def test_optional_lsp_does_not_remove_other_required_checks(verifier):
 
 
 def test_manager_context_compiles_bound_preparation_into_new_semantic_identity(tmp_path):
-    artifacts = ContentAddressedArtifactStore(tmp_path, BunshinV2Repository(tmp_path).artifacts)
+    artifacts = ContentAddressedArtifactStore(tmp_path, BunshinRepository(tmp_path).artifacts)
     view = artifacts.put_json({"module_name": "router"}, artifact_type="ModuleWorkViewArtifact")
     old = artifacts.put_json({"lsp_policy": "when_available"}, artifact_type="VerificationPolicyArtifact")
     initial_refs = {"module_work_view": view.to_dict(), "verification_policy": old.to_dict()}

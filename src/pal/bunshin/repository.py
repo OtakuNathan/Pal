@@ -36,7 +36,7 @@ from pal.bunshin.storage.transitions import TransitionsStore
 from pal.bunshin.storage.outbox_results import OutboxResultsStore
 
 
-class BunshinV2Repository:
+class BunshinRepository:
     """Composition root for stores; business code calls the responsible owner."""
 
     def __init__(self, runtime_root: Path, engine: TransitionEngine | None = None, *, database: DatabasePort | None = None, metrics: MetricsStore | None = None) -> None:
@@ -77,7 +77,7 @@ class BunshinV2Repository:
     def transaction(self) -> Iterator[BunshinUnitOfWork]:
         with self.database.transaction() as connection:
             session = TransactionSession(self.database, connection)
-            stores = BunshinV2Repository(self.runtime_root, self.transitions.engine, database=session, metrics=self.metrics)
+            stores = BunshinRepository(self.runtime_root, self.transitions.engine, database=session, metrics=self.metrics)
             try:
                 yield BunshinUnitOfWork(
                     transitions=stores.transitions,

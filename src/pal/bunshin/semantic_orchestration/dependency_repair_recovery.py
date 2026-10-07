@@ -12,12 +12,12 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import RepairIncarnation
 from pal.bunshin.graph_executor import GraphExecutionState
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.dependency_repair_facts import node_name
 
 
 def pending_repair_incarnation(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     artifacts: ContentAddressedArtifactStore,
     node: AggregateSnapshot,
 ) -> RepairIncarnation | None:

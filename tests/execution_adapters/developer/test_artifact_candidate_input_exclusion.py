@@ -31,7 +31,7 @@ from pal.bunshin.adapters import (
 )
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.input_binding import BOUND_INPUTS_ROOT
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 WORKER_FILES = {
     "report.md",
@@ -55,7 +55,7 @@ def _documented_is_bound_input_path(relative_path: object) -> bool:
 class ArtifactCandidateInputExclusionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_input_exclusion_"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.adapter = ArtifactBundleAdapter(self.root, self.store)
         # Capture the authoritative objects the adapter module bound at

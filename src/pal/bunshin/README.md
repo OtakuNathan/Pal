@@ -1,5 +1,27 @@
 # bunshin
 
+Package layout:
+- `pal.bunshin` is the single implementation and public package; it has no
+  parallel versioned implementation or compatibility import package
+- `capabilities.py` owns Manager/plugin integration; `workflow_capabilities.py`
+  owns public Task, Workflow, and catalog operations
+- `catalog.py` owns editable profile/family overrides; `workflow_catalog.py`
+  publishes immutable Family bindings for workflows
+- `architecture_compilation.py` compiles the resources in
+  `architecture_templates/` and `architecture_specializations/`
+- `storage/`, `semantic_orchestration/`, and `runner_components/` retain their
+  existing transaction, orchestration, and worker-runtime responsibilities
+- the default worker entrypoint is `python -m pal.bunshin.worker_main`; formal
+  models live in `spec/bunshin/`
+
+Stored format and protocol identities are independent of Python package names.
+Existing `bunshin_v2_*` SQL names, `bunshin_v2` metadata and port keys, role
+profile IDs, capability-group IDs, RPC/control names, artifact formats, and
+session identity salts remain stable. Moving the package does not trigger a
+schema cutover or rewrite an existing checkpoint. A resumed Pal role retains
+its pinned harness generation when the current launcher changes; the same
+checkpoint identity and fail-closed restore checks continue to apply.
+
 Owns:
 - durable workflow, aggregate, role-session, and worker-process orchestration
 - Manager-compiled architecture templates, Family specializations, and

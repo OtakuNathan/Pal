@@ -6,13 +6,13 @@ from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType, SubmissionInvariantError
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.storage.queries import QueriesStore
 from pal.bunshin.unit_of_work import BunshinUnitOfWork
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
-def bind_imported_plan_product(*, repository: BunshinV2Repository,
+def bind_imported_plan_product(*, repository: BunshinRepository,
         artifacts: ContentAddressedArtifactStore, revision: AggregateSnapshot,
         unit_of_work: BunshinUnitOfWork) -> bool:
     """Repair only the exact initial import's empty logical plan cursor.

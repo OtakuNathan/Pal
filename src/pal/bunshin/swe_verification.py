@@ -28,7 +28,7 @@ from pal.bunshin.review_findings import (
     structured_advisories,
     structured_findings,
 )
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_evidence import recorded_cases
 from pal.bunshin.verification_readiness import current_verification_receipts, final_verification_errors, verification_case_errors, verification_corpus_snapshot
 from pal.bunshin.submission_errors import submission_error_result, submission_validation
@@ -486,7 +486,7 @@ def swe_verification_tool_result(
         else:
             artifact_store = ContentAddressedArtifactStore(
                 Path(str(workspace["runtime_root"])),
-                BunshinV2Repository(Path(str(workspace['runtime_root']))).artifacts,
+                BunshinRepository(Path(str(workspace['runtime_root']))).artifacts,
             )
             ref = artifact_store.put_json(
                 submission,

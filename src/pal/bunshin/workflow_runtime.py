@@ -26,7 +26,7 @@ from pal.bunshin.graph_executor import (
 )
 from pal.bunshin.graph_protocol import GraphIR
 from pal.bunshin.dependency_repair_protocol import RepairIncarnation
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ class WorkflowCoordinator:
     interpret Family-specific contract fields.
     """
 
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def ensure_plan_cycle(
         self,

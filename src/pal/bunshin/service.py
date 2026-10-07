@@ -19,7 +19,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.architecture_compilation import (
     compiled_architecture_definition_from_mapping,
 )
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contract_protocol import (
     CONTRACT_ARTIFACT,
     compile_contract_markdown,
@@ -39,7 +39,7 @@ from pal.bunshin.input_binding import (
     capture_input_binding,
     declared_inputs_from_references,
 )
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.cycle_protocol import CycleAction
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.paths import inferred_project_name
@@ -71,20 +71,20 @@ ROUTER_OPERATIONS = {
 }
 
 @dataclass
-class BunshinV2WorkflowService:
+class BunshinWorkflowService:
     runtime_root: Path
-    repository: BunshinV2Repository = field(init=False)
+    repository: BunshinRepository = field(init=False)
     artifacts: ContentAddressedArtifactStore = field(init=False)
     contracts: ContractArtifactAccess = field(init=False)
-    catalog: BunshinV2Catalog = field(init=False)
+    catalog: BunshinWorkflowCatalog = field(init=False)
     skeleton: GitBackedSkeletonService = field(init=False)
     task_ledger: TaskLedgerService = field(init=False)
 
     def __post_init__(self) -> None:
-        self.repository = BunshinV2Repository(Path(self.runtime_root))
+        self.repository = BunshinRepository(Path(self.runtime_root))
         self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository.artifacts)
         self.contracts = ContractArtifactAccess(self.artifacts, self.repository)
-        self.catalog = BunshinV2Catalog(Path(self.runtime_root), self.artifacts)
+        self.catalog = BunshinWorkflowCatalog(Path(self.runtime_root), self.artifacts)
         self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
         self.task_ledger = TaskLedgerService(Path(self.runtime_root), self.artifacts)
 
@@ -1861,7 +1861,7 @@ class BunshinV2WorkflowService:
 
 
 def workflow_request_from_snapshot(
-    service: BunshinV2WorkflowService,
+    service: BunshinWorkflowService,
     workflow: AggregateSnapshot,
 ) -> dict[str, Any]:
     request_ref = dict(workflow.payload.get("request_ref") or {})
@@ -2092,7 +2092,7 @@ def _select_triage_candidate(
 
 
 def _pending_checker_settlement_input(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     artifacts: ContentAddressedArtifactStore,
     node: AggregateSnapshot,
 ) -> str:

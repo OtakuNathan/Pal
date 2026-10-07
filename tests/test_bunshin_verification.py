@@ -26,12 +26,12 @@ from pal.bunshin import (
     AggregateType,
     ArtifactRef,
     ContentAddressedArtifactStore,
-    BunshinV2Repository,
+    BunshinRepository,
 )
 from pal.bunshin.contracts import AggregateSnapshot, SubmissionInvariantError
 from pal.bunshin.delivery import DeliveryService, is_github_pull_request_remote
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.orchestration import BunshinOutboxProcessor
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.cycle_protocol import (
     AssignmentKind,
     CycleAction,
@@ -137,7 +137,7 @@ class _FakeExecutionAdapter:
 class BunshinV2VerificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_verify_"))
-        self.repository = BunshinV2Repository(self.runtime_root)
+        self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.verification = VerificationService(self.repository, self.store)
         self.adapter = _FakeExecutionAdapter()
@@ -576,7 +576,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         (scratch / "end_to_end_probe.txt").write_text("passed\n", encoding="utf-8")
         system_fingerprint = "a" * 64
 
-        ref = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.role_reports.publish_verification_evidence(
+        ref = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.role_reports.publish_verification_evidence(
             review_scratch=scratch,
             candidate_identity=system_fingerprint,
         )
@@ -594,7 +594,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         scratch.mkdir()
         (scratch / "probe.txt").write_text("reproduced\n", encoding="utf-8")
 
-        ref = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.role_reports.publish_verification_evidence(
+        ref = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.role_reports.publish_verification_evidence(
             review_scratch=scratch,
             candidate_identity="b" * 64,
         )
@@ -672,7 +672,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
         )
 
-        installed = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.verifier_tests.install_verifier_tests_for_repair(node)
+        installed = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.verifier_tests.install_verifier_tests_for_repair(node)
 
         self.assertEqual(installed, {})
         self.assertTrue(committed_test.is_file())
@@ -735,7 +735,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 }
             },
         )
-        worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root))
         settlement = {
             "role_assignment_id": "assignment-verifier",
             "role_submission_payload_hash": "submission-hash",
@@ -857,7 +857,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             SubmissionInvariantError,
             "outside the bound module corpus",
         ):
-            SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.verification_completion.complete_semantic_verifier(
+            SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.verification_completion.complete_semantic_verifier(
                 effect={"effect_key": "verify-post-receipt"},
                 node=node,
                 invocation_id="verifier-attempt",
@@ -1020,7 +1020,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
         )
 
-        installed = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.verifier_tests.install_verifier_tests_for_repair(node)
+        installed = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.verifier_tests.install_verifier_tests_for_repair(node)
 
         self.assertEqual(installed, {})
         self.assertFalse((repo / "tests" / "integration" / "test_pipeline.py").exists())
@@ -1069,7 +1069,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 "workspace_path": str(repo),
             },
         )
-        checkpoint_ref, checkpoint_digest, checkpoint = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.verifier_tests.checkpoint_verifier_tests(
+        checkpoint_ref, checkpoint_digest, checkpoint = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.verifier_tests.checkpoint_verifier_tests(
             node=node,
             review_workspace=repo,
             candidate_ref=candidate_ref,
@@ -1156,7 +1156,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
         )
 
-        worker = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root))
         with self.assertRaisesRegex(
             SubmissionInvariantError,
             "canonical Module worktree",
@@ -4100,7 +4100,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.assertEqual(result.snapshot.payload["repair_bill_ref"], repair_ref.to_dict())
 
     def test_requirement_finding_replan_keeps_the_accepted_task_ledger(self) -> None:
-        service = BunshinV2WorkflowService(self.runtime_root)
+        service = BunshinWorkflowService(self.runtime_root)
         base_requirements_ref = service.task_ledger.publish(
             title="Router",
             task_spec={
@@ -4267,7 +4267,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             action=CycleAction.HUMAN_ACCEPTED,
         )
 
-        processor = BunshinV2OutboxProcessor(service)
+        processor = BunshinOutboxProcessor(service)
         processor._request_epoch_replan(
             {
                 "effect_key": "task-ledger-replan",
@@ -4310,8 +4310,8 @@ class BunshinV2VerificationTests(unittest.TestCase):
             status=VerificationStatus.PASS,
             actor="verifier",
         ).snapshot
-        service = BunshinV2WorkflowService(self.runtime_root)
-        processor = BunshinV2OutboxProcessor(service)
+        service = BunshinWorkflowService(self.runtime_root)
+        processor = BunshinOutboxProcessor(service)
 
         result = processor._publish_accepted_memory_candidate(
             {
@@ -4432,7 +4432,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
 class BunshinV2DeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_delivery_"))
-        self.repository = BunshinV2Repository(self.runtime_root)
+        self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.repo = self.runtime_root / "repo"
         self.repo.mkdir()

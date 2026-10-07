@@ -459,11 +459,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/workflow_capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'attached', False)": {
+  "src/pal/bunshin/workflow_capabilities.py:BunshinPublicProvider._resolve_rebind_binding:getattr(endpoint, 'attached', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/workflow_capabilities.py:BunshinV2PublicProvider._resolve_rebind_binding:getattr(endpoint, 'enabled', False)": {
+  "src/pal/bunshin/workflow_capabilities.py:BunshinPublicProvider._resolve_rebind_binding:getattr(endpoint, 'enabled', False)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

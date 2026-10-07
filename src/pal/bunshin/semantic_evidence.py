@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification_readiness import verification_corpus_snapshot, record_verification_execution, lsp_verification_status, shell_execution_output, bind_recorded_case_execution, case_corpus_binding, case_definition_fingerprint
 from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.shared import RuntimeStatus, ToolExecutionResult
@@ -521,7 +521,7 @@ def _artifact_store(workspace: Mapping[str, Any]) -> Any:
     gateway = role_gateway_client_from_env(root)
     if gateway is not None:
         return RoleGatewayArtifactStore(gateway)
-    repository = BunshinV2Repository(root)
+    repository = BunshinRepository(root)
     repository.database.ensure_schema()
     return ContentAddressedArtifactStore(root, repository.artifacts)
 

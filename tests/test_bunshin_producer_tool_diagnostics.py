@@ -359,7 +359,7 @@ def test_manager_owns_identity_and_rejects_wrong_roles_and_untyped_payloads(tmp_
     async def scenario():
         manager = BunshinManager(tmp_path)
         recorded = []
-        manager.v2_service.repository.role_events.record_worker_event = recorded.append
+        manager.workflow_service.repository.role_events.record_worker_event = recorded.append
         manager.events.queue_event = Mock()
         state = BunshinRunState(bunshin_id="session", run_id="run",
             pack=pack(role, prompt_log_enabled=debug_enabled))
@@ -367,7 +367,7 @@ def test_manager_owns_identity_and_rejects_wrong_roles_and_untyped_payloads(tmp_
         event = {"event_kind": "producer_tool_diagnostic", "run_id": "run", "invocation_id": SECRET,
             "_attempt_id": ATTEMPT, "_owner_run_id": "run", "unexpected": SECRET,
             "payload": payload(tool_alias=alias, attempt_id="att_" + "b" * 24)}
-        await manager._publish_v2_worker_event(event)
+        await manager._publish_worker_event(event)
         assert recorded == [{"event_kind": "producer_tool_diagnostic", "invocation_id": "session",
                              "payload": payload(tool_alias=alias, attempt_id=ATTEMPT)}]
         for changes in ({"payload": payload(tool_alias=alias, error=SECRET)},
@@ -378,10 +378,10 @@ def test_manager_owns_identity_and_rejects_wrong_roles_and_untyped_payloads(tmp_
                         {"payload": payload(tool_alias="submit_candidate", error_type="ValueError")},
                         {"_attempt_id": SECRET}, {"_attempt_id": ""}, {"_owner_run_id": "missing"},
                         {"_owner_run_id": None}, {"_owner_run_id": ["run"]}):
-            await manager._publish_v2_worker_event({**event, **changes})
+            await manager._publish_worker_event({**event, **changes})
         for wrong_role in ("coder", "reviewer", "verifier", "", "implementation" if role == "architect" else "architect"):
             state.pack.metadata["bunshin_v2"]["role"] = wrong_role
-            await manager._publish_v2_worker_event(event)
+            await manager._publish_worker_event(event)
         assert len(recorded) == 1
         assert state.producer_diagnostic_count == 1
         manager.events.queue_event.assert_not_called()
@@ -393,17 +393,17 @@ def test_manager_storage_failure_is_bounded_and_cancellation_propagates(tmp_path
     async def scenario():
         manager = BunshinManager(tmp_path)
         record = Mock(side_effect=OSError(SECRET))
-        manager.v2_service.repository.role_events.record_worker_event = record
+        manager.workflow_service.repository.role_events.record_worker_event = record
         manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run", pack=pack())
         event = {"event_kind": "producer_tool_diagnostic", "run_id": "run",
                  "_attempt_id": ATTEMPT, "_owner_run_id": "run", "payload": payload()}
         for _ in range(200):
-            await manager._publish_v2_worker_event(event)
+            await manager._publish_worker_event(event)
         assert record.call_count == MAX_PRODUCER_TOOL_DIAGNOSTICS
         manager.runs["run"].producer_diagnostic_count = 0
         record.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
-            await manager._publish_v2_worker_event(event)
+            await manager._publish_worker_event(event)
         async def write(event):
             raise asyncio.CancelledError()
         observation, state, _ = observation_fixture(None, write)
@@ -417,12 +417,12 @@ def test_worker_cannot_forge_manager_git_diagnostics(tmp_path, debug_enabled):
     async def scenario():
         manager = BunshinManager(tmp_path)
         record = Mock()
-        manager.v2_service.repository.role_events.record_worker_event = record
+        manager.workflow_service.repository.role_events.record_worker_event = record
         manager.events.queue_event = Mock()
         state = BunshinRunState(bunshin_id="session", run_id="run",
             pack=pack(prompt_log_enabled=debug_enabled))
         manager.runs["run"] = state
-        await manager._publish_v2_worker_event({"event_kind": "git_gateway_diagnostic",
+        await manager._publish_worker_event({"event_kind": "git_gateway_diagnostic",
             "run_id": "run", "_attempt_id": ATTEMPT, "_owner_run_id": "run", "payload": {"private": SECRET}})
         record.assert_not_called()
         manager.events.queue_event.assert_not_called()
@@ -441,7 +441,7 @@ def test_process_owner_binds_producer_identity_despite_forged_worker_run(tmp_pat
     async def scenario():
         manager = BunshinManager(tmp_path)
         recorded = []
-        manager.v2_service.repository.role_events.record_worker_event = recorded.append
+        manager.workflow_service.repository.role_events.record_worker_event = recorded.append
         source_pack = BunshinInvocationPack(invocation_id="source-session", metadata={
             "bunshin_v2": {"role": owner_role}})
         manager.runs["source-run"] = BunshinRunState("source-session", "source-run", source_pack)
@@ -458,7 +458,7 @@ def test_process_owner_binds_producer_identity_despite_forged_worker_run(tmp_pat
         async def shell(*args, **kwargs):
             yield
         repository = MagicMock(runtime_root=tmp_path)
-        execution = execution_module.WorkerExecution(MagicMock(), manager._publish_v2_worker_event,
+        execution = execution_module.WorkerExecution(MagicMock(), manager._publish_worker_event,
             None, repository, MagicMock(), SimpleNamespace(process_shell=shell), None, MagicMock())
         command = SimpleNamespace(effect={}, fencing_token=1, invocation_id="source-session",
             lease_resource="lease", snapshot=MagicMock())
@@ -485,7 +485,7 @@ def test_durable_retention_survives_manager_reconstruction_without_affecting_pro
 
     async def scenario():
         manager = BunshinManager(tmp_path)
-        repository = manager.v2_service.repository
+        repository = manager.workflow_service.repository
         artifacts = ContentAddressedArtifactStore(tmp_path, repository.artifacts)
         prompt = artifacts.put_json({"prompt": "fixture"}, artifact_type="RolePromptPackArtifact")
         lease = repository.leases.claim_lease(f"{role}:node", "session", ttl_seconds=60)
@@ -499,12 +499,12 @@ def test_durable_retention_survives_manager_reconstruction_without_affecting_pro
             manager = BunshinManager(tmp_path)
             manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run", pack=pack(role))
             for index in range(180):
-                await manager._publish_v2_worker_event({"event_kind": "producer_tool_diagnostic",
+                await manager._publish_worker_event({"event_kind": "producer_tool_diagnostic",
                     "run_id": "run", "invocation_id": SECRET, "_attempt_id": ATTEMPT, "_owner_run_id": "run",
                     "payload": payload(tool_alias=alias, round=index,
                         stage="started" if index % 2 == 0 else "completed",
                         error_type="SubmissionValidationError" if role == "architect" and index % 2 else None)})
-            await manager._publish_v2_worker_event({"event_kind": "progress", "run_id": "run",
+            await manager._publish_worker_event({"event_kind": "progress", "run_id": "run",
                 "invocation_id": "session", "_attempt_id": ATTEMPT, "_owner_run_id": "run",
                 "payload": {"phase": "llm_round_completed", "round": 90 + cycle, "tool_call_count": 90}})
         with repository.database.read_connection() as connection:

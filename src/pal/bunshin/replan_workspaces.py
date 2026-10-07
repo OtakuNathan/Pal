@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.sessions import coder_session_id, module_verifier_session_id, node_role_generation
 
 
@@ -171,7 +171,7 @@ def _checkpoint_preserved_module_head(
 
 def _retire_removed_module_resources(
     *,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     workflow_id: str,
     source_nodes: Mapping[str, AggregateSnapshot],
     target_module_names: set[str],
@@ -237,7 +237,7 @@ def _retire_removed_module_resources(
 
 def _recreate_replaced_module_worktree(
     *,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     workflow_id: str,
     source_node: AggregateSnapshot,
     target_node: AggregateSnapshot,

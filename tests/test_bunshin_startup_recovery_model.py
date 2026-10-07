@@ -16,11 +16,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 
 
 def test_bunshin_tla_checker_covers_every_model():
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     block = re.search(r"models=\((.*?)\)", script, re.DOTALL)
     assert block is not None
     models = block.group(1).split()

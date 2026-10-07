@@ -13,7 +13,7 @@ from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutine
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.paths import invocation_root
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import role_session_stage_key
 from pal.bunshin.role_protocol import RoleSessionAction, RoleSessionState, stable_hash
 from pal.foundation import utc_now
@@ -24,7 +24,7 @@ from pal.shared import BunshinInvocationPack
 class RoleCheckpoints:
     artifacts: ContentAddressedArtifactStore
     inject_skill: SkillInjector | None
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     runtime_root: Path
 
     def durable_assignment_prompt_ref(

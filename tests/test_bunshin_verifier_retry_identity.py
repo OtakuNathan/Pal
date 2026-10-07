@@ -20,7 +20,7 @@ from pal.bunshin.work_items import edit_finding_tool_result, findings_from_work_
 from pal.bunshin.verification_builder import _remove_case
 from pal.bunshin.swe_verification import verification_outcome_readiness
 from pal.shared.tool_protocol import new_tool_call
-from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
+from tests import test_bunshin_verifier_scope_recovery as scope_fixture
 
 
 VERIFIER = RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE)

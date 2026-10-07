@@ -18,7 +18,7 @@ from pal.bunshin.dependency_repair_protocol import (
 )
 from pal.bunshin.graph_executor import GraphExecution, GraphExecutionState, diff_graphs
 from pal.bunshin.graph_protocol import EdgeKind, EdgeSpec, GraphIR, NodeSpec, RoleBinding
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.workflow_runtime import WorkflowCoordinator, _replanned_execution
 
 
@@ -375,7 +375,7 @@ class DependencyRepairPersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.repository = BunshinV2Repository(Path(self.temp.name))
+        self.repository = BunshinRepository(Path(self.temp.name))
         self.workflow = "workflow"
         self.execution = _pending()
         self.repository.cycles.store_graph_generation(workflow_id=self.workflow, graph=self.execution.graph)

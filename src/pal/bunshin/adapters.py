@@ -29,7 +29,7 @@ from pal.shared import BunshinInvocationPack
 SOFTWARE_GIT_ADAPTER = "software_git.v2"
 ARTIFACT_BUNDLE_ADAPTER = "artifact_bundle.v2"
 
-def prepare_v2_workspace_environment(
+def prepare_workspace_environment(
     workspace: Mapping[str, Any],
     *,
     runtime_root: Path | None = None,
@@ -90,7 +90,7 @@ def _dedupe(values: Sequence[str]) -> list[str]:
     return result
 
 
-def prepare_v2_role_workspace(
+def prepare_role_workspace(
     runtime_root: Path,
     pack: BunshinInvocationPack,
     *,

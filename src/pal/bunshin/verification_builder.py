@@ -26,7 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification_readiness import verification_corpus_snapshot
 from pal.bunshin.review_findings import (
     ADD_FINDING_CAPABILITY,
@@ -925,7 +925,7 @@ def _submit(
         runtime_root = Path(str(workspace["runtime_root"]))
         submission_store = ContentAddressedArtifactStore(
             runtime_root,
-            BunshinV2Repository(runtime_root).artifacts,
+            BunshinRepository(runtime_root).artifacts,
         )
         local_submission_ref = submission_store.put_json(
             output,

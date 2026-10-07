@@ -10,7 +10,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.delivery import DeliveryService
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
 
@@ -20,7 +20,7 @@ class FinalDelivery:
     effect_reads: EffectReads
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     runtime_root: Path
 

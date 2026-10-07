@@ -10,7 +10,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 MODULE = "VerifierRetryIdentity"
 CASES = [
     ("", "none", None),
@@ -30,7 +30,7 @@ CASES = [
 
 def test_retry_identity_config_and_runner_wiring():
     """Static wiring only; this is not TLA parsing or model checking."""
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     assert f"    {MODULE}\n" in script
     for suffix, fault, invariant in CASES:
         cfg = (SPEC_ROOT / f"{MODULE}{suffix}.cfg").read_text()

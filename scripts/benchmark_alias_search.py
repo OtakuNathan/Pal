@@ -36,7 +36,7 @@ def fixture(root):
     from pal.memory.capabilities import register_with_core as memory
     from pal.plugins.capabilities import register_with_core as plugins
     from pal.artifact.capabilities import register_with_core as artifact
-    from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+    from pal.bunshin.workflow_capabilities import BunshinPublicProvider
     from pal.core.module_registry import ModuleHandle
     value = FixtureExecution(root, 'affordance-search-benchmark')
     from pal.memory.service import MemoryService
@@ -44,7 +44,7 @@ def fixture(root):
     plugins(value.core.context, SimpleNamespace())
     artifact(value.core.context, SimpleNamespace())
     value.core.context.register_module(ModuleHandle(
-        module_id='bunshin', tier='detachable', introspection_provider=BunshinV2PublicProvider(root)))
+        module_id='bunshin', tier='detachable', introspection_provider=BunshinPublicProvider(root)))
     for module in ('memory', 'plugins', 'artifact', 'bunshin'):
         value.core.publish_module_capabilities(module)
     return value

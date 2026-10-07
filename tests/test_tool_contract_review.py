@@ -210,7 +210,7 @@ def test_dynamic_mcp_aliases_are_stable_bounded_and_do_not_collide_after_truncat
     ('pal.identity.capabilities', 'IdentityIntrospectionProvider', 'show', 'default identity'),
     ('pal.artifact.capabilities', 'ArtifactIntrospectionProvider', 'search', 'not proof of expiry'),
     ('pal.checklist.capabilities', 'ChecklistIntrospectionProvider', 'clear', 'no-op'),
-    ('pal.bunshin.workflow_capabilities', 'BunshinV2PublicProvider', 'reset_family_override', 'no-op'),
+    ('pal.bunshin.workflow_capabilities', 'BunshinPublicProvider', 'reset_family_override', 'no-op'),
     ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'close', 'no-op'),
     ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'network', 'installed=true'),
 ])

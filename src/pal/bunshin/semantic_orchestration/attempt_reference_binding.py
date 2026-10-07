@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.role_contracts import RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays
@@ -15,7 +15,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import BoundRoleReference
 
 @dataclass
 class ReferenceBinding:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     task_ledger: TaskLedgerService
     workflow_facts: WorkflowFacts
 

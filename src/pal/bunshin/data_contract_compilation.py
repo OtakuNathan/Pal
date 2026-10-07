@@ -6,7 +6,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, provision_artifact_workspaces
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.execution_models import ExecutionCompilation
 from pal.bunshin.execution_values import _action
 from pal.bunshin.graph_installation import _install_execution_graph
@@ -19,7 +19,7 @@ from pal.bunshin.module_identity import reconcile_module_identities
 
 @dataclass
 class ArtifactEpochCompiler:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     contracts: ContractArtifactAccess
 
     def compile(

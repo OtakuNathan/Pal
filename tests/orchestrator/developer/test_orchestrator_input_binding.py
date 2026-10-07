@@ -30,7 +30,7 @@ from pal.bunshin.input_binding import BoundInputError
 from pal.bunshin.semantic_orchestration import attempt_inputs as orchestrator_module
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays, _role_workspace_input_binding_roots
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 
 WORKFLOW_ID = "wf-bind"
 
@@ -135,7 +135,7 @@ class BindRoleAttemptInputsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_orchestrator_binding_"))
         self.addCleanup(shutil.rmtree, self.root, True)
-        self.service = BunshinV2WorkflowService(self.root)
+        self.service = BunshinWorkflowService(self.root)
         self.orchestrator = SemanticOrchestrator(self.service)
         self.manifest_ref = self.service.artifacts.put_json(
             {

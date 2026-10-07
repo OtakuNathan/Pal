@@ -17,7 +17,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.graph_executor import FindingClass
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_findings import structured_advisories, structured_findings
 from pal.bunshin.verification import DefectKind, VerificationService, VerificationStatus, no_progress_detected, verification_correction_count, MAX_VERIFICATION_CORRECTIONS
 from pal.bunshin.verification_builder import dominant_verification_defect_kind
@@ -30,7 +30,7 @@ class VerificationSettlement:
     role_reports: RoleReports
     verifier_tests: VerifierTests
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     dependency_repair_registration: Callable[[AggregateSnapshot, ArtifactRef], Mapping[str, Any]] | None = None
 
     def prepared_dependency_result(self, node: AggregateSnapshot) -> Mapping[str, Any] | None:
@@ -414,7 +414,7 @@ class VerificationSettlement:
         return accepted_candidate, accepted_candidate_digest, accepted_candidate_ref, changed_paths, fencing_token, findings, invocation_id, lease_resource, outcome, receipts, receipts_ref, report_ref, scratch_only, status
 
 def _publish_repair_evidence(
-    artifacts: ContentAddressedArtifactStore, repository: BunshinV2Repository, accepted_candidate: Any, accepted_candidate_digest: Any, candidate_ref: ArtifactRef, changed_paths: Any,
+    artifacts: ContentAddressedArtifactStore, repository: BunshinRepository, accepted_candidate: Any, accepted_candidate_digest: Any, candidate_ref: ArtifactRef, changed_paths: Any,
     findings: Any, node: AggregateSnapshot, outcome: Any, receipts: Any, receipts_ref: Any,
     report_ref: ArtifactRef, status: Any, submission: Mapping[str, Any],
     *, routing_errors: list[str] | None = None,

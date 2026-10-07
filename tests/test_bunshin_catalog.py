@@ -16,7 +16,7 @@ from pal.bunshin.catalog_store import family_override_path, profile_override_pat
 from pal.bunshin.families import BunshinFamilyRegistry
 from pal.bunshin.manager import BunshinManager
 from pal.bunshin.profiles import BunshinProfileRegistry
-from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.shared import IntrospectionCall, RuntimeStatus
 
 
@@ -295,7 +295,7 @@ class BunshinCatalogTests(unittest.TestCase):
             requests.append((method, dict(params or {})))
             return {"status": "ok", "generation": "catalog-v2", "profiles": []}
 
-        provider = BunshinV2PublicProvider(runtime_root=self.root, manager_request=request)
+        provider = BunshinPublicProvider(runtime_root=self.root, manager_request=request)
         meta = {"actor_id": "nathan", "channel_id": "socket:test"}
 
         read = provider.read_catalog(

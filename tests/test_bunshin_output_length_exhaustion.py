@@ -55,7 +55,7 @@ def exhausted_terminal(root):
         return "partial"
 
     runner.components.agent_session.run_agent_loop = run_loop
-    assert asyncio.run(runner.components.invocation.run_v2_invocation(None)) == 0
+    assert asyncio.run(runner.components.invocation.run_invocation(None)) == 0
     assert state.output_length_recovery_count == DEFAULT_BUNSHIN_OUTPUT_LENGTH_RECOVERY_ROUNDS
     assert state.pending_output_length_recovery_note == ""
     assert state.llm_round_count == 0

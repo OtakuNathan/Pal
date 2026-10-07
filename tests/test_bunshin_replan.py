@@ -10,23 +10,23 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.cycle_protocol import PlanCycle, PlanCycleState
 from pal.bunshin.orchestration import (
-    BunshinV2OutboxProcessor,
+    BunshinOutboxProcessor,
     _active_control_children,
     reconcile_control_requests,
 )
-from pal.bunshin.recovery import BunshinV2Recovery
+from pal.bunshin.recovery import BunshinRecovery
 from pal.bunshin.replan import architecture_finding_semantic_view
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.task_ledger import TaskLedgerService
 
 
 class BunshinV2ReplanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_replan_"))
-        self.service = BunshinV2WorkflowService(self.runtime_root)
+        self.service = BunshinWorkflowService(self.runtime_root)
         self.repository = self.service.repository
         self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
-        self.processor = BunshinV2OutboxProcessor(self.service)
+        self.processor = BunshinOutboxProcessor(self.service)
         self.workflow_id = "wf_replan"
         self.epoch_id = "epoch_replan"
         self.requirements_ref = TaskLedgerService(
@@ -383,7 +383,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
                 },
             )
 
-        recovered = BunshinV2Recovery(self.service)._recover_duplicate_replans()
+        recovered = BunshinRecovery(self.service)._recover_duplicate_replans()
 
         self.assertEqual(recovered, [self.epoch_id])
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)

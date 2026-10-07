@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
     SubmissionDraftContext,
@@ -19,7 +19,7 @@ from pal.bunshin.submission_drafts import (
 class SubmissionDraftStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal-v2-draft-"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.repository.database.ensure_schema()
         self.resource = "node:node_1:writer"
         self.invocation = "inv_worker_1"

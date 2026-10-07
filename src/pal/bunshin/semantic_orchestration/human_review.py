@@ -10,7 +10,7 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvar
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT
 from pal.bunshin.task_ledger import TASK_LEDGER_ARTIFACT
 from pal.bunshin.projections import PlanRevisionProjectionStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.human_review import HUMAN_REVIEW_RENDER_VERSION, human_review_card_is_current
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_reports import RoleReports
@@ -25,7 +25,7 @@ class HumanReview:
     publish_human_review: HumanReviewPublisher | None
     publish_workflow_event: WorkflowEventPublisher | None
     render_human_review: Callable[..., str]
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     runtime_root: Path
     task_ledger: TaskLedgerService
 

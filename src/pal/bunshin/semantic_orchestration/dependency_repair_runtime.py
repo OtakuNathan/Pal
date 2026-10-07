@@ -15,7 +15,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import DependencyRepairDeferred, RepairClosure, RepairIncarnation, RepairIntent
 from pal.bunshin.graph_executor import GraphExecution, GraphExecutionState
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.dependency_repair_capture import DependencyRepairCapture
 from pal.bunshin.semantic_orchestration.dependency_repair_facts import append_refs, current_attempt_id, freeze_incarnation, frozen_node, node_name, role_for_incarnation
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
@@ -29,7 +29,7 @@ from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 @dataclass
 class DependencyRepairRuntime:
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     effect_reads: EffectReads
     cleanup: RoleCleanup
     leases: RoleLeases

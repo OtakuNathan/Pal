@@ -5,14 +5,14 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateSnapshot, SubmissionInvariantError
 from pal.bunshin.background_assignments import BackgroundAssignments
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState
 
 
 @dataclass
 class AssignmentRetries:
     background: BackgroundAssignments
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def queue_active_assignment_retry(
         self,

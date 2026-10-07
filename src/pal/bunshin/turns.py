@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared import BunshinInvocationPack
 
 
-_V2_RUNNER_METADATA_KEYS = frozenset(
+_ROLE_RUNNER_METADATA_KEYS = frozenset(
     {
         "allow_text_only_completion",
         "agent_session",
@@ -33,7 +33,7 @@ def sanitize_runner_session_pack(pack: BunshinInvocationPack) -> BunshinInvocati
     metadata = {
         key: value
         for key, value in dict(pack.metadata or {}).items()
-        if key in _V2_RUNNER_METADATA_KEYS
+        if key in _ROLE_RUNNER_METADATA_KEYS
     }
     bunshin_v2 = metadata.get("bunshin_v2")
     if isinstance(bunshin_v2, dict):

@@ -48,9 +48,9 @@ from pal.bunshin.ipc import (
 from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.web_broker import web_result_to_payload
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
-from pal.bunshin.recovery import BunshinV2Recovery
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.orchestration import BunshinOutboxProcessor
+from pal.bunshin.recovery import BunshinRecovery
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.semantic_orchestration import SemanticOrchestrator
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.submission_errors import role_gateway_error_kind
@@ -347,9 +347,9 @@ class BunshinManager:
     catalog: BunshinCatalogService = field(init=False)
     catalog_bootstrap: dict[str, Any] = field(init=False, default_factory=dict)
     events: BunshinEventDelivery = field(init=False)
-    v2_service: BunshinV2WorkflowService = field(init=False)
-    v2_outbox: BunshinV2OutboxProcessor = field(init=False)
-    v2_semantic_orchestrator: SemanticOrchestrator = field(init=False)
+    workflow_service: BunshinWorkflowService = field(init=False)
+    workflow_outbox: BunshinOutboxProcessor = field(init=False)
+    semantic_orchestrator: SemanticOrchestrator = field(init=False)
     role_gateway: RoleAssignmentGateway = field(init=False)
     harness_registry: BunshinHarnessRegistry = field(init=False)
     _host_tool_bundle: Any | None = field(default=None, init=False, repr=False)
@@ -375,8 +375,8 @@ class BunshinManager:
     )
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _v2_wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _v2_outbox_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
+    _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _outbox_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _drain_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _shutdown_reason: str = field(default="", init=False)
     _shutdown_started_at: str = field(default="", init=False)
@@ -393,10 +393,10 @@ class BunshinManager:
         config = effective_bunshin_runtime_config(Path(self.runtime_root))
         configured = config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", _DEFAULT_MAX_PARALLEL_NODES))
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
-        self.v2_service = BunshinV2WorkflowService(Path(self.runtime_root))
+        self.workflow_service = BunshinWorkflowService(Path(self.runtime_root))
         try:
-            self.v2_service.repository.role_maintenance.reconcile_terminal_role_runtime()
-            self.v2_service.repository.role_maintenance.reconcile_role_session_checkpoints()
+            self.workflow_service.repository.role_maintenance.reconcile_terminal_role_runtime()
+            self.workflow_service.repository.role_maintenance.reconcile_role_session_checkpoints()
         except Exception:
             # Reconciliation is a leak repair, never a reason to make the
             # Manager unavailable. Durable state remains authoritative and a
@@ -405,24 +405,24 @@ class BunshinManager:
         self.events = BunshinEventDelivery(
             load_backlog=self._pending_task_delivery_events,
         )
-        self.role_gateway = RoleAssignmentGateway(self.v2_service)
+        self.role_gateway = RoleAssignmentGateway(self.workflow_service)
         self.harness_registry = BunshinHarnessRegistry(include_pal=True)
-        self.v2_semantic_orchestrator = SemanticOrchestrator(
-            self.v2_service,
+        self.semantic_orchestrator = SemanticOrchestrator(
+            self.workflow_service,
             harness_registry=self.harness_registry,
             max_parallel_workers=self.max_parallel_modules,
             runtime_db_path=self.runtime_db_path,
-            publish_human_review=self._publish_v2_human_review,
-            publish_worker_event=self._publish_v2_worker_event,
-            publish_workflow_event=self._publish_v2_workflow_event,
-            register_broker_run=self._register_v2_broker_run,
-            unregister_broker_run=self._unregister_v2_broker_run,
+            publish_human_review=self._publish_human_review,
+            publish_worker_event=self._publish_worker_event,
+            publish_workflow_event=self._publish_workflow_event,
+            register_broker_run=self._register_broker_run,
+            unregister_broker_run=self._unregister_broker_run,
             inject_skill=self._inject_skill_for_role,
         )
-        self.v2_outbox = BunshinV2OutboxProcessor(
-            self.v2_service,
-            semantic_effects=self.v2_semantic_orchestrator,
-            publish_workflow_event=self._publish_v2_workflow_event,
+        self.workflow_outbox = BunshinOutboxProcessor(
+            self.workflow_service,
+            semantic_effects=self.semantic_orchestrator,
+            publish_workflow_event=self._publish_workflow_event,
         )
 
     @property
@@ -434,7 +434,7 @@ class BunshinManager:
         return self.events.subscribers
 
     async def run(self) -> None:
-        recovery = await asyncio.to_thread(BunshinV2Recovery(self.v2_service).recover)
+        recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.role_server, self.role_endpoint_info = await start_role_gateway_server(
             self.runtime_root,
@@ -453,23 +453,23 @@ class BunshinManager:
                 self.role_server.serve_forever(),
                 name="bunshin-role-gateway-serve",
             )
-            recovered_assignments = await self.v2_semantic_orchestrator.recover_background_assignments()
+            recovered_assignments = await self.semantic_orchestrator.recover_background_assignments()
             if recovered_assignments:
                 self.logger.info(
                     "recovered %s durable role assignment(s)",
                     recovered_assignments,
                 )
-            self._v2_outbox_task = asyncio.create_task(self._run_v2_outbox(), name="bunshin-v2-outbox")
+            self._outbox_task = asyncio.create_task(self._run_outbox(), name="bunshin-v2-outbox")
             try:
                 await self._shutdown_event.wait()
             finally:
                 remove_signals()
-                self.v2_semantic_orchestrator.request_stop()
-                if self._v2_outbox_task is not None:
-                    self._v2_outbox_task.cancel()
+                self.semantic_orchestrator.request_stop()
+                if self._outbox_task is not None:
+                    self._outbox_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await self._v2_outbox_task
-                await self.v2_outbox.stop_background()
+                        await self._outbox_task
+                await self.workflow_outbox.stop_background()
                 # Keep both IPC endpoints alive while active workers reach a
                 # safe point and persist their final receipt or continuation.
                 await self.close_all()
@@ -637,7 +637,7 @@ class BunshinManager:
             generation = self.harness_registry.replace_external(
                 dict(params.get("generation") or {})
             )
-            self._v2_wake_event.set()
+            self._wake_event.set()
             return {
                 "ok": True,
                 "generation": generation.to_dict(),
@@ -677,20 +677,20 @@ class BunshinManager:
                 if_generation=str(params.get("if_generation") or ""),
             )
         if method == "v2_wake":
-            self._v2_wake_event.set()
+            self._wake_event.set()
             return {"ok": True, "status": "woken"}
         if method == "v2_task_status":
-            return self._v2_task_status(
+            return self._task_status(
                 str(params.get("task_id") or ""),
                 workflow_id=str(params.get("workflow_id") or ""),
                 view=str(params.get("view") or "status"),
             )
         if method == "v2_start_workflow":
-            result = self.v2_service.start_workflow(params)
-            self._v2_wake_event.set()
+            result = self.workflow_service.start_workflow(params)
+            self._wake_event.set()
             return result
         if method == "v2_rebind_task_delivery":
-            result = self.v2_service.repository.delivery_bindings.rebind_task_delivery(
+            result = self.workflow_service.repository.delivery_bindings.rebind_task_delivery(
                 task_id=str(params.get("task_id") or ""),
                 binding=dict(params.get("binding") or {}),
             )
@@ -699,11 +699,11 @@ class BunshinManager:
                     str(params.get("task_id") or ""),
                     binding_version=int(result.get("binding_version") or 0),
                 )
-            self._v2_wake_event.set()
+            self._wake_event.set()
             return result
         if method == "v2_ack_task_delivery":
             return {
-                "acknowledged": self.v2_service.repository.deliveries.acknowledge_task_delivery(
+                "acknowledged": self.workflow_service.repository.deliveries.acknowledge_task_delivery(
                     str(params.get("delivery_id") or "")
                 )
             }
@@ -712,21 +712,21 @@ class BunshinManager:
         if method == "v2_list_task_delivery_parts":
             return {
                 "parts": list(
-                    self.v2_service.repository.deliveries.delivered_task_delivery_parts(
+                    self.workflow_service.repository.deliveries.delivered_task_delivery_parts(
                         str(params.get("delivery_id") or "")
                     )
                 )
             }
         if method == "v2_ack_task_delivery_part":
             return {
-                "acknowledged": self.v2_service.repository.deliveries.acknowledge_task_delivery_part(
+                "acknowledged": self.workflow_service.repository.deliveries.acknowledge_task_delivery_part(
                     str(params.get("delivery_id") or ""),
                     str(params.get("part_key") or ""),
                 )
             }
         if method == "v2_defer_task_delivery":
             return {
-                "deferred": self.v2_service.repository.deliveries.defer_task_delivery(
+                "deferred": self.workflow_service.repository.deliveries.defer_task_delivery(
                     str(params.get("delivery_id") or ""),
                     error=str(params.get("error") or ""),
                 )
@@ -854,27 +854,27 @@ class BunshinManager:
         writer.write(pack_sidecar_message(terminal))
         await writer.drain()
 
-    async def _run_v2_outbox(self) -> None:
+    async def _run_outbox(self) -> None:
         while not self._shutdown_event.is_set():
             if self._drain_requested.is_set():
                 await asyncio.sleep(0.05)
                 continue
             try:
-                await self.v2_semantic_orchestrator.recover_background_assignments()
-                if self.v2_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
+                await self.semantic_orchestrator.recover_background_assignments()
+                if self.workflow_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
                     continue
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self.logger.exception("bunshin V2 outbox tick failed")
-            self._v2_wake_event.clear()
+            self._wake_event.clear()
             try:
-                await asyncio.wait_for(self._v2_wake_event.wait(), timeout=0.25)
+                await asyncio.wait_for(self._wake_event.wait(), timeout=0.25)
             except TimeoutError:
                 pass
 
-    async def _publish_v2_human_review(self, payload: Mapping[str, Any]) -> None:
+    async def _publish_human_review(self, payload: Mapping[str, Any]) -> None:
         standalone = bool(payload.get("standalone_review_id"))
         event = {
             "event_kind": "standalone_review_completed" if standalone else "architecture_review_pending",
@@ -894,7 +894,7 @@ class BunshinManager:
             ),
         )
 
-    def _publish_v2_workflow_event(self, payload: Mapping[str, Any]) -> None:
+    def _publish_workflow_event(self, payload: Mapping[str, Any]) -> None:
         workflow_id = str(payload.get("workflow_id") or "").strip()
         event_kind = str(payload.get("event_kind") or "workflow_terminal").strip()
         if event_kind == "architecture_review_resolved":
@@ -934,7 +934,7 @@ class BunshinManager:
             dedup_key=f"workflow-terminal:{workflow_id}:{status}",
         )
 
-    async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
+    async def _publish_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
         delivery_attempt_id = str(item.pop("_attempt_id", "") or "")
         owner_run_id = item.pop("_owner_run_id", None)
@@ -962,7 +962,7 @@ class BunshinManager:
                 return
             state.producer_diagnostic_count += 1
             try:
-                self.v2_service.repository.role_events.record_worker_event({
+                self.workflow_service.repository.role_events.record_worker_event({
                     "event_kind": "producer_tool_diagnostic",
                     "invocation_id": state.pack.invocation_id,
                     "payload": diagnostic.model_dump(),
@@ -983,7 +983,7 @@ class BunshinManager:
             except ValidationError:
                 return
             try:
-                self.v2_service.repository.role_events.record_worker_event({
+                self.workflow_service.repository.role_events.record_worker_event({
                     "event_kind": "verifier_tool_diagnostic",
                     "invocation_id": state.pack.invocation_id,
                     "payload": diagnostic.model_dump(),
@@ -1004,7 +1004,7 @@ class BunshinManager:
                 dependencies = {}
                 if str(binding.get("aggregate_type") or "") == AggregateType.DAG_NODE_RUN.value:
                     dependencies = {"node_run_id": str(binding.get("aggregate_id") or "")}
-                    node = self.v2_service.repository.snapshots.read_snapshot(
+                    node = self.workflow_service.repository.snapshots.read_snapshot(
                         AggregateType.DAG_NODE_RUN, str(binding.get("aggregate_id") or ""))
                     if node is not None:
                         dependencies = {"node_run_id": node.aggregate_id,
@@ -1066,7 +1066,7 @@ class BunshinManager:
             else bool(self.prompt_log_enabled)
         )
         if debug_enabled:
-            self.v2_service.repository.role_events.record_worker_event(item)
+            self.workflow_service.repository.role_events.record_worker_event(item)
         elif (
             kind == "progress"
             and str(event_payload.get("phase") or "")
@@ -1076,7 +1076,7 @@ class BunshinManager:
             # prompt logging. Persist only the non-content round fields when
             # debug history is disabled so batching metrics remain available
             # without retaining prompts, previews, tool arguments, or routes.
-            self.v2_service.repository.role_events.record_worker_event(
+            self.workflow_service.repository.role_events.record_worker_event(
                 {
                     **item,
                     "payload": {
@@ -1111,7 +1111,7 @@ class BunshinManager:
         dependency = source.get("source_dependencies")
         if not isinstance(dependency, dict):
             return False
-        repository = self.v2_service.repository
+        repository = self.workflow_service.repository
         workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, str(source.get("workflow_id") or ""))
         if workflow is None or str(workflow.payload.get("task_id") or "") != str(source.get("task_id") or ""):
             return False
@@ -1137,7 +1137,7 @@ class BunshinManager:
     ) -> None:
         item = dict(event)
         workflow_id = str(item.get("workflow_id") or "")
-        workflow = self.v2_service.repository.snapshots.read_snapshot(
+        workflow = self.workflow_service.repository.snapshots.read_snapshot(
             AggregateType.WORKFLOW,
             workflow_id,
         )
@@ -1150,7 +1150,7 @@ class BunshinManager:
             )
             return
         item["task_id"] = task_id
-        row = self.v2_service.repository.deliveries.enqueue_task_delivery(
+        row = self.workflow_service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id=workflow_id,
             event_kind=str(item.get("event_kind") or ""),
@@ -1162,7 +1162,7 @@ class BunshinManager:
     def _pending_task_delivery_events(self) -> list[dict[str, Any]]:
         return [
             _delivery_event_from_row(row)
-            for row in self.v2_service.repository.deliveries.list_pending_task_deliveries(limit=200)
+            for row in self.workflow_service.repository.deliveries.list_pending_task_deliveries(limit=200)
         ]
 
     def _replay_waiting_task_deliveries(
@@ -1173,7 +1173,7 @@ class BunshinManager:
     ) -> None:
         candidates: set[tuple[str, str]] = {
             (workflow_id, "architecture_review_pending")
-            for workflow_id in self.v2_service.repository.delivery_bindings.pending_human_review_workflows(
+            for workflow_id in self.workflow_service.repository.delivery_bindings.pending_human_review_workflows(
                 task_id
             )
         }
@@ -1182,7 +1182,7 @@ class BunshinManager:
                 continue
             binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
             workflow_id = str(binding.get("workflow_id") or "")
-            workflow = self.v2_service.repository.snapshots.read_snapshot(
+            workflow = self.workflow_service.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
                 workflow_id,
             )
@@ -1193,14 +1193,14 @@ class BunshinManager:
             if state.pending_approval:
                 candidates.add((workflow_id, "approval_requested"))
         for workflow_id, event_kind in sorted(candidates):
-            source = self.v2_service.repository.deliveries.latest_task_delivery(
+            source = self.workflow_service.repository.deliveries.latest_task_delivery(
                 task_id=task_id,
                 workflow_id=workflow_id,
                 event_kind=event_kind,
             )
             if source is None or str(source.get("status") or "") == "pending":
                 continue
-            replay = self.v2_service.repository.deliveries.replay_task_delivery(
+            replay = self.workflow_service.repository.deliveries.replay_task_delivery(
                 delivery_id=str(source["delivery_id"]),
                 dedup_key=(
                     f"rebind-replay:{task_id}:{binding_version}:"
@@ -1209,7 +1209,7 @@ class BunshinManager:
             )
             self.events.queue_event(_delivery_event_from_row(replay))
 
-    def _register_v2_broker_run(
+    def _register_broker_run(
         self,
         run_id: str,
         bunshin_id: str,
@@ -1218,7 +1218,7 @@ class BunshinManager:
     ) -> None:
         self.runs[run_id] = BunshinRunState(bunshin_id=bunshin_id, run_id=run_id, pack=pack, process=process)
 
-    def _unregister_v2_broker_run(
+    def _unregister_broker_run(
         self,
         run_id: str,
         process_group_reaped: bool,
@@ -1254,7 +1254,7 @@ class BunshinManager:
         )
         if state is None:
             raise KeyError(f"unknown approval target: {decision.approval_id}")
-        if not await self.v2_semantic_orchestrator.send_worker_control(
+        if not await self.semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "decision", "decision": decision.to_dict()},
         ):
@@ -1287,7 +1287,7 @@ class BunshinManager:
         )
         if task_revision:
             clarification["task_revision"] = task_revision
-        if not await self.v2_semantic_orchestrator.send_worker_control(
+        if not await self.semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "clarification", "clarification": clarification},
         ):
@@ -1335,7 +1335,7 @@ class BunshinManager:
         answer = str(answer_item.get("answer") or "")
         if not answer.strip():
             raise ValueError("Architect task-ledger clarification answer is blank")
-        return self.v2_service.append_architect_clarification(
+        return self.workflow_service.append_architect_clarification(
             {
                 "workflow_id": str(binding.get("workflow_id") or ""),
                 "architecture_revision_id": str(binding.get("aggregate_id") or ""),
@@ -1364,14 +1364,14 @@ class BunshinManager:
                 matches.append(state)
         return matches
 
-    def _v2_task_status(
+    def _task_status(
         self,
         task_id: str,
         *,
         workflow_id: str = "",
         view: str = "status",
     ) -> dict[str, Any]:
-        status = self.v2_service.task_status(
+        status = self.workflow_service.task_status(
             task_id,
             workflow_id=workflow_id,
             view=view,
@@ -1877,7 +1877,7 @@ class BunshinManager:
             "llm_usage_unreported_count": usage_unreported,
             "llm_usage": self._llm_usage_ledger.snapshot(),
             "event_subscriber_count": len(self.event_subscribers),
-            "bunshin_db_path": str(self.v2_service.repository.database.db_path),
+            "bunshin_db_path": str(self.workflow_service.repository.database.db_path),
             "log_sink": current_service_log_sink_description(),
             "catalog_generation": str(self.catalog.snapshot()["generation"]),
             "harness_generation": (
@@ -1896,15 +1896,15 @@ class BunshinManager:
             1,
             int(config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", self.max_parallel_modules)) or self.max_parallel_modules),
         )
-        self.v2_semantic_orchestrator.max_parallel_workers = self.max_parallel_modules
-        self._v2_wake_event.set()
+        self.semantic_orchestrator.max_parallel_workers = self.max_parallel_modules
+        self._wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}
 
     async def set_prompt_log_enabled(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Set the debug policy snapshot used by future role processes."""
 
         self.prompt_log_enabled = bool(params.get("enabled"))
-        self.v2_semantic_orchestrator.set_prompt_log_enabled(self.prompt_log_enabled)
+        self.semantic_orchestrator.set_prompt_log_enabled(self.prompt_log_enabled)
         return {"ok": True, "enabled": self.prompt_log_enabled}
 
     def request_shutdown(
@@ -1917,7 +1917,7 @@ class BunshinManager:
         self._shutdown_reason = reason
         self._shutdown_started_at = self._shutdown_started_at or utc_now()
         self.graceful_shutdown_timeout_seconds = max(0.0, timeout_seconds)
-        self.v2_semantic_orchestrator.request_stop()
+        self.semantic_orchestrator.request_stop()
         if graceful:
             self._drain_requested.set()
             if self._drain_task is None or self._drain_task.done():
@@ -1949,7 +1949,7 @@ class BunshinManager:
                     or process.returncode is not None
                 ):
                     continue
-                sent = await self.v2_semantic_orchestrator.send_worker_control(
+                sent = await self.semantic_orchestrator.send_worker_control(
                     run_id,
                     {
                         "type": "restart_requested",
@@ -1972,8 +1972,8 @@ class BunshinManager:
                 and state.status not in _TERMINAL_RUN_STATUSES
             ]
             background_count = (
-                self.v2_outbox.active_background_count
-                + self.v2_semantic_orchestrator.active_background_count
+                self.workflow_outbox.active_background_count
+                + self.semantic_orchestrator.active_background_count
             )
             if not active_runs and background_count == 0:
                 break
@@ -1991,7 +1991,7 @@ class BunshinManager:
         # The semantic orchestrator owns worker processes.  Cancelling its
         # logical tasks enters each process owner's close path, which withdraws
         # process authority, signals once when needed, and reaps the child.
-        await self.v2_semantic_orchestrator.stop_background_workers(
+        await self.semantic_orchestrator.stop_background_workers(
             timeout_seconds=self.graceful_shutdown_timeout_seconds,
         )
         active = [

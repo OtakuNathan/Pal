@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pal.bunshin.storage.role_assignments import semantic_business_lease
 from pathlib import Path
 from typing import Any
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_runtime import RoleSupervisor
 import json
 from pal.bunshin.semantic_orchestration.callbacks import WorkerEventPublisher
@@ -25,7 +25,7 @@ class WorkerExecution:
     processes: WorkerProcesses
     publish_worker_event: WorkerEventPublisher | None
     register_broker_run: BrokerRunRegistrar | None
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_leases: RoleLeases
     supervisor: RoleSupervisor
     unregister_broker_run: BrokerRunUnregistrar | None

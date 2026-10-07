@@ -7,6 +7,13 @@ pins one Architect, Reviewer, Implementation, and Verifier binding. The graph
 shape is shared across families; the module definition schema and role
 participants are data.
 
+The implementation has one canonical package, `pal.bunshin`, with `storage`,
+`semantic_orchestration`, and `runner_components` as its ownership boundaries.
+See the [package layout](../src/pal/bunshin/README.md) for module responsibilities.
+Formal models live in `spec/bunshin` and retain their established invariant names.
+Historical version labels in durable SQL, profile, metadata, and wire-protocol
+identities remain unchanged; package integration does not migrate existing data.
+
 ## Truth Sources
 
 Manager owns an immutable `TaskLedgerArtifact`, materialized to roles as

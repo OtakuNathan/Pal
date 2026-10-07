@@ -13,14 +13,14 @@ from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.skeleton import compiled_module_write_scopes
 from pal.bunshin.execution_values import workspace_content_fingerprint
 
 
 @dataclass
 class CandidateSnapshotService:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     artifacts: ContentAddressedArtifactStore
     worktree_locks: WorkspaceLockRegistry
 

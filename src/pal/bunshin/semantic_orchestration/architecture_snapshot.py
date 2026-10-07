@@ -14,7 +14,7 @@ from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.skeleton import ARCHITECTURE_REPAIR_BASELINE_ARTIFACT, ArchitectureWorkspace, architecture_revision_path_states
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
 from pal.bunshin.semantic_orchestration.role_leases import RoleLeases
@@ -27,7 +27,7 @@ class ArchitectureSnapshot:
     role_cleanup: RoleCleanup
     role_leases: RoleLeases
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     skeleton: GitBackedSkeletonService
     workspace_locks: WorkspaceLockRegistry

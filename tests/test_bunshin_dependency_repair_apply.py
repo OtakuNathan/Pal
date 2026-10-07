@@ -7,7 +7,7 @@ import pytest
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.cycle_protocol import NodeCycleState
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.dependency_repair_apply import apply_dependency_repair_cohort
 from pal.bunshin.storage.transitions import TransitionsStore
 from pal.bunshin.verification import repair_bill_semantic_view
@@ -16,7 +16,7 @@ from tests.test_bunshin_dependency_repair_protocol import _execution, _member, _
 
 class Case:
     def __init__(self, root, *, peer_status="FAIL", stale_provider=False, join_peer=False):
-        self.repository = BunshinV2Repository(root)
+        self.repository = BunshinRepository(root)
         self.artifacts = ContentAddressedArtifactStore(root, self.repository.artifacts)
         execution = _execution()
         if stale_provider:

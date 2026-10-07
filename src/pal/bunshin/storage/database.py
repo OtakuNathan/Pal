@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.schema import ensure_bunshin_v2_schema
+from pal.bunshin.schema import ensure_bunshin_schema
 from pal.shared.text_search import jieba_fts_text
 
 
@@ -28,7 +28,7 @@ class BunshinDatabase:
             connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
-            ensure_bunshin_v2_schema(connection)
+            ensure_bunshin_schema(connection)
             self.ensure_task_fts_index_locked(connection)
         self._schema_ready = True
 

@@ -54,8 +54,8 @@ for model in "${models[@]}"; do
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" \
         -cleanup \
-        -config "spec/bunshin_v2/${model}.cfg" \
-        "spec/bunshin_v2/${model}.tla"
+        -config "spec/bunshin/${model}.cfg" \
+        "spec/bunshin/${model}.tla"
 done
 
 # Negative controls exercise draft freeze, concurrency, authority, evidence,
@@ -80,8 +80,8 @@ for entry in \
     draft_output="$({
         java -XX:+UseParallelGC -jar "${tla_jar}" \
             -workers "${workers}" -cleanup \
-            -config "spec/bunshin_v2/VerifierDraftLifecycle${suffix}.cfg" \
-            spec/bunshin_v2/VerifierDraftLifecycle.tla
+            -config "spec/bunshin/VerifierDraftLifecycle${suffix}.cfg" \
+            spec/bunshin/VerifierDraftLifecycle.tla
     } 2>&1)"
     draft_status=$?
     set -e
@@ -108,8 +108,8 @@ for entry in \
     upsert_output="$({
         java -XX:+UseParallelGC -jar "${tla_jar}" \
             -workers "${workers}" -cleanup \
-            -config "spec/bunshin_v2/VerifierFindingUpsert${suffix}.cfg" \
-            spec/bunshin_v2/VerifierFindingUpsert.tla
+            -config "spec/bunshin/VerifierFindingUpsert${suffix}.cfg" \
+            spec/bunshin/VerifierFindingUpsert.tla
     } 2>&1)"
     upsert_status=$?
     set -e
@@ -141,8 +141,8 @@ for entry in \
     retry_output="$({
         java -XX:+UseParallelGC -jar "${tla_jar}" \
             -workers "${workers}" -cleanup \
-            -config "spec/bunshin_v2/VerifierRetryIdentity${suffix}.cfg" \
-            spec/bunshin_v2/VerifierRetryIdentity.tla
+            -config "spec/bunshin/VerifierRetryIdentity${suffix}.cfg" \
+            spec/bunshin/VerifierRetryIdentity.tla
     } 2>&1)"
     retry_status=$?
     set -e
@@ -172,8 +172,8 @@ for entry in \
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" \
         -cleanup \
-        -config "spec/bunshin_v2/${config}.cfg" \
-        "spec/bunshin_v2/${model}.tla"
+        -config "spec/bunshin/${config}.cfg" \
+        "spec/bunshin/${model}.tla"
 done
 
 # A passing positive model alone must not make the no-silent-reset assertion
@@ -183,8 +183,8 @@ set +e
 unsafe_output="$({
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" -cleanup \
-        -config spec/bunshin_v2/StartupRecoveryLifecycleUnsafe.cfg \
-        spec/bunshin_v2/StartupRecoveryLifecycle.tla
+        -config spec/bunshin/StartupRecoveryLifecycleUnsafe.cfg \
+        spec/bunshin/StartupRecoveryLifecycle.tla
 } 2>&1)"
 unsafe_status=$?
 set -e
@@ -200,8 +200,8 @@ set +e
 unknown_unsafe_output="$({
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" -cleanup \
-        -config spec/bunshin_v2/OperatorTriageRecoveryUnsafe.cfg \
-        spec/bunshin_v2/OperatorTriageRecovery.tla
+        -config spec/bunshin/OperatorTriageRecoveryUnsafe.cfg \
+        spec/bunshin/OperatorTriageRecovery.tla
 } 2>&1)"
 unknown_unsafe_status=$?
 set -e

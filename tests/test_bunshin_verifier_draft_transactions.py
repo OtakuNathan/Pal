@@ -15,7 +15,7 @@ from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION, Submission
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.review_findings import partition_findings
 from pal.bunshin.semantic_evidence import recorded_cases
-from tests import test_bunshin_v2_role_gateway as gateway_tests
+from tests import test_bunshin_role_gateway as gateway_tests
 
 
 @pytest.fixture

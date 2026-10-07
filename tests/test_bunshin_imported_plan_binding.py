@@ -7,12 +7,12 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.cycle_protocol import CycleAction, CycleAssignment, CycleSlot, AssignmentKind, CycleTransitionError, PlanCycle, PlanCycleState
 from pal.bunshin.imported_plan import bind_imported_plan_product
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 class ImportedBinding:
     def __init__(self, root):
-        self.repo = BunshinV2Repository(root)
+        self.repo = BunshinRepository(root)
         self.artifacts = ContentAddressedArtifactStore(root, self.repo.artifacts)
         self.requirements = self.put({}, "TaskLedgerArtifact")
         self.product = self.put({"requirements_ref": self.requirements}, "ContractArtifact")

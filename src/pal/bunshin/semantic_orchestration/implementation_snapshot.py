@@ -12,7 +12,7 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateType, LeaseConflict, 
 from pal.bunshin.candidate_snapshots import CandidateSnapshotService
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
@@ -27,7 +27,7 @@ class ImplementationSnapshot:
     role_leases: RoleLeases
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     runtime_root: Path
     workspace_locks: WorkspaceLockRegistry
 

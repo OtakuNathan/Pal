@@ -10,26 +10,26 @@ from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.cutover import cutover_bunshin_runtime
 from pal.bunshin.ipc import bunshin_runtime_dir
 from pal.bunshin.schema import (
-    BUNSHIN_V2_SCHEMA_VERSION,
-    ensure_bunshin_v2_schema,
+    BUNSHIN_SCHEMA_VERSION,
+    ensure_bunshin_schema,
 )
 
 
 class BunshinCurrentCutoverTests(unittest.TestCase):
     def test_fresh_schema_is_current_and_legacy_schema_is_rejected(self) -> None:
         with sqlite3.connect(":memory:") as connection:
-            ensure_bunshin_v2_schema(connection)
+            ensure_bunshin_schema(connection)
             version = connection.execute(
                 "SELECT schema_value FROM bunshin_v2_schema_meta "
                 "WHERE schema_key = 'schema_version'"
             ).fetchone()[0]
-            self.assertEqual(version, str(BUNSHIN_V2_SCHEMA_VERSION))
+            self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
             connection.execute(
                 "UPDATE bunshin_v2_schema_meta SET schema_value = '24' "
                 "WHERE schema_key = 'schema_version'"
             )
             with self.assertRaisesRegex(RuntimeError, "not migrated in place"):
-                ensure_bunshin_v2_schema(connection)
+                ensure_bunshin_schema(connection)
 
     def test_cutover_archives_old_runtime_and_copies_only_user_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -91,7 +91,7 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
                     "SELECT schema_value FROM bunshin_v2_schema_meta "
                     "WHERE schema_key = 'schema_version'"
                 ).fetchone()[0]
-            self.assertEqual(version, str(BUNSHIN_V2_SCHEMA_VERSION))
+            self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
 
     def test_invalid_override_aborts_before_archive_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -141,7 +141,7 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
                     "SELECT schema_value FROM bunshin_v2_schema_meta "
                     "WHERE schema_key = 'schema_version'"
                 ).fetchone()[0]
-            self.assertEqual(version, str(BUNSHIN_V2_SCHEMA_VERSION))
+            self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
 
 
 if __name__ == "__main__":

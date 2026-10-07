@@ -6,7 +6,7 @@
 > [current documentation index](../../README.md).
 
 Status: historical V1 inventory. The active V2 implementation is documented in
-[`bunshin_v2_contract_orchestration.md`](../../bunshin_v2_contract_orchestration.md).
+[`bunshin_contract_orchestration.md`](../../bunshin_contract_orchestration.md).
 V1 workflow writes and resume are disabled after the V2 cutover.
 
 This document separates two things that must not be mixed:

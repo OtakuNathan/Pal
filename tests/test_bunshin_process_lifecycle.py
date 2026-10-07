@@ -354,10 +354,10 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             process=process,
         )
         self.manager.runs[state.run_id] = state
-        self.manager.v2_service.repository.role_events.record_worker_event = lambda _event: None
+        self.manager.workflow_service.repository.role_events.record_worker_event = lambda _event: None
         self.manager.events.queue_event = lambda _event: None
 
-        await self.manager._publish_v2_worker_event(
+        await self.manager._publish_worker_event(
             {
                 "event_kind": "terminal",
                 "run_id": state.run_id,
@@ -369,16 +369,16 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.summary()["run_active"])
         self.assertEqual(state.pending_terminal_status, "completed")
         with self.assertRaisesRegex(RuntimeError, "process owner completes cleanup"):
-            self.manager._unregister_v2_broker_run(state.run_id, False)
+            self.manager._unregister_broker_run(state.run_id, False)
 
-        self.manager._unregister_v2_broker_run(state.run_id, True)
+        self.manager._unregister_broker_run(state.run_id, True)
         self.assertEqual(state.status, "completed")
         self.assertFalse(state.summary()["run_active"])
         self.assertTrue(state.ended_at)
 
     async def test_worker_event_history_is_written_only_for_logged_role_run(self) -> None:
         recorded: list[dict[str, object]] = []
-        self.manager.v2_service.repository.role_events.record_worker_event = (
+        self.manager.workflow_service.repository.role_events.record_worker_event = (
             lambda event: recorded.append(dict(event))
         )
         self.manager.events.queue_event = lambda _event: None
@@ -402,7 +402,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.manager.runs[logged.run_id] = logged
 
         for state in (quiet, logged):
-            await self.manager._publish_v2_worker_event(
+            await self.manager._publish_worker_event(
                 {
                     "event_kind": "progress",
                     "run_id": state.run_id,
@@ -420,7 +420,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         recorded: list[dict[str, object]] = []
-        self.manager.v2_service.repository.role_events.record_worker_event = (
+        self.manager.workflow_service.repository.role_events.record_worker_event = (
             lambda event: recorded.append(dict(event))
         )
         self.manager.events.queue_event = lambda _event: None
@@ -434,7 +434,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.runs[state.run_id] = state
 
-        await self.manager._publish_v2_worker_event(
+        await self.manager._publish_worker_event(
             {
                 "event_kind": "progress",
                 "run_id": state.run_id,
@@ -469,12 +469,12 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             process=process,
         )
         self.manager.runs[state.run_id] = state
-        self.manager.v2_service.repository.role_events.record_worker_event = lambda _event: None
+        self.manager.workflow_service.repository.role_events.record_worker_event = lambda _event: None
         self.manager.events.queue_event = lambda _event: None
 
-        self.manager._unregister_v2_broker_run(state.run_id, True)
+        self.manager._unregister_broker_run(state.run_id, True)
         self.assertEqual(state.status, "failed")
-        await self.manager._publish_v2_worker_event(
+        await self.manager._publish_worker_event(
             {
                 "event_kind": "terminal",
                 "run_id": state.run_id,
@@ -486,7 +486,7 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.summary()["run_active"])
 
     async def test_leader_returncode_does_not_make_owned_worker_reusable(self) -> None:
-        orchestrator = self.manager.v2_semantic_orchestrator
+        orchestrator = self.manager.semantic_orchestrator
         orchestrator.processes.register(SimpleNamespace(
             invocation_id="inv-owned", run_id="run-owned",
             process=SimpleNamespace(returncode=0)
@@ -524,9 +524,9 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(timeout_seconds, 0)
             calls.append("owner-close")
             process.returncode = -15
-            self.manager._unregister_v2_broker_run(state.run_id, True)
+            self.manager._unregister_broker_run(state.run_id, True)
 
-        self.manager.v2_semantic_orchestrator.stop_background_workers = (
+        self.manager.semantic_orchestrator.stop_background_workers = (
             stop_background_workers
         )
 

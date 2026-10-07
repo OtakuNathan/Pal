@@ -7,7 +7,7 @@ from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMo
 from pal.shared import BunshinInvocationPack
 
 
-def apply_v2_research_capability_policy(pack: BunshinInvocationPack, *, research_mode: str) -> BunshinInvocationPack:
+def apply_research_capability_policy(pack: BunshinInvocationPack, *, research_mode: str) -> BunshinInvocationPack:
     mode = ResearchMode(str(research_mode or ResearchMode.LOCAL_ONLY))
     if mode == ResearchMode.EXTERNAL_ALLOWED:
         return pack
@@ -34,7 +34,7 @@ def _role_primary_artifact_name(pack: BunshinInvocationPack) -> str:
     return primary_artifact
 
 
-def apply_v2_role_capability_policy(
+def apply_role_capability_policy(
     pack: BunshinInvocationPack,
     *,
     activation: RoleActivation,
@@ -163,7 +163,7 @@ def _is_authoring_capability_name(name: str) -> bool:
     )
 
 
-def apply_v2_revision_scope_capability_policy(pack: BunshinInvocationPack) -> BunshinInvocationPack:
+def apply_revision_scope_capability_policy(pack: BunshinInvocationPack) -> BunshinInvocationPack:
     """Revision guidance reuses the normal Architect tool surface."""
 
     return pack

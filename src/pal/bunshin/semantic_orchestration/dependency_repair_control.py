@@ -7,7 +7,7 @@ from pathlib import Path
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.graph_executor import GraphExecution
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.dependency_repair_facts import current_attempt_id, frozen_node, role_for_incarnation
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
 from pal.bunshin.semantic_orchestration.role_leases import RoleLeases
@@ -16,7 +16,7 @@ from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 
 
 async def retire_repair_control(*, node: AggregateSnapshot, execution: GraphExecution,
-        repository: BunshinV2Repository, artifacts: ContentAddressedArtifactStore,
+        repository: BunshinRepository, artifacts: ContentAddressedArtifactStore,
         cleanup: RoleCleanup, leases: RoleLeases, workspace_locks: WorkspaceLockRegistry,
         confirm: bool) -> None:
     pending = execution.dependency_repairs.pending

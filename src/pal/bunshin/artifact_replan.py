@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.graph_executor import GraphDiff, NodeReuseKind
 from pal.bunshin.graph_protocol import GraphIR
 from pal.bunshin.execution_values import _action
@@ -12,7 +12,7 @@ from pal.bunshin.execution_graph_facts import _topological_module_order
 
 def _reconcile_data_contract_module_identities(
     *,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     contracts: ContractArtifactAccess,
     workflow_id: str,
     source_epoch_id: str,

@@ -2,7 +2,7 @@ from __future__ import annotations
 import pal.bunshin.turns as _dependency_turns
 from dataclasses import dataclass
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.semantic_orchestration.role_environment import _role_submission_kind
 from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
@@ -24,7 +24,7 @@ class AssignmentReuse:
     assignment_identity: AssignmentIdentity
     assignment_retries: AssignmentRetries
     background: BackgroundAssignments
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_checkpoints: RoleCheckpoints
 
     async def execute(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 from pal.bunshin.semantic_orchestration.worker_results import _terminal_nonretryable_blocker
@@ -16,7 +16,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import (
 
 @dataclass
 class TerminalValidation:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_checkpoints: RoleCheckpoints
 
     async def execute(

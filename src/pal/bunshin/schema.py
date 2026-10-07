@@ -3,10 +3,10 @@ from __future__ import annotations
 import sqlite3
 
 
-BUNSHIN_V2_SCHEMA_VERSION = 29
+BUNSHIN_SCHEMA_VERSION = 29
 
 
-def ensure_bunshin_v2_schema(connection: sqlite3.Connection) -> None:
+def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS bunshin_v2_schema_meta (
@@ -16,7 +16,7 @@ def ensure_bunshin_v2_schema(connection: sqlite3.Connection) -> None:
         """
     )
     previous_version = _schema_version(connection)
-    if previous_version not in {0, BUNSHIN_V2_SCHEMA_VERSION}:
+    if previous_version not in {0, BUNSHIN_SCHEMA_VERSION}:
         raise RuntimeError(
             "legacy Bunshin runtime schema is not migrated in place; "
             "archive the old runtime and initialize a fresh v29 runtime"
@@ -523,7 +523,7 @@ def ensure_bunshin_v2_schema(connection: sqlite3.Connection) -> None:
         VALUES ('schema_version', ?)
         ON CONFLICT(schema_key) DO UPDATE SET schema_value = excluded.schema_value
         """,
-        (str(BUNSHIN_V2_SCHEMA_VERSION),),
+        (str(BUNSHIN_SCHEMA_VERSION),),
     )
 
 

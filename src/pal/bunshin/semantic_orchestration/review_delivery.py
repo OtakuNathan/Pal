@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import VerificationStatus
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 
@@ -18,7 +18,7 @@ class ReviewDelivery:
     effect_reads: EffectReads
     artifacts: ContentAddressedArtifactStore
     publish_human_review: HumanReviewPublisher | None
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
 
     async def publish_standalone_report(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:

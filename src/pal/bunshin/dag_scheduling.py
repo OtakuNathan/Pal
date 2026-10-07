@@ -6,7 +6,7 @@ from pathlib import Path
 from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.execution_values import _action
 from pal.bunshin.execution_graph_facts import dependency_fingerprint
@@ -16,7 +16,7 @@ from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
 
 @dataclass
 class DagScheduler:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def schedule_ready_nodes(
         self,

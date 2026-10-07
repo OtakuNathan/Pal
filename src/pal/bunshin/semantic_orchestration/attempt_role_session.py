@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.storage.role_assignments import semantic_business_lease
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.semantic_orchestration.assignment_retries import AssignmentRetries
 from pal.bunshin.semantic_orchestration.role_inputs import _role_session_scope
@@ -17,7 +17,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import (
 @dataclass
 class RoleSession:
     assignment_retries: AssignmentRetries
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     background: BackgroundAssignments | None = None
 
     async def execute(

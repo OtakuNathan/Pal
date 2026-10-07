@@ -2,14 +2,14 @@ from __future__ import annotations
 from typing import Any, Mapping
 from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import family_execution_adapter, validate_family_binding_payload
 from pal.bunshin.graph_protocol import graph_ir_from_mapping
 from pal.bunshin.workflow_runtime import InstalledGraph, WorkflowCoordinator
 
 
 def _workflow_execution_adapter(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     contracts: ContractArtifactAccess,
     workflow_id: str,
 ) -> str:
@@ -34,7 +34,7 @@ def _install_execution_graph(
     artifact: Mapping[str, Any],
     *,
     workflow_id: str,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
 ) -> InstalledGraph:
     raw = artifact.get("graph_ir")
     if not isinstance(raw, Mapping) or not raw:

@@ -5,7 +5,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.execution_models import ExecutionCompilation
 from pal.bunshin.graph_installation import _workflow_execution_adapter
 
@@ -16,7 +16,7 @@ from pal.bunshin.data_contract_compilation import ArtifactEpochCompiler
 
 @dataclass
 class ExecutionCompiler:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     contracts: ContractArtifactAccess
     skeleton: SkeletonEpochCompiler = field(init=False)
     artifacts: ArtifactEpochCompiler = field(init=False)

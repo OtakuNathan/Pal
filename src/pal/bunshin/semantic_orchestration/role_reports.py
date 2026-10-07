@@ -10,14 +10,14 @@ from typing import Any, Callable, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.paths import resolve_project_git_layout
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.replan import ARCHITECTURE_FINDING_BATCH_VIEW_ARTIFACT, architecture_finding_semantic_view
 
 
 @dataclass
 class RoleReports:
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     runtime_root: Path
 

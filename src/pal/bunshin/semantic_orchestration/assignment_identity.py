@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateType, SubmissionInvariantError
 from pal.bunshin.background_assignments import BackgroundAssignments
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.machines import machine_spec_for
 from pal.bunshin.role_contracts import RoleActivation, RoleMode
 from pal.bunshin.role_gateway import role_submission_artifact_type
@@ -17,7 +17,7 @@ from pal.bunshin.semantic_orchestration.routes import SEMANTIC_EFFECT_ROUTES
 class AssignmentIdentity:
     effect_reads: EffectReads
     background: BackgroundAssignments
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def role_assignment_disposition(
         self,

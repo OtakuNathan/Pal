@@ -12,10 +12,10 @@ import pytest
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
 from pal.bunshin.orchestration import (
-    BunshinV2OutboxProcessor, _reconcile_cycle_control_projection,
+    BunshinOutboxProcessor, _reconcile_cycle_control_projection,
     _workflow_pauses_cycles,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.storage.cycles import CyclesStore
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from tests.test_bunshin_produced_dependency_gates import _compile_graph
@@ -23,7 +23,7 @@ from tests.test_bunshin_produced_dependency_gates import _compile_graph
 
 @pytest.fixture
 def case(tmp_path):
-    service = BunshinV2WorkflowService(tmp_path)
+    service = BunshinWorkflowService(tmp_path)
     repository = service.repository
     graph = _compile_graph()
     coordinator = WorkflowCoordinator(repository)
@@ -47,7 +47,7 @@ def enter_triage(case, *, project=True):
     with service.repository.transaction() as transaction:
         workflow = transaction.transitions.dispatch(action).snapshot
         if project:
-            BunshinV2OutboxProcessor(service)._sync_cycle_triage(action, unit_of_work=transaction)
+            BunshinOutboxProcessor(service)._sync_cycle_triage(action, unit_of_work=transaction)
     return workflow
 
 

@@ -34,7 +34,7 @@ from pal.bunshin.role_contracts import (
     family_execution_adapter,
     validate_family_binding_payload,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.skeleton import preflight_architecture_workspace_submission
 from pal.bunshin.task_ledger import validate_task_ledger
 from pal.bunshin.submission_drafts import (
@@ -99,7 +99,7 @@ def _graph_role_binding(value: Mapping[str, Any]) -> RoleBinding:
 class RoleAssignmentGateway:
     """Narrow Manager-owned state surface exposed to sandboxed role invocations."""
 
-    service: BunshinV2WorkflowService
+    service: BunshinWorkflowService
     _git_diagnostics: GitGatewayDiagnostics = field(
         default_factory=GitGatewayDiagnostics, init=False, repr=False, compare=False,
     )

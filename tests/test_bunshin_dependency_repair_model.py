@@ -20,7 +20,7 @@ from tests.dependency_repair_models import cohort, control_overlay, later_cohort
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 
 
 @pytest.mark.parametrize("dependency,supersede,invalid_kind", [
@@ -220,7 +220,7 @@ def test_dependency_repair_model_configs_and_runner(module, config):
     assert "INIT Init\nNEXT Next\n" in text
     assert "INVARIANT TypeOK\n" in text
     assert f"MODULE {module}" in (SPEC_ROOT / f"{module}.tla").read_text()
-    assert config in (ROOT / "scripts/check_bunshin_v2_tla.sh").read_text()
+    assert config in (ROOT / "scripts/check_bunshin_tla.sh").read_text()
 
 
 @pytest.mark.parametrize("module,config", TLC_CASES)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 class ResearchMode(StrEnum):
@@ -18,4 +18,4 @@ class ContractArtifactAccess:
     """Storage ports used by contract compilation and module-view projection."""
 
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository

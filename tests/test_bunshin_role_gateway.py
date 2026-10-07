@@ -15,7 +15,7 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.graph_protocol import graph_ir_from_mapping
 from pal.bunshin.git_scope import scoped_role_git_read_plan
 from pal.execution.git_tool import GitTool, _run_git, classify_git_command
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
     SubmissionDraftContext,
@@ -33,7 +33,7 @@ from pal.bunshin.workflow_runtime import WorkflowCoordinator
 class BunshinV2RoleGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-"))
-        self.service = BunshinV2WorkflowService(self.runtime_root)
+        self.service = BunshinWorkflowService(self.runtime_root)
         self.gateway = RoleAssignmentGateway(self.service)
         self.workspace = self.runtime_root / "workspace"
         self.workspace.mkdir()
@@ -505,7 +505,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         # A legacy checkpoint stays readable, but requires an actual fresh run.
         import asyncio
         import sys
-        from tests.test_bunshin_v2_verification import _FakeExecutionAdapter
+        from tests.test_bunshin_verification import _FakeExecutionAdapter
         from pal.shared.tool_protocol import new_tool_call
         from pal.bunshin.verification_readiness import record_verification_execution, verification_corpus_snapshot
         call = new_tool_call(name="op_exec_shell", args={

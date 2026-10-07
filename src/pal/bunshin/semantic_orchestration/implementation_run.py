@@ -19,7 +19,7 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.work_views import UnitWorkViewBuilder
 from pal.bunshin.skeleton import compiled_module_write_scopes
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import repair_bill_semantic_view
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
@@ -42,7 +42,7 @@ class ImplementationRun:
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
     contracts: ContractArtifactAccess
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     async def run_implementation_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self.effect_reads.effect_role_mode(effect))

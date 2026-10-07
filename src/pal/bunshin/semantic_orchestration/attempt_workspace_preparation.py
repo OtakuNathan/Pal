@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from pal.bunshin.harnesses import BunshinHarnessRegistry
-from pal.bunshin.adapters import prepare_v2_workspace_environment
+from pal.bunshin.adapters import prepare_workspace_environment
 from pal.bunshin.lsp_prewarm import prewarm_workspace_lsp
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.paths import invocation_root, role_run_id
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
 from pal.bunshin.semantic_orchestration.attempt_models import PreparedRoleWorkspace, RoleAttemptRequest
@@ -22,7 +22,7 @@ class WorkspacePreparation:
     artifacts: ContentAddressedArtifactStore
     attempt_inputs: AttemptInputs
     harness_registry: BunshinHarnessRegistry
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
     runtime_root: Path
 
@@ -110,7 +110,7 @@ class WorkspacePreparation:
         contract_authoring = bool(workspace.get("contract_authoring_mode"))
         bound_reference_refs = dict(reference_refs)
         if bool(workspace_policy.get("prepare", False)):
-            workspace, preparation = prepare_v2_workspace_environment(
+            workspace, preparation = prepare_workspace_environment(
                 workspace,
                 runtime_root=self.runtime_root,
             )

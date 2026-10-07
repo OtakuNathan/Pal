@@ -10,7 +10,7 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
 from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
 from pal.bunshin.semantic_orchestration.verification_settlement import VerificationSettlement
@@ -22,7 +22,7 @@ class VerificationSnapshot:
     role_cleanup: RoleCleanup
     verification_settlement: VerificationSettlement
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     workspace_locks: WorkspaceLockRegistry
 
     def verification_input_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:

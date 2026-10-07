@@ -14,7 +14,7 @@ from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.worker_processes import WorkerProcesses
 from pal.bunshin.sessions import architect_session_id_for_revision
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
@@ -27,7 +27,7 @@ class RoleLeases:
     role_cleanup: RoleCleanup
     workflow_facts: WorkflowFacts
     processes: WorkerProcesses
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     workspace_locks: WorkspaceLockRegistry
 
     _background_lease: ContextVar[tuple[str, str, str, int] | None] = field(

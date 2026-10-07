@@ -81,7 +81,7 @@ class ResolvedFamilyBinding:
 
 
 @dataclass
-class BunshinV2Catalog:
+class BunshinWorkflowCatalog:
     runtime_root: Path
     artifacts: ContentAddressedArtifactStore
 

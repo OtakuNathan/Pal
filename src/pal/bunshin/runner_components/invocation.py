@@ -29,7 +29,7 @@ class Invocation:
         if close is not None:
             await close()
 
-    async def run_v2_invocation(
+    async def run_invocation(
         self,
         bundle: BunshinRuntimeBundle,
         *,

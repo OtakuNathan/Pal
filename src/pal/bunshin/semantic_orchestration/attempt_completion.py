@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 from pal.bunshin.semantic_orchestration.worker_results import _worker_event_timing
@@ -14,7 +14,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import (
 @dataclass
 class AttemptCompletion:
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_checkpoints: RoleCheckpoints
 
     async def execute(

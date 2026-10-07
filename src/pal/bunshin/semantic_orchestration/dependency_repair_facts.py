@@ -7,7 +7,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import RepairIncarnation
 from pal.bunshin.graph_executor import GraphExecution
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 def node_name(node: AggregateSnapshot) -> str:
@@ -22,7 +22,7 @@ def current_attempt_id(role: Mapping[str, Any]) -> str:
     } else ""
 
 
-def role_for_incarnation(repository: BunshinV2Repository, incarnation: RepairIncarnation) -> dict[str, Any] | None:
+def role_for_incarnation(repository: BunshinRepository, incarnation: RepairIncarnation) -> dict[str, Any] | None:
     if incarnation.role_assignment_id:
         return repository.role_assignments.read_role_assignment(incarnation.role_assignment_id)
     node = repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, incarnation.aggregate_id)
@@ -37,7 +37,7 @@ def role_for_incarnation(repository: BunshinV2Repository, incarnation: RepairInc
     return open_rows[0] if open_rows else (matches[-1] if matches else None)
 
 
-def freeze_incarnation(repository: BunshinV2Repository, artifacts: ContentAddressedArtifactStore,
+def freeze_incarnation(repository: BunshinRepository, artifacts: ContentAddressedArtifactStore,
                        execution: GraphExecution, node: AggregateSnapshot) -> tuple[RepairIncarnation, ArtifactRef]:
     cycle = execution.cycles[node_name(node)]
     assignment = cycle.active_assignment

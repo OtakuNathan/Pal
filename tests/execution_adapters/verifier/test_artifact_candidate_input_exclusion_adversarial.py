@@ -27,7 +27,7 @@ from pal.bunshin.adapters import (
 )
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.input_binding import BOUND_INPUTS_ROOT
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 def _documented_is_bound_input_path(relative_path: object) -> bool:
@@ -62,7 +62,7 @@ def _legacy_tree_fingerprint(workspace: Path) -> str:
 class ArtifactCandidateInputExclusionAdversarialTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_input_exclusion_verifier_"))
-        self.repository = BunshinV2Repository(self.root)
+        self.repository = BunshinRepository(self.root)
         self.store = ContentAddressedArtifactStore(self.root, self.repository.artifacts)
         self.adapter = ArtifactBundleAdapter(self.root, self.store)
         patcher = mock.patch.object(

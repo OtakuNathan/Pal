@@ -81,7 +81,7 @@ async def _run(runtime_root: Path, pack_path: Path, bunshin_id: str, run_id: str
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run one isolated Bunshin V2 worker invocation.")
+    parser = argparse.ArgumentParser(description="Run one isolated Bunshin worker invocation.")
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--pack-json", required=True)
     parser.add_argument("--bunshin-id", required=True)

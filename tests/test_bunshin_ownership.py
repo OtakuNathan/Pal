@@ -30,7 +30,7 @@ def owned_modules() -> set[Path]:
 
 def test_bunshin_ownership_budgets():
     limits = {"file": 800, "class": 400, "function": 150}
-    entries = {"BunshinRunner", "BunshinV2Repository", "SemanticOrchestrator"}
+    entries = {"BunshinRunner", "BunshinRepository", "SemanticOrchestrator"}
     for path in sorted(owned_modules()):
         for key, size in measurements(path).items():
             kind, _, symbol = key.partition(":")
@@ -75,9 +75,9 @@ def test_unit_of_work_publishes_or_rolls_back_all_stores(tmp_path):
     import pytest
     from pal.bunshin.contracts import ActionEnvelope, AggregateType
     from pal.bunshin.cycle_protocol import PlanCycle
-    from pal.bunshin.repository import BunshinV2Repository
+    from pal.bunshin.repository import BunshinRepository
 
-    repository = BunshinV2Repository(tmp_path)
+    repository = BunshinRepository(tmp_path)
     action = ActionEnvelope(
         action_type="CREATE_WORKFLOW", workflow_id="wf-atomic",
         aggregate_type=AggregateType.WORKFLOW, aggregate_id="wf-atomic",

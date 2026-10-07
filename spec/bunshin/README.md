@@ -1,4 +1,4 @@
-# Bunshin V2 state-machine models
+# Bunshin state-machine models
 
 These specifications model the domain-independent orchestration contract before
 the Python worker spine implements it.
@@ -115,7 +115,7 @@ Bunshin use the same execution state machine.
 Run every model with a pinned `tla2tools.jar`:
 
 ```bash
-scripts/check_bunshin_v2_tla.sh /path/to/tla2tools.jar
+scripts/check_bunshin_tla.sh /path/to/tla2tools.jar
 ```
 
 `TLA2TOOLS_JAR` can provide the jar path and `TLC_WORKERS` controls TLC's
@@ -125,7 +125,7 @@ Raspberry Pi development host.
 Regenerate the implementation topology after changing an enum or transition:
 
 ```bash
-python -c "from pathlib import Path; from pal.bunshin.formal import write_implementation_topology; write_implementation_topology(Path('spec/bunshin_v2/ImplementationTopology.tla'))"
+python -c "from pathlib import Path; from pal.bunshin.formal import write_implementation_topology; write_implementation_topology(Path('spec/bunshin/ImplementationTopology.tla'))"
 ```
 
 `pal.bunshin.machine_dsl.MachineSpec` is the concrete lifecycle source of
@@ -268,7 +268,7 @@ receipt/history temporal properties. Ten mutant configurations remove one
 guard each. `VerifierDraftLifecycleWithdrawalWitness.cfg` deliberately checks a false invariant:
 its required counterexample demonstrates a reachable delete-current-finding,
 fresh-evidence, accepted-PASS path with history retained. These expected
-counterexamples are part of `scripts/check_bunshin_v2_tla.sh`.
+counterexamples are part of `scripts/check_bunshin_tla.sh`.
 
 `tests/test_bunshin_verifier_draft_model.py` runs real TLC when an existing
 `TLA2TOOLS_JAR` is supplied, otherwise explicitly skips TLC. Its supplemental

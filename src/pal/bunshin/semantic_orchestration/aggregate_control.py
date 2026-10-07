@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.sessions import architecture_reviewer_session_id, architect_session_id_for_revision
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.architecture_review import ArchitectureReview
 from pal.bunshin.semantic_orchestration.architecture_snapshot import ArchitectureSnapshot
 from pal.bunshin.semantic_orchestration.architecture_stage import ArchitectureStage
@@ -28,7 +28,7 @@ class AggregateControl:
     node_admission: NodeAdmission
     review_delivery: ReviewDelivery
     role_cleanup: RoleCleanup
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     async def stop_aggregate_worker(
         self,

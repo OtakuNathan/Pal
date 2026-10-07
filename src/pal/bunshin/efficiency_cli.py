@@ -29,7 +29,7 @@ def resolve_db_path(runtime_root: Path) -> Path:
 
     The Bunshin v2 workflow database location is defined by
     ``pal.bunshin.config.bunshin_db_path(runtime_root)`` — the same source
-    the Bunshin manager and ``BunshinV2WorkflowService`` use to write it.
+    the Bunshin manager and ``BunshinWorkflowService`` use to write it.
     The ``PAL_BUNSHIN_RUNTIME_DB_PATH`` environment variable never applies
     here: it overrides the separate ``pal.sqlite3`` runtime database, not
     the Bunshin v2 store.

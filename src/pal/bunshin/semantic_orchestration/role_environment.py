@@ -7,7 +7,7 @@ from pal.bunshin.skill_context import normalized_skill_injection
 from pal.bunshin.harnesses import PAL_HARNESS_ID, BunshinHarnessRegistryGeneration, BunshinHarnessSpec
 from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
 from pal.bunshin.turns import sanitize_runner_session_pack
-from pal.bunshin.adapters import prepare_v2_role_workspace
+from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contracts import PermanentEffectError, SubmissionInvariantError
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.shared import BunshinInvocationPack
@@ -63,7 +63,7 @@ def _prepare_role_workspace_before_environment(
     uses_bound_durable_workspace = _role_uses_bound_durable_workspace(role, prepared)
     if not prepare_workspace or uses_bound_durable_workspace:
         return prepared, uses_bound_durable_workspace
-    role_pack = prepare_v2_role_workspace(
+    role_pack = prepare_role_workspace(
         runtime_root,
         BunshinInvocationPack(
             invocation_id=invocation_id,

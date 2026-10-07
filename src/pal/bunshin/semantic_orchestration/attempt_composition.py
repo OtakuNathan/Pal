@@ -6,7 +6,7 @@ from typing import Any, Callable
 from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
 from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
 from pal.bunshin.task_ledger import TaskLedgerService
@@ -56,7 +56,7 @@ def build_attempt_execution(
     settings: RoleRuntimeSettings,
     publish_worker_event: WorkerEventPublisher | None,
     register_broker_run: BrokerRunRegistrar | None,
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     requests: WorkflowRequests,
     runtime_db_path: Path | None,
     runtime_root: Path,

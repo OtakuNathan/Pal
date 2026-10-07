@@ -4,13 +4,13 @@ from pathlib import Path
 from typing import Any
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import invocation_root
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from typing import Mapping
 from pal.shared import BunshinInvocationPack
 from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
 from pal.bunshin.tool_guidance import merge_tool_guidance_overrides
-from pal.bunshin.adapters import prepare_v2_role_workspace
+from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contract_submission import bind_architect_file
 from pal.bunshin.swe_verification import compile_swe_verification_tool_contract
 from pal.bunshin.semantic_orchestration.attempt_models import BoundRolePlaybook, InitialRolePrompt, PreparedRolePrompt, PreparedRoleWorkspace, RoleAttemptRequest
@@ -19,7 +19,7 @@ from pal.bunshin.semantic_orchestration.attempt_models import BoundRolePlaybook,
 @dataclass
 class ToolPolicy:
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     runtime_root: Path
 
     async def execute(
@@ -75,7 +75,7 @@ class ToolPolicy:
             and not uses_bound_durable_workspace
             and not bool(pack.workspace.get("v2_role_workspace"))
         ):
-            pack = prepare_v2_role_workspace(
+            pack = prepare_role_workspace(
                 self.runtime_root,
                 pack,
                 run_id=run_id,

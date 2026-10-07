@@ -9,12 +9,12 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.workspace_resources import workspace_process_holders
 from pal.bunshin.orchestration import reconcile_control_requests
 from pal.bunshin.replan import architecture_revision_finding_value
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 
 
 @dataclass
-class BunshinV2Recovery:
-    service: BunshinV2WorkflowService
+class BunshinRecovery:
+    service: BunshinWorkflowService
 
     @property
     def repository(self):

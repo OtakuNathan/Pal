@@ -1,6 +1,6 @@
 """SQLite stores organized by durable responsibility.
 
-BunshinV2Repository composes the store dependency graph. An application operation
+BunshinRepository composes the store dependency graph. An application operation
 uses ``repository.transaction()`` when several stores must publish atomically.
 Its BunshinUnitOfWork exposes bound stores, not a raw SQLite connection. Only the
 outer database context commits or rolls back; bound sessions expire on exit.

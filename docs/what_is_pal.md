@@ -146,5 +146,5 @@ model itself.
 - [Runtime Stack](pal_runtime_stack.md)
 - [Bootstrap and Process Contract](pal_bootstrap_and_process.md)
 - [Control Plane](pal_control_plane.md)
-- [Bunshin V2 Contract Orchestration](bunshin_v2_contract_orchestration.md)
+- [Bunshin V2 Contract Orchestration](bunshin_contract_orchestration.md)
 - [Channel Contract](pal_channel_contract.md)

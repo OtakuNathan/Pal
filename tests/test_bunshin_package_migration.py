@@ -26,7 +26,7 @@ from pal.bunshin.verifier_tool_diagnostics import (
 )
 from pal.shared import BunshinInvocationPack
 from tests.test_bunshin_completion_resume import make_bundle, noop
-from tests import test_bunshin_v2_role_protocol as protocol_fixture
+from tests import test_bunshin_role_protocol as protocol_fixture
 
 
 def test_canonical_package_has_all_exports_and_no_parallel_implementation():

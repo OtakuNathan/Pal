@@ -11,12 +11,12 @@ from pal.bunshin.checkpoint import (
     AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, seal_agent_session_checkpoint,
 )
 from pal.bunshin.contracts import AggregateType, StaleFencingToken
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.role_protocol import RoleSessionAction
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
-from pal.bunshin.service import BunshinV2WorkflowService
-from tests import test_bunshin_v2_role_protocol as protocol_fixture
+from pal.bunshin.service import BunshinWorkflowService
+from tests import test_bunshin_role_protocol as protocol_fixture
 from tests.test_bunshin_completion_resume import make_bundle, make_runner
 
 
@@ -42,7 +42,7 @@ def status(role):
 
 
 def restart(role):
-    role.repository = BunshinV2Repository(role.runtime_root)
+    role.repository = BunshinRepository(role.runtime_root)
     role.repository.database.ensure_schema()
 
 
@@ -77,7 +77,7 @@ def write_initial(role, attempt, fence):
 
 
 def acknowledge(role, token):
-    gateway = RoleAssignmentGateway(BunshinV2WorkflowService(role.runtime_root))
+    gateway = RoleAssignmentGateway(BunshinWorkflowService(role.runtime_root))
     return gateway.call("checkpoint_initialize", {"access_token": token})
 
 

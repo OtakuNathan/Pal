@@ -15,7 +15,7 @@ from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.worker_processes import WorkerProcesses
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.role_runtime import RoleSupervisor
 from pal.bunshin.semantic_orchestration.routes import SEMANTIC_EFFECT_TYPES
 
@@ -23,7 +23,7 @@ from pal.bunshin.semantic_orchestration.routes import SEMANTIC_EFFECT_TYPES
 @dataclass
 class SemanticOrchestrator:
     components: SemanticComponents = field(init=False, repr=False)
-    service: BunshinV2WorkflowService
+    service: BunshinWorkflowService
     max_parallel_workers: int = 5
     runtime_db_path: Path | None = None
     harness_registry: BunshinHarnessRegistry = field(

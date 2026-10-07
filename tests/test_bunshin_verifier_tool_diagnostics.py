@@ -159,7 +159,7 @@ def test_manager_persists_only_typed_payload_and_manager_owned_identity(tmp_path
     async def scenario():
         manager = BunshinManager(tmp_path)
         recorded = []
-        manager.v2_service.repository.role_events.record_worker_event = recorded.append
+        manager.workflow_service.repository.role_events.record_worker_event = recorded.append
         manager.events.queue_event = Mock()
         state = BunshinRunState(bunshin_id="session", run_id="run", pack=BunshinInvocationPack(
             invocation_id="session", metadata={"bunshin_v2": {"role": "verifier"},
@@ -168,16 +168,16 @@ def test_manager_persists_only_typed_payload_and_manager_owned_identity(tmp_path
         event = {"event_kind": "verifier_tool_diagnostic", "run_id": "run",
             "invocation_id": SECRET, "_attempt_id": ATTEMPT,
             "unexpected": SECRET, "payload": payload(attempt_id="att_" + "b" * 24)}
-        await manager._publish_v2_worker_event(event)
+        await manager._publish_worker_event(event)
         assert recorded == [{"event_kind": "verifier_tool_diagnostic",
                              "invocation_id": "session", "payload": payload(attempt_id=ATTEMPT)}]
         manager.events.queue_event.assert_not_called()
         assert not state.last_event
         for changes in ({"payload": payload(error=SECRET)}, {"payload": payload(status=SECRET)},
                         {"_attempt_id": SECRET}, {"run_id": "missing"}):
-            await manager._publish_v2_worker_event({**event, **changes})
+            await manager._publish_worker_event({**event, **changes})
         state.pack.metadata["bunshin_v2"]["role"] = "coder"
-        await manager._publish_v2_worker_event(event)
+        await manager._publish_worker_event(event)
         assert len(recorded) == 1
     asyncio.run(scenario())
 
@@ -225,17 +225,17 @@ def test_manager_storage_failure_does_not_abort_worker_reader(tmp_path):
     async def scenario():
         manager = BunshinManager(tmp_path)
         record = Mock(side_effect=OSError(SECRET))
-        manager.v2_service.repository.role_events.record_worker_event = record
+        manager.workflow_service.repository.role_events.record_worker_event = record
         manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run",
             pack=BunshinInvocationPack(invocation_id="session",
                 metadata={"bunshin_v2": {"role": "verifier"}}))
         event = {"event_kind": "verifier_tool_diagnostic", "run_id": "run",
                  "_attempt_id": ATTEMPT, "payload": payload()}
-        await manager._publish_v2_worker_event(event)
+        await manager._publish_worker_event(event)
         record.assert_called_once()
         record.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
-            await manager._publish_v2_worker_event(event)
+            await manager._publish_worker_event(event)
     asyncio.run(scenario())
 
 
@@ -245,7 +245,7 @@ def test_real_manager_storage_distinguishes_no_call_from_pre_handler_rejection(t
 
     async def scenario():
         manager = BunshinManager(tmp_path)
-        repository = manager.v2_service.repository
+        repository = manager.workflow_service.repository
         artifacts = ContentAddressedArtifactStore(tmp_path, repository.artifacts)
         prompt = artifacts.put_json({"prompt": "fixture"}, artifact_type="RolePromptPackArtifact")
         lease = repository.leases.claim_lease("verification:node", "session", ttl_seconds=60)
@@ -260,14 +260,14 @@ def test_real_manager_storage_distinguishes_no_call_from_pre_handler_rejection(t
             "bunshin_v2": {"role": "verifier"}, "prompt_log_enabled": False})
         manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run", pack=pack)
         manager.events.queue_event = Mock()
-        await manager._publish_v2_worker_event({"event_kind": "progress", "run_id": "run",
+        await manager._publish_worker_event({"event_kind": "progress", "run_id": "run",
             "invocation_id": "session", "_attempt_id": ATTEMPT,
             "payload": {"phase": "llm_round_completed", "round": 6, "tool_call_count": 0}})
         with repository.database.read_connection() as connection:
             assert connection.execute("SELECT count(*) FROM bunshin_v2_worker_events "
                 "WHERE event_kind='verifier_tool_diagnostic'").fetchone()[0] == 0
         async def write(event):
-            await manager._publish_v2_worker_event({**event, "_attempt_id": ATTEMPT})
+            await manager._publish_worker_event({**event, "_attempt_id": ATTEMPT})
         async def heartbeat(operation, **kwargs):
             return await operation
         invocation = rejection("invalid_arguments", SECRET, details={"args": SECRET})

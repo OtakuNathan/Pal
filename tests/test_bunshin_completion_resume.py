@@ -116,7 +116,7 @@ def test_real_completion_retry_preserves_memory_rounds_and_sequence(tmp_path, re
                 runner.components.completion, "completion_gate_progress_marker",
                 return_value="unchanged",
             ):
-                await runner.components.invocation.run_v2_invocation(bundle)
+                await runner.components.invocation.run_invocation(bundle)
             rounds = [
                 event["payload"]["round"] for event in events
                 if event.get("payload", {}).get("phase") == "llm_round_completed"
@@ -207,7 +207,7 @@ def test_in_process_retry_retains_live_runtime_without_unsafe_checkpoint(tmp_pat
                 bundle.runtime_state_coordinator, "restore",
                 wraps=bundle.runtime_state_coordinator.restore,
             ) as restore_runtime:
-                await runner.components.invocation.run_v2_invocation(bundle)
+                await runner.components.invocation.run_invocation(bundle)
             assert restore_runtime.await_count == 1
             rounds = [
                 event["payload"]["round"] for event in events

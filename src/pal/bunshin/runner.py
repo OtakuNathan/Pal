@@ -66,7 +66,7 @@ class BunshinRunner:
                 "phase_started",
                 accepted_payload,
             )
-            return await self.components.invocation.run_v2_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
+            return await self.components.invocation.run_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
         except _BunshinCooperativeCancel as cancel:
             await self.components.invocation.close_execution_work(bundle)
             with contextlib.suppress(Exception):

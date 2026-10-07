@@ -13,7 +13,7 @@ import pytest
 from pal.bunshin.runner import BunshinRunner
 from pal.bunshin.runner_components.artifacts import Artifacts
 from pal.bunshin.runner_components.completion import Completion
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_evidence import run_shell_evidence
 from pal.bunshin.submission_drafts import (
     AUTHORING_CONTRACT_VERSION,
@@ -29,7 +29,7 @@ def verifier(tmp_path):
     runtime = tmp_path / "runtime"
     repo = tmp_path / "repo"
     repo.mkdir()
-    repository = BunshinV2Repository(runtime)
+    repository = BunshinRepository(runtime)
     lease = repository.leases.claim_lease("progress-verifier", "progress-test", ttl_seconds=300)
     workspace = {
         "runtime_root": str(runtime),
@@ -307,7 +307,7 @@ def test_corpus_progress_extends_retry_without_bypassing_missing_submission(veri
         runtime_root=verifier.runtime_root, pack=verifier.pack,
         bunshin_id="progress-test", run_id="attempt-test", write_event=noop, read_decision=noop,
     )
-    asyncio.run(runner.components.invocation.run_v2_invocation(None))
+    asyncio.run(runner.components.invocation.run_invocation(None))
     assert runner.calls == 3
     assert runner.components.status.blocked_kind == "completion_gate_stalled"
     assert not runner.components.completion.completion_evidence_present()

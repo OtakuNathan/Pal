@@ -2,7 +2,7 @@
 
 ``input_binding`` is a parallel dependency module: in this worktree its
 procedures are contract declarations, so these cases drive the real
-``BunshinV2WorkflowService.start_workflow`` against contract-conforming
+``BunshinWorkflowService.start_workflow`` against contract-conforming
 doubles installed at the ``pal.bunshin.service`` import boundary, exactly
 as the declared edge contract (participation rule, fail-closed errors,
 manifest publication) prescribes.
@@ -39,7 +39,7 @@ from pal.bunshin.input_binding import (
     BoundInputError,
     DeclaredInput,
 )
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 
 SOURCE_COMMIT = "1" * 40
 
@@ -147,7 +147,7 @@ def environment(tmp_path: Path) -> SimpleNamespace:
     decoy_repo = tmp_path / "decoy-repo"
     (decoy_repo / "docs").mkdir(parents=True)
     (decoy_repo / "docs" / "spec.md").write_text("decoy content\n", encoding="utf-8")
-    service = BunshinV2WorkflowService(runtime_root)
+    service = BunshinWorkflowService(runtime_root)
     service.create_task(
         {
             "task_id": "task-bound",

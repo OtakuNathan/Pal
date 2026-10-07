@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from pal.bunshin.harnesses import BunshinHarnessRegistryGeneration, pal_harness_spec
 from pal.bunshin import ActionEnvelope, AggregateType, build_default_transition_engine
-from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
+from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.bunshin.contracts import AggregateSnapshot, StaleFencingToken
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, NodeCycleState
 from pal.bunshin.graph_protocol import GraphIR, NodeSpec, RoleBinding
@@ -27,7 +27,7 @@ from pal.bunshin.semantic_orchestration.attempt_reference_binding import Referen
 from pal.bunshin.semantic_orchestration.attempt_role_session import RoleSession
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.role_inputs import _node_role_session_id
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.bunshin.verification import VerificationService, VerificationStatus
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
@@ -47,7 +47,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="pal-unknown-recovery-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.service = BunshinV2WorkflowService(self.root)
+        self.service = BunshinWorkflowService(self.root)
         self.repository = self.service.repository
         self.worker = SemanticOrchestrator(self.service)
         self.coordinator = WorkflowCoordinator(self.repository)
@@ -261,7 +261,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             with self.repository.database.read_connection() as connection:
                 prior_events = connection.execute("SELECT * FROM bunshin_v2_domain_events").fetchall()
                 prior_drafts = connection.execute("SELECT * FROM bunshin_v2_submission_drafts").fetchall()
-            provider = BunshinV2PublicProvider(runtime_root=self.root, wake_manager=lambda: None)
+            provider = BunshinPublicProvider(runtime_root=self.root, wake_manager=lambda: None)
             provider.service = self.service
             with patch.object(self.service, "resolve_task_workflow_selector", return_value=("task", "wf-unknown")):
                 resolved = provider.resolve_triage(CapabilityCall(

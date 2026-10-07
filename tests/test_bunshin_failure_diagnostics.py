@@ -12,7 +12,7 @@ from pal.bunshin.failure_diagnostics import append_failure_diagnostic, exception
 from pal.bunshin.runner import BunshinRunner
 from pal.bunshin import worker_main
 from pal.bunshin.contracts import AggregateType, PermanentEffectError
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.orchestration import BunshinOutboxProcessor
 from pal.bunshin.semantic_orchestration.attempt_process_result import ProcessResult
 from pal.bunshin.semantic_orchestration.attempt_worker_execution import WorkerExecution
 
@@ -139,7 +139,7 @@ def test_real_parse_and_process_result_preserve_metadata_in_failure_artifact(mon
                                workflow_id="w", state="RUNNING")
     service.repository.snapshots.read_snapshot.return_value = snapshot
     service.repository.transitions.legal_actions.return_value = ["ENTER_TRIAGE"]
-    outbox = BunshinV2OutboxProcessor(service)
+    outbox = BunshinOutboxProcessor(service)
     action = outbox._failed_effect_triage_action({"effect_key": "e", "aggregate_type": "workflow",
                                                "aggregate_id": "w"}, error)
     stored = service.artifacts.put_json.call_args

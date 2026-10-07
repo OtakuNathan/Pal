@@ -12,7 +12,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import DependencyRepairCohort
 from pal.bunshin.graph_executor import GraphExecution
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.dependency_repair_facts import append_refs, node_name
 from pal.bunshin.storage.queries import QueriesStore
 from pal.bunshin.semantic_orchestration.dependency_repair_budget import dependency_failure_history
@@ -24,7 +24,7 @@ _REF_KEYS = frozenset(ArtifactRef.__dataclass_fields__)
 
 
 def apply_dependency_repair_cohort(
-    *, repository: BunshinV2Repository, artifacts: ContentAddressedArtifactStore,
+    *, repository: BunshinRepository, artifacts: ContentAddressedArtifactStore,
     graph_execution: GraphExecution, cohort_key: str,
     capture_refs: Mapping[str, ArtifactRef | Mapping[str, Any]] | None = None,
     command_id: str = "",

@@ -386,7 +386,7 @@ on a 6-module DAG); modules that depend on others queue behind their acceptances
 - **TLA+ verified concurrency model.** The workflow state machine — architecture
   lifecycle, graph generation, replan/reuse, role assignment recovery, and
   active-lineage triage — is specified in TLA+ and checked before the
-  implementation is trusted. The specs live in `spec/bunshin_v2/` and are the
+  implementation is trusted. The specs live in `spec/bunshin/` and are the
   authoritative source for what states are legal, what transitions are allowed,
   and what invariants must hold. When a bug is found and fixed, the fix is
   validated against the spec first, then ported to code.

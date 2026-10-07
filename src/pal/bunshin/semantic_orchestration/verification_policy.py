@@ -3,7 +3,7 @@ from dataclasses import field
 from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.candidate_builder import validate_candidate_submission
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import UnknownPolicy, VerificationCaseResult, VerificationCaseSpec, VerificationStatus, historical_repair_checklist_items
 from pal.bunshin.role_protocol import stable_hash
 from pal.bunshin.verification_lsp_policy import lsp_policy_errors
@@ -45,7 +45,7 @@ def _reject_manager_identity_fields(value: Any, *, owner: str, path: str = "$") 
 
 
 def _resolve_dependency_node_id(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     node: AggregateSnapshot,
     *,
     dependency_module: str,
@@ -73,7 +73,7 @@ def _resolve_dependency_node_id(
 
 
 def _verification_repair_path_owners(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     node: AggregateSnapshot,
 ) -> dict[str, list[dict[str, str]]]:
     """Compile immutable module path ownership for Manager-routed repairs."""
@@ -136,7 +136,7 @@ def _verification_repair_path_owners(
 
 
 def _verification_repair_scope(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     node: AggregateSnapshot,
 ) -> dict[str, Any]:
     """Separate visible contracts from immutable products bound to this check.
@@ -176,7 +176,7 @@ def _verification_repair_scope(
 
 
 def _verification_related_module_nodes(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     node: AggregateSnapshot,
     *,
     include_current: bool = False,

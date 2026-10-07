@@ -7,7 +7,7 @@
 
 This note records the historical V1 staged-architect experiment. The active V2
 contract pipeline is documented in
-[`bunshin_v2_contract_orchestration.md`](../../bunshin_v2_contract_orchestration.md) and
+[`bunshin_contract_orchestration.md`](../../bunshin_contract_orchestration.md) and
 does not use ModuleDetailArtifact, milestones, or cursor-driven execution.
 
 Current implementation status:

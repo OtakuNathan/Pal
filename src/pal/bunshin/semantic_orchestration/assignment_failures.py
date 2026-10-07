@@ -6,7 +6,7 @@ from typing import Any, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, AggregateVersionConflict, DeferredEffectError, SubmissionInvariantError
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState, stable_hash
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_leases import RoleLeases
@@ -18,7 +18,7 @@ class AssignmentFailures:
     effect_reads: EffectReads
     role_leases: RoleLeases
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def settle_background_startup_failure(
         self,

@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import DefectKind, VerificationCaseResult, VerificationCaseSpec, VerificationStatus
 from pal.bunshin.submission_drafts import SubmissionDraftStore
 from pal.bunshin.semantic_evidence import recorded_cases
@@ -45,7 +45,7 @@ def _recorded_verification_case_results(
     ):
         raise ValueError("recorded verification evidence Draft binding is invalid")
     if evidence_invocation_id != invocation_id:
-        repository = BunshinV2Repository(runtime_root)
+        repository = BunshinRepository(runtime_root)
         attempt = repository.role_attempts.read_role_attempt(evidence_invocation_id)
         assignment = (
             repository.role_assignments.read_role_assignment(str(attempt.get("assignment_id") or ""))

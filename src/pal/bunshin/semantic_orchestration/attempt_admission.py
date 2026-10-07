@@ -1,14 +1,14 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pal.bunshin.storage.role_assignments import semantic_business_lease
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_runtime import RoleSupervisor
 from pal.bunshin.semantic_orchestration.attempt_models import BoundRoleHarness, ClaimedRoleAttempt, PreparedRoleSession, PreparedRoleWorkspace, RoleAttemptRequest
 
 
 @dataclass
 class AttemptAdmission:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     supervisor: RoleSupervisor
 
     async def execute(

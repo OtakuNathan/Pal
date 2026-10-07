@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.task_ledger import (
     TASK_LEDGER_ARTIFACT,
     TaskRevisionAuthority,
@@ -17,7 +17,7 @@ from pal.bunshin.task_ledger import (
 class PalV2TaskLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal-v2-task-ledger-"))
-        self.service = BunshinV2WorkflowService(self.root / "runtime")
+        self.service = BunshinWorkflowService(self.root / "runtime")
 
     def test_materializes_exactly_one_structured_task_yaml(self) -> None:
         original = {

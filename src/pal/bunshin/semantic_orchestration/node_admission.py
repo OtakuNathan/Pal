@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.null_execution import NullExecution
@@ -21,7 +21,7 @@ class NodeAdmission:
     null_execution: NullExecution
     verifier_tests: VerifierTests
     workflow_facts: WorkflowFacts
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     def admit_implementation_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self.effect_reads.effect_role_mode(effect))

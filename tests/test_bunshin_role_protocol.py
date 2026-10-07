@@ -8,10 +8,10 @@ from pathlib import Path
 from pal.bunshin.checkpoint import LogicalCoroutineCheckpointStore
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.orchestration import BunshinOutboxProcessor
 from pal.bunshin.paths import role_run_id
-from pal.bunshin.repository import BunshinV2Repository
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.semantic_orchestration import SemanticOrchestrator
 from pal.bunshin.sessions import architecture_reviewer_session_id
 from pal.bunshin.role_protocol import (
@@ -29,7 +29,7 @@ from pal.bunshin.role_protocol import (
 class BunshinV2RoleProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-role-protocol-"))
-        self.repository = BunshinV2Repository(self.runtime_root)
+        self.repository = BunshinRepository(self.runtime_root)
         self.repository.database.ensure_schema()
         self.artifacts = ContentAddressedArtifactStore(
             self.runtime_root,
@@ -703,7 +703,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             submission_payload_hash=payload_hash,
         )
 
-        result = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
+        result = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
             {
                 "effect_type": "run_implementation_role",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
@@ -760,7 +760,7 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
         ).snapshot
         self.assertEqual(producing.state, "PRODUCING")
 
-        replayed = SemanticOrchestrator(BunshinV2WorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
+        replayed = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root)).components.assignment_failures.settle_background_role_failure(
             {
                 "effect_type": "run_implementation_role",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
@@ -885,8 +885,8 @@ class BunshinV2RoleProtocolTests(unittest.TestCase):
             if effect["effect_type"] == "suspend_stale_node_assignments"
         )
         asyncio.run(
-            BunshinV2OutboxProcessor(
-                BunshinV2WorkflowService(self.runtime_root)
+            BunshinOutboxProcessor(
+                BunshinWorkflowService(self.runtime_root)
             )._execute_mechanical(stale_effect)
         )
 

@@ -15,16 +15,16 @@ from unittest.mock import patch
 
 import pytest
 
-from tests import test_bunshin_v2_verifier_scope_recovery as scope_fixture
+from tests import test_bunshin_verifier_scope_recovery as scope_fixture
 from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contract_protocol import validate_contract_payload
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, DeferredEffectError, SubmissionInvariantError
 from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.graph_compiler import GraphCompileBindings, GraphCompiler
 from pal.bunshin.graph_protocol import RoleBinding
 from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.orchestration import BunshinV2OutboxProcessor
+from pal.bunshin.orchestration import BunshinOutboxProcessor
 from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
 from pal.bunshin.process_lifecycle import WorkerProcessOwner
 from pal.bunshin.verification_readiness import verification_corpus_snapshot
@@ -91,14 +91,14 @@ class RuntimeCase:
         self.worker, self.coordinator = self.fx.worker, self.fx.coordinator
         self.workflow_id = self.fx.workflow_id
         self.worker.components.verification_settlement.dependency_repair_registration = self.worker.components.node_control.dependency_repairs.register
-        self.binding = BunshinV2Catalog(self.fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
+        self.binding = BunshinWorkflowCatalog(self.fx.root, self.artifacts).publish_family_binding("software_engineering.v2_coder")
         for version, action in enumerate(("CREATE_WORKFLOW", "START_WORKFLOW")):
             self.repository.transitions.dispatch(ActionEnvelope(
                 action_type=action, workflow_id=self.workflow_id, aggregate_type=AggregateType.WORKFLOW,
                 aggregate_id=self.workflow_id, actor="regression", expected_version=version,
                 idempotency_key="fixture-workflow:" + action, payload={"family_binding_ref": self.binding.to_dict()},
             ))
-        self.processor = BunshinV2OutboxProcessor(self.service, semantic_effects=self.worker, worker_id="cohort-regression")
+        self.processor = BunshinOutboxProcessor(self.service, semantic_effects=self.worker, worker_id="cohort-regression")
         self.claimed = {}
         self.roles = {}
         self.fx._accept_provider("manifest_model")

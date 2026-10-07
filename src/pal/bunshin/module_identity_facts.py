@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 
 
 def _artifact_is_contract(
@@ -26,7 +26,7 @@ def _same_module_identity(
 
 
 def _module_role_session_generations(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     *,
     workflow_id: str,
     source_epoch_id: str,
@@ -76,7 +76,7 @@ def _module_role_session_generations(
 
 
 def _module_identity_delta(
-    repository: BunshinV2Repository,
+    repository: BunshinRepository,
     *,
     workflow_id: str,
     source_epoch_id: str,

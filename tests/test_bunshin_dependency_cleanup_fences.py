@@ -12,7 +12,7 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType, DeferredEffectError, SubmissionInvariantError
 from pal.bunshin.process_lifecycle import WorkerProcessOwner, WorkerProcessReapError
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentRequest
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.attempt_execution import AttemptExecution
@@ -215,7 +215,7 @@ class DependencyCleanupStorageTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='dependency-cleanup-')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.repo = BunshinV2Repository(self.root)
+        self.repo = BunshinRepository(self.root)
         self.repo.database.ensure_schema()
         self.artifacts = ContentAddressedArtifactStore(self.root, self.repo.artifacts)
         self.prompt = self.artifacts.put_json({'prompt': 'test'}, artifact_type='RolePromptPackArtifact')
@@ -468,7 +468,7 @@ class DependencyCleanupStorageTests(unittest.IsolatedAsyncioTestCase):
         self.repo.leases.release_lease('node:review', 'session', rebound.fencing_token)
         replacement = self.repo.leases.claim_lease('node:review', 'session')
         self.update_node(payload={**self.node.payload, 'fencing_token': replacement.fencing_token})
-        restarted = BunshinV2Repository(self.root)
+        restarted = BunshinRepository(self.root)
         self.assertEqual(restarted.role_attempts.read_role_attempt_business_lease(second['attempt_id']), actual)
         self.assertEqual(restarted.role_assignments.read_role_assignment(assignment['assignment_id'])['execution_spec']['business_lease'], self.binding)
         with self.repo.database.read_connection() as connection:

@@ -34,7 +34,7 @@ from pydantic import Field
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_CONTROL
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -279,14 +279,14 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     target_kind="module",
 )
 @dataclass
-class BunshinV2PublicProvider:
+class BunshinPublicProvider:
     runtime_root: Path
     context: MainContext | None = None
     wake_manager: Callable[[], None] | None = None
     manager_request: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
-        self.service = BunshinV2WorkflowService(Path(self.runtime_root))
+        self.service = BunshinWorkflowService(Path(self.runtime_root))
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,

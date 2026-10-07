@@ -31,7 +31,7 @@ from pal.bunshin.paths import (
     resolve_project_git_layout,
 )
 from pal.bunshin.replan import collect_architecture_finding_batch
-from pal.bunshin.service import BunshinV2WorkflowService, workflow_request_from_snapshot
+from pal.bunshin.service import BunshinWorkflowService, workflow_request_from_snapshot
 from pal.bunshin.sessions import (
     architecture_reviewer_session_id,
     architect_session_id_for_revision,
@@ -117,8 +117,8 @@ TRIAGE_FREEZE_EFFECT_TYPES = frozenset(
 
 
 @dataclass
-class BunshinV2OutboxProcessor:
-    service: BunshinV2WorkflowService
+class BunshinOutboxProcessor:
+    service: BunshinWorkflowService
     semantic_effects: SemanticEffectPort = field(default_factory=RejectingSemanticEffectPort)
     publish_workflow_event: Callable[[Mapping[str, Any]], None] | None = None
     worker_id: str = "bunshin-v2-outbox"

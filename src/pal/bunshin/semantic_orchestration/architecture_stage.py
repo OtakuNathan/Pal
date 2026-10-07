@@ -14,7 +14,7 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateTy
 from pal.bunshin.sessions import architect_session_id_for_revision
 from pal.bunshin.cycle_protocol import CycleSlot
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.replan import architecture_revision_finding_value
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
@@ -37,7 +37,7 @@ class ArchitectureStage:
     role_reports: RoleReports
     workflow_facts: WorkflowFacts
     artifacts: ContentAddressedArtifactStore
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     requests: WorkflowRequests
 
     async def run_architecture_stage(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:

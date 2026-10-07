@@ -28,8 +28,8 @@ from pal.bunshin.harnesses import (
     BunshinHarnessRegistryGeneration,
 )
 from pal.bunshin.source import BunshinControlEventHandler, BunshinEventSource
-from pal.bunshin.workflow_capabilities import BunshinV2PublicProvider
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.workflow_capabilities import BunshinPublicProvider
+from pal.bunshin.service import BunshinWorkflowService
 from pal.shared import EventKind
 
 if TYPE_CHECKING:
@@ -150,7 +150,7 @@ class BunshinManagerProvider:
                 self._attached = self._manager_is_responding()
                 raise
 
-    def wake_v2(self) -> None:
+    def wake_workflows(self) -> None:
         self._require_manager()
         self.client.request_sync("v2_wake")
 
@@ -341,7 +341,7 @@ class BunshinManagerProvider:
         if not delivery_id:
             return item
         task_id = str(item.get("task_id") or "")
-        binding_row = BunshinV2WorkflowService(self.runtime_root).repository.delivery_bindings.read_task_delivery(task_id)
+        binding_row = BunshinWorkflowService(self.runtime_root).repository.delivery_bindings.read_task_delivery(task_id)
         binding = dict((binding_row or {}).get("current") or {})
         route = self._live_route_for_binding(binding)
         if route is None:
@@ -453,7 +453,7 @@ class BunshinManagerProvider:
                 return "Reply with the exact architecture edit instruction, then submit it with submit_bunshin_human_decision."
             try:
                 result = await asyncio.to_thread(
-                    BunshinV2WorkflowService(self.runtime_root).submit_human_decision,
+                    BunshinWorkflowService(self.runtime_root).submit_human_decision,
                     {
                         "decision_token": str(action.args.get("decision_token") or ""),
                         "decision": decision,
@@ -470,7 +470,7 @@ class BunshinManagerProvider:
                         "source_channel": "control",
                     },
                 )
-                await asyncio.to_thread(self.wake_v2)
+                await asyncio.to_thread(self.wake_workflows)
                 return f"Bunshin architecture decision recorded ({result.get('state') or decision})."
             except Exception as exc:
                 return f"Bunshin architecture decision was not applied: {exc}"
@@ -748,10 +748,10 @@ def register_with_core(
         harness_registry=harness_registry,
         runtime_db_path=runtime_db_path,
     )
-    public = BunshinV2PublicProvider(
+    public = BunshinPublicProvider(
         runtime_root=resolved_root,
         context=context,
-        wake_manager=manager.wake_v2,
+        wake_manager=manager.wake_workflows,
         manager_request=manager.client.request_sync,
     )
     manager.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()

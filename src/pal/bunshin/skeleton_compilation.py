@@ -6,7 +6,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.graph_protocol import EdgeKind
 from pal.bunshin.skeleton import SKELETON_MODULE_CONTRACT_ARTIFACT
 from pal.bunshin.workspace_paths import module_developer_test_path, module_verification_corpus_path
@@ -23,7 +23,7 @@ from pal.bunshin.module_identity import reconcile_module_identities
 
 @dataclass
 class SkeletonEpochCompiler:
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     contracts: ContractArtifactAccess
 
     def compile(

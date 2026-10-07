@@ -17,9 +17,9 @@ from pal.bunshin.prompt_adapter import (
 )
 from pal.bunshin.runner_components.prompt_context import PromptContext
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.workflow_catalog import BunshinV2Catalog
+from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
 from pal.bunshin.semantic_orchestration.attempt_playbook_binding import PlaybookBinding
@@ -37,9 +37,9 @@ from pal.shared.tool_protocol import new_tool_call
 
 
 async def _bound_pack(root, *, sink, legacy_playbook=False):
-    repository = BunshinV2Repository(root)
+    repository = BunshinRepository(root)
     artifacts = ContentAddressedArtifactStore(root, repository.artifacts)
-    binding_ref = BunshinV2Catalog(root, artifacts).publish_family_binding(
+    binding_ref = BunshinWorkflowCatalog(root, artifacts).publish_family_binding(
         "software_engineering.v2_coder"
     )
     binding = dict(artifacts.read_json(binding_ref))

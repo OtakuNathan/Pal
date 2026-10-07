@@ -20,7 +20,7 @@ from pal.bunshin.semantic_orchestration.dependency_repair_recovery import pendin
 from pal.bunshin.semantic_orchestration.dependency_repair_runtime import DependencyRepairRuntime
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.node_control import NodeControl
-from pal.bunshin.service import BunshinV2WorkflowService
+from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from tests.test_bunshin_dependency_repair_apply import Case
@@ -29,7 +29,7 @@ from tests.test_bunshin_dependency_repair_protocol import _execution, _intent, _
 
 class RecoveryCase(Case):
     def __init__(self, root):
-        self.service = BunshinV2WorkflowService(root)
+        self.service = BunshinWorkflowService(root)
         self.repository, self.artifacts = self.service.repository, self.service.artifacts
         self.coordinator = WorkflowCoordinator(self.repository)
         execution = _execution()

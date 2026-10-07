@@ -20,7 +20,7 @@ from tests.verifier_draft_model import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_ROOT = ROOT / "spec" / "bunshin_v2"
+SPEC_ROOT = ROOT / "spec" / "bunshin"
 MODULE = "VerifierDraftLifecycle"
 MUTANTS = [
     ("ReceiptBlind", "finding", "receipt-blind", "ReceiptFreezesBothDrafts"),
@@ -77,7 +77,7 @@ def test_supplemental_wrong_cas_never_edits_either_draft():
 
 def test_verifier_draft_tla_configs_and_runner_wiring():
     """Static wiring only; this does not parse TLA+ or claim a checked model."""
-    script = (ROOT / "scripts" / "check_bunshin_v2_tla.sh").read_text()
+    script = (ROOT / "scripts" / "check_bunshin_tla.sh").read_text()
     config = (SPEC_ROOT / f"{MODULE}.cfg").read_text()
     assert f"    {MODULE}\n" in script
     for invariant in (

@@ -6,7 +6,7 @@ from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.storage.role_assignments import semantic_business_lease
 from typing import Any
 from pal.bunshin.contracts import AggregateSnapshot, DeferredEffectError
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import RoleActivation
 from typing import Mapping
 from pal.bunshin.role_runtime import RoleSupervisor
@@ -51,7 +51,7 @@ class AttemptExecution:
     process_result: ProcessResult
     terminal_validation: TerminalValidation
     attempt_completion: AttemptCompletion
-    repository: BunshinV2Repository
+    repository: BunshinRepository
     role_leases: RoleLeases
     supervisor: RoleSupervisor
     background: BackgroundAssignments | None = None

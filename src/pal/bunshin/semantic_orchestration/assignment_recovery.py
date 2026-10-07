@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
 from pal.bunshin.background_assignments import BackgroundAssignments
-from pal.bunshin.repository import BunshinV2Repository
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState
 from pal.bunshin.semantic_orchestration.assignment_execution import AssignmentExecution
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
@@ -17,7 +17,7 @@ class AssignmentRecovery:
     assignment_identity: AssignmentIdentity
     assignment_retries: AssignmentRetries
     background: BackgroundAssignments
-    repository: BunshinV2Repository
+    repository: BunshinRepository
 
     async def recover_background_assignments(self, handlers) -> int:
         if self.background.stopping:
