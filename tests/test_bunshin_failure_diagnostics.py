@@ -202,6 +202,8 @@ def test_checkpoint_classification_is_unchanged_with_metadata():
 
 
 @pytest.mark.parametrize("terminal_payload,has_receipt,permanent", [
+    ({"status": "blocked", "blocker_kind": "output_length_recovery_exhausted",
+      "summary": "bounded output recovery exhausted; narrow the next file edit"}, False, True),
     ({"status": "blocked", "blocker_kind": "completion_gate_stalled",
       "summary": "required primary artifact absent after submit feedback"}, False, True),
     ({"status": "blocked", "blocker_kind": "other_blocker",

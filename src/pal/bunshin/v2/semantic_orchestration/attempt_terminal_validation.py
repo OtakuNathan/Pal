@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pal.bunshin.v2.repository import BunshinV2Repository
 from pal.bunshin.v2.contracts import SubmissionInvariantError
 from pal.bunshin.v2.semantic_orchestration.role_checkpoints import RoleCheckpoints
-from pal.bunshin.v2.semantic_orchestration.worker_results import _terminal_completion_gate_stalled
+from pal.bunshin.v2.semantic_orchestration.worker_results import _terminal_nonretryable_blocker
 from pal.bunshin.v2.contracts import DeferredEffectError
 from pal.bunshin.v2.role_protocol import RoleAssignmentState
 import contextlib
@@ -71,8 +71,8 @@ class TerminalValidation:
             )
         if str(terminal_payload.get("status") or "") != "completed":
             summary = str(terminal_payload.get("summary") or "V2 semantic worker failed")
-            completion_stalled = _terminal_completion_gate_stalled(terminal_payload)
-            if not completion_stalled:
+            permanent_blocker = _terminal_nonretryable_blocker(terminal_payload)
+            if not permanent_blocker:
                 self.repository.role_retries.queue_role_attempt_retry(
                     assignment_id=str(assignment["assignment_id"]),
                     attempt_id_value=str(attempt["attempt_id"]),
@@ -102,7 +102,7 @@ class TerminalValidation:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            if completion_stalled:
+            if permanent_blocker:
                 raise PermanentEffectError(summary)
             raise RuntimeError(summary)
         assignment_after_process = self.repository.role_assignments.read_role_assignment(

@@ -243,6 +243,7 @@ class LlmRounds:
                         truncation_reason=finish_reason,
                     )
                 state.pending_output_length_recovery_note = ""
+                self.status.classify_blocker("output_length_recovery_exhausted")
                 self.status.block(self.text_deliverables.truncated_output_blocked_summary(
                     finish_reason
                 ))

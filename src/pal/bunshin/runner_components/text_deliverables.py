@@ -115,11 +115,12 @@ class TextDeliverables:
         primary = dict(self.artifacts.artifact_payload().get("primary_artifact") or {})
         artifact_path = str(primary.get("path") or primary.get("relative_path") or "").strip()
         saved = f" Partial output was saved to {artifact_path}." if artifact_path else ""
-        scope = "contract invocation"
         return (
-            f"LLM output was truncated before the bunshin completed the {scope} "
-            f"(finish_reason={reason}). Treat this {scope} as blocked.{saved} "
-            "For long deliverables, write the full result as an artifact/file and keep the final reply short."
+            f"LLM output reached the output limit (finish_reason={reason}). "
+            "Bounded recovery is exhausted; automatic retries have stopped. "
+            "Resume after narrowing the next action: write or edit the deliverable "
+            "in smaller file chunks, then submit it and keep the final reply short."
+            f"{saved}"
         )
 
     @staticmethod
