@@ -6,11 +6,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
-from pal.execution.git_tool import GitTool, classify_git_command
+from pal.execution.git_tool import GitTool, ScopedGitReadPlan, classify_git_command
 from pal.shared import RuntimeStatus
 
 
@@ -169,6 +171,23 @@ class GitToolTests(unittest.TestCase):
             self.assertEqual(result.structured["classification"]["operation_kind"], "read")
             self.assertIn("?? new.txt", result.structured["stdout"])
             self.assertIn("git status", result.llm_text)
+
+    def test_internal_scoped_plan_is_immutable_and_reclassifies_original_request(self) -> None:
+        policy = classify_git_command("status --short")
+        plan = ScopedGitReadPlan(policy, Path.cwd(), (":(top,literal)semi;colon",))
+        with self.assertRaises(FrozenInstanceError):
+            plan.path_operands = ("outside",)
+        with self.assertRaises(FrozenInstanceError):
+            plan.policy.tokens = ("reset", "--hard")
+        for forged in (
+            replace(plan, policy=replace(policy, raw="status; touch SCOPED_SENTINEL")),
+            replace(plan, policy=replace(policy, tokens=("reset", "--hard"))),
+            replace(plan, policy=classify_git_command("restore -- path.txt")),
+        ):
+            with self.subTest(plan=forged), patch("pal.execution.git_tool._run_git") as run:
+                with self.assertRaisesRegex(ValueError, "original classified read"):
+                    GitTool()._invoke_scoped_read(forged, cwd=Path.cwd())
+                run.assert_not_called()
 
     def test_restore_mutation_records_audit_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

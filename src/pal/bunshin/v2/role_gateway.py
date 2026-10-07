@@ -29,7 +29,7 @@ from pal.bunshin.v2.graph_compiler import (
 )
 from pal.bunshin.v2.graph_satellites import FamilyGraphSatelliteProjector
 from pal.bunshin.v2.graph_protocol import GraphSourceMap, RoleBinding
-from pal.bunshin.v2.git_scope import scoped_role_git_read_command
+from pal.bunshin.v2.git_scope import scoped_role_git_read_plan
 from pal.bunshin.v2.role_contracts import (
     family_execution_adapter,
     validate_family_binding_payload,
@@ -803,14 +803,16 @@ class RoleAssignmentGateway:
         if not cwd.is_relative_to(workspace_root):
             raise ValueError("Git cwd is outside the assigned repository workspace")
 
-        scoped_command = scoped_role_git_read_command(
+        plan = scoped_role_git_read_plan(
             prompt_pack=prompt_pack,
             assignment=dict(authenticated.get("assignment") or {}),
             artifact_reader=self.service.artifacts.read_json,
             policy=policy,
+            repository_root=workspace_root,
+            cwd_prefix="" if cwd == workspace_root else cwd.relative_to(workspace_root).as_posix(),
         )
 
-        result = GitTool().invoke({"cmd": scoped_command, "cwd": str(cwd)})
+        result = GitTool()._invoke_scoped_read(plan, cwd=cwd)
         structured = dict(result.structured or {})
         # A pre-execution refusal has no native Git process result. Keep it on
         # the gateway error path, which the worker shim reports as a refusal.

@@ -57,11 +57,15 @@ def assert_failed_without_process(events):
     assert PRIVATE not in json.dumps(events)
 
 
-def test_scoped_command_refusal_is_not_a_native_exit_code(tmp_path):
-    gateway, events = gateway_fixture(tmp_path, scope=f"src/{PRIVATE};literal")
-    # Run the real scope compiler and GitTool classifier. The second classifier
-    # rejects the Manager-added path before any native Git process can start.
-    with patch("pal.execution.git_tool._run_git") as run_git:
+def test_scoped_tool_refusal_is_not_a_native_exit_code(tmp_path):
+    gateway, events = gateway_fixture(tmp_path)
+    result = CapabilityResult(status=RuntimeStatus.FORBIDDEN, llm_text=PRIVATE,
+        structured={"error_code": "GIT_COMMAND_BLOCKED"})
+    # A wrapper refusal must stay on the error path even when it returns no
+    # process fields. Literal Manager paths are covered by the scoped-read tests.
+    with patch("pal.execution.git_tool._run_git") as run_git, patch(
+        "pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result,
+    ):
         with pytest.raises(ToolRejectedError, match="rejected.*before execution") as caught:
             invoke(gateway)
     run_git.assert_not_called()
@@ -77,7 +81,7 @@ def test_rejection_status_cannot_be_overridden_by_process_fields(tmp_path, statu
     result = CapabilityResult(status=status, llm_text=PRIVATE, structured={
         "error_code": "GIT_COMMAND_BLOCKED", "returncode": 0, "stdout": PRIVATE, "stderr": "",
     })
-    with patch("pal.bunshin.v2.role_gateway.GitTool.invoke", return_value=result) as invoke_tool:
+    with patch("pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result) as invoke_tool:
         with pytest.raises(ToolRejectedError):
             invoke(gateway)
     invoke_tool.assert_called_once()
@@ -98,7 +102,7 @@ def test_rejection_status_cannot_be_overridden_by_process_fields(tmp_path, statu
 def test_missing_or_malformed_process_result_is_not_fabricated(tmp_path, structured):
     gateway, events = gateway_fixture(tmp_path)
     result = CapabilityResult(status=RuntimeStatus.ERROR, llm_text=PRIVATE, structured=structured)
-    with patch("pal.bunshin.v2.role_gateway.GitTool.invoke", return_value=result):
+    with patch("pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result):
         with pytest.raises(ToolExecutionError, match="valid process result") as caught:
             invoke(gateway)
     assert caught.value.error_code == "git_read_invalid_result"
@@ -111,7 +115,7 @@ def test_non_process_status_cannot_become_native_success(tmp_path):
     result = CapabilityResult(status=RuntimeStatus.QUEUED, llm_text=PRIVATE, structured={
         "returncode": 0, "stdout": "", "stderr": "",
     })
-    with patch("pal.bunshin.v2.role_gateway.GitTool.invoke", return_value=result):
+    with patch("pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result):
         with pytest.raises(ToolExecutionError):
             invoke(gateway)
     assert_failed_without_process(events)
@@ -128,7 +132,7 @@ def test_native_process_fields_survive_without_coercion(tmp_path, code, stdout, 
         structured={"returncode": code, "stdout": stdout, "stderr": stderr,
                     "classification": {"operation_kind": "read"}},
     )
-    with patch("pal.bunshin.v2.role_gateway.GitTool.invoke", return_value=result):
+    with patch("pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result):
         response = invoke(gateway)
     assert response == result.structured
     assert events[-1]["payload"]["stage"] == "returned"
@@ -148,24 +152,29 @@ def test_real_git_empty_success_and_no_match_remain_native(tmp_path, command, co
     assert events[-1]["payload"]["stage"] == "returned"
 
 
-@pytest.mark.parametrize("scope,command,expected_code", [
-    (f"src/{PRIVATE};literal", ["status", "--short"], git_shim.GIT_TRAP_EXIT_CODE),
-    ("src", ["status", "--short"], 0),
-    ("src", ["grep", "missing_pattern"], 1),
-    ("src", ["status", "--definitely-not-a-git-option"], 129),
+@pytest.mark.parametrize("command,expected_code,refuse", [
+    (["status", "--short"], git_shim.GIT_TRAP_EXIT_CODE, True),
+    (["status", "--short"], 0, False),
+    (["grep", "missing_pattern"], 1, False),
+    (["status", "--definitely-not-a-git-option"], 129, False),
 ])
 def test_gateway_rpc_shim_roundtrip_preserves_refusal_and_native_results(
-    tmp_path, scope, command, expected_code,
+    tmp_path, command, expected_code, refuse,
 ):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "untracked.txt").write_text("fixture\n", encoding="utf-8")
-    gateway, events = gateway_fixture(tmp_path, scope=scope)
+    gateway, events = gateway_fixture(tmp_path)
     client_socket, server_socket = socket.socketpair()
     responses = []
     errors = []
 
     async def call(method, params):
+        if refuse:
+            result = CapabilityResult(status=RuntimeStatus.FORBIDDEN, llm_text=PRIVATE,
+                structured={"error_code": "GIT_COMMAND_BLOCKED"})
+            with patch("pal.bunshin.v2.role_gateway.GitTool._invoke_scoped_read", return_value=result):
+                return gateway.call(method, params)
         return gateway.call(method, params)
 
     def serve():

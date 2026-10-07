@@ -296,12 +296,38 @@ class GitTool:
 
         cwd = _resolve_cwd(args.get("cwd"))
         timeout_ms = _positive_int(args.get("timeout_ms"), default=self.default_timeout_ms, minimum=1)
+        return self._execute(policy, tokens=policy.tokens, cwd=cwd, timeout_ms=timeout_ms)
+
+    def _invoke_scoped_read(
+        self, plan: ScopedGitReadPlan, *, cwd: Path
+    ) -> CapabilityResult:
+        """Internal Manager entrypoint; never expose a token/trust bypass in tool args."""
+        policy = classify_git_command(plan.policy.raw)
+        if policy.operation_kind != "read" or policy != plan.policy:
+            raise ValueError("scoped Git read requires the original classified read command")
+        if not cwd.is_relative_to(plan.repository_root):
+            raise ValueError("scoped Git cwd is outside the authenticated repository")
+        return self._execute(
+            policy, tokens=plan.tokens, cwd=cwd, timeout_ms=self.default_timeout_ms,
+            repository_root=plan.repository_root,
+        )
+
+    def _execute(
+        self,
+        policy: GitCommandPolicy,
+        *,
+        tokens: tuple[str, ...],
+        cwd: Path,
+        timeout_ms: int,
+        repository_root: Path | None = None,
+    ) -> CapabilityResult:
         before = _git_snapshot(cwd) if policy.is_mutation else {}
         completed = _run_git(
-            policy.tokens,
+            tokens,
             cwd=cwd,
             timeout_ms=timeout_ms,
             read_only=policy.operation_kind == "read",
+            repository_root=repository_root,
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
@@ -316,8 +342,8 @@ class GitTool:
             after=after,
         )
         structured: dict[str, Any] = {
-            "cmd": cmd,
-            "tokens": ["git", *policy.tokens],
+            "cmd": policy.raw,
+            "tokens": ["git", *tokens],
             "cwd": str(cwd),
             "classification": policy.to_dict(),
             "returncode": completed.returncode,
@@ -338,6 +364,30 @@ class GitTool:
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
         return self._invoke(args, budget=kwargs.get("budget"))
+
+
+@dataclass(frozen=True)
+class ScopedGitReadPlan:
+    """Original worker request plus separately authenticated Manager pathspecs."""
+
+    policy: GitCommandPolicy
+    repository_root: Path
+    path_operands: tuple[str, ...] = ()
+    has_path_separator: bool = False
+
+    @property
+    def tokens(self) -> tuple[str, ...]:
+        if not self.path_operands:
+            return self.policy.tokens
+        # An empty worker delimiter already introduces the Manager operands.
+        # Explicit worker paths must never be combined with a broader scope.
+        tokens = self.policy.tokens
+        if self.has_path_separator:
+            if not tokens or tokens[-1] != "--":
+                raise ValueError("Manager scope requires an empty Git path separator")
+            return (*tokens, *self.path_operands)
+        return (*tokens, "--", *self.path_operands)
+
 
 def classify_git_command(cmd: object) -> GitCommandPolicy:
     raw = str(cmd or "").strip()
@@ -684,6 +734,7 @@ def _run_git(
     cwd: Path,
     timeout_ms: int,
     read_only: bool = False,
+    repository_root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     inherited_env = dict(os.environ)
     if read_only:
@@ -715,6 +766,14 @@ def _run_git(
                 "core.hooksPath=/dev/null",
             ]
         )
+    if repository_root is not None:
+        # Only the internal scoped plan supplies this authenticated checkout.
+        # Pin both identities so a descendant cwd cannot discover a nested repo.
+        # Git resolves ordinary .git directories and linked-worktree gitfiles;
+        # a missing/invalid identity fails without falling back to discovery.
+        git_prefix.extend(
+            ["--git-dir", str(repository_root / ".git"), "--work-tree", str(repository_root)]
+        )
     return subprocess.run(
         [*git_prefix, *safe_tokens],
         cwd=str(cwd),
@@ -723,6 +782,7 @@ def _run_git(
         text=True,
         timeout=timeout_ms / 1000.0,
         check=False,
+        shell=False,
     )
 
 

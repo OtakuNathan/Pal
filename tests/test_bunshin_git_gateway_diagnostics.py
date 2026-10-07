@@ -266,12 +266,13 @@ def test_existing_git_operation_runs_once_and_raw_classification_is_not_recorded
     result = CapabilityResult(status=RuntimeStatus.ERROR, llm_text=SECRET,
         structured={"returncode": 1, "stdout": SECRET,
         "stderr": SECRET, "classification": {"raw": SECRET}})
+    plan = object()
     with patch("pal.bunshin.v2.role_gateway.GitTool") as tool, patch(
-        "pal.bunshin.v2.role_gateway.scoped_role_git_read_command", return_value="status --short"
+        "pal.bunshin.v2.role_gateway.scoped_role_git_read_plan", return_value=plan
     ):
-        tool.return_value.invoke.return_value = result
+        tool.return_value._invoke_scoped_read.return_value = result
         response = invoke(gateway, cwd=str(tmp_path))
-        tool.return_value.invoke.assert_called_once_with({"cmd": "status --short", "cwd": str(tmp_path)})
+        tool.return_value._invoke_scoped_read.assert_called_once_with(plan, cwd=tmp_path)
     assert response == result.structured
     assert events[-1]["payload"]["returncode"] == 1
     assert_content_free(events)
