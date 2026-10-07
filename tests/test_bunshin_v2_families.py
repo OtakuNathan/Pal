@@ -994,7 +994,8 @@ workspace_policy: {}
             submit,
         )
         self.assertIn("Use when: Use after every checklist item is completed", submit)
-        self.assertIn("without a contracted product delta", submit)
+        self.assertIn("submit an unchanged baseline", submit)
+        self.assertIn("must have at least one contracted product file", submit)
 
         defect = str(
             providers["report_candidate_architecture_defect"]["description"]
@@ -1277,6 +1278,26 @@ workspace_policy: {}
                         self.assertFalse(lowered.endswith("_id"), name)
                         self.assertFalse(lowered.endswith("_ref"), name)
                         self.assertFalse(lowered.endswith("_sha"), name)
+
+    def test_candidate_provider_guidance_distinguishes_unchanged_software_from_artifact_products(self) -> None:
+        for adapter in ("software_git.v2", "artifact_bundle.v2"):
+            with self.subTest(adapter=adapter):
+                scoped = BunshinScopedExecutionRuntime(
+                    ExecutionRuntime(),
+                    ["op_bunshin_candidate_submit"],
+                    workspace={"execution_adapter": adapter},
+                )
+                provider = scoped.build_llm_tool_contracts()[0]["function"]
+                description = str(provider["description"])
+                self.assertEqual(provider["name"], "submit_candidate")
+                self.assertEqual(provider["input_schema"]["properties"], {})
+                self.assertIn("A software module may submit an unchanged baseline", description)
+                self.assertIn("when it already satisfies the bound contract", description)
+                self.assertIn("do not manufacture changes for submission", description)
+                self.assertIn("An artifact-bundle unit must have at least one contracted product file", description)
+                self.assertIn("every checklist item is completed, focused checks pass", description)
+                self.assertIn("Never add submit_candidate itself to the checklist", description)
+                self.assertNotIn("without a contracted product delta", description)
 
     def test_scoped_contract_provider_exposes_contract_submit(self) -> None:
         scoped = BunshinScopedExecutionRuntime(

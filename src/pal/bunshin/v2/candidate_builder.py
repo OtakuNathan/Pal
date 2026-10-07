@@ -50,11 +50,14 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "use_when": (
                 "Use after every checklist item is completed, focused checks pass, and the "
                 "implementation is ready for independent verification. Takes no arguments; "
-                "the Manager derives Git delta and journal fields."
+                "the Manager derives Git delta and journal fields. A software module may "
+                "submit an unchanged baseline when it already satisfies the bound contract "
+                "and focused checks pass; do not manufacture changes for submission."
             ),
             "do_not_use_when": (
-                "Do not use with unfinished checklist work, without a contracted product delta, "
-                "or when the correct terminal outcome is an architecture defect or module split. "
+                "Do not use with unfinished checklist work or when the correct terminal "
+                "outcome is an architecture defect or module split. An artifact-bundle unit "
+                "must have at least one contracted product file before submission. "
                 "Never add submit_candidate itself to the checklist."
             ),
             "failure_next_steps": (
