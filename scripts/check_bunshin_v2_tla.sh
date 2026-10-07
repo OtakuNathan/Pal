@@ -16,6 +16,7 @@ models=(
     ProduceCheckCycle
     VerifierDraftLifecycle
     VerifierFindingUpsert
+    VerifierRetryIdentity
     ImportedPlanLifecycle
     GraphGenerationLifecycle
     GraphExecutionLifecycle
@@ -115,6 +116,39 @@ for entry in \
     if [[ ${upsert_status} -eq 0 ]] || [[ "${upsert_output}" != *"Invariant ${invariant} is violated"* ]]; then
         echo "VerifierFindingUpsert${suffix} did not reproduce ${invariant}" >&2
         echo "${upsert_output}" >&2
+        exit 1
+    fi
+done
+
+# Retry ownership must ignore only attempt-local preparation, preserve current
+# drafts on a valid rebind, and reject malformed stored identity before recovery.
+for entry in \
+    RawFullRefs:OwnedRetryRetainsCurrent \
+    RawFullRefsSilentPass:NoSilentPassWithoutCRUD \
+    IgnoreCandidate:CandidateChangesNeverCurrent \
+    IgnoreSemanticRef:SemanticRefChangesNeverCurrent \
+    IgnorePolicy:VerificationPolicyNeverIgnored \
+    IgnoreSession:ForeignSessionNeverCurrent \
+    IgnoreGeneration:NewGenerationNeverCurrent \
+    IgnoreReceipt:ReceiptBackedSourceNeverCurrent \
+    IgnoreProjection:SubmittedProjectionNeverCurrent \
+    MalformedAsExternal:MalformedIdentityNeverRebinds \
+    RebindWitness:NoSemanticRebindWitness; do
+    suffix="${entry%%:*}"
+    invariant="${entry#*:}"
+    echo "==> TLC VerifierRetryIdentity${suffix} (expected ${invariant} counterexample)"
+    set +e
+    retry_output="$({
+        java -XX:+UseParallelGC -jar "${tla_jar}" \
+            -workers "${workers}" -cleanup \
+            -config "spec/bunshin_v2/VerifierRetryIdentity${suffix}.cfg" \
+            spec/bunshin_v2/VerifierRetryIdentity.tla
+    } 2>&1)"
+    retry_status=$?
+    set -e
+    if [[ ${retry_status} -eq 0 ]] || [[ "${retry_output}" != *"Invariant ${invariant} is violated"* ]]; then
+        echo "VerifierRetryIdentity${suffix} did not reproduce ${invariant}" >&2
+        echo "${retry_output}" >&2
         exit 1
     fi
 done

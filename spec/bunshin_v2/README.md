@@ -336,3 +336,39 @@ requires a reachable canonical insert, canonical update and removal of the same
 ID, with all operation requests/results retained for exact replay. Actual TLC
 checks live in `tests/test_bunshin_verifier_finding_upsert_model.py`; its static
 wiring assertion alone is not a model-checking claim.
+
+### Semantic retry identity refinement
+
+`VerifierRetryIdentity.tla` refines `RecoverSourceAsCurrent`'s `owned/sameInput`
+inputs without changing the checked draft lifecycle, evidence or finding-upsert
+models. It considers a stopped source worker and a new physical assignment for
+the same logical verifier session. A changed `workspace_preparation` reference
+alone must not turn current findings or cases into external history. That
+reference describes attempt-local preparation; Candidate, contract and derived
+`verification_policy` references remain semantic, even when the stored input
+fingerprint happens to match.
+
+| Focused action/property | Implementation boundary | Required concrete regression |
+| --- | --- | --- |
+| `SemanticRefs`, `SameSemanticEvaluation` | `draft_integrity.source_is_owned_retry` decodes both stored reference maps and uses the existing `role_inputs._semantic_role_input_refs` authority, also used by prompt construction; exclude only its attempt-local preparation reference | Different physical assignments with equal session/scalar identity, generation and semantic refs but different preparation artifacts remain the same owned retry; JSON key ordering/serialization differences do not alter semantic equality |
+| `Rebind`, `OwnedRetryRetainsCurrent` | The transaction-local ownership decision governs both source preference and `inherit_verifier_payload(..., frozen=False)` | Preserve current finding IDs/revisions and current testcase records across pause/resume into a new assignment; original source and its existing audit/history remain unchanged |
+| `OnlyOwnedSemanticDraftsRemainCurrent` and the Candidate/session/generation/ref/policy invariants | Keep equality of trusted session, workflow, aggregate type/ID, role, mode, submission kind, input fingerprint and evaluation generation; compare every semantic reference | Changed Candidate with an unchanged fingerprint is still external; foreign session, new generation, changed contract or verification policy also stays protected history; preparation-only changes are the positive control |
+| `ReceiptBackedSourceNeverCurrent`, `SubmittedProjectionNeverCurrent` | Keep `receipt_freezes_authoring` and stored source/sibling submission checks; semantic equality cannot reopen a submitted source | Pending or accepted source receipt with still-active draft projection remains immutable history; a submitted source projection never becomes editable current state |
+| `RejectMalformed`, `MalformedIdentityNeverRebinds` | Decode and validate both stored reference JSON/maps and execution-spec/generation metadata before classifying ownership; invalid metadata raises and rolls back recovery | Invalid JSON, wrong reference shapes, malformed execution spec or generation block recovery visibly; do not return `False` and publish an empty draft labeled `external_source` |
+| `NoSilentPassWithoutCRUD`, `PassStillRequiresEvidence` | Rebinding preserves current blocking findings; ordinary current finding CRUD and the existing fresh-evidence submission gate remain separate | A same-evaluation rebind cannot PASS merely because preparation changed. After a deliberate current finding edit/removal, the normal fresh-evidence gate may allow PASS |
+| `SourceNeverChanges`, `ImmutableHistoryPreserved` | Copy/reclassify into the new assignment only; never rewrite prior source artifacts, operation history or accepted receipts | Previously accepted reports remain byte-for-byte unchanged; valid foreign/submitted sources remain history rather than being silently adopted as current |
+
+The model represents one selected source and independently varies each trusted
+identity field, Candidate/contract/verification-policy refs, preparation identity,
+receipt phase, source projection and valid/malformed admission. Decoding and
+shape validation are abstracted by the admission flag; they require the concrete
+tests above. It does not change the no-assignment local lease-lineage fallback or
+prove multi-source ranking beyond the shared ownership predicate.
+
+The positive configuration checks preservation, immutable history and no silent
+PASS. Ten negative configurations include both the raw-full-reference comparison
+that loses current records and its later PASS-without-CRUD consequence. The
+`RebindWitness` configuration requires a trace with a different preparation
+reference/new physical assignment and preserved current findings plus cases.
+`tests/test_bunshin_verifier_retry_identity_model.py` runs these with actual TLC
+when the pinned jar is supplied; its wiring assertion alone is not a proof.
