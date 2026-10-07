@@ -52,7 +52,7 @@ class PromptContext:
             "initial_skill_injections": list(
                 (self.pack.metadata or {}).get("initial_skill_injections") or []
             ),
-            "output_contract": str(profile.get("output_contract_fragment") or ""),
+            "output_contract": self.output_contract(),
             "workspace_policy": self.workspace_policy(),
             "completion_policy": self.completion_policy(),
             "execution_strategy": self.execution_strategy(),
@@ -60,6 +60,26 @@ class PromptContext:
             "requirements_brief": requirements_brief,
             "workflow_model": "contract_v2",
         }
+
+    def output_contract(self) -> str:
+        contract = str(dict(self.pack.resolved_profile or {}).get("output_contract_fragment") or "")
+        binding = dict(dict(self.pack.metadata or {}).get("bunshin_v2") or {})
+        binding.update(dict(dict(self.pack.workspace or {}).get("bunshin_v2") or {}))
+        if (binding.get("role") != "architect" or not binding.get("submission_receipt_required")
+                or str(binding.get("harness_id") or "pal") != "pal"):
+            return contract
+        # The immutable profile is shared with external adapters, which record
+        # files after their harness exits. Native Pal must submit before exit.
+        contract = contract.replace(
+            "Manager validates and records the bound files after the harness finishes.",
+            "call submit_contract with no arguments and wait for successful Manager acceptance before finishing.",
+        )
+        return contract + "\n\n" + (
+            "After authoring and reconciling the bound architect.yaml and any required declaration files, complete the checklist "
+            "and call submit_contract with an empty argument object ({}). Finish only after successful Manager "
+            "acceptance records the durable submission receipt. A final response does not submit the files. "
+            "If submission is rejected, preserve the files and correct the reported validation error before retrying."
+        )
 
     def workspace_policy(self) -> dict[str, Any]:
         workspace_policy = self.pack.workspace.get("workspace_policy")
