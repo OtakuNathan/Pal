@@ -18,6 +18,11 @@ not a second DAG scheduler or semantic lifecycle owner.
 - `ProduceCheckCycle.tla` models the shared producer/checker protocol used by
   both planning and graph nodes, including generation-bound products and
   verdicts, human review, and triage resumption at an assignment boundary.
+- `VerifierDraftLifecycle.tla` models editable current findings and test cases,
+  the atomic durable submission boundary across both authoring drafts,
+  receipt/projection lag, immutable history, and evidence-bound PASS. Its
+  availability invariants explicitly permit changing or deleting completed
+  current findings until submission.
 - `GraphGenerationLifecycle.tla` separates authored architecture revisions
   from installed GraphIR generations. Superseded human-edit revisions consume
   no graph generation; every candidate targets the next append-only slot and
@@ -197,3 +202,70 @@ pinned jar, the TLC tests explicitly skip; the other Python checks are not a
 substitute for model checking. The full shell checker includes the positive
 model and requires a `FreshStartNeverForgetsInitialization` counterexample from
 `StartupRecoveryLifecycleUnsafe.cfg`.
+
+## Verifier draft/submission implementation boundary
+
+`VerifierDraftLifecycle` is a protocol requirement, not generated Python. One
+finding and one case stand for arbitrary current-owned records; finding kinds
+share the same CRUD contract. Two versions represent the `work_items` and
+`verification` draft rows. Pending durable receipt acceptance is the freeze
+point, including the window in which either draft still projects `active`.
+Marking/reconciling a draft `submitted` cannot retroactively choose a newer
+payload. Neither completion of a current finding nor recording a test result
+submits the assignment.
+
+| Model action/property | Required implementation boundary | Concrete conformance coverage |
+| --- | --- | --- |
+| `EditFinding`, `DraftAllowsFindingCRUD` | Current-owned finding create/update/delete in `work_items`; stable identity on update, fresh identity after delete/recreate; reducer and Manager persistence validate the target | All allowed finding kinds/dispositions; completed finding edit/delete; rejected stale/deleted target; caller-forged `origin` cannot grant ownership |
+| `EditCase`, `RecordEvidence`, `DraftAllowsCaseCRUD` | Case definition changes and execution-result upserts in the verification draft; current case content and evidence remain distinct | Add/replace/remove current cases; definition/content changes stale old evidence; execution can create fresh evidence; deleting an unrelated result cannot waive mandatory historical replay |
+| `CommitSubmit`, `AtomicSubmissionSnapshot` | `role_gateway._draft_submit` passes both observed versions; `RoleSubmissionsStore.record_role_submission` rechecks both versions and authority inside its write transaction before accepting the receipt | Barrier-controlled finding-edit/submit and case-edit/submit races: edit first rejects stale submit; receipt first rejects either edit; do not reconcile stale submit into a newer draft |
+| `ReceiptFreezesBothDrafts`, `ProjectSubmitted` | Every local/Manager draft write checks the authoritative assignment receipt in the same transaction as its write, including sibling authoring drafts | Inject failure after receipt persistence and before projection; both findings and cases remain frozen; exact receipt replay/recovery never changes sealed content |
+| `MutationsUseCurrentAuthority`, `MutationsUseCurrentVersion` | Authenticated role/assignment/input identity, current generation/fence, and affected draft CAS checked at persistence | Wrong role/assignment, old generation/fence, wrong CAS, expired attempt and mutation-versus-replacement race |
+| `PrepareSubmit`, exact finding comparison in `CommitSubmit` | Submitted finding projection equals authoritative current `work_items` findings, not an arbitrary authored subset | PASS payload omitting a current blocking finding is rejected even if verification-draft version is current |
+| `ReplayMutation`, `MutationReplayRejectsConflicts` | Same draft-scoped operation key and semantic request hash deduplicate; altered expected CAS alone is not a new semantic request | Same-key/same-arguments retry does not advance version; same key/changed content is rejected; stale/frozen replay may reject but never writes |
+| `RecoverSourceAsCurrent`, `SourceReceiptsFreezeInheritance` | Classify source with stored ownership, input identity, source/sibling projection and authoritative receipt, never payload `origin` | Owned, same-input, unsubmitted retry recovers an editable current copy; external or submitted source becomes history; pending receipt plus still-active source projection cannot resurrect editable findings/cases |
+| `HistoryPreserved`, `HistoryCannotBeTargeted`, `ReceiptNeverChanges` | Separate immutable inherited/submitted source records from mutable current records; original archived retry source remains intact | Current update/delete preserves original external/prior receipts and required case references; original submitted finding/case content survives retry and inheritance |
+| `PassRequiresCurrentEvidence` | PASS requires fresh Candidate/corpus/case evidence, historical replay coverage and no current blocking finding | Withdraw a mistaken current finding, rerun required tests, then PASS; no forced PASS, unresolved current failure, empty case set or stale corpus receipt |
+
+Physical corpus writes are separate from SQLite transactions. `EditCorpus`
+models them separately from case-definition changes. `acceptedCorpus` records
+the content identity at submission validation/acceptance, while the sealed
+receipt retains its own identity. Refining the atomic corpus comparison requires
+serialization of supported corpus-writing operations with final validation and
+receipt acceptance, or sealing an immutable validated corpus snapshot with an
+equivalent ordering guarantee. A digest read performed earlier in the request
+alone does not provide that guarantee. The model does not claim SQLite locks
+ordinary filesystem writes. A later physical change leaves the receipt intact
+and removes its authority to represent the current corpus; it cannot manufacture
+fresh PASS evidence. Concrete race tests must establish the implementation's
+chosen boundary rather than treating this model as proof of filesystem locking.
+
+The source-classification operator exhausts active/submitted projections crossed
+with absent/pending/accepted receipt states, stored ownership and matching input.
+Actual payload parsing, stable record IDs, content hashes, artifact durability,
+schema validation and history partitioning still require the conformance tests
+above. The model deliberately has no liveness claim or promise that tests pass.
+Bounded edit/version counts constrain model exploration, not user authoring.
+The checked configurations allow two revisions per draft, one physical corpus
+write, two generations and two fence values. One physical write exercises both
+stale-before-submit and change-after-submit paths in separate traces. Replacing
+generation/fence selects a new draft-key operation namespace; the model clears
+only the active operation-log projection, not the archived source log. An
+operation record retains semantic content and its authority scope, while replay
+CAS arguments stay outside the semantic request hash.
+Here `kind/value` abstracts the complete semantic request, including every
+tool-argument field such as an exposed per-finding revision. Only the store's
+transport `expected_version` and authenticated context are excluded; changing a
+semantic revision with the same operation key must remain a conflict.
+
+`VerifierDraftLifecycle.cfg` checks safety, edit availability and immutable
+receipt/history temporal properties. Ten mutant configurations remove one
+guard each. `VerifierDraftLifecycleWithdrawalWitness.cfg` deliberately checks a false invariant:
+its required counterexample demonstrates a reachable delete-current-finding,
+fresh-evidence, accepted-PASS path with history retained. These expected
+counterexamples are part of `scripts/check_bunshin_v2_tla.sh`.
+
+`tests/test_bunshin_verifier_draft_model.py` runs real TLC when an existing
+`TLA2TOOLS_JAR` is supplied, otherwise explicitly skips TLC. Its supplemental
+Python scenarios exhaust four smaller finite spaces and source classifications;
+they are neither a TLA parser nor the full model nor production refinement proof.

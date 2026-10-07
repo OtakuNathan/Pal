@@ -14,6 +14,7 @@ fi
 models=(
     ModuleLifecycle
     ProduceCheckCycle
+    VerifierDraftLifecycle
     ImportedPlanLifecycle
     GraphGenerationLifecycle
     GraphExecutionLifecycle
@@ -53,6 +54,40 @@ for model in "${models[@]}"; do
         -cleanup \
         -config "spec/bunshin_v2/${model}.cfg" \
         "spec/bunshin_v2/${model}.tla"
+done
+
+# Negative controls exercise draft freeze, concurrency, authority, evidence,
+# ownership and replay. The final expected counterexample proves that deleting
+# a current draft finding can lead to PASS while immutable history is retained.
+for entry in \
+    ReceiptBlind:ReceiptFreezesBothDrafts \
+    SubmitWithoutCAS:AtomicSubmissionSnapshot \
+    StaleAuthority:MutationsUseCurrentAuthority \
+    StaleEvidence:PassRequiresCurrentEvidence \
+    HistoryRewrite:HistoryPreserved \
+    CompletedLocked:DraftAllowsFindingCRUD \
+    ReplayRewrite:ReceiptFreezesBothDrafts \
+    ConflictingReplay:MutationReplayRejectsConflicts \
+    OmitFinding:ReceiptFreezesBothDrafts \
+    ReceiptBlindInheritance:SourceReceiptsFreezeInheritance \
+    WithdrawalWitness:NoWithdrawalPassWitness; do
+    suffix="${entry%%:*}"
+    invariant="${entry#*:}"
+    echo "==> TLC VerifierDraftLifecycle${suffix} (expected ${invariant} counterexample)"
+    set +e
+    draft_output="$({
+        java -XX:+UseParallelGC -jar "${tla_jar}" \
+            -workers "${workers}" -cleanup \
+            -config "spec/bunshin_v2/VerifierDraftLifecycle${suffix}.cfg" \
+            spec/bunshin_v2/VerifierDraftLifecycle.tla
+    } 2>&1)"
+    draft_status=$?
+    set -e
+    if [[ ${draft_status} -eq 0 ]] || [[ "${draft_output}" != *"Invariant ${invariant} is violated"* ]]; then
+        echo "VerifierDraftLifecycle${suffix} did not reproduce ${invariant}" >&2
+        echo "${draft_output}" >&2
+        exit 1
+    fi
 done
 
 # Additional bounded peer-report classifications and the two-scope overlap.
