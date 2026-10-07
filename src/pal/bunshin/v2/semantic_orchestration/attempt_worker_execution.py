@@ -148,6 +148,10 @@ class WorkerExecution:
                     # to Manager delivery deduplication without changing the
                     # worker's public payload contract.
                     event["_attempt_id"] = str(attempt["attempt_id"])
+                    if event.get("event_kind") == "producer_tool_diagnostic":
+                        # Bind new operational records to this owned process,
+                        # never a different run named by worker output.
+                        event["_owner_run_id"] = run_id
                     events.append(event)
                     if self.publish_worker_event is not None:
                         await self.publish_worker_event(event)

@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pal.bunshin.producer_tool_diagnostics import (
+    MAX_PRODUCER_TOOL_DIAGNOSTICS, is_producer_pack, producer_tool_diagnostic,
+)
 from pal.bunshin.verifier_tool_diagnostics import (
     VerifierFailureProvenance, capture_verifier_failure, is_verifier_pack,
     record_verifier_failure, verifier_tool_alias, verifier_tool_diagnostic,
@@ -9,7 +12,7 @@ from pal.bunshin.runner_components.prompt_values import _BUNSHIN_TOOL_RESULT_RET
 from pal.bunshin.runner_components.progress_text import _json_preview
 from pal.bunshin.runner_components.progress_text import _preview_text
 from pal.shared.tool_protocol import ToolCallIR
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from pal.core.turns import TurnContinuation
 from pal.bunshin.scoped_execution import _effective_capability_name
@@ -26,6 +29,7 @@ class ToolObservation:
     reporter: Reporter
     tool_execution: ToolExecution
     tool_session: ToolSession
+    _producer_diagnostic_count: int = field(default=0, init=False, repr=False)
 
     async def execute_bunshin_tool_with_observation(
         self,
@@ -39,6 +43,7 @@ class ToolObservation:
     ) -> ToolExecutionResult:
         index = len(continuation.pending_tool_results)
         await self.emit_verifier_diagnostic(state, call, index, "started")
+        await self.emit_producer_diagnostic(state, call, index, "started")
         target_name = _effective_capability_name(call)
         await self.reporter.emit_progress(
             "tool_call_started",
@@ -88,6 +93,7 @@ class ToolObservation:
             except Exception as exc:
                 record_verifier_failure(exc)
                 await self.emit_verifier_diagnostic(state, call, index, "failed", provenance=capture.provenance)
+                await self.emit_producer_diagnostic(state, call, index, "failed")
                 self.reporter.append_debug_log(
                     "tool_call_failed",
                     {
@@ -110,6 +116,7 @@ class ToolObservation:
                 )
                 raise
             await self.emit_verifier_diagnostic(state, call, index, "completed", result=result, provenance=capture.provenance)
+            await self.emit_producer_diagnostic(state, call, index, "completed", result=result)
         state.tool_call_count += 1
         self.tool_session.observe_count(max(
             self.tool_session.observed_tool_call_count,
@@ -139,6 +146,27 @@ class ToolObservation:
             text_preview=_preview_text(_tool_result_text(result)),
         )
         return result
+
+    async def emit_producer_diagnostic(
+        self, state: BunshinAgentLoopState, call: ToolCallIR, index: int,
+        stage: Literal["started", "completed", "failed"], *,
+        result: ToolExecutionResult | None = None,
+    ) -> None:
+        try:
+            if (self._producer_diagnostic_count >= MAX_PRODUCER_TOOL_DIAGNOSTICS
+                    or not is_producer_pack(self.reporter.pack)):
+                return
+            payload = producer_tool_diagnostic(
+                call, round_index=state.llm_round_count, tool_call_index=index,
+                stage=stage, result=result,
+            )
+            if payload is not None:
+                # Count attempts even when the transport fails. Never retry or
+                # replace the tool result because optional telemetry failed.
+                self._producer_diagnostic_count += 1
+                await self.reporter.emit("producer_tool_diagnostic", payload)
+        except Exception:
+            return
 
     async def emit_verifier_diagnostic(
         self, state: BunshinAgentLoopState, call: ToolCallIR, index: int,

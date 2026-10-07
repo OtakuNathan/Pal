@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.bunshin.producer_tool_diagnostics import MAX_PRODUCER_TOOL_DIAGNOSTICS
+from pal.bunshin.git_gateway_diagnostics import MAX_GIT_GATEWAY_DIAGNOSTICS
 from pal.bunshin.v2.storage.serialization import _json
 import json
 from dataclasses import dataclass
@@ -36,6 +38,18 @@ class RoleEventsStore:
             ).fetchone()
             if invocation is None:
                 return
+            diagnostic_limit = {
+                "producer_tool_diagnostic": MAX_PRODUCER_TOOL_DIAGNOSTICS,
+                "git_gateway_diagnostic": MAX_GIT_GATEWAY_DIAGNOSTICS,
+            }.get(event_kind)
+            if diagnostic_limit is not None:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM bunshin_v2_worker_events "
+                    "WHERE invocation_id = ? AND event_kind = ?",
+                    (invocation_id, event_kind),
+                ).fetchone()[0]
+                if count >= diagnostic_limit:
+                    return
             connection.execute(
                 """
                 INSERT INTO bunshin_v2_worker_events(

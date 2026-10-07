@@ -33,6 +33,9 @@ from pal.foundation.fd_lease import fd_lease_snapshot
 from pal.llm.usage import LLMUsageLedger
 from pydantic import ValidationError
 from pal.bunshin.verifier_tool_diagnostics import VerifierToolDiagnostic, is_verifier_pack
+from pal.bunshin.producer_tool_diagnostics import (
+    MAX_PRODUCER_TOOL_DIAGNOSTICS, ProducerToolDiagnostic, is_producer_pack,
+)
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.config import effective_bunshin_runtime_config
 from pal.bunshin.event_delivery import BunshinEventDelivery
@@ -290,6 +293,7 @@ class BunshinRunState:
     pending_clarification: dict[str, Any] = field(default_factory=dict)
     pending_terminal_status: str = ""
     process_group_reaped: bool = False
+    producer_diagnostic_count: int = field(default=0, init=False, repr=False)
 
     def summary(self) -> dict[str, Any]:
         active = self.status not in _TERMINAL_RUN_STATUSES
@@ -933,8 +937,37 @@ class BunshinManager:
     async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
         delivery_attempt_id = str(item.pop("_attempt_id", "") or "")
+        owner_run_id = item.pop("_owner_run_id", None)
         run_id = str(item.get("run_id") or "")
         state = self.runs.get(run_id)
+        if item.get("event_kind") == "git_gateway_diagnostic":
+            # This record is emitted only within the authenticated Manager
+            # gateway. Worker-supplied lookalikes have no recording authority.
+            return
+        if item.get("event_kind") == "producer_tool_diagnostic":
+            # Only the Manager's implementation binding supplies authority and
+            # identity. Keep this operational record out of chat and role state.
+            state = self.runs.get(owner_run_id) if isinstance(owner_run_id, str) else None
+            if (state is None or not delivery_attempt_id or not is_producer_pack(state.pack)
+                    or state.producer_diagnostic_count >= MAX_PRODUCER_TOOL_DIAGNOSTICS):
+                return
+            try:
+                diagnostic = ProducerToolDiagnostic.model_validate(item.get("payload"))
+                diagnostic = ProducerToolDiagnostic.model_validate({
+                    **diagnostic.model_dump(), "attempt_id": delivery_attempt_id,
+                })
+            except ValidationError:
+                return
+            state.producer_diagnostic_count += 1
+            try:
+                self.v2_service.repository.role_events.record_worker_event({
+                    "event_kind": "producer_tool_diagnostic",
+                    "invocation_id": state.pack.invocation_id,
+                    "payload": diagnostic.model_dump(),
+                })
+            except Exception:
+                pass
+            return
         if item.get("event_kind") == "verifier_tool_diagnostic":
             # This operational record has its own strict contract even with
             # prompt logging enabled. Do not route it to chat or role state.

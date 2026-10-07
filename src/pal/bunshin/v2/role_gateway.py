@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
+from pal.bunshin.git_gateway_diagnostics import GitGatewayDiagnostics
 from pal.bunshin.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.v2.role_gateway_client import role_gateway_client_from_env, RoleGatewayArtifactStore
 from pal.bunshin.v2.architecture_templates import (
@@ -97,6 +98,9 @@ class RoleAssignmentGateway:
     """Narrow Manager-owned state surface exposed to sandboxed role invocations."""
 
     service: BunshinV2WorkflowService
+    _git_diagnostics: GitGatewayDiagnostics = field(
+        default_factory=GitGatewayDiagnostics, init=False, repr=False, compare=False,
+    )
 
     @property
     def repository(self):
@@ -158,7 +162,19 @@ class RoleAssignmentGateway:
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
         if method == "git_read":
-            return self._git_read(authenticated, payload)
+            def record_event(event: Mapping[str, Any]) -> None:
+                self.repository.role_events.record_worker_event(event)
+
+            diagnostic = self._git_diagnostics.started(
+                authenticated, payload.get("cmd"), record_event,
+            )
+            try:
+                result = self._git_read(authenticated, payload)
+            except BaseException as exc:
+                self._git_diagnostics.failed(diagnostic, exc, record_event)
+                raise
+            self._git_diagnostics.returned(diagnostic, result, record_event)
+            return result
         raise ValueError(f"role gateway method is not allowed: {method}")
 
     def _bound_input_json(
