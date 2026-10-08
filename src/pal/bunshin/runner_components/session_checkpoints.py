@@ -155,24 +155,18 @@ class SessionCheckpoints:
         response_keys: list[str],
     ) -> dict[str, Any]:
         """Capture loop state; this alone does not authorize durable restart."""
+        opening_event = continuation.opening_event
         return {
             "initial_instruction": str(initial_instruction),
             "response_keys": list(response_keys),
-            "active_input_id": str(
-                getattr(
-                    getattr(continuation, "opening_event", None),
-                    "event_id",
-                    "",
-                )
-                or ""
-            ),
+            "active_input_id": str(opening_event.event_id or "") if opening_event is not None else "",
             "llm_round_count": int(state.llm_round_count),
             "tool_call_count": int(state.tool_call_count),
             "output_length_recovery_count": int(
-                getattr(state, "output_length_recovery_count", 0) or 0
+                state.output_length_recovery_count or 0
             ),
             "pending_output_length_recovery_note": str(
-                getattr(state, "pending_output_length_recovery_note", "") or ""
+                state.pending_output_length_recovery_note or ""
             ),
             "tool_batch_count": int(continuation.tool_batch_count),
             "preferred_llm_endpoint_id": str(
@@ -191,7 +185,7 @@ class SessionCheckpoints:
                 "memory_candidate_records": [
                     dict(item)
                     for item in list(
-                        getattr(state.memory_candidate_sink, "records", ()) or ()
+                        state.memory_candidate_sink.records or ()
                     )
                     if isinstance(item, Mapping)
                 ],

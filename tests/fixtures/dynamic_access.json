@@ -295,26 +295,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(continuation, 'opening_event', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(getattr(continuation, 'opening_event', None), 'event_id', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state, 'output_length_recovery_count', 0)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state, 'pending_output_length_recovery_note', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner_components/session_checkpoints.py:SessionCheckpoints.persist_agent_session_checkpoint:getattr(state.memory_candidate_sink, 'records', ())": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bunshin/runner_components/tool_execution.py:ToolExecution.execute_allowed_tool:getattr(execution_runtime, 'allowed_capabilities', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."

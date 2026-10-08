@@ -1669,6 +1669,8 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
 
             class FakeExecution:
+                workspace = pack.workspace
+
                 async def execute_tool_async(self, call, **kwargs):
                     _ = kwargs
                     calls.append(str(call.args.get("cmd") or ""))
@@ -1724,6 +1726,8 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
 
             class AliasExecution:
+                workspace = pack.workspace
+
                 def resolve_capability_address(self, name):
                     return {"read_file": "op_file_read"}.get(str(name), str(name))
 

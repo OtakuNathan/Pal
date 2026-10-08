@@ -2,6 +2,7 @@ from __future__ import annotations
 from pal.bunshin.storage.serialization import _snapshot_from_row
 from pal.bunshin.storage.serialization import _decode_json_columns
 import json
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.foundation import utc_now
@@ -374,49 +375,59 @@ class QueriesStore:
         """Return durable execution sources for one worker-owned aggregate."""
 
         self.database.ensure_schema()
-        sources: list[str] = []
         now = utc_now()
         with self.database.read_connection() as connection:
-            if lease_resource_key:
-                lease = connection.execute(
-                    """
-                    SELECT 1 FROM bunshin_v2_leases
-                    WHERE resource_key = ? AND owner_id != '' AND expires_at > ?
-                    LIMIT 1
-                    """,
-                    (str(lease_resource_key), now),
-                ).fetchone()
-                if lease is not None:
-                    sources.append("live_lease")
-            pending_effect = connection.execute(
-                """
-                SELECT 1 FROM bunshin_v2_outbox
-                WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
-                  AND status IN ('pending', 'inflight')
-                LIMIT 1
-                """,
-                (str(workflow_id), aggregate_type.value, str(aggregate_id)),
-            ).fetchone()
-            if pending_effect is not None:
-                sources.append("outbox")
-            durable_assignment = connection.execute(
-                """
-                SELECT 1 FROM bunshin_v2_role_assignments
-                WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
-                  AND state IN (?, ?, ?, ?, ?)
-                LIMIT 1
-                """,
-                (
-                    str(workflow_id),
-                    aggregate_type.value,
-                    str(aggregate_id),
-                    RoleAssignmentState.QUEUED.value,
-                    RoleAssignmentState.CLAIMED.value,
-                    RoleAssignmentState.RUNNING.value,
-                    RoleAssignmentState.RETRY_QUEUED.value,
-                    RoleAssignmentState.RESULT_RECORDED.value,
-                ),
-            ).fetchone()
-            if durable_assignment is not None:
-                sources.append("role_assignment")
-        return tuple(sources)
+            return _read_liveness_sources(
+                connection, workflow_id=workflow_id, aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id, lease_resource_key=lease_resource_key, now=now,
+            )
+
+
+def _read_liveness_sources(
+    connection: sqlite3.Connection, *, workflow_id: str, aggregate_type: AggregateType,
+    aggregate_id: str, lease_resource_key: str, now: str,
+) -> tuple[str, ...]:
+    sources: list[str] = []
+    if lease_resource_key:
+        lease = connection.execute(
+            """
+            SELECT 1 FROM bunshin_v2_leases
+            WHERE resource_key = ? AND owner_id != '' AND expires_at > ?
+            LIMIT 1
+            """,
+            (str(lease_resource_key), now),
+        ).fetchone()
+        if lease is not None:
+            sources.append("live_lease")
+    pending_effect = connection.execute(
+        """
+        SELECT 1 FROM bunshin_v2_outbox
+        WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+          AND status IN ('pending', 'inflight')
+        LIMIT 1
+        """,
+        (str(workflow_id), aggregate_type.value, str(aggregate_id)),
+    ).fetchone()
+    if pending_effect is not None:
+        sources.append("outbox")
+    durable_assignment = connection.execute(
+        """
+        SELECT 1 FROM bunshin_v2_role_assignments
+        WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+          AND state IN (?, ?, ?, ?, ?)
+        LIMIT 1
+        """,
+        (
+            str(workflow_id),
+            aggregate_type.value,
+            str(aggregate_id),
+            RoleAssignmentState.QUEUED.value,
+            RoleAssignmentState.CLAIMED.value,
+            RoleAssignmentState.RUNNING.value,
+            RoleAssignmentState.RETRY_QUEUED.value,
+            RoleAssignmentState.RESULT_RECORDED.value,
+        ),
+    ).fetchone()
+    if durable_assignment is not None:
+        sources.append("role_assignment")
+    return tuple(sources)

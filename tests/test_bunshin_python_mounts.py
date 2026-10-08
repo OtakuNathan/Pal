@@ -17,7 +17,7 @@ class BunshinPythonMountTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="pal_python_mounts_")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.prefix = self.root / "relocated" / "python"
         self.library = self.prefix / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
         (self.library / "encodings").mkdir(parents=True)
@@ -55,6 +55,16 @@ class BunshinPythonMountTests(unittest.TestCase):
         ):
             self.assertEqual(sandbox._python_runtime_paths(), (self.library, self.executable))
             paths.assert_called_once_with(vars={"base": str(self.prefix), "platbase": str(self.prefix)})
+
+    def test_parent_directory_alias_resolves_binary_and_libraries(self) -> None:
+        alias = self.root / "runtime-alias"
+        alias.symlink_to(self.prefix, target_is_directory=True)
+        self.alias = alias / "bin" / "python"
+        self.paths = {
+            name: str(alias / Path(path).relative_to(self.prefix))
+            for name, path in self.paths.items()
+        }
+        self.assertEqual(self.runtime_paths(), (self.library, self.executable))
 
     def test_distinct_existing_platform_library_is_narrow_and_deduplicated(self) -> None:
         platform_library = self.prefix / "lib64" / self.library.name

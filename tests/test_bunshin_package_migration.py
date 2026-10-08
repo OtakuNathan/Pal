@@ -133,8 +133,9 @@ def test_same_pal_harness_pins_old_generation_and_restores_checkpoint(role, comp
             runner = runner_for(role.runtime_root, pack)
             await runner.components.session_checkpoints.persist_agent_session_checkpoint(
                 bundle, SimpleNamespace(llm_round_count=39, tool_call_count=66,
+                    output_length_recovery_count=0, pending_output_length_recovery_note="",
                     memory_service=bundle.memory_service, memory_candidate_sink=SimpleNamespace(records=[])),
-                SimpleNamespace(pending_tool_call_batch=[], pending_tool_results=[], tool_batch_count=0,
+                SimpleNamespace(opening_event=None, pending_tool_call_batch=[], pending_tool_results=[], tool_batch_count=0,
                     preferred_llm_endpoint_id="", preferred_llm_model_id=""),
                 initial_instruction=pack.instruction, response_keys=[assignment["assignment_id"]])
             original = runner.components.session_checkpoints.agent_session_checkpoint

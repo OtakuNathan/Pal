@@ -58,7 +58,7 @@ class ToolExecution:
             self.status.block(f"{admission.message}: {target_name}")
             return admission.to_result()
         delegate = execution_runtime
-        evidence_workspace = dict(getattr(execution_runtime, "workspace", self.pack.workspace) or {})
+        evidence_workspace = dict(execution_runtime.workspace or {})
         scoped_verifier_sessions = (
             _bound_verifier_context(evidence_workspace) is not None
             and execution_runtime.role_execution_sessions is self.tool_session.execution_sessions

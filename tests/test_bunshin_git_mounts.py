@@ -18,7 +18,7 @@ class BunshinGitMountTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="pal_git_mounts_")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.core = self.root / "git-core"
         self.core.mkdir()
         self.shims = self.root / "shims"

@@ -32,7 +32,7 @@ from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 class BunshinV2RoleGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-")).resolve()
         self.service = BunshinWorkflowService(self.runtime_root)
         self.gateway = RoleAssignmentGateway(self.service)
         self.workspace = self.runtime_root / "workspace"

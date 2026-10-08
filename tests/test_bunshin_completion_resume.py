@@ -78,9 +78,11 @@ async def seed_checkpoint(root, bundle):
     runner = make_runner(root, output=path)
     state = SimpleNamespace(
         llm_round_count=39, tool_call_count=66, memory_service=bundle.memory_service,
+        output_length_recovery_count=0, pending_output_length_recovery_note="",
         memory_candidate_sink=SimpleNamespace(records=[]),
     )
     continuation = SimpleNamespace(
+        opening_event=None,
         pending_tool_call_batch=[], pending_tool_results=[], tool_batch_count=0,
         preferred_llm_endpoint_id="", preferred_llm_model_id="",
     )

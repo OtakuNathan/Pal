@@ -73,6 +73,7 @@ def test_restored_native_loop_consumes_new_contract_without_rewriting_profile(tm
                 bundle,
                 SimpleNamespace(
                     llm_round_count=11, tool_call_count=7, memory_service=memory,
+                    output_length_recovery_count=0, pending_output_length_recovery_note="",
                     memory_candidate_sink=SimpleNamespace(records=[]),
                 ),
                 SimpleNamespace(

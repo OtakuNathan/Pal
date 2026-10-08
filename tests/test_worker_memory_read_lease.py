@@ -78,6 +78,9 @@ class WorkerMemoryReadLeaseTests(unittest.TestCase):
                     readonly.pinned("workflow")
 
     def test_generation_connection_closes_before_reader_lock(self):
+        alias = Path(self.temp.name) / "runtime-alias"
+        alias.symlink_to(Path(self.temp.name).resolve(), target_is_directory=True)
+        self.storage = MemoryStorage(alias)
         lock_path = self.storage.path(self.generation).parent / "readers.lock"
         closed = []
         testcase = self
@@ -86,7 +89,7 @@ class WorkerMemoryReadLeaseTests(unittest.TestCase):
             def close(self):
                 with closing(self.execute("PRAGMA database_list")) as cursor:
                     path = Path(cursor.fetchone()[2])
-                if path == testcase.storage.path(testcase.generation):
+                if path == testcase.storage.path(testcase.generation).resolve():
                     with lock_path.open("rb") as reader:
                         with testcase.assertRaises(BlockingIOError):
                             fcntl.flock(reader, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -99,7 +102,7 @@ class WorkerMemoryReadLeaseTests(unittest.TestCase):
                 with lock_path.open("rb") as reader:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(reader, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assertEqual(closed, [self.storage.path(self.generation), self.storage.catalog_path])
+        self.assertEqual(closed, [self.storage.path(self.generation).resolve(), self.storage.catalog_path.resolve()])
         with lock_path.open("rb") as reader:
             fcntl.flock(reader, fcntl.LOCK_EX | fcntl.LOCK_NB)
 

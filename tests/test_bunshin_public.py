@@ -2900,6 +2900,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             state = SimpleNamespace(
                 llm_round_count=8,
                 tool_call_count=21,
+                output_length_recovery_count=0,
+                pending_output_length_recovery_note="",
                 memory_service=memory_service,
                 memory_candidate_sink=SimpleNamespace(
                     records=[
@@ -2922,6 +2924,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 pending_tool_call_batch=[],
                 pending_tool_results=[],
                 tool_batch_count=6,
+                opening_event=None,
                 preferred_llm_endpoint_id="glm",
                 preferred_llm_model_id="glm-5.2",
             )
