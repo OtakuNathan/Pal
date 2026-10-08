@@ -57,8 +57,11 @@ from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOu
 from pal.core.module_registry import ModuleHandle
 from pal.execution import CapabilityCall
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.foundation.log_paths import pal_log_path
+from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.shared.result_rendering import render_structured_for_llm
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import LLMGenerationResult
 from pal.llm.ir import LLMRequestIR
@@ -67,7 +70,7 @@ from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_f
 from pal.memory.mutations import content_hash
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.shared import ChannelEnvelope, EventKind, SourceKind, TurnDeliveryBinding
-from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
+from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus, ToolExecutionResult
 from pal.shared.payloads import extract_text_from_payload
 
 
@@ -702,25 +705,28 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if not normalized_turn_id:
             return CapabilityResult(
                 status=RuntimeStatus.INVALID,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="turn_id is required",
                 llm_text="Could not send attachment: turn_id is required.",
-                structured={"reason": "turn_id_required"},
+                structured={"reason": "turn_id_required", "error_code": "turn_id_required", "kind": "rejected", "retry": "correct_input"},
             )
         continuation = self.state.active_turns.get(normalized_turn_id)
         if not isinstance(continuation, TurnContinuation):
             return CapabilityResult(
                 status=RuntimeStatus.NOT_FOUND,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="active turn not found",
                 llm_text="Could not send attachment: active turn not found.",
-                structured={"reason": "turn_not_active", "turn_id": normalized_turn_id},
+                structured={"reason": "turn_not_active", "error_code": "turn_not_active", "kind": "rejected", "retry": "correct_input", "turn_id": normalized_turn_id},
             )
         if continuation.delivery_binding is None:
             return CapabilityResult(
                 status=RuntimeStatus.UNSUPPORTED,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="active turn has no delivery authority",
                 llm_text="Could not send attachment: active turn has no delivery authority.",
                 structured={
-                    "reason": "delivery_authority_missing",
+                    "reason": "delivery_authority_missing", "error_code": "delivery_authority_missing", "kind": "rejected", "retry": "correct_input",
                     "turn_id": normalized_turn_id,
                 },
             )
@@ -728,9 +734,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if not path.is_file():
             return CapabilityResult(
                 status=RuntimeStatus.NOT_FOUND,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text=f"attachment file not found: {path}",
                 llm_text=f"Could not send attachment: file not found at {path}.",
-                structured={"reason": "file_not_found", "path": str(path)},
+                structured={"reason": "file_not_found", "error_code": "file_not_found", "kind": "rejected", "retry": "correct_input", "path": str(path)},
             )
         try:
             resolved = path.resolve()
@@ -741,9 +748,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if not callable(queue_attachment):
             return CapabilityResult(
                 status=RuntimeStatus.UNSUPPORTED,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="channel runtime does not support attachments",
                 llm_text="Could not send attachment: channel runtime does not support attachments.",
-                structured={"reason": "attachment_not_supported"},
+                structured={"reason": "attachment_not_supported", "error_code": "attachment_not_supported", "kind": "rejected", "retry": "correct_input"},
             )
         normalized = AttachmentSpec(
             path=str(resolved),
@@ -1372,7 +1380,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         try:
             resolved = setter(requested)
         except ValueError as exc:
-            await self._complete_action_reply_async(action, str(exc))
+            await self._complete_action_reply_async(action, exception_report(exc))
             return
         status_builder = getattr(llm_runtime, "thinking_status", None)
         status = status_builder() if callable(status_builder) else {}
@@ -1428,7 +1436,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 if isinstance(result, dict):
                     dependent_refreshes[port_name] = dict(result)
             except Exception as exc:
-                dependent_refresh_errors[port_name] = f"{exc.__class__.__name__}: {exc}"
+                dependent_refresh_errors[port_name] = exception_report(exc)
         enabled_count = payload.get("enabled_count")
         primary = payload.get("primary_endpoint_id") or "-"
         active = payload.get("active_endpoint_id") or "-"
@@ -1562,6 +1570,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         enabled = bool(action.args.get("prompt_log_enabled"))
         self.state.prompt_log_enabled = enabled
         updated_ports: set[int] = set()
+        update_errors: list[str] = []
         for port_name, port in self.context.port_registry.items():
             if id(port) in updated_ports:
                 continue
@@ -1574,12 +1583,14 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
+                error = exception_report(exc)
+                update_errors.append(f"{port_name}: {error}")
                 self.state.diagnostics.append(
                     {
                         "kind": "runtime.prompt_log.dependent_update_failed",
                         "port": str(port_name),
                         "enabled": enabled,
-                        "error": f"{exc.__class__.__name__}: {exc}",
+                        "error": error,
                     }
                 )
         message = (
@@ -1587,6 +1598,12 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             if enabled
             else "Debug logging disabled for new turns and Bunshin role runs."
         )
+        if update_errors:
+            message = (
+                f"Core debug logging {'enabled' if enabled else 'disabled'} for new turns. "
+                "Some dependent runtimes did not confirm the update; their state may differ.\n"
+                + "\n".join(update_errors)
+            )
         await self._complete_action_reply_async(action, message)
 
     async def _handle_interrupt_turn_async(self, action: ControlAction) -> None:
@@ -1795,11 +1812,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                         )
                     )
                     await self._flush_control_status_async(action.route)
-                except Exception:
+                except Exception as exc:
                     # A presentation failure must not release the gate or
                     # authorize a second claim (X08).
                     self.state.diagnostics.append(
-                        {"kind": "compact.status_delivery_failed"}
+                        {"kind": "compact.status_delivery_failed", "error": exception_report(exc)}
                     )
             else:
                 await self.cache_warm_deadline.clear_for_compaction()
@@ -1823,7 +1840,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             # under whichever context is now authoritative (Q05/Q06).
             await self._start_next_queued_turn_async()
         if not run_result.success:
-            message = "Compaction failed - memory state was left unchanged."
+            message = f"Compaction did not complete ({run_result.status})."
             if run_result.status == "base_over_budget":
                 # B05: the fixed base (system prompt + tools shell) exceeds
                 # the context window on its own.  Compacting history cannot
@@ -1838,8 +1855,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 message = (
                     "热缓存已失效或无法复用，已停止自动尝试。原上下文保留，请按需手动 compact。"
                     if run_result.status == "hot_cache_unavailable"
-                    else f"Compact 未完成（已尝试 {run_result.attempts} 次）。原上下文保留，请稍后手动 compact。"
+                    else f"Compact 未完成（已尝试 {run_result.attempts} 次）。请先查看错误详情再决定是否重试。"
                 )
+            if run_result.diagnostic_details:
+                message += "\nCompaction diagnostics:\n" + run_result.diagnostic_details
             await self._complete_compact_reply_async(action, message)
             return
         result = run_result.memory_result
@@ -1849,6 +1868,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         normalization_diagnostics = compact_normalization_diagnostics(result)
         if normalization_diagnostics:
             reply_text += f" {len(normalization_diagnostics)} optional format issues normalized or skipped."
+        if run_result.diagnostic_details:
+            reply_text += "\nCompaction diagnostics:\n" + run_result.diagnostic_details
         await self._complete_compact_reply_async(
             action,
             reply_text,
@@ -1930,7 +1951,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             self.cache_warm_deadline.configure(enabled=False)
             message = "已关闭热缓存到期前的 compact 提醒。"
         except Exception as exc:
-            message = f"关闭热缓存提醒失败：{exc}"
+            message = f"关闭热缓存提醒失败：{exception_report(exc)}"
         return {
             "delivery": control_interactions.terminal_delivery_for_action(
                 action,
@@ -1954,9 +1975,15 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         result = await self.context.execution_runtime.execute_async(
             CapabilityCall(name=capability_name, args=dict(action.args))
         )
-        text = str(result.text or result.llm_text)
-        if control_interactions.is_interaction_action(action):
-            text = text[:240].strip() or text
+        text = str(result.llm_text or result.text)
+        if result.status != RuntimeStatus.OK:
+            text = diagnostic_text(render_structured_for_llm({
+                "status": result.status, "text": result.text, "llm_text": result.llm_text,
+                "structured": result.structured,
+                "effect_receipt": result.effect_receipt.model_dump(mode="json") if result.effect_receipt else None,
+                "recovery": result.recovery_hint,
+                "affordances": [item.model_dump(mode="json") for item in result.affordances],
+            }), limit=None)
         await self._complete_action_reply_async(action, text)
 
     async def _render_reset_prompt_async(self, request) -> None:
@@ -2348,11 +2375,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     def _render_failure_feedback_text(self, feedback: FailureUserFeedback) -> str:
         return self.failure_orchestrator.render_failure_feedback_text(feedback)
 
-    def _should_enter_failure_flow_for_tool_result(self, tool_result) -> bool:
-        if getattr(tool_result, "ok", True):
+    def _should_enter_failure_flow_for_tool_result(self, tool_result: ToolExecutionResult) -> bool:
+        if tool_result.ok:
             return False
-        text = str(getattr(tool_result, "text", "") or "")
-        return text.startswith("tool execution failed:") or text.startswith("capability execution failed:")
+        return (tool_result.structured or {}).get("error_code") == "handler_exception"
 
     def _stream_llm_request(
         self,

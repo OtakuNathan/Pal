@@ -5,6 +5,7 @@ from pal.memory.contracts import MEMORY
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
+from pal.shared.diagnostics import diagnostic_text, exception_report
 
 import asyncio
 import inspect
@@ -352,7 +353,8 @@ class TurnExecutor:
         if not run_result.success:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
-                text="Memory compaction failed; memory and the active tool RPC were left unchanged.",
+                text=("Memory compaction did not report success.\n"
+                      + "\n".join((*getattr(run_result, "failures", ()), *getattr(run_result, "failure_details", ())))),
                 payload=run_result,
             )
         compact_result = run_result.memory_result
@@ -582,29 +584,36 @@ class TurnExecutor:
                     else "."
                 )
             )
-            failure_result = await self._handle_failure_async(
-                FailureSignal(
-                    subsystem=failure_subsystem,
-                    component=failure_component,
-                    failure_kind=failure_kind,
-                    severity="high",
-                    primary_blocker=blocker_text,
-                    evidence={
-                        "llm_text": outcome.text,
-                        "preferred_model_id": continuation.preferred_llm_model_id,
-                        **failure_metadata,
-                    },
-                    related_ids={"turn_id": continuation.turn_id},
-                    safe_to_retry=False,
-                    repair_domain=(
-                        "core:persistence" if local_state_failure else "llm:core"
+            failure_detail = diagnostic_text(
+                str(outcome.text or "") + "\n" + json.dumps(thaw_json(failure_metadata), ensure_ascii=False, default=str), limit=None)
+            blocker_text += "\n" + failure_detail
+            try:
+                failure_result = await self._handle_failure_async(
+                    FailureSignal(
+                        subsystem=failure_subsystem,
+                        component=failure_component,
+                        failure_kind=failure_kind,
+                        severity="high",
+                        primary_blocker=blocker_text,
+                        evidence={
+                            "llm_text": outcome.text,
+                            "preferred_model_id": continuation.preferred_llm_model_id,
+                            **failure_metadata,
+                        },
+                        related_ids={"turn_id": continuation.turn_id},
+                        safe_to_retry=False,
+                        repair_domain=(
+                            "core:persistence" if local_state_failure else "llm:core"
+                        ),
                     ),
-                ),
-                origin="llm_request",
-                conversation_context={"turn_id": continuation.turn_id},
-            )
+                    origin="llm_request",
+                    conversation_context={"turn_id": continuation.turn_id},
+                )
+                feedback_text = self._render_failure_feedback_text(failure_result.user_feedback)
+            except Exception as exc:
+                feedback_text = "Failure recovery also failed:\n" + exception_report(exc)
             outcome = self._generation_result_from_text(
-                self._render_failure_feedback_text(failure_result.user_feedback),
+                blocker_text + "\n\n" + feedback_text,
                 finish_reason=LLMFinishReason.FALLBACK,
                 response_mode=LLMResponseMode.CHAT,
             )
@@ -690,69 +699,84 @@ class TurnExecutor:
                 tool_result = await self.context.execution_runtime.execute_tool_async(execution_call, allow_tools=not continuation.finalization_only, budget=tool_budget, turn_id=continuation.turn_id)
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
-            # Direct-synthesized model-visible errors obey the same bounded
-            # presentation as execution results: exception detail is capped,
-            # never streamed unbounded into the model view.
-            detail = str(exc)
-            if len(detail) > 400:
-                detail = detail[:200] + " ... " + detail[-150:]
+            detail = exception_report(exc)
             failure = (
-                f"Tool {execution_call.name} timed out before returning a result."
+                f"Tool {execution_call.name} timed out before returning a result.\n{detail}"
                 if isinstance(exc, TimeoutError)
                 else (
-                    f"Tool {execution_call.name} did not complete: "
-                    f"{exc.__class__.__name__}: {detail}"
+                    f"Tool {execution_call.name} did not return a result: "
+                    f"\n{detail}"
                 )
             )
             guidance = (
                 "Its side effects may be incomplete or unknown. Inspect the current state, "
                 "then retry the operation if appropriate."
             )
+            receipt = {
+                "kind": "failed",
+                "error_code": "tool_timeout" if isinstance(exc, TimeoutError) else "tool_rpc_failed",
+                "effect": "unknown",
+                "retry": "reconcile_first",
+            }
+            rendered = f"{failure}\n{guidance}\n\nTool result metadata: " + json.dumps(receipt, sort_keys=True)
             tool_result = ToolExecutionResult(
                 name=execution_call.name,
                 ok=False,
-                text=f"{failure}\n{guidance}",
-                llm_text=f"{failure}\n{guidance}",
+                text=rendered,
+                llm_text=rendered,
                 structured={
-                    "error_code": (
-                        "tool_timeout"
-                        if isinstance(exc, TimeoutError)
-                        else "tool_rpc_failed"
-                    ),
+                    **receipt,
                     "error_type": exc.__class__.__name__,
-                    "effect": "unknown",
-                    "retry": "reconcile_first",
+                    "error": detail,
                 },
                 call_id=getattr(execution_call, "call_id", None),
             )
         if not tool_result.ok:
             self.context.core_event_bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
         if self._should_enter_failure_flow_for_tool_result(tool_result):
-            failure_result = await self._handle_failure_async(
-                FailureSignal(
-                    subsystem="execution",
-                    component=execution_call.name,
-                    failure_kind="capability_failure",
-                    severity="medium",
-                    primary_blocker=str(tool_result.text or f"{execution_call.name} failed"),
-                    evidence={"tool_result": tool_result.structured or {}, "tool_name": execution_call.name},
-                    related_ids={"turn_id": continuation.turn_id},
-                    safe_to_retry=False,
-                    repair_domain="execution:runtime",
-                ),
-                origin="op_tool_call",
-                conversation_context={"turn_id": continuation.turn_id, "tool_name": execution_call.name},
-            )
+            try:
+                failure_result = await self._handle_failure_async(
+                    FailureSignal(
+                        subsystem="execution",
+                        component=execution_call.name,
+                        failure_kind="capability_failure",
+                        severity="medium",
+                        primary_blocker=str(tool_result.text or f"{execution_call.name} failed"),
+                        evidence={"tool_result": tool_result.structured or {}, "tool_name": execution_call.name},
+                        related_ids={"turn_id": continuation.turn_id},
+                        safe_to_retry=False,
+                        repair_domain="execution:runtime",
+                    ),
+                    origin="op_tool_call",
+                    conversation_context={"turn_id": continuation.turn_id, "tool_name": execution_call.name},
+                )
+                feedback_text = self._render_failure_feedback_text(failure_result.user_feedback)
+                failure_metadata = {
+                    "failure_status": failure_result.verification.status,
+                    "report_id": failure_result.report.report_id if failure_result.report is not None else None,
+                }
+            except Exception as exc:
+                # Recovery is additional evidence; its own failure must not
+                # discard the tool result that was already obtained.
+                diagnostic = exception_report(exc)
+                feedback_text = "Failure recovery also failed:\n" + diagnostic
+                failure_metadata = {"failure_recovery_error": diagnostic}
             tool_result = ToolExecutionResult(
                 name=execution_call.name,
                 ok=False,
-                text=self._render_failure_feedback_text(failure_result.user_feedback),
+                text=f"{tool_result.text}\n\n{feedback_text}",
                 structured={
-                    "failure_status": failure_result.verification.status,
-                    "report_id": failure_result.report.report_id if failure_result.report is not None else None,
+                    **dict(tool_result.structured or {}),
+                    **failure_metadata,
                 },
                 call_id=getattr(execution_call, "call_id", None),
-                llm_text=self._render_failure_feedback_text(failure_result.user_feedback),
+                llm_text=f"{tool_result.llm_text or tool_result.text}\n\n{feedback_text}",
+                snapshot_refs=tool_result.snapshot_refs,
+                replay_result_ref=tool_result.replay_result_ref,
+                status=tool_result.status,
+                invocation_result=tool_result.invocation_result,
+                context_delivery=tool_result.context_delivery,
+                context_messages=tool_result.context_messages,
             )
         self._log_tool_call_result(continuation, execution_call, tool_result)
         await self._maybe_echo_tool_result_async(continuation, execution_call, tool_result)
@@ -2214,7 +2238,7 @@ class TurnExecutor:
         except Exception as exc:
             return CompactionRunResult(
                 status="error",
-                failures=(f"promote failed: {exc}",),
+                failures=("promote failed: " + exception_report(exc),),
                 clock_kind=engine.policy.clock_kind,
                 clock_value=clock_value,
             )
@@ -2246,7 +2270,7 @@ class TurnExecutor:
                 status="no_benefit"
                 if type(exc).__name__ == "NoBeneficialCompaction"
                 else "error",
-                failures=(f"{type(exc).__name__}: {exc}",),
+                failures=(exception_report(exc),),
                 clock_kind=engine.policy.clock_kind,
                 clock_value=clock_value,
             )
@@ -2450,7 +2474,7 @@ class TurnExecutor:
                 clock_value=clock_value,
             )
         except Exception as exc:
-            fault = f"{type(exc).__name__}: {exc}"
+            fault = exception_report(exc)
             if committed_run_record() is not None:
                 # The engine installed and then failed while packaging
                 # the result; classification follows the owner's terminal

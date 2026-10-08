@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.foundation.diagnostics import exception_report
 from pal.memory.service import MemoryService
 from pal.memory.storage import MemoryStorage, MemoryDatabase
 from pal.memory.repository import MemoryDurableRepository
@@ -30,6 +31,8 @@ class DreamingService:
         self.run_id = None
         self.on_ready = None
         self.activation_error = ""
+        self.last_task_error = ""
+        self.preparation_diagnostics = []
 
     def configure(self, changes):
         if not isinstance(changes, dict):
@@ -68,6 +71,7 @@ class DreamingService:
         current = {"enabled": self.config.enabled, "current_configuration": asdict(self.config),
                    "next_due": due[0] if due and self.config.enabled else None,
                    "active_run_id": self.run_id if self.task is not None and not self.task.done() else None,
+                   **({"task_error": self.last_task_error} if self.last_task_error else {}),
                    "active_configuration": asdict(self.active_config) if self.active_config is not None and self.task is not None and not self.task.done() else None}
         if row is None:
             return {**current, "status": "not_found" if run_id else "idle", "enabled": self.config.enabled, "generation_id": self.storage.current()}
@@ -89,11 +93,11 @@ class DreamingService:
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
         try:
             return await asyncio.shield(task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled:
             try:
                 await task
-            except Exception:
-                pass
+            except Exception as exc:
+                raise cancelled from exc
             raise
 
     def create_run(self, *, slot=None):
@@ -114,6 +118,7 @@ class DreamingService:
     def start(self, *, slot=None, resume=None, dry_run=False):
         if self.task is not None and not self.task.done():
             return {"status": "running", "run_id": self.run_id}
+        self.last_task_error = ""
         if dry_run:
             self.run_id = None
             self.active_config = self.config
@@ -139,10 +144,22 @@ class DreamingService:
         return {"status": "started", "run_id": run_id}
 
     def _task_done(self, task):
-        # run() records failures; consume the task result without leaking a
-        # second unhandled exception through the resident loop.
+        # Cleanup and dry-run failures can escape run(). Keep them inspectable
+        # even if persisting the diagnostic itself fails.
         if not task.cancelled():
-            task.exception()
+            error = task.exception()
+            if error is not None:
+                self.last_task_error = exception_report(error)
+                if self.run_id:
+                    try:
+                        status = self.status(self.run_id)
+                        report = {**status.get("report", {}), "background_error": self.last_task_error}
+                        with self.storage.connection(write=True) as connection:
+                            connection.execute("UPDATE dreaming_runs SET status=?,report_json=?,updated_at=? WHERE run_id=?",
+                                ("completed" if status["status"] == "completed" else "failed",
+                                 json.dumps(report), utc_now(), self.run_id))
+                    except Exception as exc:
+                        self.last_task_error += "\nRecording the background failure also failed:\n" + exception_report(exc)
         if self.on_ready:
             self.on_ready()
 
@@ -164,6 +181,8 @@ class DreamingService:
             while repo.list_pending_embeddings(limit=8):
                 refreshed = prepared_provider.refresh_indexes(limit=8)
                 if not refreshed.get("refreshed"):
+                    if refreshed.get("last_embedding_error"):
+                        self.preparation_diagnostics.append(dict(refreshed))
                     break
             return discover_clusters(repo, config or self.config, storage=self.storage, review_scope=review_scope)
         finally:
@@ -201,7 +220,9 @@ class DreamingService:
         source = self.provider.repository
         candidate = None
         pipeline = None
-        report = {"outcome": "failed", "processed_groups": 0, "merged_groups": 0}
+        self.preparation_diagnostics = []
+        report = {"outcome": "failed", "processed_groups": 0, "merged_groups": 0,
+                  "preparation_diagnostics": self.preparation_diagnostics}
         try:
             self._resolve_main_provider()
             source = self.provider.repository
@@ -295,12 +316,19 @@ class DreamingService:
             # or local reconnection failed. Never repeat it or silently undo it.
             if pipeline is not None:
                 report["usage"] = pipeline.usage
-            if self.status(run_id)["status"] != "completed":
-                report["error"] = f"{type(exc).__name__}: {exc}"
+            status = self.status(run_id)
+            if status["status"] != "completed":
+                report["error"] = exception_report(exc)
                 self._phase(run_id, "failed", report)
-            elif self.provider.repository.generation_id != self.storage.current():
-                self.provider.repository.close()
-                self.provider.repository = self.storage.open()
+            else:
+                published_report = dict(status["report"])
+                published_report["post_publish_error"] = exception_report(exc)
+                with self.storage.connection(write=True) as connection:
+                    connection.execute("UPDATE dreaming_runs SET report_json=?,updated_at=? WHERE run_id=?",
+                        (json.dumps(published_report), utc_now(), run_id))
+                if self.provider.repository.generation_id != self.storage.current():
+                    self.provider.repository.close()
+                    self.provider.repository = self.storage.open()
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return self.status(run_id)
@@ -321,6 +349,7 @@ class DreamingService:
                 status = self.status(run_id)
                 outcome = status.get("report", {}).get("outcome")
                 text = ("记忆新版本已发布，但连接尚未恢复；Pal 仍处于维护状态，需要外部完整重启。" if self.activation_error
+                        else "记忆新版本已发布，但后续步骤出错，详情见 dreaming 运行报告。" if status.get("report", {}).get("post_publish_error")
                         else "Pal 睡醒了。本次未确认可安全合并的重复记忆。" if outcome == "no_changes"
                         else "Pal 睡醒了，重复记忆整理已完成。" if status["status"] == "completed"
                         else "Pal 睡醒了。本次整理未完成，继续使用原记忆库。")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.diagnostics import exception_report
+
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_WRITE,
     INDIRECT_CONTROL,
@@ -564,13 +566,14 @@ class LspManagerPluginProvider:
             return self._rpc_error(method, exc)
 
     def _rpc_error(self, method: str, exc: Exception) -> dict[str, Any]:
-        self.last_error = f"{exc.__class__.__name__}: {exc}"
+        self.last_error = exception_report(exc)
         # Keep cached observations available through inspect_lsp_provider, never as this
         # request's operation/result or as evidence of a running process.
         current = self._status_payload()
         current.pop("cached_snapshot", None)
         return {**current, "status": RuntimeStatus.ERROR, "operation": method,
-                "error": self.last_error}
+                "error": self.last_error, "error_code": "lsp_rpc_failed",
+                **({"protocol_details": dict(exc.payload)} if getattr(exc, "payload", None) else {})}
 
     def _status_payload(self) -> dict[str, Any]:
         process_status = self._process_status()
@@ -731,6 +734,8 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
         status = RuntimeStatus.ERROR
     elif status == "partial":
         status = RuntimeStatus.OK
+    if status != RuntimeStatus.OK and not payload.get("error_code"):
+        payload = {**payload, "error_code": "lsp_unavailable" if payload.get("status") == "unavailable" else "lsp_operation_failed"}
     projection = dict(payload)
     evidence = payload.get("evidence")
     if isinstance(evidence, dict) and "result" in payload and evidence.get("result") == payload["result"]:

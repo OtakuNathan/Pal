@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 
 from pal.llm.repository import RuntimeSettingRepository
 from pal.web_search.contracts import (
@@ -20,11 +22,29 @@ from pal.web_search.repository import WebSearchProviderRepository
 
 def _http_json(url: str, *, headers: dict[str, str] | None = None, timeout_seconds: float = 20.0) -> dict[str, Any]:
     request = Request(url, headers={**{"User-Agent": "PalV2/0.1"}, **dict(headers or {})})
-    with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
+            raw = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        with exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(diagnostic_text(f"Search provider HTTP {exc.code}: {exc.reason}\nResponse body:\n{raw}", limit=None)) from exc
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError(diagnostic_text(f"Search provider returned invalid JSON:\n{raw}", limit=None)) from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("search provider returned invalid JSON")
+        raise RuntimeError(diagnostic_text(f"Search provider returned a non-object:\n{raw}", limit=None))
+    if any(payload.get(key) for key in ("error", "errors", "Error")):
+        raise RuntimeError(diagnostic_text(f"Search provider reported an error:\n{raw}", limit=None))
     return payload
+
+
+def _invalid_results(provider: str, payload: dict[str, Any]) -> RuntimeError:
+    return RuntimeError(diagnostic_text(
+        f"{provider} returned malformed results; response retained for diagnosis:\n"
+        + json.dumps(payload, ensure_ascii=False), limit=None,
+    ))
 
 
 @dataclass
@@ -48,18 +68,21 @@ class BraveSearchProvider(WebSearchProviderPort):
                 "X-Subscription-Token": api_key,
             },
         )
-        results = payload.get("web", {}).get("results", [])
+        web = payload.get("web", {})
+        if not isinstance(web, dict):
+            raise _invalid_results("Brave", payload)
+        results = web.get("results", [])
         if not isinstance(results, list):
-            raise RuntimeError("brave search returned invalid results")
+            raise _invalid_results("Brave", payload)
         items: list[WebSearchItem] = []
         for index, item in enumerate(results[: max(1, min(int(query.limit), 10))], start=1):
             if not isinstance(item, dict):
-                continue
+                raise _invalid_results("Brave", payload)
             title = str(item.get("title") or "").strip()
             url_value = str(item.get("url") or "").strip()
             snippet = str(item.get("description") or item.get("snippet") or "").strip()
             if not title or not url_value:
-                continue
+                raise _invalid_results("Brave", payload)
             items.append(
                 WebSearchItem(
                     title=title,
@@ -98,19 +121,21 @@ class DuckDuckGoSearchProvider(WebSearchProviderPort):
                 )
             )
         related = payload.get("RelatedTopics")
+        if related is not None and not isinstance(related, list):
+            raise _invalid_results("DuckDuckGo", payload)
         if isinstance(related, list):
             for item in related:
                 if len(items) >= max(1, min(int(query.limit), 5)):
                     break
                 if not isinstance(item, dict):
-                    continue
+                    raise _invalid_results("DuckDuckGo", payload)
                 nested_topics = item.get("Topics")
                 if isinstance(nested_topics, list):
                     for nested in nested_topics:
                         if len(items) >= max(1, min(int(query.limit), 5)):
                             break
                         if not isinstance(nested, dict):
-                            continue
+                            raise _invalid_results("DuckDuckGo", payload)
                         text = str(nested.get("Text") or "").strip()
                         url_value = str(nested.get("FirstURL") or "").strip()
                         if text and url_value:
@@ -124,6 +149,8 @@ class DuckDuckGoSearchProvider(WebSearchProviderPort):
                                     rank=len(items) + 1,
                                 )
                             )
+                        else:
+                            raise _invalid_results("DuckDuckGo", payload)
                     continue
                 text = str(item.get("Text") or "").strip()
                 url_value = str(item.get("FirstURL") or "").strip()
@@ -138,6 +165,8 @@ class DuckDuckGoSearchProvider(WebSearchProviderPort):
                             rank=len(items) + 1,
                         )
                     )
+                else:
+                    raise _invalid_results("DuckDuckGo", payload)
         return items[: max(1, min(int(query.limit), 5))]
 
 
@@ -234,18 +263,20 @@ class WebSearchService:
         candidates = self._provider_candidates(configured_provider_id)
         if not candidates:
             raise RuntimeError("no enabled web search provider available")
-        last_error = "search failed"
+        failures: list[Exception] = []
+        provider_errors: list[dict[str, str]] = []
         for index, record in enumerate(candidates):
             provider = self.providers.get(record.provider_kind)
-            if provider is None:
-                self.last_errors[record.provider_id] = "provider runtime unavailable"
-                last_error = "provider runtime unavailable"
-                continue
             try:
+                if provider is None:
+                    raise RuntimeError(f"provider runtime unavailable: {record.provider_kind}")
                 items = provider.search(record, request)
             except Exception as exc:
-                self.last_errors[record.provider_id] = str(exc)
-                last_error = str(exc)
+                exc.add_note(f"Search provider: {record.provider_id} ({record.provider_kind})")
+                diagnostic = exception_report(exc)
+                self.last_errors[record.provider_id] = diagnostic
+                provider_errors.append({"provider_id": record.provider_id, "provider_kind": record.provider_kind, "error": diagnostic})
+                failures.append(exc)
                 continue
             self.last_errors[record.provider_id] = ""
             return WebSearchQueryResult(
@@ -253,8 +284,9 @@ class WebSearchService:
                 configured_provider_id=configured_provider_id,
                 effective_provider_id=record.provider_id,
                 fallback_used=index > 0,
+                provider_errors=provider_errors,
             )
-        raise RuntimeError(last_error)
+        raise ExceptionGroup("All web search providers failed", failures)
 
     def _provider_candidates(self, preferred_provider_id: str | None) -> list[WebSearchProviderModel]:
         enabled = list(self.repository.list_enabled())

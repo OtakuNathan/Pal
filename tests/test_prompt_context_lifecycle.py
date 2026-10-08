@@ -120,7 +120,8 @@ def test_default_snapshot_does_not_freeze_changed_guidance():
     turn = turn.append_prompt_contexts(added, state)
     frozen2, added2, _ = prepare_context(turn, [], [candidate('B', instruction=True)])
     assert frozen2 == frozen
-    assert 'B' in added2[0].text and 'Unless the current user request' in added2[0].text
+    assert 'B' in added2[0].text and '<pal_defaults>' in added2[0].text
+    assert 'Unless the current user request' not in added2[0].text
 
 
 def test_compaction_keeps_only_current_state_without_making_new_revision():

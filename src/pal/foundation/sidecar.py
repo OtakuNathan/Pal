@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import msgpack
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.foundation.fd_lease import (
     FdCancellationControl,
     FdCloseOutcome,
@@ -450,8 +451,12 @@ async def _write_async_sidecar(resource: _AsyncSidecarResource, payload: bytes) 
 
 def _sidecar_error_from_response(response: dict[str, Any]) -> SidecarRpcError:
     error = dict(response.get("error") or {})
+    message = str(error.get("message") or "sidecar request failed")
+    diagnostic = str(error.get("diagnostic") or "")
+    if diagnostic and diagnostic not in message:
+        message += "\nRemote diagnostic:\n" + diagnostic
     return SidecarRpcError(
-        str(error.get("message") or "sidecar request failed"),
+        message,
         kind=str(error.get("kind") or "protocol"),
         payload=error,
     )
@@ -674,5 +679,11 @@ async def dispatch_sidecar_request(
             "type": "response",
             "id": request_id,
             "ok": False,
-            "error": {"kind": kind, "message": f"{exc.__class__.__name__}: {exc}"},
+            "error": {
+                "kind": kind,
+                # A compact summary plus a complete report avoids duplicating
+                # a large exception message inside the bounded wire frame.
+                "message": diagnostic_text(f"{exc.__class__.__name__}: {exc}"),
+                "diagnostic": exception_report(exc),
+            },
         }

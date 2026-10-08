@@ -210,7 +210,11 @@ class TestEveryExitIsBounded:
             )
             assert not result.ok
             assert result.status == "inner_boom"
-            assert result.llm_text.count("inner business failure") == 1
+            # The complete traceback may also contain the message in the
+            # source line that raised it. Check the exception and envelope,
+            # rather than mistaking that source evidence for a second result.
+            assert result.llm_text.count("ToolExecutionError: inner business failure") == 1
+            assert result.llm_text.count("Tool result metadata:") == 1
             assert len(result.llm_text) <= LIMIT
         finally:
             core.close()

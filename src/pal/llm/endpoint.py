@@ -217,7 +217,7 @@ class ShapeEndpointInvoker:
                     ))
                 last = replace(update, response=response)
                 yield last
-            if last is None or (not last.response.message.parts and last.response.finish_reason != LLMFinishReason.LENGTH):
+            if last is None or (not last.response.message.parts and last.response.finish_reason not in {LLMFinishReason.LENGTH, LLMFinishReason.ERROR}):
                 raise RuntimeError("LLM stream completed without semantic output")
             status = "failed" if last.response.finish_reason == LLMFinishReason.ERROR else "success"
         except BaseException as exc:

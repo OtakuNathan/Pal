@@ -385,7 +385,10 @@ def test_http_quota_is_structured_and_pauses_credentials():
     invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(LLMCredentialResolver(store).resolve_api_key, SDK()))
     with pytest.raises(ChatGPTError) as result:
         invoker.invoke(endpoint(), request())
-    assert result.value.to_dict() == {"code": QUOTA_CODE, "status": 429, "param": "model", "request_id": "request-123"}
+    details = result.value.to_dict()
+    assert {key: details[key] for key in ("code", "status", "param", "request_id")} == {
+        "code": QUOTA_CODE, "status": 429, "param": "model", "request_id": "request-123"}
+    assert json.loads(details["diagnostic"])["error"] == {"code": QUOTA_CODE, "param": "model"}
     assert json.loads(store.get_secret(REF))["usage_paused"]
 
 

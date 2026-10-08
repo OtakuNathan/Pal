@@ -42,6 +42,24 @@ def invoke(runtime, alias, args, turn_id="turn"):
     return runtime.execute_tool(new_tool_call(name="call_tool", args={"name": alias, "args": args}), turn_id=turn_id)
 
 
+@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs", "read_latest_proactive_run"])
+def test_task_read_tools_exist_before_creation_and_after_deletion(env, alias):
+    runtime, manager, _ = env
+    assert not manager.registered
+    assert alias in runtime.registry_generation.indirect_aliases
+    missing = invoke(runtime, alias, {"name": "reminder"})
+    assert not missing.ok
+    assert missing.structured["error_code"] == "unknown_target"
+    assert missing.structured["effect"] == "not_started"
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
+    found = invoke(runtime, alias, {"name": "reminder"})
+    assert found.ok, found.llm_text
+    assert found.structured["name"] == "reminder"
+    assert invoke(runtime, "delete_proactive_task", {"name": "reminder"}).ok
+    assert alias in runtime.registry_generation.indirect_aliases
+    assert not invoke(runtime, alias, {"name": "reminder"}).ok
+
+
 def test_create_defaults_to_current_conversation_and_persists(env):
     runtime, manager, binding = env
     result = invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"})

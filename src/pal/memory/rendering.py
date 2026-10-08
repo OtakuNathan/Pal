@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from pal.foundation.diagnostics import diagnostic_text
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 
 def normalize_recall_view(raw: object) -> L3RecallView:
@@ -26,17 +29,8 @@ def build_recall_structured_payload(
         "hit_count": len(list(result.hits or [])),
         "hits_preview": _render_hit_previews(list(result.hits or []), view=normalized_view),
     }
-    minimal_metadata = {
-        "retrieval_mode": metadata.get("retrieval_mode"),
-        "degraded": metadata.get("degraded"),
-        "degraded_reason": metadata.get("degraded_reason"),
-        "mem_ref": metadata.get("mem_ref"),
-        "lookup_status": metadata.get("lookup_status"),
-        "successors": metadata.get("successors"),
-    }
-    minimal_metadata = {key: value for key, value in minimal_metadata.items() if value not in (None, "", False)}
-    if minimal_metadata:
-        payload["metadata"] = minimal_metadata
+    if metadata:
+        payload["metadata"] = metadata
     return payload
 
 
@@ -66,8 +60,9 @@ def render_recall_result_for_llm(
         lines.extend(item_lines)
     else:
         if not query.mem_ref:
-            lines.append("No matching memories returned." if metadata.get("degraded") or metadata.get("degraded_reason")
-                         else "No matching memories found.")
+            lines.append("No matching memories returned.")
+    if metadata:
+        lines.append("Provider metadata: " + _metadata_text(metadata))
     lines.append("</recalled_memories>")
     return "\n".join(lines)
 
@@ -95,7 +90,13 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult) -> str
         lines.append(f"reason: {metadata['reason']}")
     if metadata.get("successors"):
         lines.append("successors: " + ", ".join(metadata["successors"]))
+    if metadata:
+        lines.append("Provider metadata: " + _metadata_text(metadata))
     return "\n".join(lines)
+
+
+def _metadata_text(metadata: dict) -> str:
+    return diagnostic_text(json.dumps(metadata, ensure_ascii=False, default=str), limit=None)
 
 
 def _render_hit_lines(hits: list[dict[str, object]], *, view: L3RecallView) -> list[str]:

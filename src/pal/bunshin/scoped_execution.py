@@ -21,7 +21,7 @@ from weakref import WeakValueDictionary
 
 from pal.execution.runtime import ExecutionRuntime
 from pydantic import Field, create_model
-from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
+from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
 from pal.execution.tool_facade import (
     CompleteResult,
     EffectKind,
@@ -265,7 +265,7 @@ def _workflow_capability(
         )
     )
 
-    async def invoke(call: CapabilityCall) -> ToolHandlerResult | ToolInvocationResult:
+    async def invoke(call: CapabilityCall) -> ToolHandlerResult | ToolInvocationResult | CapabilityResult:
         meta = dict(call.meta)
         provider_call = meta.get("tool_call")
         tool_call = new_tool_call(
@@ -283,7 +283,16 @@ def _workflow_capability(
             ):
                 return result.invocation_result
             if not result.ok:
-                raise RuntimeError(result.llm_text or result.text or "workflow tool failed")
+                details = dict(result.structured or {})
+                outcome = details.get("effect")
+                receipt = (EffectReceipt(outcome=EffectOutcome(outcome))
+                           if isinstance(outcome, str) and outcome in {item.value for item in EffectOutcome} else None)
+                return CapabilityResult(
+                    status=RuntimeStatus.ERROR, text=result.text,
+                    llm_text=result.llm_text, structured=details, effect_receipt=receipt,
+                    recovery_hint=str(details.get("recovery_hint") or details.get("recovery") or ""),
+                    snapshot_refs=result.snapshot_refs, context_messages=result.context_messages,
+                )
             payload = dict(result.structured or {"text": result.text})
             llm_text = default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
         else:

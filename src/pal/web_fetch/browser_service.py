@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.web_fetch.extensions import inspect_extension, read_extensions, validate_extension_url
 from pal.web_fetch.runtime_paths import (
     BrowserRuntimePaths,
@@ -108,17 +110,27 @@ class BrowserServiceError(RuntimeError):
         retryable: bool = False,
         state_unknown: bool = False,
         curl_applicable: bool = False,
+        diagnostic: str = "",
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = str(code)
         self.retryable = bool(retryable)
         self.state_unknown = bool(state_unknown)
         self.curl_applicable = bool(curl_applicable)
+        self.diagnostic = diagnostic_text(diagnostic, limit=None)
+        if self.diagnostic:
+            self.add_note("Remote browser diagnostic:\n" + self.diagnostic)
+        self.details = dict(details or {})
+        if self.details:
+            self.add_note("Browser error details: " + diagnostic_text(json.dumps(self.details, ensure_ascii=False), limit=None))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
-            "message": str(self),
+            "message": diagnostic_text(self, limit=None),
+            "diagnostic": exception_report(self),
+            "details": self.details,
             "retryable": self.retryable,
             "state_unknown": self.state_unknown,
             "curl_applicable": self.curl_applicable,
@@ -225,9 +237,14 @@ class _PlaywrightCliWorker:
     def _schedule_install(self, *, browser_only: bool = False, reason: str = "") -> None:
         with self._install_lock:
             if self._stopping.is_set():
-                return
+                raise BrowserServiceError("Browser service is stopping", code="service_stopping")
             if self._install_thread is not None and self._install_thread.is_alive():
                 return
+            if self._install_state.get("error"):
+                raise BrowserServiceError(
+                    "Browser dependency installation failed; inspect the error and repair dependencies before retrying.",
+                    code="dependency_install_failed", diagnostic=self._install_state["error"],
+                )
             self._install_state.update(
                 {
                     "attempted": True,
@@ -242,22 +259,31 @@ class _PlaywrightCliWorker:
                 daemon=True,
             )
             self._install_thread = thread
-            thread.start()
+            try:
+                thread.start()
+            except Exception as exc:
+                self._install_state.update(in_progress=False, last_result="failed", error=exception_report(exc))
+                raise
 
     def _install_dependencies(self, *, browser_only: bool) -> None:
         from pal.packages.process import command_control
         from pal.packages.service import PackageService
+        error = ""
+        preparation_result: dict[str, Any] = {}
         try:
             with command_control(self._install_control):
-                PackageService(self.paths.runtime_root).prepare("web_fetch", kind="builtin")
+                preparation_result = PackageService(self.paths.runtime_root).prepare("web_fetch", kind="builtin")
             self._node_major_cached = self._node_major()
             self._cli_version_cached = self._detected_cli_version()
             result = "ok"
         except Exception as exc:
-            result = f"failed: {exc}"[-500:]
+            error = exception_report(exc)
+            result = "failed: " + error
         with self._install_lock:
             self._install_state["in_progress"] = False
             self._install_state["last_result"] = result
+            self._install_state["error"] = error
+            self._install_state["preparation_result"] = preparation_result
 
     def health(self) -> dict[str, Any]:
         with self._lock:
@@ -364,18 +390,18 @@ class _PlaywrightCliWorker:
                         state_unknown=exc.state_unknown,
                         curl_applicable=True,
                     )
-                    self.last_error = str(wrapped)[-500:]
+                    self.last_error = exception_report(exc)
                     raise wrapped from exc
-                self.last_error = str(exc)[-500:]
+                self.last_error = exception_report(exc)
                 raise
             except (TypeError, ValueError) as exc:
-                self.last_error = str(exc)[-500:]
+                self.last_error = exception_report(exc)
                 raise BrowserServiceError(
                     str(exc), code="invalid_arguments"
                 ) from exc
             except Exception as exc:
-                self.last_error = f"{type(exc).__name__}: {exc}"[-500:]
-                raise BrowserServiceError(str(exc)) from exc
+                self.last_error = exception_report(exc)
+                raise BrowserServiceError(str(exc), state_unknown=True) from exc
             finally:
                 with self._lock:
                     self.in_flight = max(0, self.in_flight - 1)
@@ -432,13 +458,16 @@ class _PlaywrightCliWorker:
         try:
             page = dict(payload.get("page") or self._page_state(record, timeout_ms=timeout_ms))
         except BrowserServiceError as exc:
-            if not payload.get("navigation_completed"):
-                raise
             page = {}
+            payload["action_completed"] = True
             payload["page_state_error"] = exc.to_dict()
         record.last_url = str(page.get("url") or record.last_url)
         if record.persistent:
-            self._write_profile_meta(record)
+            try:
+                self._write_profile_meta(record)
+            except Exception as exc:
+                payload["action_completed"] = True
+                payload["profile_state_error"] = exception_report(exc)
         payload.update(
             {
                 "action": action,
@@ -457,6 +486,9 @@ class _PlaywrightCliWorker:
             timeout_ms=timeout_ms, raw=True,
         )
         document = _parse_json_object(raw, "browser read")
+        if not isinstance(document.get("text"), str) or not isinstance(document.get("links", []), list):
+            raise BrowserServiceError("Browser read returned malformed document", code="invalid_cli_output",
+                                      details={"output": diagnostic_text(raw, limit=None)})
         text = str(document.get("text") or "")
         # Harness-only transport; the capability stores this in the receiving
         # runtime's output store before rendering any LLM-facing result.
@@ -680,6 +712,8 @@ class _PlaywrightCliWorker:
                 options.append("--hires")
             positionals = [_bounded_text(target, limit=500, field_name="target")] if target else []
             command = _cli_args("screenshot", *positionals, options=options)
+            primary_error = None
+            cleanup_error = ""
             try:
                 self._run(record, command, timeout_ms=timeout_ms, raw=True)
                 if file_path.stat().st_size > SCREENSHOT_MAX_BYTES:
@@ -688,9 +722,20 @@ class _PlaywrightCliWorker:
                         code="screenshot_too_large",
                     )
                 content = file_path.read_bytes()
+            except Exception as exc:
+                primary_error = exc
+                raise
             finally:
-                file_path.unlink(missing_ok=True)
-            return {"png_base64": base64.b64encode(content).decode("ascii")}
+                try:
+                    file_path.unlink(missing_ok=True)
+                except Exception as cleanup:
+                    cleanup_error = exception_report(cleanup)
+                    if primary_error is not None:
+                        primary_error.add_note("Screenshot cleanup also failed:\n" + cleanup_error)
+            payload = {"png_base64": base64.b64encode(content).decode("ascii")}
+            if cleanup_error:
+                payload["screenshot_cleanup_error"] = cleanup_error
+            return payload
         raise BrowserServiceError("unsupported browser action", code="unsupported_action")
 
     @staticmethod
@@ -704,6 +749,8 @@ class _PlaywrightCliWorker:
         try:
             return self._run(record, argv, timeout_ms=timeout_ms, raw=raw)
         except BrowserServiceError as exc:
+            if exc.code == "cli_unavailable" and not exc.state_unknown:
+                raise
             raise BrowserServiceError(
                 str(exc), code=exc.code, retryable=False, state_unknown=True
             ) from exc
@@ -725,13 +772,17 @@ class _PlaywrightCliWorker:
             )
         except subprocess.TimeoutExpired as exc:
             raise BrowserServiceError(
-                "Playwright CLI command timed out", code="command_timeout", state_unknown=True
+                "Playwright CLI command timed out", code="command_timeout", state_unknown=True,
+                details={"stdout": _output_text(exc.stdout), "stderr": _output_text(exc.stderr)},
             ) from exc
         except OSError as exc:
             raise BrowserServiceError(str(exc), code="cli_unavailable", retryable=True) from exc
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "Playwright CLI command failed").strip()[-1000:]
-            raise BrowserServiceError(detail, code="cli_command_failed")
+            detail = diagnostic_text((completed.stderr or completed.stdout or "Playwright CLI command failed").strip(), limit=None)
+            raise BrowserServiceError(detail, code="cli_command_failed", details={
+                "returncode": completed.returncode,
+                "stdout": _output_text(completed.stdout), "stderr": _output_text(completed.stderr),
+            })
         return completed.stdout.strip()
 
     def _ensure_session(
@@ -768,15 +819,21 @@ class _PlaywrightCliWorker:
         open_args = _cli_args("open", "about:blank", options=open_options)
         try:
             self._run(record, open_args, timeout_ms=timeout_ms, raw=True)
-        except BrowserServiceError:
-            self._close_named(record, force=True)
+        except BrowserServiceError as exc:
+            try:
+                self._close_named(record, force=True)
+            except Exception as cleanup:
+                exc.add_note("Browser cleanup also failed:\n" + exception_report(cleanup))
             raise
         restore_http_page = restored_url.startswith(("http://", "https://"))
         if restore_http_page:
             try:
                 self._run(record, _cli_args("goto", restored_url), timeout_ms=timeout_ms, raw=True)
             except BrowserServiceError as exc:
-                self._close_named(record, force=True)
+                try:
+                    self._close_named(record, force=True)
+                except Exception as cleanup:
+                    exc.add_note("Browser cleanup also failed:\n" + exception_report(cleanup))
                 raise BrowserServiceError(
                     "The browser started, but restoring the saved page failed. "
                     "Provide a new HTTP(S) URL to navigate_browser or read_browser_page to continue; "
@@ -855,43 +912,59 @@ class _PlaywrightCliWorker:
 
     def _close(self, key: str) -> dict[str, Any]:
         with self._lock:
-            record = self.sessions.pop(key, None)
+            record = self.sessions.get(key)
         was_running = record is not None
         if record is None:
             record = _SessionRecord(key=key, name=f"pal-{key[:24]}", persistent=True)
-        self._close_named(record, force=False)
+        if was_running or self.paths.cli.is_file():
+            self._close_named(record, force=False)
         with self._lock:
+            self.sessions.pop(key, None)
             active = set(self.sessions)
-        self._prune_profiles(exclude=active)
-        return {"action": "close", "closed": was_running, "profile_retained": True, "session": self._session_payload(None)}
+        result = {"action": "close", "closed": was_running, "profile_retained": True, "session": self._session_payload(None)}
+        try:
+            self._prune_profiles(exclude=active | {key})
+        except Exception as exc:
+            result["profile_cleanup_error"] = exception_report(exc)
+        return result
 
     def _reset(self, key: str) -> dict[str, Any]:
-        self._close(key)
-        shutil.rmtree(self.paths.profiles / key, ignore_errors=True)
-        return {"action": "reset", "reset": True, "profile_retained": False, "session": self._session_payload(None)}
+        closed = self._close(key)
+        path = self.paths.profiles / key
+        try:
+            if path.exists():
+                shutil.rmtree(path)
+        except Exception as exc:
+            raise BrowserServiceError("Browser closed but profile reset failed", code="profile_reset_failed",
+                state_unknown=True, details={"close_result": closed}) from exc
+        return {**closed, "action": "reset", "reset": True, "profile_retained": False}
 
     def _close_named(self, record: _SessionRecord, *, force: bool) -> None:
         if not self.paths.cli.is_file():
-            return
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [str(self.paths.cli), f"-s={record.name}", "close"],
-                cwd=str(self.paths.workspace), env=self._child_env(),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=10 if force else 20, check=False,
-            )
+            raise BrowserServiceError("Playwright CLI unavailable; browser closure is unconfirmed", code="cli_unavailable")
+        self._run_write(record, ["close"], timeout_ms=10000 if force else 20000)
 
     def _close_workspace_sessions(self, *, force: bool) -> None:
         _ = force
         if not self.paths.cli.is_file():
+            if self.sessions:
+                raise BrowserServiceError("Playwright CLI unavailable; active browser sessions could not be closed",
+                                          code="browser_shutdown_failed", state_unknown=True)
             return
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
+        try:
+            completed = subprocess.run(
                 [str(self.paths.cli), "close-all"],
                 cwd=str(self.paths.workspace), env=self._child_env(),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                capture_output=True, text=True,
                 timeout=20, check=False,
             )
+        except Exception as exc:
+            raise BrowserServiceError("Browser workspace shutdown failed", code="browser_shutdown_failed",
+                state_unknown=True, details={"stdout": _output_text(getattr(exc, "stdout", None)),
+                                             "stderr": _output_text(getattr(exc, "stderr", None))}) from exc
+        if completed.returncode != 0:
+            raise BrowserServiceError("Browser workspace shutdown failed", code="browser_shutdown_failed", state_unknown=True,
+                details={"returncode": completed.returncode, "stdout": _output_text(completed.stdout), "stderr": _output_text(completed.stderr)})
 
     def shutdown(self) -> None:
         self._stopping.set()
@@ -909,9 +982,12 @@ class _PlaywrightCliWorker:
     def _read_profile_meta(self, key: str) -> dict[str, Any]:
         try:
             payload = json.loads(self._profile_meta_path(key).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            raise BrowserServiceError("Browser profile metadata is not an object", code="invalid_profile_metadata",
+                                      details={"output": diagnostic_text(json.dumps(payload), limit=None)})
+        return payload
 
     def _write_profile_meta(self, record: _SessionRecord) -> None:
         _atomic_write_json(
@@ -933,14 +1009,14 @@ class _PlaywrightCliWorker:
             last_used = float(meta.get("last_used_at") or path.stat().st_mtime)
             size = _tree_size(path)
             if now - last_used > PROFILE_RETENTION_SECONDS:
-                shutil.rmtree(path, ignore_errors=True)
+                shutil.rmtree(path)
                 continue
             entries.append((last_used, size, path))
         total = _tree_size(self.paths.profiles)
         for _last_used, size, path in sorted(entries):
             if total <= PROFILE_MAX_BYTES:
                 break
-            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(path)
             total = max(0, total - size)
 
 
@@ -1019,10 +1095,17 @@ def _parse_json_object(raw: str, label: str) -> dict[str, Any]:
         if isinstance(value, str):
             value = json.loads(value)
     except (TypeError, ValueError) as exc:
-        raise BrowserServiceError(f"{label} returned invalid JSON", code="invalid_cli_output") from exc
+        raise BrowserServiceError(f"{label} returned invalid JSON", code="invalid_cli_output",
+                                  details={"output": diagnostic_text(raw, limit=None)}) from exc
     if not isinstance(value, dict):
-        raise BrowserServiceError(f"{label} returned a non-object", code="invalid_cli_output")
+        raise BrowserServiceError(f"{label} returned a non-object", code="invalid_cli_output",
+                                  details={"output": diagnostic_text(raw, limit=None)})
     return value
+
+
+def _output_text(value: str | bytes | None) -> str:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+    return diagnostic_text(text, limit=None)
 
 
 def _parse_lenient_json(raw: str) -> Any:
@@ -1146,35 +1229,26 @@ def _tree_size(path: Path) -> int:
     total = 0
     if not path.exists():
         return 0
-    for root, _dirs, files in os.walk(path):
+    def on_error(error: OSError) -> None:
+        raise error
+
+    for root, _dirs, files in os.walk(path, onerror=on_error):
         for file_name in files:
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(FileNotFoundError):
                 total += (Path(root) / file_name).stat().st_size
     return total
 
 
-def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        if os.name == "nt":
-            process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-    try:
-        process.wait(timeout=2.0)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    with contextlib.suppress(ProcessLookupError, OSError):
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-
-
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict[str, Any]) -> None:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    try:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    except Exception as exc:
+        status_code = 500
+        error = BrowserServiceError(
+            "Browser response serialization failed", code="invalid_sidecar_output",
+            state_unknown=handler.command == "POST", diagnostic=exception_report(exc),
+        )
+        body = json.dumps({"ok": False, "error": error.to_dict()}, ensure_ascii=False).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
@@ -1201,7 +1275,9 @@ def run_browser_service_cli(
                 raise ValueError("request body exceeds 256 KiB")
             raw = self.rfile.read(length).decode("utf-8", errors="replace") if length else "{}"
             decoded = json.loads(raw or "{}")
-            return decoded if isinstance(decoded, dict) else {}
+            if not isinstance(decoded, dict):
+                raise ValueError("browser request body must be a JSON object")
+            return decoded
 
         def do_GET(self) -> None:  # noqa: N802
             if not self._authorized():
@@ -1211,7 +1287,13 @@ def run_browser_service_cli(
                 _json_response(self, 404, {"ok": False, "error": {"code": "not_found", "message": "not found"}})
                 return
             worker.last_activity_at = time.monotonic()
-            _json_response(self, 200, worker.health())
+            try:
+                result = worker.health()
+            except Exception as exc:
+                _json_response(self, 500, {"ok": False, "error": BrowserServiceError(
+                    "Browser health check failed", code="health_check_failed", diagnostic=exception_report(exc)).to_dict()})
+                return
+            _json_response(self, 200, result)
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._authorized():
@@ -1220,11 +1302,18 @@ def run_browser_service_cli(
             try:
                 payload = self._read_json()
             except (UnicodeError, ValueError, TypeError) as exc:
-                _json_response(self, 400, {"ok": False, "error": {"code": "invalid_arguments", "message": str(exc)}})
+                _json_response(self, 400, {"ok": False, "error": BrowserServiceError(
+                    str(exc), code="invalid_arguments", diagnostic=exception_report(exc)).to_dict()})
                 return
             worker.last_activity_at = time.monotonic()
             if self.path == "/shutdown":
-                worker.shutdown()
+                try:
+                    worker.shutdown()
+                except Exception as exc:
+                    error = exc if isinstance(exc, BrowserServiceError) else BrowserServiceError(
+                        "Browser shutdown failed", code="browser_shutdown_failed", state_unknown=True, diagnostic=exception_report(exc))
+                    _json_response(self, 500, {"ok": False, "error": error.to_dict()})
+                    return
                 _json_response(self, 200, {"ok": True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
@@ -1239,29 +1328,39 @@ def run_browser_service_cli(
                     persistent=bool(payload.get("persistent", True)),
                     timeout_ms=int(payload.get("timeout_ms") or 15000),
                 )
-            except (BrowserServiceError, ValueError, TypeError) as exc:
-                error = exc.to_dict() if isinstance(exc, BrowserServiceError) else BrowserServiceError(str(exc), code="invalid_arguments").to_dict()
+            except Exception as exc:
+                error = exc.to_dict() if isinstance(exc, BrowserServiceError) else BrowserServiceError(
+                    str(exc), code="invalid_arguments" if isinstance(exc, (ValueError, TypeError)) else "handler_exception",
+                    state_unknown=not isinstance(exc, (ValueError, TypeError)), diagnostic=exception_report(exc),
+                ).to_dict()
                 status = 503 if error["code"] == "dependency_installing" else 400 if error["code"] == "invalid_arguments" else 500
                 _json_response(self, status, {"ok": False, "error": error})
                 return
             _json_response(self, 200, {"ok": True, "result": result})
 
     server = ThreadingHTTPServer((host, int(port)), BrowserHandler)
+    stopped = threading.Event()
 
     def idle_monitor() -> None:
-        while True:
-            time.sleep(1.0)
+        while not stopped.wait(1.0):
             if worker.in_flight > 0 or worker.install_in_progress():
                 continue
             if time.monotonic() - worker.last_activity_at < max(5, int(idle_timeout_seconds)):
                 continue
-            worker.shutdown()
+            try:
+                worker.shutdown()
+            except Exception as exc:
+                worker.last_error = exception_report(exc)
+                continue
             server.shutdown()
             return
 
     threading.Thread(target=idle_monitor, daemon=True).start()
-    server.serve_forever(poll_interval=0.5)
-    server.server_close()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        stopped.set()
+        server.server_close()
     return 0
 
 
@@ -1271,6 +1370,7 @@ class _BrowserServiceProcess:
     host: str
     port: int
     token: str
+    output: Any = None
 
 
 @dataclass
@@ -1282,6 +1382,7 @@ class BrowserServiceManager:
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     last_error: str = ""
+    _last_process_output: str = field(default="", init=False, repr=False)
     _process: _BrowserServiceProcess | None = field(default=None, init=False, repr=False)
     _start_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -1300,30 +1401,43 @@ class BrowserServiceManager:
                 },
                 timeout_seconds=max(10.0, timeout_ms / 1000.0 + 10.0), resource=resource,
             )
-        except BrowserServiceError:
+        except BrowserServiceError as exc:
+            self.last_error = exception_report(exc)
             raise
         except Exception as exc:
-            self.last_error = f"browser sidecar transport failed: {exc}"[-500:]
-            self.stop_sync()
+            self.last_error = exception_report(exc)
+            try:
+                self.stop_sync()
+            except Exception as cleanup:
+                exc.add_note("Browser sidecar cleanup also failed:\n" + exception_report(cleanup))
             raise BrowserServiceError(
-                self.last_error,
+                "Browser sidecar transport failed",
                 code="sidecar_transport_failed",
                 retryable=True,
                 state_unknown=True,
                 curl_applicable=str(action) in {"navigate", "read"},
+                diagnostic=exception_report(exc),
             ) from exc
         if not bool(payload.get("ok")):
-            error = dict(payload.get("error") or {})
-            raise BrowserServiceError(
+            error = payload.get("error")
+            if not isinstance(error, dict):
+                error = {"message": str(error or "browser action failed"), "state_unknown": True}
+            failure = BrowserServiceError(
                 str(error.get("message") or "browser action failed"),
                 code=str(error.get("code") or "browser_error"),
                 retryable=bool(error.get("retryable")),
                 state_unknown=bool(error.get("state_unknown")),
                 curl_applicable=bool(error.get("curl_applicable")),
+                diagnostic=diagnostic_text(json.dumps(payload, ensure_ascii=False), limit=None),
             )
+            self.last_error = failure.to_dict()["diagnostic"]
+            raise failure
         result = payload.get("result")
         if not isinstance(result, dict):
-            raise BrowserServiceError("browser service returned invalid payload", code="invalid_sidecar_output")
+            failure = BrowserServiceError("browser service returned invalid payload", code="invalid_sidecar_output",
+                state_unknown=True, diagnostic=diagnostic_text(json.dumps(payload, ensure_ascii=False), limit=None))
+            self.last_error = failure.to_dict()["diagnostic"]
+            raise failure
         self.last_error = ""
         return result
 
@@ -1350,14 +1464,18 @@ class BrowserServiceManager:
             "max_concurrency": int(self.max_concurrency),
         }
         if not running:
-            payload.update({"healthy": dependencies_ready, "reason": "idle" if dependencies_ready else "dependency_missing"})
+            payload.update({"healthy": dependencies_ready and not self.last_error,
+                            "reason": "last_action_failed" if self.last_error else "idle" if dependencies_ready else "dependency_missing"})
             return payload
         try:
             health = self._request_json("GET", "/health", None, timeout_seconds=1.0, resource=resource)
+            if not health.get("ok"):
+                raise BrowserServiceError("Browser health check failed", code="health_check_failed",
+                                          diagnostic=diagnostic_text(json.dumps(health), limit=None))
             payload.update(health)
             self.last_error = ""
         except Exception as exc:
-            self.last_error = str(exc)
+            self.last_error = exception_report(exc)
             payload.update({"healthy": False, "reason": "health_check_failed", "last_error": self.last_error})
         return payload
 
@@ -1366,24 +1484,46 @@ class BrowserServiceManager:
             resource = self._process
             if resource is None:
                 return
-            try:
-                if self._process_running(resource):
-                    with contextlib.suppress(Exception):
-                        self._request_json("POST", "/shutdown", {}, timeout_seconds=5.0, resource=resource)
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        resource.process.wait(timeout=5.0)
-            finally:
-                if self._process is resource:
-                    self._process = None
-                process = resource.process
-                if process.poll() is None:
+            failures = []
+            process = resource.process
+            if self._process_running(resource):
+                try:
+                    result = self._request_json("POST", "/shutdown", {}, timeout_seconds=5.0, resource=resource)
+                    if not result.get("ok"):
+                        raise BrowserServiceError("Browser shutdown request failed", diagnostic=diagnostic_text(json.dumps(result), limit=None))
+                    process.wait(timeout=5.0)
+                except Exception as exc:
+                    failures.append(exception_report(exc))
+            if process.poll() is None:
+                try:
                     with contextlib.suppress(ProcessLookupError):
                         if os.name == "nt":
                             process.kill()
                         else:
                             os.killpg(process.pid, signal.SIGKILL)
-                with contextlib.suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=2.0)
+                except Exception as exc:
+                    failures.append(exception_report(exc))
+            stopped = process.poll() is not None
+            if stopped:
+                if self._process is resource:
+                    self._process = None
+                if resource.output is not None:
+                    try:
+                        resource.output.seek(0)
+                        self._last_process_output = _output_text(resource.output.read())
+                    except Exception as exc:
+                        failures.append(exception_report(exc))
+                    finally:
+                        try:
+                            resource.output.close()
+                        except Exception as exc:
+                            failures.append(exception_report(exc))
+            if failures or not stopped:
+                self.last_error = "\n".join(failures) or "Browser sidecar exit was not confirmed"
+                raise BrowserServiceError("Browser sidecar shutdown encountered errors", code="sidecar_shutdown_failed",
+                    state_unknown=not stopped, diagnostic=self.last_error,
+                    details={"process_stopped": stopped, "process_output": self._last_process_output})
 
     async def shutdown_async(self) -> None:
         self.stop_sync()
@@ -1406,30 +1546,50 @@ class BrowserServiceManager:
             ]
             child_env = dict(os.environ)
             child_env["PAL_BROWSER_SERVICE_TOKEN"] = token
-            process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                cwd=str(Path(self.runtime_root).parent), env=child_env,
-                start_new_session=os.name != "nt",
-            )
-            resource = _BrowserServiceProcess(process=process, host=self.host, port=port, token=token)
+            output = tempfile.TemporaryFile()
+            self._last_process_output = ""
+            try:
+                process = subprocess.Popen(
+                    command, stdout=output, stderr=subprocess.STDOUT,
+                    cwd=str(Path(self.runtime_root).parent), env=child_env,
+                    start_new_session=os.name != "nt",
+                )
+            except Exception as exc:
+                output.close()
+                self.last_error = exception_report(exc)
+                raise BrowserServiceError("Browser service could not start", code="sidecar_start_failed",
+                    retryable=True, diagnostic=self.last_error) from exc
+            resource = _BrowserServiceProcess(process=process, host=self.host, port=port, token=token, output=output)
             self._process = resource
             self.port = port
             self.token = token
             deadline = time.monotonic() + 60.0
+            startup_errors: list[str] = []
             while time.monotonic() < deadline:
                 if not self._process_running(resource):
                     break
                 try:
                     payload = self._request_json("GET", "/health", None, timeout_seconds=0.25, resource=resource)
-                except Exception:
+                except Exception as exc:
+                    diagnostic = exception_report(exc)
+                    if diagnostic not in startup_errors:
+                        startup_errors.append(diagnostic)
                     time.sleep(0.1)
                     continue
                 if bool(payload.get("ok")):
                     self.last_error = ""
                     return resource
-            self.last_error = "browser service failed to start"
-            self.stop_sync()
-            raise BrowserServiceError(self.last_error, code="sidecar_start_failed", retryable=True)
+                diagnostic = diagnostic_text(json.dumps(payload, ensure_ascii=False), limit=None)
+                if diagnostic not in startup_errors:
+                    startup_errors.append(diagnostic)
+                time.sleep(0.1)
+            try:
+                self.stop_sync()
+            except Exception as exc:
+                startup_errors.append(exception_report(exc))
+            self.last_error = "\n".join(["Browser service failed to start", *startup_errors, self._last_process_output])
+            raise BrowserServiceError("Browser service failed to start", code="sidecar_start_failed", retryable=True,
+                                      diagnostic=self.last_error, details={"returncode": process.poll()})
 
     def _request_json(
         self, method: str, path: str, payload: dict[str, Any] | None,
@@ -1443,16 +1603,28 @@ class BrowserServiceManager:
         try:
             response = urlopen(request, timeout=max(0.1, float(timeout_seconds)))  # noqa: S310
         except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            with exc:
+                raw = exc.read().decode("utf-8", errors="replace")
             try:
                 decoded = json.loads(raw)
             except ValueError:
-                decoded = {"ok": False, "error": {"code": "http_error", "message": raw or str(exc)}}
-            return decoded if isinstance(decoded, dict) else {"ok": False}
+                decoded = None
+            if not isinstance(decoded, dict) or not isinstance(decoded.get("error"), dict):
+                decoded = {"error": {"code": "http_error", "message": diagnostic_text(raw or str(exc), limit=None), "state_unknown": method == "POST"}}
+            decoded["ok"] = False
+            decoded["http_status"] = exc.code
+            decoded["http_body"] = diagnostic_text(raw, limit=None)
+            return decoded
         with response:
-            decoded = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+            raw = response.read().decode("utf-8", errors="replace")
+        try:
+            decoded = json.loads(raw)
+        except ValueError as exc:
+            raise BrowserServiceError("browser service returned invalid JSON", code="invalid_sidecar_output",
+                state_unknown=method == "POST", details={"body": diagnostic_text(raw, limit=None)}) from exc
         if not isinstance(decoded, dict):
-            raise BrowserServiceError("browser service returned invalid JSON", code="invalid_sidecar_output")
+            raise BrowserServiceError("browser service returned invalid JSON", code="invalid_sidecar_output",
+                state_unknown=method == "POST", details={"body": diagnostic_text(raw, limit=None)})
         return decoded
 
     @staticmethod

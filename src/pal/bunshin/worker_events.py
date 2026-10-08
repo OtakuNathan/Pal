@@ -14,6 +14,7 @@ from types import TracebackType
 from typing import Any, TextIO
 
 from pal.bunshin.failure_diagnostics import exception_diagnostic
+from pal.foundation.diagnostics import exception_report
 
 
 EventWriter = Callable[[dict[str, Any]], Awaitable[None]]
@@ -151,9 +152,10 @@ class WorkerEventWriter:
     ) -> None:
         try:
             await self.close()
-        except Exception:
+        except Exception as shutdown_error:
             if exc is None:
                 raise
+            exc.add_note("Worker event shutdown also failed:\n" + exception_report(shutdown_error))
             logging.getLogger(__name__).warning("Worker event shutdown failed after the primary failure")
 
     async def write_event(self, event: dict[str, Any]) -> None:
@@ -225,16 +227,20 @@ class WorkerEventWriter:
                     await self._write_line(message.line)
             except Exception as exc:
                 if message.delivered is not None and not message.delivered.done():
-                    message.delivered.set_exception(WorkerEventDeliveryError(
+                    failure = WorkerEventDeliveryError(
                         f"worker event delivery failed: {type(exc).__name__}: {exc}",
-                    ))
+                    )
+                    failure.__cause__ = exc
+                    message.delivered.set_exception(failure)
                 if not self._reported_failure:
                     self._reported_failure = True
                     logging.getLogger(__name__).warning(
                         "Worker event delivery failed: %s", type(exc).__name__,
                     )
                 if message.delivered is not None and self._fallback is not None:
-                    await self._fallback(message.line)
+                    fallback = json.loads(message.line)
+                    fallback["delivery_error"] = exception_report(exc)
+                    await self._fallback(_json_line(fallback))
             except asyncio.CancelledError:
                 if message.delivered is not None and not message.delivered.done():
                     message.delivered.set_exception(WorkerEventDeliveryError("worker event writer stopped before delivery"))
@@ -281,7 +287,7 @@ class WorkerEventWriter:
 
 def _worker_error(exc: Exception) -> dict[str, Any]:
     return {
-        "kind": "worker_error", "error": f"{type(exc).__name__}: {exc}",
+        "kind": "worker_error", "error": exception_report(exc),
         "failure_diagnostic": exception_diagnostic(exc),
     }
 
@@ -304,7 +310,9 @@ async def run_worker_with_events(operation: Callable[[EventWriter], Awaitable[in
                     pass
                 return 1
     except Exception as exc:
-        await _report_error_to_stderr(primary_error or exc)
+        if primary_error is not None and exc is not primary_error:
+            exc.add_note("Original worker error:\n" + exception_report(primary_error))
+        await _report_error_to_stderr(exc)
         return 1
     finally:
         if pipe is not None:

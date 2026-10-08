@@ -293,7 +293,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
     ):
         path = self.root / "incoming" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"not really an image")
+        from PIL import Image
+        Image.new("RGB", (8, 8)).save(path)
         return self.manager.register_ingested(
             {
                 "local_cached_path": str(path),

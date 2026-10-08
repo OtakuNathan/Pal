@@ -48,15 +48,17 @@ from pal.execution.tool_facade import (
     RetryDirective,
     RetryPolicy,
     ToolAffordance,
+    ToolExecutionError,
     ToolHandlerResult,
     ToolInvocationResult,
     ToolRejectedError,
     derive_retry_directive,
     rejection,
+    render_invalid_arguments,
     validate_output,
     validation_error_details,
 )
-from pal.shared.diagnostics import diagnostic_text, exception_diagnostic
+from pal.shared.diagnostics import diagnostic_text, exception_report
 from pal.execution.tool_presentation import render_tool_definition, render_tool_search
 from pal.shared.result_rendering import render_structured_for_llm
 from pal.execution.tool_registry import (
@@ -173,6 +175,33 @@ def _invocation_args(
     defaults = validated.model_dump(mode="python", exclude_none=True)
     explicit = validated.model_dump(mode="python", exclude_unset=True)
     return _merge_explicit_model_fields(defaults, explicit)
+
+
+def _failure_effect_outcome(record: CompiledToolRecord, receipt: EffectReceipt | None) -> EffectOutcome:
+    if receipt is not None:
+        return receipt.outcome
+    if record.execution.effect_kind is EffectKind.NONE:
+        return EffectOutcome.NONE
+    # Read-labelled tools can still change session state, e.g. navigation or
+    # memory promotion. Only the handler can confirm that no effect occurred.
+    return EffectOutcome.UNKNOWN
+
+
+def _with_failure_diagnostics(text: str, structured: dict[str, Any], *, error: str = "") -> str:
+    """Keep handler diagnostics visible even when its summary omits them."""
+    error = diagnostic_text(error, limit=None)
+    if error and error not in text:
+        text += "\nReported error: " + error
+    missing = {}
+    for key, value in structured.items():
+        if isinstance(value, str) and (not value or value in text):
+            continue
+        serialized_field = render_structured_for_llm({key: value})[1:-1]
+        if serialized_field not in text:
+            missing[key] = value
+    if missing:
+        text += "\nFailure details: " + diagnostic_text(render_structured_for_llm(missing), limit=None)
+    return text
 
 
 @dataclass
@@ -868,15 +897,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             )
             return rejection(
                 "invalid_arguments",
-                f"invalid arguments for {record.alias}: {exc}",
+                render_invalid_arguments(record.alias, exc, record.input_schema),
                 retry=RetryDirective.CORRECT_INPUT,
-                affordances=[
-                    ToolAffordance(
-                        tool="read_tool",
-                        arguments={"name": record.alias},
-                        reason="Invalid arguments. Use read_tool to inspect the exact schema, then correct the call.",
-                    )
-                ],
                 details=details,
             )
 
@@ -1067,6 +1089,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 continue
             hit = dict(item)
             hit["score"] = tier * 10000 + coverage * 100 + alias_coverage * 10 + purpose_coverage
+            matched_terms = terms & (alias_terms | purpose_terms)
+            if tier < 5 and matched_terms and matched_terms <= {"status", "show", "list", "inspect", "read", "get", "check"}:
+                hit["weak_match"] = True
             scored.append((tier, coverage, alias_coverage, purpose_coverage, alias, hit))
         scored.sort(key=lambda row: (-row[0], -row[1], -row[2], -row[3], row[4]))
         candidates = scored
@@ -1106,6 +1131,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             )
         elif not scored:
             result["usage_hint"] = "No matching tools. Try English alias keywords [domain] [action] [object] (e.g. 'lsp incoming calls', 'browser screenshot') or task synonyms; omit unknown filters."
+        elif hits and all(hit.get("weak_match") for hit in hits):
+            result["usage_hint"] = "Weak matches: these tools match only generic action/status words, not a specific task domain. Rephrase with domain and action keywords; do not assume they support the requested task."
         return result
 
     @staticmethod
@@ -1137,17 +1164,21 @@ class ExecutionRuntime(ExecutionRuntimePort):
             validated = validate_output(record.output_model, output).model_dump(mode="json", exclude_none=True)
         except (ValidationError, TypeError) as exc:
             outcome = EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.NOT_APPLIED
+            diagnostic = exception_report(exc)
             return FailedResult(
                 error_code="output_validation_failed",
-                error=str(exc),
+                error=diagnostic,
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
                 llm_text=(f"Built-in output failed validation for {record.alias}.\n"
-                          f"Validation error: {exception_diagnostic(exc)}\n"
-                          "Use read_tool with view=output to inspect the output contract."),
+                          f"Validation error:\n{diagnostic}\n"
+                          "Use read_tool with view=output to inspect the output contract.\n"
+                          "Unvalidated tool result:\n" + render_structured_for_llm({
+                              "output": output, "llm_text": llm_text,
+                          })),
                 affordances=[ToolAffordance(tool="read_tool", arguments={"name": record.alias, "view": "output"},
                                            reason="Inspect the output contract to repair the provider; do not replay a mutation.")],
-                details={"output_schema": record.output_schema},
+                details={"output_schema": record.output_schema, "raw_output": output, "raw_llm_text": llm_text},
             )
         return CompleteResult(
             output=validated,
@@ -1256,15 +1287,31 @@ class ExecutionRuntime(ExecutionRuntimePort):
         """
         try:
             result = self._resolve_result_guidance(generation, result)
-            if isinstance(result, (FailedResult, RejectedResult)) and not result.affordances and not result.recovery_hint:
+            if (isinstance(result, (FailedResult, RejectedResult))
+                    and result.error_code != "invalid_arguments"
+                    and not result.affordances and not result.recovery_hint):
                 record = generation.record_for_alias(call.name)
                 if record is not None and record.guidance.failure_next_steps.strip():
                     result = result.model_copy(update={"recovery_hint": record.guidance.failure_next_steps.strip()})
-        except Exception:
+        except Exception as exc:
             # Guidance handling must never turn a delivered operation into a
-            # new failure (B12); degrade to the bare typed result.
+            # new failure. Keep its recovery constraints and report this
+            # additional fault without offering unvalidated actions.
             _LOGGER.warning("Unable to resolve tool result guidance", exc_info=True)
-            result = result.model_copy(update={"affordances": [], "recovery_hint": ""})
+            result = result.model_copy(update={
+                "affordances": [],
+                "llm_text": result.llm_text + "\nRecovery suggestions could not be validated; "
+                    "operation status is unchanged:\n" + exception_report(exc),
+            })
+        if len(result.recovery_hint) > _MAX_RECOVERY_HINT_CHARS:
+            # Keep the full instruction inside the snapshottable body. The
+            # shortened metadata is explicit and makes nested finalization
+            # idempotent instead of silently losing trailing constraints.
+            marker = " ... [full recovery in result text or snapshot]"
+            result = result.model_copy(update={
+                "llm_text": result.llm_text + "\n\nFull recovery guidance: " + result.recovery_hint,
+                "recovery_hint": result.recovery_hint[:_MAX_RECOVERY_HINT_CHARS - len(marker)] + marker,
+            })
         return self._budget_invocation_result(result, call, budget=budget, turn_id=turn_id)
 
     def _resolve_result_guidance(
@@ -1274,6 +1321,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     ) -> ToolInvocationResult:
         """Validate and dedup suggested actions against the captured view (§8)."""
         resolved: list[ToolAffordance] = []
+        diagnostics: list[str] = []
         for candidate in normalize_affordances(result.affordances or (), limit=None):
             try:
                 key = action_key(candidate)
@@ -1299,12 +1347,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
                         continue
                     action = ToolAffordance(tool="call_tool", arguments=arguments, reason=candidate.reason)
                 resolved.append(action)
-            except Exception:
+            except Exception as exc:
                 _LOGGER.warning("Dropping invalid tool result affordance", exc_info=True)
+                diagnostics.append(exception_report(exc))
         resolved = normalize_affordances(resolved)
-        if resolved == list(result.affordances or ()):
+        if resolved == list(result.affordances or ()) and not diagnostics:
             return result
-        return result.model_copy(update={"affordances": resolved})
+        updates = {"affordances": resolved}
+        if diagnostics:
+            updates["llm_text"] = result.llm_text + "\nSome recovery suggestions could not be validated:\n" + "\n".join(diagnostics)
+        return result.model_copy(update=updates)
 
     def _budget_invocation_result(self, result, call, *, budget, turn_id):
         """Bound the body and recovery metadata independently of optional actions.
@@ -1323,7 +1375,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         delivery = getattr(result, "context_delivery", None)
         manifest = FileDeliveryManifest.from_dict(delivery) if delivery else None
         managed_snapshot = bool(
-            call.args.get("file_path")
+            isinstance(result, CompleteResult)
+            and call.name == "read_file"
+            and call.args.get("file_path")
             and self.result_snapshots is not None
             and self.result_snapshots.lookup_path(str(call.args["file_path"])) is not None
         )
@@ -1364,15 +1418,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     lifetime=lifetime, coverage="complete result text")
             refs = tuple(dict.fromkeys((*refs, ref)))
             hint = render_snapshot_hint(ref) + extra
-        except OSError as exc:
+        except Exception as exc:
             output_error = str(exc)
+            if isinstance(result, (FailedResult, RejectedResult)):
+                # Without a readable snapshot, truncation would destroy the
+                # only model-visible copy of the failure's cause.
+                return result.model_copy(update={
+                    "llm_text": text + "\n\nComplete error output could not be saved:\n" + exception_report(exc)
+                        + "\nThe full failure is shown above beyond the output budget because no complete snapshot "
+                          "could be saved. Operation status is unchanged; do not repeat side effects to recover output.",
+                })
             hint = (
-                "Complete output could not be saved: " + str(exc)[:200] +
-                ". The operation result is retained; this preview is incomplete. "
-                "Resolve storage availability. Repeat only a known safe/idempotent operation; "
-                "where applicable use shell with tail/sed for bounded output. "
-                "Do not repeat side effects merely to retrieve output." + extra
+                "Complete output could not be saved:\n" + exception_report(exc) +
+                "\nPreview incomplete; operation status is unchanged. Fix storage; retrieve retained output if available. "
+                "Do not repeat side effects to retrieve output." + extra
             )
+            if len(hint) + len(tail) > limit:
+                hint += "\nThe storage diagnostic exceeds this output budget and is shown in full."
         preview_allowance = max(0, min(int(budget.preview_chars or 1000), limit - len(hint) - len(tail) - 4))
         marker = "\n... [output omitted] ...\n"
         if preview_allowance < len(marker):
@@ -1415,7 +1477,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         turn_id: str | None,
     ) -> ToolInvocationResult:
-        if isinstance(raw, (CompleteResult, RejectedResult, FailedResult)):
+        if isinstance(raw, (RejectedResult, FailedResult)):
+            return raw.model_copy(update={"llm_text": _with_failure_diagnostics(
+                raw.llm_text, raw.details, error=raw.error)})
+        if isinstance(raw, CompleteResult):
             return raw
         receipt: EffectReceipt | None = None
         affordances: list[ToolAffordance] = []
@@ -1446,13 +1511,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if isinstance(raw_receipt, EffectReceipt):
                 receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
-                outcome = (
-                    EffectOutcome.NONE
-                    if record.execution.effect_kind is EffectKind.NONE
-                    else receipt.outcome
-                    if receipt is not None
-                    else EffectOutcome.UNKNOWN
-                )
+                outcome = _failure_effect_outcome(record, receipt)
                 # Pick the best failure guidance instead of stacking every
                 # source (§6.1): handler-provided recovery wins; the declared
                 # fallback fills the recovery hint only when nothing more
@@ -1462,15 +1521,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     handler_affordances=affordances,
                     declared_failure_next_steps=record.guidance.failure_next_steps.strip(),
                 )
-                return FailedResult(
+                retry = derive_retry_directive(record.execution, outcome)
+                declared_retry = (raw_structured or {}).get("retry")
+                if isinstance(declared_retry, str) and declared_retry in {item.value for item in RetryDirective}:
+                    retry = RetryDirective(declared_retry)
+                result_type = (RejectedResult if (raw_structured or {}).get("kind") == "rejected"
+                    and outcome is EffectOutcome.NOT_STARTED else FailedResult)
+                return result_type(
                     error_code=str((raw_structured or {}).get("error_code") or raw_status or "handler_failed"),
                     error=raw_text or llm_text,
                     effect=outcome,
-                    retry=derive_retry_directive(record.execution, outcome),
-                    llm_text=llm_text or raw_text,
+                    retry=retry,
+                    llm_text=_with_failure_diagnostics(llm_text or raw_text, dict(raw_structured or {}), error=raw_text),
                     affordances=owner_affordances,
                     recovery_hint=recovery_hint,
                     details=dict(raw_structured or {}),
+                    snapshot_refs=raw.snapshot_refs,
+                    context_messages=context_messages,
                 )
             candidate = raw_structured if raw_structured is not None else {"text": raw_text}
             if record.is_mcp and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict):
@@ -1484,10 +1551,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         else:
             candidate = raw
 
-        if record.execution.effect_kind is EffectKind.NONE:
-            outcome = EffectOutcome.NONE
-        elif receipt is not None:
+        if receipt is not None:
             outcome = receipt.outcome
+        elif record.execution.effect_kind is EffectKind.NONE:
+            outcome = EffectOutcome.NONE
         elif record.requires_effect_receipt:
             outcome = EffectOutcome.UNKNOWN
             return FailedResult(
@@ -1495,7 +1562,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 error=f"effectful handler for {record.alias} returned no effect receipt",
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
-                llm_text=f"Effect outcome is unknown for {record.alias}; reconcile before retrying.",
+                llm_text=(f"Effect outcome is unknown for {record.alias}; the handler returned no effect receipt. "
+                          "Reconcile before retrying.\nUnvalidated tool result:\n" + render_structured_for_llm({
+                              "output": candidate, "llm_text": llm_text,
+                          })),
+                details={"raw_output_text": render_structured_for_llm(candidate), "raw_llm_text": llm_text},
+                snapshot_refs=raw.snapshot_refs if isinstance(raw, CapabilityResult) else (),
+                recovery_hint=recovery_hint,
+                affordances=affordances,
+                context_messages=context_messages,
             )
         else:
             outcome = EffectOutcome.APPLIED
@@ -1510,13 +1585,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 output_model = validate_output(record.output_model, candidate)
                 output = output_model.model_dump(mode="json", exclude_none=True)
         except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
+            diagnostic = exception_report(exc)
             return FailedResult(
                 error_code="output_validation_failed",
-                error=str(exc),
+                error=diagnostic,
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
                 llm_text=(f"Tool output contract error for {record.alias}; effect={outcome.value}.\n"
-                          f"Validation error: {exc}\n"
+                          f"Validation error:\n{diagnostic}\n"
                           "This is a tool/provider output error, not a task argument error. "
                           "Inspect the captured result and repair the tool/provider contract; "
                           "do not repeat side effects to retrieve this output.\n"
@@ -1526,6 +1602,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 details={"output_schema": record.output_schema,
                          "raw_output_text": render_structured_for_llm(candidate),
                          "raw_llm_text": llm_text},
+                context_messages=context_messages,
             )
         # Handler text is data, including leading/trailing whitespace. Only
         # Pal-owned structured serialization may change presentation.
@@ -1551,9 +1628,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _rejected_error_result(exc: ToolRejectedError) -> RejectedResult:
+        text = exception_report(exc)
+        if exc.details:
+            text += "\nFailure details: " + diagnostic_text(render_structured_for_llm(exc.details), limit=None)
         return rejection(
             exc.error_code,
-            str(exc),
+            text,
             retry=exc.retry,
             affordances=normalize_affordances(exc.affordances, limit=None),
             details=dict(exc.details),
@@ -1573,19 +1653,24 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 handler_affordances=handler_affordances,
                 declared_failure_next_steps=declared_failure_next_steps,
             )
-        except Exception:
+        except Exception as exc:
             _LOGGER.warning("Unable to resolve failure guidance; retaining operation failure", exc_info=True)
-            return "", []
+            hint = handler_recovery_hint or declared_failure_next_steps
+            diagnostic = "Recovery guidance resolution also failed:\n" + exception_report(exc)
+            return ((hint + "\n" if hint else "") + diagnostic), []
 
     @staticmethod
     def _handler_exception_result(record: CompiledToolRecord, exc: Exception) -> FailedResult:
         receipt = getattr(exc, "effect_receipt", None)
-        if record.execution.effect_kind is EffectKind.NONE:
-            outcome = EffectOutcome.NONE
-        elif isinstance(receipt, EffectReceipt):
-            outcome = receipt.outcome
-        else:
-            outcome = EffectOutcome.UNKNOWN
+        outcome = _failure_effect_outcome(record, receipt if isinstance(receipt, EffectReceipt) else None)
+        retry = exc.retry if isinstance(exc, ToolExecutionError) else None
+        if not isinstance(retry, RetryDirective):
+            retry = derive_retry_directive(record.execution, outcome)
+        diagnostic = exception_report(exc)
+        details = dict(getattr(exc, "details", {}) or {})
+        llm_text = f"Tool {record.alias} failed ({type(exc).__name__}); effect={outcome.value}.\n{diagnostic}"
+        if details:
+            llm_text += "\nFailure details: " + diagnostic_text(render_structured_for_llm(details), limit=None)
         recovery_hint, affordances = ExecutionRuntime._safe_failure_guidance(
             handler_recovery_hint=str(getattr(exc, "recovery_hint", "") or ""),
             handler_affordances=list(getattr(exc, "affordances", ()) or ()),
@@ -1593,13 +1678,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
         return FailedResult(
             error_code=str(getattr(exc, "error_code", "handler_exception") or "handler_exception"),
-            error=f"{exc.__class__.__name__}: {exc}",
+            error=diagnostic,
             effect=outcome,
-            retry=derive_retry_directive(record.execution, outcome),
-            llm_text=f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
+            retry=retry,
+            llm_text=llm_text,
             affordances=affordances,
             recovery_hint=recovery_hint,
-            details=dict(getattr(exc, "details", {}) or {}),
+            details=details,
         )
 
     @staticmethod
@@ -1632,7 +1717,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return ToolExecutionResult(name=alias, ok=False, text=rendered,
             structured=result.model_dump(mode="json"), call_id=call_id,
             llm_text=rendered, status=result.error_code, invocation_result=result,
-            snapshot_refs=result.snapshot_refs, replay_result_ref=call_id if result.snapshot_refs else "")
+            snapshot_refs=result.snapshot_refs, replay_result_ref=call_id if result.snapshot_refs else "",
+            context_messages=tuple(result.context_messages))
 
     @staticmethod
     def _invocation_metadata_values(
@@ -1902,75 +1988,58 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            result = self.call_registered(
+            return self.call_registered(
                 CapabilityCall(
                     name=call.name,
                     args=dict(call.args),
                     meta={**dict(call.meta), "execution_runtime": self},
                 )
             )
-            return CapabilityResult(
-                status=result.status,
-                text=result.text,
-                structured=result.structured,
-                llm_text=getattr(result, "llm_text", ""),
-                context_delivery=getattr(result, "context_delivery", None),
-                context_messages=tuple(getattr(result, "context_messages", ()) or ()),
-            )
-        except ToolRejectedError as exc:
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text=str(exc),
-                structured={
-                    "error": str(exc),
-                    "error_code": exc.error_code,
-                    "capability": call.name,
-                },
-                llm_text=str(exc),
-            )
         except Exception as exc:
-            return CapabilityResult(
-                status=RuntimeStatus.ERROR,
-                text=f"capability execution failed: {exc.__class__.__name__}",
-                structured={"error": str(exc), "capability": call.name},
-                llm_text=f"capability execution failed: {exc.__class__.__name__}",
-            )
+            return self._capability_exception_result(call, exc)
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            result = await self.call_registered_async(
+            return await self.call_registered_async(
                 CapabilityCall(
                     name=call.name,
                     args=dict(call.args),
                     meta={**dict(call.meta), "execution_runtime": self},
                 )
             )
-            return CapabilityResult(
-                status=result.status,
-                text=result.text,
-                structured=result.structured,
-                llm_text=getattr(result, "llm_text", ""),
-                context_delivery=getattr(result, "context_delivery", None),
-                context_messages=tuple(getattr(result, "context_messages", ()) or ()),
-            )
-        except ToolRejectedError as exc:
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text=str(exc),
-                structured={
-                    "error": str(exc),
-                    "error_code": exc.error_code,
-                    "capability": call.name,
-                },
-                llm_text=str(exc),
-            )
         except Exception as exc:
-            return CapabilityResult(
-                status=RuntimeStatus.ERROR,
-                text=f"capability execution failed: {exc.__class__.__name__}",
-                structured={"error": str(exc), "capability": call.name},
-                llm_text=f"capability execution failed: {exc.__class__.__name__}",
-            )
+            return self._capability_exception_result(call, exc)
+
+    @staticmethod
+    def _capability_exception_result(call: CapabilityCall, exc: Exception) -> CapabilityResult:
+        rejected = isinstance(exc, ToolRejectedError)
+        declared = isinstance(exc, (ToolRejectedError, ToolExecutionError))
+        diagnostic = exception_report(exc)
+        text = diagnostic if rejected else f"Capability execution failed: {diagnostic}"
+        details = dict(exc.details) if declared else {}
+        if details:
+            text += "\nFailure details: " + diagnostic_text(render_structured_for_llm(details), limit=None)
+        structured = {
+            **details,
+            "kind": "rejected" if rejected else "failed",
+            "error_code": exc.error_code if declared else "handler_exception",
+            "capability": call.name,
+        }
+        if "error" in structured:
+            structured["diagnostic"] = diagnostic
+        else:
+            structured["error"] = diagnostic
+        retry = exc.retry if declared else None
+        if isinstance(retry, RetryDirective):
+            structured["retry"] = retry.value
+        return CapabilityResult(
+            status=RuntimeStatus.INVALID if rejected else RuntimeStatus.ERROR,
+            text=text, llm_text=text, structured=structured,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.NOT_STARTED) if rejected else
+                            exc.effect_receipt if isinstance(exc, ToolExecutionError) else None),
+            recovery_hint=exc.recovery_hint if declared else "",
+            affordances=tuple(exc.affordances) if declared else (),
+        )
 
     async def interrupt_turn(self, turn_id: str) -> None:
         if not turn_id:

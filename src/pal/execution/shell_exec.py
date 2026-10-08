@@ -19,7 +19,8 @@ from typing import Callable
 from pal.shared.result_snapshot import ResultSnapshotRef
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
+from pal.shared.diagnostics import exception_report
 from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.shared import (
     OPERATION_NAMESPACE,
@@ -56,8 +57,10 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "budgeting handles large output, while such pipelines hide the command that is stalled."
     ),
     failure_next_steps=(
-        "Inspect stdout, stderr, and exit status, correct the command or environment, and retry only when the "
-        "operation is safe to repeat. Follow any returned recovery affordance."
+        "Read stdout, stderr, and exit status before changing the command. A non-zero exit is the command's "
+        "reported result, not necessarily a mistake: rg/grep exit 1 means no matches, diff exit 1 means "
+        "differences, and test runners can report failing tests. Retry only when the operation is safe to repeat. "
+        "Follow any returned recovery affordance."
     ),
 )
 
@@ -79,6 +82,8 @@ class _ShellExecution:
     snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     snapshot_text: str = ""
     output_error: str = ""
+    output_error_code: str = ""
+    started: bool = True
 
 
 @dataclass(eq=False)
@@ -89,6 +94,9 @@ class _ShellProcessSupervisor:
     output_root: Path
     termination_grace_seconds: float = SHELL_TERMINATION_GRACE_SECONDS
     capture_output: Callable[[Path, Path], tuple[ResultSnapshotRef, str] | None] | None = None
+    started: bool = field(default=False, init=False)
+    returncode: int | None = field(default=None, init=False)
+    execution: _ShellExecution | None = field(default=None, init=False, repr=False)
     _proc: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _cancel_requested: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -104,7 +112,7 @@ class _ShellProcessSupervisor:
             timed_out = False
             with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
                 if self._cancel_requested.is_set():
-                    return _ShellExecution(returncode=None, stdout="", stderr="", cancelled=True)
+                    return _ShellExecution(returncode=None, stdout="", stderr="", cancelled=True, started=False)
                 proc = subprocess.Popen(
                     self.argv,
                     stdin=subprocess.DEVNULL,
@@ -114,6 +122,7 @@ class _ShellProcessSupervisor:
                     start_new_session=os.name != "nt",
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                 )
+                self.started = True
                 with self._state_lock:
                     self._proc = proc
                 if self._cancel_requested.is_set():
@@ -131,22 +140,33 @@ class _ShellProcessSupervisor:
                 finally:
                     with contextlib.suppress(Exception):
                         proc.wait(timeout=self.termination_grace_seconds + 1.0)
+                    self.returncode = proc.returncode
                     stdout_file.flush()
                     stderr_file.flush()
                     with self._state_lock:
                         self._proc = None
             output_error = ""
+            output_error_code = ""
             try:
                 captured = self.capture_output(stdout_path, stderr_path) if self.capture_output else None
-            except OSError as exc:
+            except Exception as exc:
                 captured = None
-                output_error = f"Command finished, but output could not be preserved: {exc}"
-            stdout = "" if captured or output_error else stdout_path.read_bytes().decode("utf-8", errors="replace")
-            stderr = "" if captured or output_error else stderr_path.read_bytes().decode("utf-8", errors="replace")
-            return _ShellExecution(
+                output_error = "Command finished, but its output snapshot could not be saved:\n" + exception_report(exc)
+                output_error_code = "output_snapshot_failed"
+            # A failed snapshot must not discard streams that still exist.
+            # The outer delivery layer can budget this retained evidence.
+            streams = {"stdout": "", "stderr": ""}
+            if not captured:
+                for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+                    try:
+                        streams[label] = path.read_bytes().decode("utf-8", errors="replace")
+                    except OSError as exc:
+                        output_error += f"\n{label} could not be read; its contents are unavailable:\n" + exception_report(exc)
+                        output_error_code = "output_read_failed"
+            self.execution = _ShellExecution(
                 returncode=proc.returncode,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=streams["stdout"],
+                stderr=streams["stderr"],
                 timed_out=timed_out,
                 cancelled=self._cancel_requested.is_set() and not timed_out,
                 termination_signal=self._termination_signal,
@@ -154,7 +174,9 @@ class _ShellProcessSupervisor:
                 snapshot_refs=(captured[0],) if captured else (),
                 snapshot_text=captured[1] if captured else "",
                 output_error=output_error,
+                output_error_code=output_error_code,
             )
+            return self.execution
 
     async def cancel(self) -> None:
         await asyncio.to_thread(self.terminate)
@@ -233,7 +255,7 @@ class ShellExecTool:
         try:
             execution = supervisor.run()
         except OSError as exc:
-            return self._spawn_failure(cmd, cwd, timeout_ms, exc)
+            return self._execution_failure(cmd, cwd, timeout_ms, exc, supervisor)
         return self._execution_result(cmd, cwd, timeout_ms, execution)
 
     async def ainvoke(self, args: dict[str, object], **kwargs: object) -> CapabilityResult:
@@ -258,7 +280,7 @@ class ShellExecTool:
                 snapshots.finish_references(execution.snapshot_refs)
             raise
         except OSError as exc:
-            return self._spawn_failure(cmd, cwd, timeout_ms, exc)
+            return self._execution_failure(cmd, cwd, timeout_ms, exc, supervisor)
         finally:
             release = getattr(runtime, "release_interrupt_handle", None)
             if callable(release):
@@ -326,7 +348,7 @@ class ShellExecTool:
     ) -> CapabilityResult:
         if execution.output_error:
             display_text = execution.output_error
-            error_code = "output_snapshot_failed"
+            error_code = execution.output_error_code or "output_snapshot_failed"
         elif execution.timed_out:
             display_text = f"command timed out after {timeout_ms} ms"
             error_code = "command_timed_out"
@@ -343,6 +365,8 @@ class ShellExecTool:
         output_text += _render_shell_output(display_text, execution.stdout, execution.stderr)
         if execution.snapshot_text:
             output_text += "\n" + execution.snapshot_text
+        if execution.output_error and (execution.timed_out or execution.cancelled):
+            output_text += "\nCommand " + ("timed out" if execution.timed_out else "was cancelled") + "."
         structured = {
             "cmd": cmd,
             "cwd": cwd or str(Path.cwd()),
@@ -366,26 +390,43 @@ class ShellExecTool:
             structured=structured,
             llm_text=output_text,
             snapshot_refs=execution.snapshot_refs,
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN if execution.started and error_code else
+                EffectOutcome.APPLIED if execution.started else EffectOutcome.NOT_STARTED),
         )
 
     @staticmethod
-    def _spawn_failure(
+    def _execution_failure(
         cmd: str,
         cwd: str | None,
         timeout_ms: int,
         exc: OSError,
+        supervisor: _ShellProcessSupervisor,
     ) -> CapabilityResult:
-        display_text = f"could not start shell command: {type(exc).__name__}: {exc}"
+        if supervisor.execution is not None:
+            completed = ShellExecTool._execution_result(cmd, cwd, timeout_ms, supervisor.execution)
+            diagnostic = exception_report(exc)
+            text = completed.llm_text + "\nShell output cleanup failed:\n" + diagnostic
+            return CapabilityResult(
+                status=RuntimeStatus.ERROR, text=text, llm_text=text,
+                structured={**dict(completed.structured or {}), "error_code": "shell_cleanup_failed", "cleanup_error": diagnostic},
+                effect_receipt=completed.effect_receipt, snapshot_refs=completed.snapshot_refs,
+                recovery_hint="The command has finished. Resolve the cleanup failure without repeating the command.",
+            )
+        display_text = (
+            "Shell command started, but execution or output delivery failed. "
+            f"Observed exit code: {supervisor.returncode if supervisor.returncode is not None else 'unavailable'}.\n"
+            if supervisor.started else "could not start shell command:\n"
+        ) + exception_report(exc)
         return CapabilityResult(
             status=RuntimeStatus.ERROR,
             text=display_text,
             llm_text=display_text,
             structured={
-                "error_code": "shell_spawn_failed",
+                "error_code": "shell_execution_failed" if supervisor.started else "shell_spawn_failed",
                 "cmd": cmd,
                 "cwd": cwd or str(Path.cwd()),
                 "display_text": display_text,
-                "returncode": None,
+                "returncode": supervisor.returncode,
                 "stdout": "",
                 "stderr": "",
                 "stdout_truncated": False,
@@ -396,6 +437,9 @@ class ShellExecTool:
                 "termination_signal": "",
                 "descendants_terminated": False,
             },
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN if supervisor.started else EffectOutcome.NOT_STARTED),
+            recovery_hint=("The command started; inspect its effects and output before deciding whether to retry."
+                if supervisor.started else "The shell process was not started. Correct the reported launch or environment error before retrying."),
         )
 
     def _build_shell_command(self, cmd: str) -> list[str]:

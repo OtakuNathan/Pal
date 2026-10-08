@@ -15,6 +15,7 @@ from typing import Any
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import (
     FileContentChangedError,
+    FileSnapshotReadError,
     FileStateCache,
     atomic_compare_and_swap_utf8,
     line_number_at_offset,
@@ -29,6 +30,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import exception_report
 
 
 # Error codes
@@ -44,7 +46,7 @@ ERR_NO_CHANGE = "NO_CHANGE"
 _ERROR_LLMS: dict[str, str] = {
     ERR_NOT_READ: "File has not been read yet. Read it first before editing.",
     ERR_PARTIAL_READ: "The requested edit is outside the line ranges already read. Read the exact affected range before editing.",
-    ERR_STALE_FILE: "File has been modified since read. Read it again before editing.",
+    ERR_STALE_FILE: "The current file version could not be confirmed against the read snapshot. Read it again before editing.",
     ERR_MULTIPLE_MATCHES: "old_string appears multiple times in the file. Provide more context to uniquely identify the match.",
     ERR_NOT_FOUND_MATCH: "old_string was not found in the file.",
     ERR_EMPTY_OLD_STRING: "old_string must not be empty.",
@@ -84,7 +86,11 @@ class FileEditTool:
         # Capture presence before get_valid(), because stale entries are
         # evicted as a side effect of validation.
         had_record = file_path in self.cache
-        cached_state = self.cache.get_valid_state(file_path)
+        try:
+            cached_state = self.cache.get_valid_state(file_path)
+        except FileSnapshotReadError as exc:
+            return _err(RuntimeStatus.ERROR, "Could not read the file before editing.\n" + exception_report(exc),
+                        error_code="READ_FAILED", file_path=file_path)
         if cached_state is None:
             if not had_record:
                 return _err(
@@ -108,7 +114,7 @@ class FileEditTool:
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
-                f"failed to resolve file before editing: {exc}",
+                "Failed to resolve file before editing:\n" + exception_report(exc),
                 error_code="READ_FAILED",
                 file_path=file_path,
             )
@@ -149,11 +155,11 @@ class FileEditTool:
                 expected_content=cached_content,
                 new_content=new_content,
             )
-        except FileContentChangedError:
+        except FileContentChangedError as exc:
             self.cache.invalidate(file_path)
             return _err(
                 RuntimeStatus.FORBIDDEN,
-                _ERROR_LLMS[ERR_STALE_FILE],
+                _ERROR_LLMS[ERR_STALE_FILE] + "\n" + exception_report(exc),
                 error_code=ERR_STALE_FILE,
                 file_path=file_path,
             )
@@ -161,7 +167,7 @@ class FileEditTool:
             self.cache.invalidate(file_path)
             return _err(
                 RuntimeStatus.ERROR,
-                f"File write reported an error: {exc}. Commit outcome is uncertain; read the current file before retrying.",
+                "File write reported an error. Commit outcome is uncertain; read the current file before retrying.\n" + exception_report(exc),
                 error_code="WRITE_FAILED",
                 file_path=file_path,
             )
@@ -184,6 +190,16 @@ class FileEditTool:
                 item["current_match_line_ranges"] = [list(_line_range_for_match(new_content, start, end))
                     for start, end in _match_offsets(new_content, edit["old_string"])]
         report = json.dumps({"applied_edit_indices": applied, "failed_edits": failed}, ensure_ascii=False) + "\n"
+        recovery_hint = ""
+        if failed:
+            failed_indices = ", ".join(str(item["edit_index"]) for item in failed)
+            subject = f"edits {failed_indices} failed and were" if len(failed) > 1 else f"edit {failed_indices} failed and was"
+            codes = ", ".join(dict.fromkeys(str(item.get("error_code") or "unknown") for item in failed))
+            report = f"Applied {len(applied)} of {len(edits)} edits; {subject} not applied ({codes}; see failed_edits).\n" + report
+            recovery_hint = (
+                f"Only the failed edits ({failed_indices}) need attention; do not resubmit applied edits. "
+                "Use current_match_line_ranges and the patch below to re-plan them."
+            )
         llm_text = report + patch
         standalone_ranges, inherited_ranges = _post_edit_authority(
             old_content=cached_content,
@@ -231,6 +247,7 @@ class FileEditTool:
                 "applied_edit_indices": applied,
                 "failed_edits": failed,
             },
+            recovery_hint=recovery_hint,
             context_delivery=manifest.to_dict(),
         )
 

@@ -356,7 +356,8 @@ def test_worker_main_flushes_progress_terminal_and_primary_worker_error(monkeypa
     wire = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [item["event"]["event_kind"] for item in wire[:-1]] == ["progress", "terminal"]
     assert wire[-1]["kind"] == "worker_error"
-    assert wire[-1]["error"] == f"ValueError: {message.replace(chr(0xdcff), chr(0xfffd))}"
+    assert wire[-1]["error"].endswith(f"ValueError: {message.replace(chr(0xdcff), chr(0xfffd))}")
+    assert "Traceback" in wire[-1]["error"]
     wire[-1]["error"].encode("utf-8")
     assert wire[-1]["failure_diagnostic"]["error_type"] == "ValueError"
 
@@ -380,7 +381,8 @@ def test_closed_stdout_preserves_primary_worker_error_on_stderr(monkeypatch, mes
     assert fallback["kind"] == "worker_event_fallback"
     wire = fallback["message"]
     assert wire["kind"] == "worker_error"
-    assert wire["error"] == f"ValueError: {message.replace(chr(0xdcff), chr(0xfffd))}"
+    assert wire["error"].endswith(f"ValueError: {message.replace(chr(0xdcff), chr(0xfffd))}")
+    assert "Traceback" in wire["error"]
     wire["error"].encode("utf-8")
 
 
@@ -518,4 +520,5 @@ sys.exit(module.main())
     assert wire[50]["event"]["event_kind"] == "terminal"
     assert len(wire) == (52 if fails else 51)
     if fails:
-        assert wire[-1]["error"] == "ValueError: primary harness failure"
+        assert wire[-1]["error"].endswith("ValueError: primary harness failure")
+        assert "Traceback" in wire[-1]["error"]

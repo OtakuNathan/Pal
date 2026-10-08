@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
+
 import asyncio
 import hashlib
 import json
@@ -839,6 +841,7 @@ class LLMRuntime:
         if not endpoints:
             return _failure_result("Selected LLM endpoint is unavailable or not configured. Select one with /model.")
         last_error: Exception | None = None
+        failure_attempts: list[dict[str, Any]] = []
         for endpoint in endpoints:
             # F1: when the prepared plan resolved THIS endpoint, reuse its
             # compiled request verbatim — the projected payload is the
@@ -859,6 +862,7 @@ class LLMRuntime:
                     return _failure_result(str(exc), exc=exc)
                 except Exception as exc:
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
                     self._emit(
                         "llm_endpoint_exhausted",
@@ -956,6 +960,7 @@ class LLMRuntime:
                             on_submitted=on_submitted,
                         )
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, attempt)
                     self._emit(
                         "llm_endpoint_exhausted",
@@ -965,6 +970,7 @@ class LLMRuntime:
                     break
                 except Exception as exc:
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, attempt)
                     retryable = _retryable_error_kind(error_kind)
                     if retryable and attempt + 1 < self.endpoint_retry_attempts:
@@ -982,6 +988,7 @@ class LLMRuntime:
         return _failure_result(
             _public_failure_text(last_error),
             exc=last_error,
+            failure_attempts=failure_attempts,
         )
 
     def _projection_send_receipt(
@@ -1119,6 +1126,7 @@ class LLMRuntime:
             yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
             return
         last_error: Exception | None = None
+        failure_attempts: list[dict[str, Any]] = []
         for endpoint in endpoints:
             # F1: plan-prepared requests are reused verbatim on their
             # resolved endpoint (the projection encoded exactly this).
@@ -1139,6 +1147,7 @@ class LLMRuntime:
                     return
                 except Exception as exc:
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, 0, provider_attempt=False)
                     self._emit(
                         "llm_endpoint_exhausted",
@@ -1254,6 +1263,7 @@ class LLMRuntime:
                         )
                         return
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, attempt)
                     self._emit(
                         "llm_endpoint_exhausted",
@@ -1263,6 +1273,7 @@ class LLMRuntime:
                     break
                 except Exception as exc:
                     last_error = exc
+                    failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, attempt)
                     provider_started = semantic_seen or bool(
                         stream_control is not None
@@ -1286,6 +1297,8 @@ class LLMRuntime:
                                 else 0
                             ),
                         )
+                        error_response = replace(error_response, message=replace(error_response.message,
+                            metadata={**dict(error_response.message.metadata), "failure_attempts": failure_attempts}))
                         self.usage_ledger.record_failed_request(
                             endpoint_id=endpoint.endpoint_id
                         )
@@ -1309,6 +1322,7 @@ class LLMRuntime:
         response = _failure_result(
             str(last_error or "LLM stream failed"),
             exc=last_error,
+            failure_attempts=failure_attempts,
         ).response
         yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
 
@@ -1360,14 +1374,16 @@ class LLMRuntime:
 
         task = asyncio.create_task(asyncio.to_thread(worker))
         deadline = loop.time() + wall_timeout
+        last_update: LLMResponseUpdate | None = None
         try:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     stream_control.cancel("wall_timeout")
-                    response = _failure_result(
-                        f"LLM stream exceeded the {wall_timeout:g}s wall-clock limit"
-                    ).response
+                    error = TimeoutError(f"LLM stream exceeded the {wall_timeout:g}s wall-clock limit")
+                    response = (_response_with_failure(last_update.response, error,
+                        partial_output_chars=len(last_update.response.text)) if last_update is not None
+                        else _failure_result(str(error), exc=error).response)
                     yield LLMResponseUpdate(
                         response,
                         delta_kind=LLMResponseDeltaKind.STATE,
@@ -1392,6 +1408,7 @@ class LLMRuntime:
                     if on_event is not None:
                         on_event(item.payload)
                     continue
+                last_update = item
                 yield item  # type: ignore[misc]
         finally:
             stream_control.cancel("consumer_closed")
@@ -2003,12 +2020,20 @@ def _failure_result(
     text: str,
     *,
     exc: Exception | None = None,
+    failure_attempts: list[dict[str, Any]] | None = None,
 ) -> LLMGenerationResult:
+    detail = exception_report(exc) if exc is not None else ""
+    text = diagnostic_text(text, limit=None)
+    if detail and detail not in text:
+        text += "\n" + detail
+    metadata = _failure_metadata(exc)
+    if failure_attempts:
+        metadata["failure_attempts"] = failure_attempts
     return LLMGenerationResult(
         response=_text_response(
             text,
             LLMFinishReason.ERROR,
-            metadata=_failure_metadata(exc),
+            metadata=metadata,
         )
     )
 
@@ -2019,12 +2044,11 @@ def _response_with_failure(
     *,
     partial_output_chars: int = 0,
 ) -> LLMResponseIR:
-    if exception_error(exc) is not None:
-        response = replace(response, message=replace(
-            response.message,
-            parts=tuple(part for part in response.message.parts if not isinstance(part, ToolCallIR)),
-            replay=None,
-        ))
+    response = replace(response, message=replace(
+        response.message,
+        parts=tuple(part for part in response.message.parts if not isinstance(part, ToolCallIR)),
+        replay=None,
+    ))
     metadata = dict(response.message.metadata)
     metadata.update(_failure_metadata(exc))
     if partial_output_chars > 0:
@@ -2047,6 +2071,7 @@ def _failure_metadata(exc: Exception | None) -> dict[str, Any]:
         ),
         "failure_kind": error_kind,
         "error_type": type(exc).__name__ if exc is not None else "UnknownError",
+        **({"error_diagnostic": exception_report(exc)} if exc is not None else {}),
     }
 
 
@@ -2178,6 +2203,8 @@ def _is_stub_endpoint(endpoint: LLMEndpointModel) -> bool:
 
 
 def _accounted_response_error(endpoint: Any, response: LLMResponseIR) -> LLMEndpointResponseError:
-    error = LLMEndpointResponseError(f"endpoint {endpoint.endpoint_id} returned finish_reason=error")
+    error = LLMEndpointResponseError(diagnostic_text(
+        f"endpoint {endpoint.endpoint_id} returned finish_reason=error\n{response.text}\n"
+        + json.dumps(thaw_json(response.message.metadata), ensure_ascii=False, default=str), limit=None))
     error.llm_attempt_recorded = bool(response.attempt_ids)
     return error

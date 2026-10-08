@@ -74,6 +74,17 @@ If `out_channel_id` is set, proactive execution resolves it through the channel 
 
 If `out_channel_id` is unset, the proactive run still executes and records history, but it does not emit channel output.
 
+A configured output channel that cannot be resolved is a run failure, not an
+implicit request to execute without output. Failures during run creation, turn
+execution, cleanup, and completion recording retain their exception chains.
+If durable failure recording also fails, run inspection exposes the in-process
+`runtime_failures` fallback for the current runtime lifetime.
+
+Run status `completed` confirms turn execution only. Run inspection explicitly
+reports `completion_scope=turn_execution` and
+`delivery_confirmation=not_recorded`; it is not a channel delivery receipt.
+Asynchronous delivery failures remain channel-owned failure events.
+
 ## Tables
 
 Current truth tables:

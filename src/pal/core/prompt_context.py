@@ -127,7 +127,7 @@ def prepare_context(
         elif previous:
             header += "Use this context in place of earlier content under this heading.\n"
         if item.get("instruction"):
-            header += "<pal_defaults>Unless the current user request specifies otherwise:\n"
+            header += "<pal_defaults>\n"
         footer = ("\n</pal_defaults>" if item.get("instruction") else "") + "\n</pal_context>"
         # Keep artifact/reference parts as user data. Control records only carry text.
         from pal.llm.conversions import request_ir_from_prompt

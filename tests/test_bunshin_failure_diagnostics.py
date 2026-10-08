@@ -67,7 +67,8 @@ def test_worker_main_reports_pre_runner_exception(monkeypatch, capsys):
                              "--bunshin-id", "b", "--run-id", "r"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["kind"] == "worker_error"
-    assert payload["error"] == "RuntimeError: SECRET_MESSAGE_MUST_NOT_BE_AMPLIFIED"
+    assert payload["error"].endswith("RuntimeError: SECRET_MESSAGE_MUST_NOT_BE_AMPLIFIED")
+    assert "Traceback" in payload["error"]
     assert "SECRET" not in json.dumps(payload["failure_diagnostic"])
     assert payload["failure_diagnostic"]["frames"][-1]["function"] == "_failure"
 
@@ -267,7 +268,9 @@ def test_nonzero_cleanup_preserves_terminal_policy_and_diagnostics(
 
     if has_receipt:
         result = asyncio.run(process())
-        assert result.terminal_payload == terminal_payload
+        assert {key: result.terminal_payload[key] for key in terminal_payload} == terminal_payload
+        assert cleanup in result.terminal_payload["process_error"]["error"]
+        assert result.terminal_payload["process_error"]["submission_recorded"] is True
         repository.role_retries.queue_role_attempt_retry.assert_not_called()
         return
     with pytest.raises((RuntimeError, PermanentEffectError)) as caught:

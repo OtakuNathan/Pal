@@ -529,7 +529,7 @@ class TestResolveFailureGuidance:
 class TestGuidanceFailureDegrades:
     """B12: a broken guidance layer never changes operation facts."""
 
-    def test_helper_exception_keeps_facts_and_reduces_to_bare_result(self, tmp_path, monkeypatch):
+    def test_helper_exception_keeps_facts_and_recovery_and_reports_diagnostic(self, tmp_path, monkeypatch):
         def handler(_call):
             raise ToolExecutionError(
                 "business boom",
@@ -563,9 +563,11 @@ class TestGuidanceFailureDegrades:
             assert result.retry == RetryDirective.SAFE
             assert "business boom" in result.llm_text
             assert result.details == {"trace": "kept"}
-            # Degraded guidance is empty, never a fabricated replacement.
+            # Omit unvalidated actions, but retain authored recovery and the
+            # reason this additional delivery step failed.
             assert result.affordances == []
-            assert result.recovery_hint == ""
+            assert result.recovery_hint == "inspect the failing test"
+            assert "guidance helper exploded" in result.llm_text
         finally:
             runtime.shutdown()
 

@@ -841,7 +841,7 @@ def adjust_messages(messages):
         self.assertEqual(invoker.attempts, 2)
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("kind=response_error", result.text)
-        self.assertNotIn("DSML response is malformed", result.text)
+        self.assertIn("DSML response is malformed", result.text)
 
     def test_output_recovery_is_normalized_after_dsml_fragments_are_merged(self) -> None:
         token = "｜DSML｜"

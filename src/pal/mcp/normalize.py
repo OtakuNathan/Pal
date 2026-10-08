@@ -7,6 +7,7 @@ from typing import Any
 from pal.execution.contracts import CapabilityResult
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpRejectedItem, McpToolSpec
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import diagnostic_text, exception_report
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
@@ -117,6 +118,7 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
         "error_kind": "tool_execution" if is_error else None,
     }
     if is_error:
+        structured["error_code"] = "mcp_tool_error"
         structured["next_step"] = (
             "For argument errors, use read_tool with the called Pal alias to inspect its exact schema. "
             f"For server failures, inspect read_mcp_server(name={server_id!r}) and inspect_mcp_state. "
@@ -137,19 +139,22 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
 
 
 def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind: str) -> CapabilityResult:
-    error_text = str(exc).strip() or exc.__class__.__name__
+    error_text = exception_report(exc)
     structured = {
         "mcp": {"server_id": server_id, "name": name, "kind": kind},
         "error_kind": "protocol",
+        "error_code": "mcp_protocol_error",
         "error": error_text,
         "error_type": exc.__class__.__name__,
         "next_step": f"Use inspect_mcp_state and read_mcp_server(name={server_id!r}) for transport/server state. Correct the reported cause; reconcile external writes before retrying.",
     }
+    if getattr(exc, "payload", None):
+        structured["protocol_details"] = dict(exc.payload)
     return CapabilityResult(
         status=RuntimeStatus.ERROR,
         text=f"MCP {kind} protocol error: {error_text}",
         structured=structured,
-        llm_text=render_titled_structured_for_llm("MCP protocol error", structured),
+        llm_text=diagnostic_text(render_titled_structured_for_llm("MCP protocol error", structured), limit=None),
     )
 
 

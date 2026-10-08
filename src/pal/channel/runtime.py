@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_report
+
 import asyncio
 import inspect
 import logging
@@ -765,8 +767,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     task.result()
                 except Exception as exc:
                     errors.append(
-                        f"{endpoint.endpoint.endpoint_id}: "
-                        f"{exc.__class__.__name__}: {exc}"
+                        f"{endpoint.endpoint.endpoint_id}: {exception_report(exc)}"
                     )
         self._started = False
         self._loop = None
@@ -802,7 +803,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     await preparation
         except Exception as exc:
             if owns_transition:
-                hub.last_error = str(exc)
+                hub.last_error = exception_report(exc)
                 self._apply_hub_action(
                     hub,
                     EndpointHubAction.ROLLBACK_TRANSPORT
@@ -830,7 +831,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 await old_stopper()
             except Exception as exc:
                 if owns_transition:
-                    self.fail_endpoint_transition(endpoint_id, str(exc))
+                    self.fail_endpoint_transition(endpoint_id, exception_report(exc))
                 raise
             if hub.state == EndpointHubState.TRANSITIONING:
                 # A transport may return scheduled-but-unconfirmed work to its
@@ -854,8 +855,8 @@ class ChannelRuntime(ChannelRuntimePort):
             if callable(failed_stopper):
                 try:
                     await failed_stopper()
-                except Exception:
-                    pass
+                except Exception as cleanup_exc:
+                    exc.add_note("Replacement transport cleanup also failed:\n" + exception_report(cleanup_exc))
             self._absorb_endpoint_transport_backlog(hub, endpoint)
             old_starter = getattr(old_endpoint, "start_async", None)
             if old_endpoint is not None:
@@ -867,10 +868,10 @@ class ChannelRuntime(ChannelRuntimePort):
                 self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
             if owns_transition:
                 if old_endpoint is not None:
-                    hub.last_error = "replacement startup failed; restored previous transport"
                     self.complete_endpoint_transition(endpoint_id)
+                    hub.last_error = "replacement startup failed; restored previous transport:\n" + exception_report(exc)
                 else:
-                    self.fail_endpoint_transition(endpoint_id, str(exc))
+                    self.fail_endpoint_transition(endpoint_id, exception_report(exc))
             raise
         _transfer_endpoint_runtime_state(old_endpoint, endpoint)
         self.endpoint_registry.register(endpoint)
@@ -1407,7 +1408,7 @@ class ChannelRuntime(ChannelRuntimePort):
             try:
                 confirmed = self._deliver_buffered(endpoint, delivery)
             except Exception as exc:
-                hub.last_error = str(exc)
+                hub.last_error = exception_report(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(
                     getattr(exc, "permanent", False)
                 )
@@ -1585,7 +1586,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     ),
                     "provider_id": hub.provider_id,
                     "transition_epoch": hub.transition_epoch,
-                    "reason": str(reason or "delivery_failed"),
+                    "reason": exception_report(reason) if isinstance(reason, Exception) else str(reason or "delivery_failed"),
                     "reason_code": getattr(reason, "reason", "delivery_failed"),
                     "permanent": permanent,
                     "transient": not permanent,
@@ -1653,7 +1654,7 @@ class ChannelRuntime(ChannelRuntimePort):
             try:
                 adapter.send(item.response_handle, item.text)
             except Exception as exc:
-                reason = str(exc)
+                reason = exception_report(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(
                     getattr(exc, "permanent", False)
                 )

@@ -60,7 +60,7 @@ def test_browser_full_text_is_saved_in_receiving_runtime_and_readable(runtime, b
     assert 'line09000' in read.llm_text
 
 
-def test_browser_storage_failure_keeps_preview_without_exposing_full_body(runtime, monkeypatch):
+def test_browser_storage_failure_keeps_full_body_for_delivery_budgeting(runtime, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError('disk full')
 
@@ -71,10 +71,11 @@ def test_browser_storage_failure_keeps_preview_without_exposing_full_body(runtim
         'execution_runtime': runtime, 'turn_id': 'failed-storage'}))
     document = result.structured['document']
     assert document['text'] == 'preview'
-    assert document['text_file_error'] == 'disk full'
+    assert 'OSError: disk full' in document['text_file_error']
     assert 'text_file' not in document and '_full_text' not in document
-    assert 'full private body' not in result.llm_text
-    assert 'saving the full text failed' in document['next_step'].lower()
+    assert document['text_file_content'] == 'full private body'
+    assert 'full private body' in result.llm_text
+    assert 'full captures are included' in document['next_step'].lower()
     assert result.snapshot_refs == ()
 
 
@@ -132,7 +133,9 @@ def test_truncated_browser_operations_keep_full_output_without_reexecution(runti
     assert text not in result.llm_text
     assert 'do not repeat' in payload['next_step']
     if fail_storage:
-        assert payload['text_file_error'] == 'disk full'
+        assert 'OSError: disk full' in payload['text_file_error']
+        captured = payload['text_file_content']
+        assert (json.loads(captured) if action == 'evaluate' else captured) == value
         assert 'text_file' not in payload
         assert result.snapshot_refs == ()
     else:

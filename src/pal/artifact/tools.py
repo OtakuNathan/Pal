@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from pal.artifact.contracts import ARTIFACT_KIND_IMAGE
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.execution.turn_io_contracts import TurnIOHost
+from pal.foundation.diagnostics import exception_report
 from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.shared.tool_protocol import ToolContextMessageIR
@@ -25,12 +27,20 @@ def _scope_from_runtime(runtime: TurnIOHost | None, turn_id: str | None) -> str:
     raise KeyError("artifact_scope_unavailable")
 
 
-def _result(status: str, title: str, structured: dict[str, Any], text: str = "") -> CapabilityResult:
+def _result(status: str, title: str, structured: dict[str, Any], text: str = "", *,
+            effect: EffectOutcome | None = None, recovery_hint: str = "") -> CapabilityResult:
+    if status != RuntimeStatus.OK:
+        structured = dict(structured)
+        structured.setdefault("error_code", structured.get("reason") or "artifact_failed")
+    if effect == EffectOutcome.NOT_STARTED:
+        structured = {**structured, "kind": "rejected", "retry": "correct_input"}
     return CapabilityResult(
         status=status,
         text=text or title,
         structured=structured,
         llm_text=render_titled_structured_for_llm(title, structured),
+        effect_receipt=EffectReceipt(outcome=effect) if effect is not None else None,
+        recovery_hint=recovery_hint,
     )
 
 
@@ -45,16 +55,17 @@ class ArtifactImportTool:
     service: ArtifactManager
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        started = False
         try:
             scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
             raw_path = str(args.get("path") or "").strip()
             if not raw_path:
-                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "path_required"})
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "path_required"}, effect=EffectOutcome.NOT_STARTED)
             path = Path(raw_path).expanduser().resolve(strict=True)
             if not path.is_file():
-                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "not_regular_file"})
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "not_regular_file"}, effect=EffectOutcome.NOT_STARTED)
             if path.stat().st_size > self.service.policy.limits.max_original_bytes:
-                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "artifact_too_large"})
+                return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "artifact_too_large"}, effect=EffectOutcome.NOT_STARTED)
             kind = self.service.processor_registry.resolve_kind(
                 mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                 file_name=path.name,
@@ -65,8 +76,10 @@ class ArtifactImportTool:
                 try:
                     with Image.open(path) as source_image:
                         source_image.verify()
-                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
-                    return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", {"reason": "artifact_processing_failed"})
+                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+                    return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed",
+                        {"reason": "artifact_processing_failed", "error": exception_report(exc)}, effect=EffectOutcome.NOT_STARTED)
+            started = True
             ref = self.service.register_ingested(
                 kwargs.get("stored_source") or path,
                 scope_key=scope_key,
@@ -76,12 +89,16 @@ class ArtifactImportTool:
             payload = {"artifact": ref.to_dict(), "artifact_id": ref.artifact_id}
             if ref.status == "failed":
                 payload["reason"] = "artifact_processing_failed"
-                return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", payload)
+                return _result(RuntimeStatus.UNSUPPORTED, "Artifact import failed", payload,
+                    effect=EffectOutcome.APPLIED,
+                    recovery_hint="The artifact record was stored, but processing failed. Inspect its diagnostic before importing again.")
             return CapabilityResult(
                 status=RuntimeStatus.OK,
                 text="Local file imported",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Local file imported", payload),
+                recovery_hint=("Artifact processing is partial. Inspect its notes and available representations."
+                               if ref.status == "partial" else ""),
                 context_messages=(ToolContextMessageIR(
                     content=(
                         "<runtime_context_update>Local file imported into the current conversation. "
@@ -93,11 +110,17 @@ class ArtifactImportTool:
                 ),),
             )
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed", {"reason": _key_error_reason(exc)})
-        except FileNotFoundError:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed", {"reason": "source_not_found"})
-        except (OSError, RuntimeError, ValueError) as exc:
-            return _result(RuntimeStatus.ERROR, "Artifact import failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed",
+                {"reason": _key_error_reason(exc), "error": exception_report(exc)},
+                effect=EffectOutcome.UNKNOWN if started else EffectOutcome.NOT_STARTED)
+        except FileNotFoundError as exc:
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact import failed",
+                {"reason": "source_not_found", "error": exception_report(exc)},
+                effect=EffectOutcome.UNKNOWN if started else EffectOutcome.NOT_STARTED)
+        except (OSError, RuntimeError, ValueError, ImportError) as exc:
+            return _result(RuntimeStatus.ERROR, "Artifact import failed",
+                {"reason": "artifact_import_failed", "error": exception_report(exc)},
+                effect=EffectOutcome.UNKNOWN if started else EffectOutcome.NOT_STARTED)
 
 
 @dataclass
@@ -115,7 +138,7 @@ class ArtifactListTool:
             structured = {"artifacts": [ref.to_dict() for ref in refs]}
             return _result(RuntimeStatus.OK, "Visible artifacts", structured, text=f"{len(refs)} artifact(s)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact list failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact list failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -132,7 +155,7 @@ class ArtifactInfoTool:
             structured = self.service.info(str(args.get("artifact_id") or ""), scope_key)
             return _result(RuntimeStatus.OK, "Artifact info", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact info failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact info failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -157,9 +180,9 @@ class ArtifactReadTool:
             status = RuntimeStatus.OK if result.ok else RuntimeStatus.UNSUPPORTED
             return _result(status, "Artifact read", result.to_dict(), text=result.text)
         except ValueError as exc:
-            return _result(RuntimeStatus.INVALID, "Artifact read failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.INVALID, "Artifact read failed", {"reason": str(exc), "error": exception_report(exc)})
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact read failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact read failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -182,7 +205,7 @@ class ArtifactSearchTool:
             structured = {"results": [item.to_dict() for item in results], "ttl_refreshed": False}
             return _result(RuntimeStatus.OK, "Artifact search results", structured, text=f"{len(results)} artifact candidate(s)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact search failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact search failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -199,7 +222,7 @@ class ArtifactSelectTool:
             structured = self.service.select(str(args.get("artifact_id") or ""), scope_key)
             return _result(RuntimeStatus.OK, "Artifact selected", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact select failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact select failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -226,7 +249,7 @@ class ArtifactContentSearchTool:
             }
             return _result(RuntimeStatus.OK, "Artifact content search results", structured, text=f"{len(results)} content match(es)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact content search failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact content search failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 @dataclass
@@ -244,11 +267,11 @@ class ArtifactTranscribeTool:
             transcript = self.service.read(artifact_id, scope_key, representation="transcript")
             if transcript.ok:
                 return _result(RuntimeStatus.OK, "Artifact transcript", transcript.to_dict(), text=transcript.text)
-            info = self.service.info(artifact_id, scope_key)
-            structured = {"reason": "needs_transcription", "artifact": info.get("artifact", {})}
+            structured = {"reason": "needs_transcription", "artifact": transcript.metadata,
+                          "read_result": transcript.to_dict()}
             return _result(RuntimeStatus.UNSUPPORTED, "Artifact transcription needed", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact transcription failed", {"reason": _key_error_reason(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact transcription failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
 def _optional_int(value: Any) -> int | None:

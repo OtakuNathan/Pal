@@ -588,7 +588,7 @@ workspace_policy: {}
         )
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "invalid_arguments")
-        self.assertIn("Extra inputs are not permitted", result.llm_text)
+        self.assertIn("unexpected field", result.llm_text)
         self.assertFalse((self.root / "artifact-stage" / "verification_plan.json").exists())
 
     def test_worker_only_canonical_names_are_exposed_through_role_native_aliases(self) -> None:

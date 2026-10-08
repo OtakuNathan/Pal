@@ -5,7 +5,10 @@ from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, StrictToolModel, ToolAffordance, ToolGuidance, ToolRejectedError
+from pal.execution.contracts import CapabilityResult
+from pal.foundation.diagnostics import exception_report
+from pydantic import Field
 
 from pal.execution.generated_tool_models import (
     ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
@@ -71,6 +74,14 @@ class ProactiveTarget:
     last_run_at: str | None
 
 
+class ProactiveTaskReadInput(StrictToolModel):
+    name: str = Field(min_length=1, description="Task name returned by list_proactive_tasks.")
+
+
+class ProactiveTaskRunsInput(ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput):
+    name: str = Field(min_length=1, description="Task name returned by list_proactive_tasks.")
+
+
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="proactive",
@@ -122,7 +133,7 @@ class ProactiveIntrospectionProvider:
         result = resolve(endpoint_id=endpoint_id, reply_target=reply_target, current_binding=current)
         return str(result["channel_id"]), dict(result["reply_target"])
 
-    def iter_proactive_tasks(self) -> list[ProactiveTarget]:
+    def iter_proactive_tasks(self, *, include_history: bool = True) -> list[ProactiveTarget]:
         items: list[ProactiveTarget] = []
         for definition in sorted(self.manager.registered.values(), key=lambda item: item.proactive_id):
             items.append(
@@ -136,7 +147,7 @@ class ProactiveIntrospectionProvider:
                     out_reply_target=dict(definition.out_reply_target),
                     schedule=dict(definition.schedule),
                     next_due_at=self.manager.schedule_engine.next_due_at(definition.proactive_id),
-                    last_run_at=self._last_run_at_for(definition.proactive_id),
+                    last_run_at=self._last_run_at_for(definition.proactive_id) if include_history else None,
                 )
             )
         return items
@@ -211,24 +222,20 @@ class ProactiveIntrospectionProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="proactive",
+        scope="module",
         action_name="show",
         guidance=ToolGuidance(
             purpose="Show one proactive task's full configuration — goal, schedule, output channel, skill refs.",
             use_when="Inspecting a specific task's details before modifying or debugging it.",
             do_not_use_when="Listing all tasks (use list_proactive_tasks). Checking run history (use read_latest_proactive_run or list_proactive_runs).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks.",
+            failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks.",
         ),
         aliases=("read_proactive_task",),
+        InputModel=ProactiveTaskReadInput,
+        metadata={"canonical_path": "intro_proactive_show"},
     )
     def show_task(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_proactive_target(call)
-        if target is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="proactive task not found",
-                llm_text="proactive task not found",
-            )
         payload = {
             "name": target.proactive_id,
             "proactive_id": target.proactive_id,
@@ -251,27 +258,23 @@ class ProactiveIntrospectionProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="proactive",
+        scope="module",
         action_name="last_run",
         guidance=ToolGuidance(
             purpose="Show the most recent run result for one proactive task.",
-            use_when='Checking if a recurring/scheduled task ran successfully or what it produced. No recorded run can mean the task has never executed or was newly created; inspect its schedule and enabled state before treating it as a failure.',
+            use_when='Checking if a recurring/scheduled task ran successfully or what it produced. Completed means the turn finished; it does not confirm channel delivery. No recorded run can mean the task has never executed or was newly created; inspect its schedule and enabled state before treating it as a failure.',
             do_not_use_when="Browsing all runs (use list_proactive_runs). Checking task config (use read_proactive_task).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks. If no run yet, the task may be newly created.",
+            failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks. If no run yet, the task may be newly created.",
         ),
         aliases=("read_latest_proactive_run",),
+        InputModel=ProactiveTaskReadInput,
+        metadata={"canonical_path": "intro_proactive_last_run"},
     )
-    def last_run(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_proactive_target(call)
-        if target is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="proactive task not found",
-                llm_text="proactive task not found",
-            )
+    def last_run(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
+        target = self._require_proactive_target(call, include_history=False)
         repository = self.manager.repository
         if repository is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None,
+            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": None,
                        "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
@@ -279,16 +282,19 @@ class ProactiveIntrospectionProvider:
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        run = repository.latest_run(target.proactive_id)
+        try:
+            run = repository.latest_run(target.proactive_id)
+        except Exception as exc:
+            return self._history_error(target.proactive_id, exc)
         if run is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None, "history_status": "empty"}
+            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": None, "history_status": "empty"}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
-                text="proactive task has not run yet",
+                text="no durable proactive run record",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
+        payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
@@ -298,28 +304,23 @@ class ProactiveIntrospectionProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="proactive",
+        scope="module",
         action_name="list_runs",
         guidance=ToolGuidance(
             purpose="List recent run history for one proactive task.",
             use_when="Debugging a task that keeps failing or checking patterns across multiple runs.",
             do_not_use_when="Just the latest run (use read_latest_proactive_run). Task configuration (use read_proactive_task).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks.",
+            failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks.",
         ),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
+        InputModel=ProactiveTaskRunsInput,
         aliases=("list_proactive_runs",),
+        metadata={"canonical_path": "intro_proactive_list_runs"},
     )
-    def list_runs(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_proactive_target(call)
-        if target is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="proactive task not found",
-                llm_text="proactive task not found",
-            )
+    def list_runs(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
+        target = self._require_proactive_target(call, include_history=False)
         repository = self.manager.repository
         if repository is None:
-            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": [],
+            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "items": [],
                        "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
@@ -328,8 +329,11 @@ class ProactiveIntrospectionProvider:
                 llm_text=render_titled_structured_for_llm("Proactive run history", payload),
             )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
-        items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
-        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": items, "history_status": "available" if items else "empty"}
+        try:
+            items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
+        except Exception as exc:
+            return self._history_error(target.proactive_id, exc)
+        payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "items": items, "history_status": "available" if items else "empty"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive run history",
@@ -356,7 +360,7 @@ class ProactiveIntrospectionProvider:
         proactive_id = str(call.args.get("name") or "").strip()
         goal = str(call.args.get("goal") or "").strip()
         if not proactive_id or not goal:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name and goal are required",
                 llm_text="name and goal are required",
@@ -436,13 +440,13 @@ class ProactiveIntrospectionProvider:
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
             )
         if not self.manager.destroy_task(proactive_id):
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
@@ -511,14 +515,14 @@ class ProactiveIntrospectionProvider:
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
             )
         existing = self.manager.registered.get(proactive_id)
         if existing is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
@@ -572,7 +576,7 @@ class ProactiveIntrospectionProvider:
     def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
@@ -583,7 +587,7 @@ class ProactiveIntrospectionProvider:
         out_reply_target = dict(out_reply_target_raw)
         updated = self.manager.set_output_target(proactive_id, out_reply_target)
         if updated is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
@@ -617,7 +621,7 @@ class ProactiveIntrospectionProvider:
         proactive_id = str(call.args.get("name") or "").strip()
         schedule = call.args.get("schedule")
         if not proactive_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
@@ -627,7 +631,7 @@ class ProactiveIntrospectionProvider:
             return invalid
         updated = self.manager.update_schedule(proactive_id, normalized_schedule)
         if updated is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
@@ -645,14 +649,14 @@ class ProactiveIntrospectionProvider:
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
             )
         updated = self.manager.set_enabled(proactive_id, enabled)
         if updated is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
                 structured={"proactive_id": proactive_id},
@@ -672,14 +676,18 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive state updated", payload),
         )
 
-    def _require_proactive_target(self, call: IntrospectionCall) -> ProactiveTarget | None:
-        proactive_id = str(call.args.get("target_id") or "").strip()
-        if not proactive_id:
-            return None
-        for target in self.iter_proactive_tasks():
+    def _require_proactive_target(self, call: IntrospectionCall, *, include_history: bool = True) -> ProactiveTarget:
+        proactive_id = str(call.args.get("name") or call.args.get("target_id") or "").strip()
+        targets = self.iter_proactive_tasks(include_history=include_history)
+        for target in targets:
             if target.proactive_id == proactive_id:
                 return target
-        return None
+        raise ToolRejectedError(
+            f"Proactive task not found: {proactive_id!r}.", error_code="unknown_target",
+            details={"available_names": [target.proactive_id for target in targets]},
+            affordances=[ToolAffordance(tool="list_proactive_tasks", arguments={},
+                reason="Find a current proactive task name before retrying.")],
+        )
 
     def _last_run_at_for(self, proactive_id: str) -> str | None:
         repository = self.manager.repository
@@ -690,12 +698,28 @@ class ProactiveIntrospectionProvider:
             return None
         return latest.completed_at or latest.started_at
 
+    def _runtime_failures(self, proactive_id: str) -> list[dict[str, object]]:
+        if self.runner is None:
+            return []
+        return [dict(item) for item in self.runner.results
+                if item.get("proactive_id") == proactive_id and item.get("error_text")]
+
+    def _history_error(self, proactive_id: str, exc: Exception) -> CapabilityResult:
+        payload = {"proactive_id": proactive_id, "history_status": "unavailable",
+                   "error_code": "proactive_history_read_failed", "error": exception_report(exc),
+                   "runtime_failures": self._runtime_failures(proactive_id)}
+        return CapabilityResult(status=RuntimeStatus.ERROR, text="proactive run history could not be read",
+            structured=payload, llm_text=render_titled_structured_for_llm("Proactive history read failed", payload),
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
+
     def _render_run(self, run) -> dict[str, object]:
         return {
             "proactive_run_id": run.proactive_run_id,
             "proactive_id": run.proactive_id,
             "trigger_kind": run.trigger_kind,
             "status": run.status,
+            "completion_scope": "turn_execution",
+            "delivery_confirmation": "not_recorded",
             "trigger_metadata": dict(run.trigger_metadata or {}),
             "turn_id": run.turn_id,
             "output_summary": run.output_summary,
@@ -799,7 +823,7 @@ def _invalid_schedule_result(text: str, *, structured: dict[str, object] | None 
 
 
 def _invalid_result(text: str, *, structured: dict[str, object] | None = None) -> IntrospectionResult:
-    return IntrospectionResult(
+    return _precondition_failure(
         status=RuntimeStatus.INVALID,
         text=text,
         structured=dict(structured or {}),
@@ -850,3 +874,15 @@ def register_with_core(
     context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)
     context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, module_id=PROACTIVE_MODULE_ID)
     return handle
+
+
+def _precondition_failure(
+    *, status: str, text: str, llm_text: str, structured: dict | None = None,
+) -> CapabilityResult:
+    return CapabilityResult(
+        status=status,
+        text=text,
+        llm_text=llm_text,
+        structured={**dict(structured or {}), "kind": "rejected", "retry": "correct_input"},
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
+    )

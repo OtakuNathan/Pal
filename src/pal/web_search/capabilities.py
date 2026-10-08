@@ -4,7 +4,8 @@ from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from pal.execution.generated_tool_models import (
     WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
@@ -31,6 +32,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.web_search.contracts import WebSearchQuery
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.service import WebSearchService
+from pal.foundation.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -292,7 +294,7 @@ class WebSearchIntrospectionProvider:
         metadata={"canonical_path": "op_web_search", "omit_family_in_canonical": True},
         aliases=("search_web",),
     )
-    def query(self, call: IntrospectionCall) -> IntrospectionResult:
+    def query(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         query_text = str(call.args.get("query") or "").strip()
         if not query_text:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="query is required", llm_text="query is required")
@@ -309,17 +311,20 @@ class WebSearchIntrospectionProvider:
                 )
             )
         except Exception as exc:
-            return IntrospectionResult(
+            diagnostic = exception_report(exc)
+            return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="web search failed",
-                structured={"query": query_text, "error": str(exc)},
-                llm_text=f"web search failed: {exc}",
+                structured={"query": query_text, "error_code": "web_search_failed", "error": diagnostic},
+                llm_text=f"web search failed: {diagnostic}",
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         payload = {
             "items": [item.__dict__ for item in result.items],
             "configured_provider_id": result.configured_provider_id,
             "effective_provider_id": result.effective_provider_id,
             "fallback_used": result.fallback_used,
+            "provider_errors": result.provider_errors,
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,

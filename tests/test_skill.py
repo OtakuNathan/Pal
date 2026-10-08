@@ -275,7 +275,7 @@ Run the workflow.
         result = SkillCommitTool(service=self.service).invoke({"candidate_id": candidate.candidate_id})
 
         self.assertEqual(result.status, "invalid")
-        self.assertEqual(result.structured["error"], "duplicate_skill_requires_update_or_replace")
+        self.assertIn("duplicate_skill_requires_update_or_replace", result.structured["error"])
 
     def test_inject_only_active_and_preserves_long_manual(self) -> None:
         service = SkillService(repository=self.skill_repository, inject_manual_char_budget=10)
@@ -705,8 +705,10 @@ Run the workflow.
 
         result = asyncio.run(SkillAssimilateTool(service=service).ainvoke({"source_text": "Learn this workflow."}))
 
-        self.assertEqual(result.status, "invalid")
-        self.assertEqual(result.structured["error"], "sanitizer_invalid_json")
+        self.assertEqual(result.status, "error")
+        self.assertIn("sanitizer_invalid_json", result.structured["error"])
+        self.assertIn("JSONDecodeError", result.structured["error"])
+        self.assertIn("{not-json", result.structured["error"])
 
 
 if __name__ == "__main__":

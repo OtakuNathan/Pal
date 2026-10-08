@@ -30,6 +30,7 @@ class ResponseIRBuilder:
         self.context = context
         self.message_id = str(uuid4())
         self.parts: list[Any] = []
+        self.metadata: dict[str, Any] = {}
         self.finish_reason = LLMFinishReason.STOP
         self.usage = LLMUsageIR()
         self.replay_payload: dict[str, Any] = {}
@@ -157,6 +158,7 @@ class ResponseIRBuilder:
             state=state,
             replay=replay,
             metadata={
+                **self.metadata,
                 **({"reasoning_context": self.evidence.reasoning_context}
                    if self.evidence.reasoning_context else {}),
                 "committed_items": [
@@ -194,7 +196,9 @@ class ResponseIRBuilder:
         if not self.complete:
             self.complete = True
         response = self.snapshot()
-        if not response.message.parts:
+        if not response.message.parts and not (
+            response.finish_reason == LLMFinishReason.ERROR and self.metadata.get("provider_error")
+        ):
             raise ShapeDecodeError("LLM response contained no assistant content or tool calls")
         return response
 

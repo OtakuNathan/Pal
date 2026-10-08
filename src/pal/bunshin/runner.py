@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pal.bunshin.failure_diagnostics import exception_diagnostic
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.bunshin.runner_components.models import BunshinRuntimeBundle as BunshinRuntimeBundle
 from pal.bunshin.runner_components.models import _BunshinCooperativeCancel as _BunshinCooperativeCancel
 from pal.bunshin.runner_components.models import _BunshinCooperativeRestart as _BunshinCooperativeRestart
@@ -7,7 +8,7 @@ from pal.bunshin.runner_components.models import EventWriter as EventWriter
 from pal.bunshin.runner_components.models import DecisionReader as DecisionReader
 from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime as build_slim_bunshin_runtime
 from pal.bunshin.runner_components.llm_settings import _prompt_observation_tag_from_pack as _prompt_observation_tag_from_pack
-import contextlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -81,7 +82,7 @@ class BunshinRunner:
                 {
                     "status": "failed",
                     "summary": f"bunshin runner failed: {exc.__class__.__name__}",
-                    "error": str(exc),
+                    "error": exception_report(exc),
                     "failure_diagnostic": exception_diagnostic(exc),
                     "error_type": exc.__class__.__name__,
                     "error_kind": (
@@ -105,16 +106,21 @@ class BunshinRunner:
     async def _report_terminal_after_cleanup(
         self, bundle: BunshinRuntimeBundle | None, payload: dict[str, Any],
     ) -> None:
+        cleanup_error = None
         try:
             await self.components.invocation.close_execution_work(bundle)
         except Exception as exc:
             # Preserve the primary failure's classification and retry policy.
             # Cleanup still fails the process, but cannot suppress its terminal.
             payload["cleanup_error"] = {
-                "error": str(exc), "error_type": type(exc).__name__,
+                "error": exception_report(exc), "error_type": type(exc).__name__,
                 "failure_diagnostic": exception_diagnostic(exc),
             }
-            raise
-        finally:
-            with contextlib.suppress(Exception):
-                await self.components.reporter.emit("terminal", payload)
+            cleanup_error = exc
+        try:
+            await self.components.reporter.emit("terminal", payload)
+        except Exception as exc:
+            undelivered = diagnostic_text(json.dumps(payload, ensure_ascii=False), limit=None)
+            raise RuntimeError(f"Bunshin terminal delivery failed; undelivered terminal: {undelivered}") from exc
+        if cleanup_error is not None:
+            raise cleanup_error

@@ -175,6 +175,7 @@ class ArtifactRef:
     status: str
     available_actions: tuple[str, ...] = ()
     text_file: dict[str, Any] = field(default_factory=dict)
+    notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -185,6 +186,7 @@ class ArtifactRef:
             "status": self.status,
             "available_actions": list(self.available_actions),
             "text_file": dict(self.text_file),
+            "notes": self.notes,
         }
 
 

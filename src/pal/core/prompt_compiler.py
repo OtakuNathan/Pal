@@ -191,6 +191,7 @@ class PromptCompiler:
     def _build_failure_prompt_ir(self, assembly_context: PromptAssemblyContext) -> PromptIR:
         identity_blocks: list[PromptIRBlock] = []
         persona_blocks: list[PromptIRBlock] = []
+        tool_policy_blocks: list[PromptIRBlock] = []
         for fragment in self.collect_prompt_fragments(
             PromptAssemblyContext(
                 event=assembly_context.event,
@@ -202,7 +203,7 @@ class PromptCompiler:
             )
         ):
             normalized_section = self._normalize_prompt_section(fragment.section)
-            if normalized_section not in {"identity", "persona"}:
+            if normalized_section not in {"identity", "persona", "tool_policy"}:
                 continue
             rendered_body = str(fragment.content).strip()
             if not rendered_body:
@@ -212,7 +213,8 @@ class PromptCompiler:
                 normalized_section=normalized_section,
                 rendered_body=rendered_body,
             )
-            (identity_blocks if normalized_section == "identity" else persona_blocks).append(block)
+            {"identity": identity_blocks, "persona": persona_blocks,
+             "tool_policy": tool_policy_blocks}[normalized_section].append(block)
         rules = str(
             assembly_context.metadata.get("failure_rules")
             or (
@@ -227,6 +229,7 @@ class PromptCompiler:
         system_blocks = [
             *identity_blocks,
             PromptIRBlock(block_id="operating_rules", title="Operating Rules", content=rules),
+            *tool_policy_blocks,
         ]
         runtime_blocks = self._build_runtime_overlay_blocks(assembly_context)
         user_context_blocks: list[PromptIRBlock] = []
@@ -801,8 +804,7 @@ class PromptCompiler:
                 current_parts = []
             body = block.content.strip()
             if block.block_id in {"persona", "operating_guidance", "task_flow", "tool_routing", "tool_efficiency", "memory_guide", "skill_guide", "knowledge_storage_boundary"}:
-                key = f"instruction:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}"
-                body = f'<pal_defaults key="{escape(key, quote=True)}">Unless the current user request specifies otherwise:\n' + body + "\n</pal_defaults>"
+                body = f'<pal_defaults key="{escape(block.block_id, quote=True)}">\n' + body + "\n</pal_defaults>"
             current_parts.append(body)
         if current_tag is not None and current_parts:
             rendered_sections.append(self._render_system_section(current_tag, current_parts))

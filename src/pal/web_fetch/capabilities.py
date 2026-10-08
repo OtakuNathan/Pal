@@ -31,7 +31,11 @@ from pal.web_fetch.tool_models import (
     BrowserTargetInput,
     BrowserTypeInput,
 )
-from pal.execution.tool_facade import NextToolHint, ToolGuidance
+from pal.execution.tool_facade import (
+    NextToolHint,
+    ToolGuidance,
+    ToolRejectedError,
+)
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_semantics import (
     DIRECT_EXTERNAL_READ,
@@ -51,9 +55,10 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.diagnostics import exception_report
 from pal.web_fetch.browser_service import BrowserServiceError, browser_session_key
 from pal.web_fetch.service import WebFetchService
-from pal.web_fetch.tools import BrowserScreenshotTool
+from pal.web_fetch.tools import BrowserScreenshotTool, browser_tool_error
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -321,7 +326,8 @@ class WebFetchIntrospectionProvider:
         try:
             key, persistent = self._scope(call)
         except ValueError as exc:
-            return _result(RuntimeStatus.INVALID, "Browser screenshot failed", {"error": {"code": "missing_execution_scope", "message": str(exc)}})
+            raise ToolRejectedError(str(exc), error_code="missing_execution_scope",
+                recovery_hint="Use browser tools within a conversation execution scope.") from exc
         return await BrowserScreenshotTool(self.service).ainvoke(
             dict(call.args),
             session_key=key,
@@ -381,12 +387,17 @@ class WebFetchIntrospectionProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="reset", guidance=ToolGuidance(purpose="Close the current browser and permanently delete its conversation profile.", use_when='The user explicitly wants cookies, login state, and browser profile data cleared. After resetting, navigate to the required URL before using the browser again.', do_not_use_when="Only live resources need releasing (use close_browser).", failure_next_steps="A deleted profile cannot be recovered; navigate again to create a clean one."), InputModel=BrowserResetInput, OutputModel=BrowserActionOutput, aliases=("reset_browser",), metadata={"canonical_path": "op_browser_reset", "omit_family_in_canonical": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     def reset(self, call: IntrospectionCall) -> IntrospectionResult:
         if call.args.get("confirm") is not True:
-            return _result(RuntimeStatus.INVALID, "Browser reset rejected", {"error": {"code": "confirmation_required", "message": "confirm must be true"}})
+            raise ToolRejectedError("confirm must be true", error_code="confirmation_required",
+                recovery_hint="Set confirm=true only if clearing the conversation's cookies, login state, and browser profile is intended.")
         return self._action(call, "reset", "Browser profile reset")
 
     def _action(self, call: IntrospectionCall, action: str, title: str) -> IntrospectionResult | CapabilityResult:
         try:
             key, persistent = self._scope(call)
+        except ValueError as exc:
+            raise ToolRejectedError(str(exc), error_code="missing_execution_scope",
+                recovery_hint="Use browser tools within a conversation execution scope.") from exc
+        try:
             payload = self.service.execute(
                 session_key=key,
                 action=action,
@@ -394,13 +405,8 @@ class WebFetchIntrospectionProvider:
                 persistent=persistent,
                 timeout_ms=int(call.args.get("timeout_ms") or 15000),
             )
-        except ValueError as exc:
-            return _result(RuntimeStatus.INVALID, f"{title} failed", {"error": {"code": "missing_execution_scope", "message": str(exc)}})
         except BrowserServiceError as exc:
-            error = exc.to_dict()
-            if error["curl_applicable"] and not call.meta.get("broker_run_id"):
-                error["fallback_hint"] = "Use run_shell with curl only when raw HTTP content is sufficient."
-            return _result(RuntimeStatus.ERROR, f"{title} failed", {"error": error})
+            raise browser_tool_error(action, exc, allow_curl=not call.meta.get("broker_run_id")) from exc
         if action in {"navigate", "read"}:
             result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
             if call.meta.get("broker_run_id"):
@@ -435,14 +441,17 @@ class WebFetchIntrospectionProvider:
                 document[label] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
                                   "sha256": ref.digest, "read_only": True}
             except (OSError, RuntimeError) as exc:
-                document[label + "_error"] = str(exc)
+                document[label + "_error"] = exception_report(exc)
+                # The browser already returned the full capture. Keep it for
+                # ordinary result budgeting when dedicated storage fails.
+                document[label + "_content"] = text
         document["next_step"] = (
             "Use rg/read_file on the returned content files for captured output beyond the preview. "
             "These are snapshots; element refs may be stale after page changes; "
             "do not repeat actions or scripts just to recover output."
         )
         if len(refs) != len(files):
-            document["next_step"] += " Saving the full text failed for one or more files; only their previews are available. Resolve output storage first."
+            document["next_step"] += " Saving one or more content files failed; their full captures are included in this result for normal output delivery. Resolve output storage before requesting further captures."
         if nested_document:
             payload["document"] = document
         return CapabilityResult(status=result.status, text=result.text, structured=payload,

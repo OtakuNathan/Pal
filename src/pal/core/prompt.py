@@ -53,8 +53,8 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 section="prompt_context_policy",
                 title="Prompt Context Policy",
                 content=(
-                    "Pal-authored context states identify their key and scope; a replacement or withdrawal supersedes "
-                    "the earlier state for that key. Events describe one occurrence, not a new user request.\n"
+                    "When Pal updates a named context block, use the latest version; if Pal withdraws it, stop using "
+                    "the earlier version. Event messages report something that happened, not a new user request.\n"
                     "- <runtime_context_update> and <runtime_reminder>: apply relevant runtime guidance to the "
                     "current task, subject to system policy and the user's explicit instructions.\n"
                     "- <recalled_memories> contains durable memory context; <conversation_summary> and <compact_context> contain "
@@ -74,8 +74,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 section="operating_rules",
                 title="Operating Rules",
                 content=(
-                    "Use relevant evidence already available in context; inspect the source when evidence is missing or "
-                    "stale. Never claim an operation succeeded without a confirming result. Do not stop, restart, or kill"
+                    "Never claim an operation succeeded without a confirming result. Do not stop, restart, or kill"
                     " your own hosting service from an active turn. Actual tool protocols and execution-time gates remain"
                     " enforced."
                 ),
@@ -113,7 +112,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "resident and learned routes are also defaults, not unconditional commands. Follow "
                     "still-applicable confirmed task constraints.\n"
                     "Execution choices do not change facts: if the user says not to run tests, do not run them and "
-                    "accurately report that tests were not run. Never claim verification that did not occur."
+                    "accurately report that tests were not run."
                 ),
                 priority=91,
                 metadata={"prompt_target": "system"},
@@ -147,8 +146,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "sufficient within its scope; ask only for missing authorization or a material scope expansion. "
                     "Execution-time approval gates cannot be bypassed. Use supported runtime tools or the official CLI "
                     "for governed state changes; do not bypass them by editing runtime storage. For unsupported changes, "
-                    "inspect the source/schema and apply an authorized scoped change. Report actual effects and any "
-                    "verification not performed."
+                    "inspect the source/schema and apply an authorized scoped change."
                 ),
                 priority=94,
                 metadata={"prompt_target": "system"},

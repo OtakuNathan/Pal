@@ -21,6 +21,8 @@ from uuid import uuid4
 import httpx
 
 from pal.llm.secret_store import SecretRef, SecretStorePort, TransactionalSecretStorePort
+from pal.foundation.diagnostics import diagnostic_text
+from pal.shared.json_values import thaw_json
 
 PROFILE = "openai_chatgpt"
 API_URL = "https://api.openai.com/v1"
@@ -47,14 +49,15 @@ def is_chatgpt(value: Any) -> bool:
 
 
 class ChatGPTError(RuntimeError):
-    """Safe, structured failure. Never formats provider bodies or credentials."""
+    """Structured failure retaining redacted provider diagnostics."""
 
-    def __init__(self, code: str, *, status: int | None = None, param: str = "", request_id: str = ""):
+    def __init__(self, code: str, *, status: int | None = None, param: str = "", request_id: str = "", diagnostic: str = ""):
         self.code = str(code or "unknown_error")
         self.status = status
         self.param = str(param or "")
         self.request_id = str(request_id or "")
-        super().__init__(self.user_message)
+        self.diagnostic = diagnostic_text(diagnostic, limit=None)
+        super().__init__(self.user_message + ("\n" + self.diagnostic if self.diagnostic else ""))
 
     @property
     def retryable(self) -> bool:
@@ -78,12 +81,14 @@ class ChatGPTError(RuntimeError):
         return f"ChatGPT 请求未完成（{self.code}）。未切换 endpoint；可使用 /model 手动选择。"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"code": self.code, "status": self.status, "param": self.param, "request_id": self.request_id}
+        return {"code": self.code, "status": self.status, "param": self.param, "request_id": self.request_id,
+                **({"diagnostic": self.diagnostic} if self.diagnostic else {})}
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ChatGPTError:
         return cls(str(value.get("code") or "unknown_error"), status=value.get("status"),
-                   param=str(value.get("param") or ""), request_id=str(value.get("request_id") or ""))
+                   param=str(value.get("param") or ""), request_id=str(value.get("request_id") or ""),
+                   diagnostic=str(value.get("diagnostic") or ""))
 
 
 def response_error(payload: Mapping[str, Any], *, status: int | None = None, request_id: str = "") -> ChatGPTError:
@@ -93,7 +98,8 @@ def response_error(payload: Mapping[str, Any], *, status: int | None = None, req
     if not code and isinstance(payload.get("error"), str):
         code = payload["error"]
     return ChatGPTError(str(code or "request_failed"), status=status,
-                        param=str(detail.get("param") or ""), request_id=request_id)
+                        param=str(detail.get("param") or ""), request_id=request_id,
+                        diagnostic=json.dumps(thaw_json(payload), ensure_ascii=False, default=str))
 
 
 def exception_error(exc: BaseException, *, include_http: bool = False) -> ChatGPTError | None:

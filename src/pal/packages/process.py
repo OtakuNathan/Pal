@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Iterator
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
+
 
 class PackageError(RuntimeError):
     pass
@@ -20,8 +22,9 @@ class PackageError(RuntimeError):
 
 def error_text(value: object) -> str:
     from pal.foundation.service_logging import redact_service_log_text
-    text = redact_service_log_text(value)
-    return re.sub(r"(https?://)[^/\s]+@", r"\1<redacted>@", text)[-4000:]
+    text = exception_report(value) if isinstance(value, BaseException) else diagnostic_text(value, limit=None)
+    text = redact_service_log_text(text)
+    return re.sub(r"(https?://)[^/\s]+@", r"\1<redacted>@", text)
 
 
 _local = threading.local()
@@ -120,17 +123,26 @@ def run_command(argv: list[str], *, env: dict[str, str] | None = None,
                         os.killpg(process.pid, signal.SIGKILL)
         try:
             process.wait(timeout=timeout)
-        except BaseException:
+        except BaseException as exc:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+            output.seek(0)
+            detail = output.read().decode("utf-8", errors="replace")
+            if detail:
+                exc.add_note("Captured command output (stdout and stderr):\n" + error_text(detail))
             raise
         finally:
             if control:
                 with control.lock:
                     control.process = None
-        output.seek(0, os.SEEK_END)
-        output.seek(max(0, output.tell() - 4000))
+        if process.returncode:
+            # Preserve all failure evidence; model-output budgeting happens
+            # after the package/job adapter has delivered the result.
+            output.seek(0)
+        else:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 4000))
         detail = output.read().decode("utf-8", errors="replace")
     if process.returncode:
         raise PackageError(f"Command {Path(argv[0]).name} failed ({process.returncode}): {error_text(detail)}")

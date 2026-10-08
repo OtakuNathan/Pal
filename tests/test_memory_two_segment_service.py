@@ -122,6 +122,7 @@ class ServiceTwoSegmentTests(unittest.TestCase):
             "run-x", _entry("S"), candidate_id="c1", after_commit=boom)
         self.assertEqual(outcome.status, "committed")
         self.assertEqual(len(service.failed_retirements), 1)
+        self.assertIn("cleanup exploded", outcome.detail)
         self.assertIn("S", service.l1_store.turns.turns[0].messages[0].text)
 
     def test_duplicate_delivery_is_idempotent_not_conflict(self):

@@ -177,15 +177,15 @@ def _resolve_proactive_reply_envelope(
         return None
     channel_runtime = context.port_registry.get("channel:channel")
     if channel_runtime is None:
-        return None
+        raise RuntimeError(f"Proactive output channel {out_channel_id!r} cannot be resolved: channel runtime is unavailable")
     endpoint_runtime = channel_runtime.get_endpoint(out_channel_id)
     if endpoint_runtime is None:
-        return None
+        raise RuntimeError(f"Proactive output channel {out_channel_id!r} is unavailable")
     reply_target = endpoint_runtime.derive_default_reply_target()
     reply_target.update(dict(definition.out_reply_target or {}))
     reply_target.update(dict(trigger.metadata.get("reply_target") or {}))
     if endpoint_runtime.endpoint.channel_kind == "socket" and not reply_target:
-        return None
+        raise RuntimeError(f"Proactive output channel {out_channel_id!r} has no reply target")
     return ChannelEnvelope(
         event=proactive_event,
         endpoint=endpoint_runtime.endpoint,

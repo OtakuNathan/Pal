@@ -19,6 +19,21 @@ from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMo
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.role_cleanup import RoleCleanup
 from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
+from pal.foundation.diagnostics import diagnostic_text
+
+
+def release_attempt_lease(
+    repository: BunshinRepository, resource_key: str, owner_id: str, fencing_token: int,
+    *, result_details: str,
+) -> None:
+    try:
+        repository.leases.release_lease(resource_key, owner_id, fencing_token)
+    except (LeaseConflict, StaleFencingToken):
+        # The process owner may already have released this exact attempt.
+        return
+    except Exception as exc:
+        exc.add_note("Worker result before lease cleanup failed:\n" + diagnostic_text(result_details, limit=None))
+        raise
 
 
 @dataclass

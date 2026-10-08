@@ -5,6 +5,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
 )
 from pal.execution.tool_facade import ToolGuidance
+from pal.shared.diagnostics import exception_report
 
 from pal.execution.generated_tool_models import (
     McpPluginMcpManagerPluginProviderAttachInput,
@@ -170,7 +171,7 @@ class McpManagerPluginProvider:
             self._refresh_module_capabilities()
             self.last_error = ""
         except Exception as exc:
-            self.last_error = f"{exc.__class__.__name__}: {exc}"
+            self.last_error = exception_report(exc)
             self.projection = None
             self.last_health = {"healthy": False, "startup_error": self.last_error}
             with contextlib.suppress(Exception):
@@ -273,9 +274,10 @@ class McpManagerPluginProvider:
         except Exception as exc:
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
-                text=f"image prepare failed: {exc.__class__.__name__}",
-                structured={"error": str(exc)},
-                llm_text=f"Image preparation failed: {exc}. " + _mcp_recovery_hint(exc, image=True),
+                text="Image preparation failed",
+                structured=_error_payload(exc, error_code="mcp_image_prepare_failed"),
+                llm_text="Image preparation failed:\n" + exception_report(exc),
+                recovery_hint=_mcp_recovery_hint(exc, image=True),
             )
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -440,7 +442,10 @@ class McpManagerPluginProvider:
             self._ensure_manager_started()
             return self.client.request_sync(method, params)
         except Exception as exc:
-            return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
+            self.last_error = exception_report(exc)
+            current = self._status_payload()
+            current.pop("cached_snapshot", None)
+            return {**current, **_error_payload(exc), "status": RuntimeStatus.ERROR, "operation": method}
 
     def _status_payload(self) -> dict[str, Any]:
         status = self._process_status()
@@ -453,7 +458,7 @@ class McpManagerPluginProvider:
             "projected_capability_count": len(self.projection.mounted_subtree.descriptors) if self.projection else 0,
             "projected_skill_count": len(self.projection.skills) if self.projection else 0,
         }
-        payload.update(dict(self.last_health or {}))
+        payload["cached_snapshot"] = dict(self.last_health or {})
         return payload
 
     def _prepare_image_payload(
@@ -592,9 +597,13 @@ def _add_names(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
     return rendered
 
 
+def _error_payload(exc: Exception, *, error_code: str = "mcp_manager_failed") -> dict[str, Any]:
+    return {"error": exception_report(exc), "error_type": exc.__class__.__name__, "error_code": error_code,
+            **({"protocol_details": dict(exc.payload)} if getattr(exc, "payload", None) else {})}
+
+
 def _error_result(text: str, exc: Exception) -> IntrospectionResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__,
-               "next_step": _mcp_recovery_hint(exc)}
+    payload = {**_error_payload(exc), "next_step": _mcp_recovery_hint(exc)}
     return IntrospectionResult(
         status=RuntimeStatus.ERROR,
         text=text,

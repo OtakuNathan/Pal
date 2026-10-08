@@ -12,6 +12,7 @@ from pal.control.contracts import (ControlRoute, InteractionButtonSpec, Interact
     InteractionItemSpec, InteractionMessageSpec)
 from pal.control.interactions import delivery_for_interaction, delivery_for_reply
 from pal.foundation import utc_now
+from pal.foundation.diagnostics import diagnostic_text
 from pal.memory.contracts import L3BatchCommitRequest, L3CommitRequest
 from pal.memory.mutations import content_hash
 from pal.memory.proposals import MemoryProposalBatch, STAR_FIELDS, normalize_memory_candidates
@@ -250,8 +251,11 @@ class MemoryReviewService:
                     self._finish(state, [item.document_id for item in result.results])
                 else:
                     state["status"] = "failed"
-                    state["error"] = f"Batch not committed: {result.status}. Retry or edit the candidates."
+                    state["error"] = diagnostic_text(
+                        f"Batch returned {result.status}. Inspect the provider result before retrying: "
+                        + json.dumps(asdict(result), ensure_ascii=False), limit=None)
                     state["revision"] += 1
+                state["result"]["provider_result"] = asdict(result)
                 self._save(db, state)
             return {"status": result.status, **state["result"]}
 

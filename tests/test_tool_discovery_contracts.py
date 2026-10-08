@@ -41,6 +41,29 @@ def test_word_search_distinguishes_install_and_uninstall_and_splits_alias(runtim
     assert len(result.structured["hits"]) == 3
 
 
+def test_generic_word_hits_report_weak_matching_without_changing_ranking(runtime):
+    for alias in ("inspect_browser_status", "inspect_proactive_status"):
+        mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
+            InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+            guidance=ToolGuidance(purpose="Inspect service status", use_when="Read service status", do_not_use_when="Other tasks"))
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "git status"}))
+    assert result.ok
+    assert result.structured["hits"]
+    assert all(hit["weak_match"] for hit in result.structured["hits"])
+    assert "Weak matches" in result.llm_text
+    precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "inspect_browser_status"}))
+    assert not precise.structured["hits"][0].get("weak_match")
+
+
+def test_call_tool_search_does_not_advertise_wrapper_retry_or_effect(runtime):
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "call_tool"}))
+    execution = result.structured["hits"][0]["execution"]
+    assert execution["inherits"] == "target_alias"
+    assert "effect_kind" not in execution
+    assert "retry_policy" not in execution
+    assert "idempotency" not in execution
+
+
 def test_discovery_exposes_plugin_reattach_and_provider_install():
     from types import SimpleNamespace
     from pal.plugins.capabilities import register_with_core as register_plugins

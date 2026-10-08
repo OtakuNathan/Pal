@@ -21,6 +21,7 @@ from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 from pal.foundation import utc_now
+from pal.foundation.diagnostics import exception_report
 from pal.memory import (
     L2Entry,
     L3CommitRequest,
@@ -583,7 +584,7 @@ class SQLiteVecL3Plugin:
         if query.mem_ref:
             return self._recall_exact(query)
         if not self.mounted:
-            return L3RecallResult()
+            return L3RecallResult(metadata={"degraded": True, "degraded_reason": "memory provider is not mounted"})
         refreshed = (
             {
                 "refreshed": 0,
@@ -665,12 +666,15 @@ class SQLiteVecL3Plugin:
             self.service.project_l3_entries(hot_entries, touch=True, top_of_mind=True)
         if cool_entries:
             self.service.project_l3_entries(cool_entries, touch=True, top_of_mind=False)
-        degraded_reason = str(self.last_embedding_error or embedding_health.get("last_error") or "").strip()
+        degraded_reason = str(self.last_embedding_error or embedding_health.get("last_error")
+                              or refreshed.get("last_embedding_error") or "").strip()
         degraded = bool(vector_query_text) and bool(degraded_reason)
         return L3RecallResult(
             hits=hits,
             projected_entries=projected_entries,
             metadata={
+                "index_refresh": refreshed,
+                "embedding_health": embedding_health,
                 "refreshed_embeddings": refreshed.get("refreshed", 0),
                 "generation_id": self.repository.generation_id,
                 "vector_available": refreshed.get("vector_available", False),
@@ -725,7 +729,7 @@ class SQLiteVecL3Plugin:
                 raise RuntimeError("embedding provider returned mismatched batch size")
             self.last_embedding_error = ""
         except Exception as exc:
-            self.last_embedding_error = str(exc)
+            self.last_embedding_error = exception_report(exc)
             with self.repository.write_lock:
                 if not self.repository.frozen:
                     with self.repository.write_transaction():
@@ -825,7 +829,7 @@ class SQLiteVecL3Plugin:
             query_vector = self.embedding_provider.embed_query(search_text)
             self.last_embedding_error = ""
         except Exception as exc:
-            self.last_embedding_error = str(exc)
+            self.last_embedding_error = exception_report(exc)
             return {}
         sqlite_vec_scores = self.repository.query_vector_candidates_sqlite_vec(
             provider_id=self._embedding_provider_id(),
@@ -905,7 +909,7 @@ class SQLiteVecL3Plugin:
                 "provider_id": self._embedding_provider_id(),
                 "transport": self._embedding_transport(),
                 "model_name": self._embedding_model_name(),
-                "last_error": str(exc),
+                "last_error": exception_report(exc),
             }
         if not bool(payload.get("healthy")) and payload.get("last_error"):
             self.last_embedding_error = str(payload.get("last_error"))

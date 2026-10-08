@@ -156,8 +156,9 @@ class WorkerExecution:
                     if self.publish_worker_event is not None:
                         await self.publish_worker_event(event)
                 elif str(item.get("kind") or "") == "worker_error":
-                    worker_error = append_failure_diagnostic(
+                    error = append_failure_diagnostic(
                         str(item.get("error") or ""), item.get("failure_diagnostic"),
                     )
+                    worker_error = "\n".join(filter(None, (worker_error, error)))
             await owner.wait()
         return ExitedRoleProcess(events=events, owner=owner, worker_error=worker_error)

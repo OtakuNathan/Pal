@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shutil
 import socket
 import sqlite3
@@ -49,7 +50,7 @@ from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, RuntimeStatus, SINGLETON_TARGET
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET
 from pal.wizard import WizardService
 from pal.web_fetch import BrowserServiceManager
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
@@ -278,6 +279,32 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.proactive_repository)
         self.assertIsNotNone(handle.proactive_runner)
         self.assertIn("proactive", handle.core.context.module_registry.modules)
+
+    def test_composed_guidance_and_prompt_references_resolve_or_state_availability(self) -> None:
+        handle = self._compose_runtime(wizard=self.wizard, registration=self.registration, database=self.database)
+        generation = handle.core.context.execution_runtime.registry_generation
+        records = {**generation.direct_aliases, **generation.indirect_aliases}
+        tool_name = re.compile(
+            r"\b(?:read|list|inspect|search|inject|write|edit|delete|upsert|complete|close|navigate|run|call|"
+            r"reload|attach|rescan|start|observe|remember|recall|forget|update|set|enable|disable|capture|find)_[a-z0-9_]+\b"
+        )
+        # These look like aliases but are result data fields.
+        data_fields = {"attach_errors", "search_text"}
+        for alias, record in records.items():
+            with self.subTest(alias=alias):
+                prose = "\n".join((record.guidance.purpose, record.guidance.use_when, record.guidance.do_not_use_when))
+                for mentioned in set(tool_name.findall(prose)) - data_fields:
+                    if mentioned == "inspect_channel_endpoint" and mentioned not in records:
+                        self.assertIn("If endpoints exist", prose)
+                    else:
+                        self.assertIn(mentioned, records, f"{alias} refers to unavailable {mentioned}")
+                for hint in record.guidance.next_tool_hints:
+                    if hint.name not in records:
+                        self.assertIn("not available in the current tool surface", record.compiled_description)
+        for fragment in handle.core.collect_prompt_fragments(PromptAssemblyContext()):
+            with self.subTest(prompt=fragment.section):
+                for mentioned in set(tool_name.findall(fragment.content)) - data_fields:
+                    self.assertIn(mentioned, records)
 
     def test_proactive_repository_round_trips_definition_and_run(self) -> None:
         repository = ProactiveRepository()

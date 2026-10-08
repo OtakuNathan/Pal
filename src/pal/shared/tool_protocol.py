@@ -188,6 +188,7 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
 class RejectedResult(_StrictProtocolModel):
     kind: Literal["rejected"] = "rejected"
     snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
+    context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
     error_code: str
     error: str
     effect: Literal[EffectOutcome.NOT_STARTED] = EffectOutcome.NOT_STARTED
@@ -201,6 +202,7 @@ class RejectedResult(_StrictProtocolModel):
 class FailedResult(_StrictProtocolModel):
     kind: Literal["failed"] = "failed"
     snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
+    context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)
     error_code: str
     error: str
     effect: EffectOutcome

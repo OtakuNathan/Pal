@@ -18,6 +18,7 @@ from pal.llm.ir import LLMRequestIR, PromptRegionIR, ThinkingLevel
 from pal.memory.context_view import projected_messages
 from pal.memory.contracts import MEMORY
 from pal.shared import PromptAssemblyContext
+from pal.foundation.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.llm.runtime import LLMRuntime, ModelSwitchAdvice
@@ -97,7 +98,7 @@ class ModelSwitchMixin:
         try:
             advice = self._model_switch_advice(llm, target_id, status["current"])
         except Exception as exc:
-            await self._complete_action_reply_async(action, f"Cannot switch models: {exc}")
+            await self._complete_action_reply_async(action, f"Cannot switch models: {exception_report(exc)}")
             return
         request = PendingControlRequest(
             request_id=f"model_{uuid4().hex[:12]}", request_kind="model_switch",
@@ -213,7 +214,10 @@ class ModelSwitchMixin:
                     commit_guard=current,
                 )
                 if not compact_result.success:
-                    raise ValueError(f"Compact did not complete ({compact_result.status}); the model was not changed.")
+                    raise ValueError(
+                        f"Compact did not complete ({compact_result.status}); the model was not changed.\n"
+                        + compact_result.diagnostic_details
+                    )
             async with self.state.channel_turn_transition_lock:
                 if not current():
                     raise ValueError("Model selection was cancelled or its configuration changed.")
@@ -222,12 +226,18 @@ class ModelSwitchMixin:
                 llm.apply_model_selection(target_id, level)
                 scope.pending_requests.pop("model_switch", None)
         except Exception as exc:
-            suffix = " The completed Compact remains in effect." if compact_result and compact_result.success else ""
-            await self._complete_action_reply_async(action, f"Model switch failed: {exc}{suffix}")
+            suffix = (
+                "\nThe completed Compact remains in effect.\n" + compact_result.diagnostic_details
+                if compact_result and compact_result.success else ""
+            )
+            await self._complete_action_reply_async(action, f"Model switch failed: {exception_report(exc)}{suffix}")
         else:
             # Delivery failure cannot roll back an already committed selection.
             # Let the channel error propagate without reporting a switch failure.
-            await self._complete_action_reply_async(action, f"Model updated to {target_id}. Thinking level: {level}. This applies to new turns only.")
+            message = f"Model updated to {target_id}. Thinking level: {level}. This applies to new turns only."
+            if compact_result and compact_result.diagnostic_details:
+                message += "\nCompaction diagnostics:\n" + compact_result.diagnostic_details
+            await self._complete_action_reply_async(action, message)
         finally:
             if request.payload.get("stage") == "executing" and scope.pending_requests.get("model_switch") is request:
                 scope.pending_requests.pop("model_switch", None)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_report
+
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable
@@ -677,7 +679,7 @@ class ChannelEndpointQueueBase(ABC):
             try:
                 self.send_channel_message(item.response_handle, item.message)
             except Exception as exc:
-                self.last_delivery_error = str(exc)
+                self.last_delivery_error = exception_report(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
                 if not permanent:
                     self.outbox.append(
@@ -691,7 +693,8 @@ class ChannelEndpointQueueBase(ABC):
                             attempts=item.attempts + 1,
                         )
                     )
-                failure = self._reply_failure_event_once(item, str(exc), permanent=permanent)
+                failure = self._reply_failure_event_once(item, self.last_delivery_error, permanent=permanent,
+                    reason_code=getattr(exc, "reason", "delivery_failed"))
                 if failure is not None:
                     emitted.append(failure)
                 continue
@@ -712,12 +715,14 @@ class ChannelEndpointQueueBase(ABC):
         reason: str,
         *,
         permanent: bool,
+        reason_code: str = "delivery_failed",
     ) -> EventEnvelope | None:
         return self._delivery_failure_event_once(
             delivery_id=item.reply_id,
             attempts=item.attempts + 1,
             reason=reason,
             permanent=permanent,
+            reason_code=reason_code,
         )
 
     def _delivery_failure_event_once(
@@ -727,6 +732,7 @@ class ChannelEndpointQueueBase(ABC):
         attempts: int,
         reason: str,
         permanent: bool,
+        reason_code: str = "delivery_failed",
     ) -> EventEnvelope | None:
         normalized_reason = str(reason or "delivery_failed")
         if permanent:
@@ -753,6 +759,7 @@ class ChannelEndpointQueueBase(ABC):
                 "endpoint_id": self.endpoint.endpoint_id,
                 "channel_kind": self.endpoint.channel_kind,
                 "reason": normalized_reason,
+                "reason_code": reason_code,
                 "permanent": permanent,
                 "attempts": attempts,
             },
@@ -768,7 +775,7 @@ class ChannelEndpointQueueBase(ABC):
             try:
                 self.send_stream_update(item.response_handle, item.update)
             except Exception as exc:
-                self.last_delivery_error = str(exc)
+                self.last_delivery_error = exception_report(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
                 if not permanent:
                     self.stream_update_outbox.append(
@@ -788,8 +795,9 @@ class ChannelEndpointQueueBase(ABC):
                 failure = self._delivery_failure_event_once(
                     delivery_id=item.update_id,
                     attempts=item.attempts + 1,
-                    reason=str(exc),
+                    reason=self.last_delivery_error,
                     permanent=permanent,
+                    reason_code=getattr(exc, "reason", "delivery_failed"),
                 )
                 if failure is not None:
                     emitted.append(failure)
@@ -811,7 +819,7 @@ class ChannelEndpointQueueBase(ABC):
             try:
                 self.send_status(item.response_handle, item.kind, dict(item.payload))
             except Exception as exc:
-                self.last_delivery_error = str(exc)
+                self.last_delivery_error = exception_report(exc)
 
     def flush_attachment_outbox(self) -> list[EventEnvelope]:
         if not self.attachment_outbox:
@@ -846,7 +854,7 @@ class ChannelEndpointQueueBase(ABC):
             try:
                 self.send_attachment(item.response_handle, item.attachment)
             except Exception as exc:
-                self.last_delivery_error = str(exc)
+                self.last_delivery_error = exception_report(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
                 if not permanent:
                     self.attachment_outbox.append(
@@ -866,7 +874,8 @@ class ChannelEndpointQueueBase(ABC):
                             "reply_id": item.attachment_id,
                             "endpoint_id": self.endpoint.endpoint_id,
                             "channel_kind": self.endpoint.channel_kind,
-                            "reason": str(exc),
+                            "reason": self.last_delivery_error,
+                            "reason_code": getattr(exc, "reason", "delivery_failed"),
                             "permanent": permanent,
                             "attempts": item.attempts + 1,
                         },

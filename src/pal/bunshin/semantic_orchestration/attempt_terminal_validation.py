@@ -4,9 +4,10 @@ from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 from pal.bunshin.semantic_orchestration.worker_results import _terminal_nonretryable_blocker
+from pal.bunshin.semantic_orchestration.worker_results import _terminal_failure_details, _worker_terminal_failure
 from pal.bunshin.contracts import DeferredEffectError
 from pal.bunshin.role_protocol import RoleAssignmentState
-import contextlib
+from pal.bunshin.semantic_orchestration.role_leases import release_attempt_lease
 from pal.bunshin.contracts import PermanentEffectError
 from pal.bunshin.semantic_orchestration.attempt_models import (
     BoundRoleHarness, ClaimedRoleAttempt, CollectedRoleTerminal, MaterializedRolePack, PreparedRoleSession,
@@ -33,6 +34,10 @@ class TerminalValidation:
         invocation_id = command.invocation_id
         pal_checkpoint_capable = stage_harness_binding.pal_checkpoint_capable
         terminal_payload = stage_process_result.terminal_payload
+        result_details = (
+            f"Worker terminal status={terminal_payload.get('status')}.\n"
+            + _terminal_failure_details(terminal_payload)
+        )
         if (
             str(terminal_payload.get("status") or "") == "suspended"
             and bool(terminal_payload.get("manager_restart"))
@@ -42,16 +47,14 @@ class TerminalValidation:
                 attempt_id_value=str(attempt["attempt_id"]),
                 error_kind="manager_restart",
                 error_text=str(
-                    terminal_payload.get("summary")
+                    _terminal_failure_details(terminal_payload)
                     or "worker deferred for manager restart"
                 ),
             )
-            with contextlib.suppress(Exception):
-                self.repository.leases.release_lease(
-                    assignment_lease_resource,
-                    str(attempt["attempt_id"]),
-                    assignment_lease.fencing_token,
-                )
+            release_attempt_lease(
+                self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+                assignment_lease.fencing_token, result_details=result_details,
+            )
             checkpoint = self.role_checkpoints.publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
@@ -67,24 +70,26 @@ class TerminalValidation:
                 status="interrupted",
             )
             raise DeferredEffectError(
-                str(terminal_payload.get("summary") or "worker deferred for manager restart")
+                _terminal_failure_details(terminal_payload) or "worker deferred for manager restart"
             )
         if str(terminal_payload.get("status") or "") != "completed":
-            summary = str(terminal_payload.get("summary") or "V2 semantic worker failed")
+            summary = _terminal_failure_details(terminal_payload) or "V2 semantic worker failed"
             permanent_blocker = _terminal_nonretryable_blocker(terminal_payload)
-            if not permanent_blocker:
+            error_kind, _, retry_directive = _worker_terminal_failure([
+                {"event_kind": "terminal", "payload": terminal_payload},
+            ])
+            permanent = bool(permanent_blocker) or retry_directive == "do_not_retry"
+            if not permanent:
                 self.repository.role_retries.queue_role_attempt_retry(
                     assignment_id=str(assignment["assignment_id"]),
                     attempt_id_value=str(attempt["attempt_id"]),
-                    error_kind="worker_terminal_failed",
+                    error_kind=error_kind or "worker_terminal_failed",
                     error_text=summary,
                 )
-            with contextlib.suppress(Exception):
-                self.repository.leases.release_lease(
-                    assignment_lease_resource,
-                    str(attempt["attempt_id"]),
-                    assignment_lease.fencing_token,
-                )
+            release_attempt_lease(
+                self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+                assignment_lease.fencing_token, result_details=result_details,
+            )
             checkpoint = self.role_checkpoints.publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
@@ -102,7 +107,7 @@ class TerminalValidation:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            if permanent_blocker:
+            if permanent:
                 raise PermanentEffectError(summary)
             raise RuntimeError(summary)
         assignment_after_process = self.repository.role_assignments.read_role_assignment(
@@ -112,12 +117,10 @@ class TerminalValidation:
             RoleAssignmentState.RESULT_RECORDED.value,
             RoleAssignmentState.SETTLED.value,
         }:
-            with contextlib.suppress(Exception):
-                self.repository.leases.release_lease(
-                    assignment_lease_resource,
-                    str(attempt["attempt_id"]),
-                    assignment_lease.fencing_token,
-                )
+            release_attempt_lease(
+                self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+                assignment_lease.fencing_token, result_details=result_details,
+            )
             checkpoint = self.role_checkpoints.publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
@@ -138,10 +141,8 @@ class TerminalValidation:
             raise SubmissionInvariantError(
                 "role participant reported completion before its durable submission receipt"
             )
-        with contextlib.suppress(Exception):
-            self.repository.leases.release_lease(
-                assignment_lease_resource,
-                str(attempt["attempt_id"]),
-                assignment_lease.fencing_token,
-            )
+        release_attempt_lease(
+            self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+            assignment_lease.fencing_token, result_details=result_details,
+        )
         return ValidatedRoleTerminal(assignment_after_process=assignment_after_process)

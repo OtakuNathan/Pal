@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from pydantic import ValidationError
+
+from pal.foundation.diagnostics import diagnostic_text
 from pal.foundation.persistence import utc_now
 from pal.llm.contracts import LLMRuntimePort
 from pal.execution.contracts import ExecutionProjectionPort
@@ -29,6 +32,10 @@ from pal.skill.repository import SkillRepository
 from pal.skill.decorators import SkillBlueprint
 
 
+class SkillInputError(ValueError):
+    """A skill request rejected before its mutation starts."""
+
+
 @dataclass
 class SkillService:
     repository: SkillRepository = field(default_factory=SkillRepository)
@@ -48,7 +55,7 @@ class SkillService:
     async def assimilate_async(self, payload: dict[str, Any]) -> SkillAssimilationCandidate:
         source_text = str(payload.get("source_text") or "").strip()
         if not source_text:
-            raise ValueError("source_text is required")
+            raise SkillInputError("source_text is required")
         source_format = _validated_source_format(payload.get("source_format"))
         intent = _validated_intent(payload.get("intent"))
         desired_skill_id = str(payload.get("desired_skill_id") or "").strip()
@@ -64,13 +71,17 @@ class SkillService:
             desired_skill_id=desired_skill_id,
             risk_hints=risk_hints,
         )
-        candidate = self._candidate_from_sanitized(
-            sanitized,
-            source_format=source_format,
-            risk_hints=risk_hints,
-            source_refs=source_refs,
-            source_metadata=source_metadata,
-        )
+        try:
+            candidate = self._candidate_from_sanitized(
+                sanitized,
+                source_format=source_format,
+                risk_hints=risk_hints,
+                source_refs=source_refs,
+                source_metadata=source_metadata,
+            )
+        except Exception as exc:
+            raise RuntimeError("sanitizer_candidate_failed; response: " + diagnostic_text(
+                json.dumps(sanitized, ensure_ascii=False, default=str), limit=None)) from exc
         self.pending_candidates[candidate.candidate_id] = candidate
         return candidate
 
@@ -79,7 +90,7 @@ class SkillService:
         replace = bool(payload.get("replace", False))
         exact_duplicate = [item for item in candidate.duplicate_candidates if item.get("match_kind") == "exact_skill_id"]
         if exact_duplicate and not replace:
-            raise ValueError("duplicate_skill_requires_update_or_replace")
+            raise SkillInputError("duplicate_skill_requires_update_or_replace")
         skill = candidate.skill
         if replace and self.repository.get_skill(skill.skill_id) is not None:
             self.repository.mark_deprecated(skill.skill_id)
@@ -92,12 +103,15 @@ class SkillService:
     def update_skill(self, payload: dict[str, Any]) -> SkillDescriptor:
         skill_id = str(payload.get("skill_id") or "").strip()
         if not skill_id:
-            raise ValueError("skill_id is required")
+            raise SkillInputError("skill_id is required")
         current = self.repository.get_skill(skill_id)
         if current is None:
-            raise ValueError("skill_not_found")
+            raise SkillInputError("skill_not_found")
         from pal.skill.tool_models import SkillPatch
-        patch = SkillPatch.model_validate(payload.get("patch", {})).model_dump(exclude_unset=True)
+        try:
+            patch = SkillPatch.model_validate(payload.get("patch", {})).model_dump(exclude_unset=True)
+        except ValidationError as exc:
+            raise SkillInputError("invalid skill patch") from exc
         star_patch = patch.get("applicability_star") if isinstance(patch.get("applicability_star"), dict) else {}
         star = SkillApplicabilitySTAR(
             situation=star_patch.get("situation", current.applicability_star.situation),
@@ -131,7 +145,7 @@ class SkillService:
             return current
         updated = _copy_skill(updated, version=current.version + 1, updated_at=utc_now())
         if updated.status not in SKILL_STATUSES:
-            raise ValueError("unsupported skill status")
+            raise SkillInputError("unsupported skill status")
         self._write_skill_file(updated)
         stored = self.repository.upsert_skill(updated)
         return stored
@@ -205,12 +219,15 @@ class SkillService:
         )
         outcome = await self.llm_runtime.agenerate(request)
         if outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
-            raise ValueError("sanitizer_context_too_large")
+            raise RuntimeError("sanitizer_context_too_large: " + diagnostic_text(outcome.text, limit=None))
         raw = str(outcome.text or "").strip()
+        if outcome.finish_reason != LLMFinishReason.STOP:
+            raise RuntimeError(diagnostic_text(
+                f"sanitizer_generation_failed ({outcome.finish_reason}): {raw}", limit=None))
         try:
             return json.loads(_strip_json_fence(raw))
         except json.JSONDecodeError as exc:
-            raise ValueError("sanitizer_invalid_json") from exc
+            raise RuntimeError("sanitizer_invalid_json; response: " + diagnostic_text(raw, limit=None)) from exc
 
     def _candidate_from_sanitized(
         self,
@@ -296,7 +313,7 @@ class SkillService:
         candidate_payload = payload.get("candidate")
         if isinstance(candidate_payload, dict):
             return _candidate_from_dict(candidate_payload)
-        raise ValueError("candidate_id_or_candidate_required")
+        raise SkillInputError("candidate_id_or_candidate_required")
 
     def _write_skill_file(self, skill: SkillDescriptor) -> None:
         if self.runtime_root is None:
@@ -475,14 +492,14 @@ def _collect_skill_blueprints(provider: Any) -> tuple[SkillBlueprint, ...]:
 def _validated_source_format(value: object) -> str:
     normalized = str(value or "plain_text").strip()
     if normalized not in {"plain_text", "skill_md"}:
-        raise ValueError("source_format must be plain_text or skill_md")
+        raise SkillInputError("source_format must be plain_text or skill_md")
     return normalized
 
 
 def _validated_intent(value: object) -> str:
     normalized = str(value or "learn").strip()
     if normalized not in {"learn", "summarize", "sanitize"}:
-        raise ValueError("intent must be learn, summarize, or sanitize")
+        raise SkillInputError("intent must be learn, summarize, or sanitize")
     return normalized
 
 

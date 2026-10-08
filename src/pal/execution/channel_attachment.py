@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.execution.turn_io_contracts import TurnIOHost
 from pal.foundation import AttachmentSpec
 from pal.shared import RuntimeStatus
@@ -15,12 +16,7 @@ from pal.shared import RuntimeStatus
 class ChannelSendAttachmentTool:
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
-        return CapabilityResult(
-            status=RuntimeStatus.INVALID,
-            text="channel_send_attachment requires async turn context",
-            llm_text="Could not send attachment: this tool requires async turn context.",
-            structured={"reason": "async_required"},
-        )
+        return _failure(RuntimeStatus.INVALID, "async_required", "this tool requires async turn context")
 
     async def ainvoke(self, args: dict[str, Any], *, runtime: TurnIOHost | None = None, turn_id: str | None = None) -> CapabilityResult:
         if not str(turn_id or "").strip():
@@ -49,14 +45,16 @@ class ChannelSendAttachmentTool:
         result = await turn_io.send_attachment_for_turn(turn_id, attachment)
         if isinstance(result, CapabilityResult):
             return result
-        return _failure(RuntimeStatus.ERROR, "invalid_core_turn_io_result", "core turn I/O returned an invalid result")
+        return _failure(RuntimeStatus.ERROR, "invalid_core_turn_io_result", "core turn I/O returned an invalid result", not_started=False)
 
 
-def _failure(status: str, reason: str, text: str, **structured: Any) -> CapabilityResult:
-    payload = {"reason": reason, **structured}
+def _failure(status: str, reason: str, text: str, *, not_started: bool = True, **structured: Any) -> CapabilityResult:
+    payload = {"reason": reason, "error_code": reason, "kind": "rejected" if not_started else "failed",
+               "retry": "correct_input" if not_started else "reconcile_first", **structured}
     return CapabilityResult(
         status=status,
         text=text,
         llm_text=f"Could not send attachment: {text}.",
         structured=payload,
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED if not_started else EffectOutcome.UNKNOWN),
     )

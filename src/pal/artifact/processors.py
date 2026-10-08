@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from pal.foundation.diagnostics import exception_report
 from pal.artifact.contracts import (
     ARTIFACT_KIND_AUDIO,
     ARTIFACT_KIND_BINARY,
@@ -228,8 +229,8 @@ class PdfArtifactProcessor:
         record = context.record
         try:
             import fitz  # type: ignore
-        except Exception:
-            return replace(record, status=ARTIFACT_STATUS_PARTIAL, notes="PyMuPDF is not available")
+        except Exception as exc:
+            return replace(record, status=ARTIFACT_STATUS_PARTIAL, notes="PyMuPDF is not available: " + exception_report(exc))
 
         doc = fitz.open(str(context.original_path))
         try:
@@ -267,12 +268,12 @@ class PdfArtifactProcessor:
                         summary=_preview(text), status=ARTIFACT_STATUS_READY,
                     ))
                 except Exception as exc:
-                    errors.append(f"text: {exc}")
+                    errors.append("text: " + exception_report(exc))
                 try:
                     images = _render_pdf_page_images(context, record, doc, page_indices=(index,))
                     location["image_file_path"] = images[index + 1]
                 except Exception as exc:
-                    errors.append(f"image: {exc}")
+                    errors.append("image: " + exception_report(exc))
                 location["status"] = "partial" if errors else "ready"
                 if errors:
                     location["errors"] = errors
@@ -361,11 +362,7 @@ def prepare_inline_image_file(input_path: Path, output_path: Path, *, policy: Ar
 
 
 def normalize_image_file(input_path: Path, output_path: Path, *, policy: ArtifactPolicy) -> Path:
-    try:
-        from PIL import Image, ImageOps  # type: ignore
-    except Exception:
-        shutil.copy2(input_path, output_path)
-        return output_path
+    from PIL import Image, ImageOps  # type: ignore
 
     with Image.open(input_path) as img:
         img = ImageOps.exif_transpose(img)
@@ -401,18 +398,14 @@ def normalize_image_file(input_path: Path, output_path: Path, *, policy: Artifac
 def _can_preserve_original_image(input_path: Path, mime_type: str, *, policy: ArtifactPolicy) -> bool:
     if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
         return False
-    try:
-        if _base64_size(input_path.stat().st_size) > policy.image.inline_base64_budget_bytes:
-            return False
-    except Exception:
+    if _base64_size(input_path.stat().st_size) > policy.image.inline_base64_budget_bytes:
         return False
-    try:
-        from PIL import Image  # type: ignore
+    from PIL import Image  # type: ignore
 
-        with Image.open(input_path) as img:
-            return max(img.size) <= policy.image.max_edge_px
-    except Exception:
-        return True
+    with Image.open(input_path) as img:
+        within_limit = max(img.size) <= policy.image.max_edge_px
+        img.verify()
+        return within_limit
 
 
 def _suffix_for_mime(mime_type: str) -> str:

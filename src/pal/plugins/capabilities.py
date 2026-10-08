@@ -33,6 +33,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.plugins.host import PluginHost
@@ -77,7 +78,7 @@ class PluginsIntrospectionProvider:
             payload = action(**args)
             status = RuntimeStatus.ERROR if payload.get("status") == "failed" else RuntimeStatus.OK
         except Exception as exc:
-            payload = {"error": str(exc)}
+            payload = {"error": exception_report(exc), "error_code": "package_operation_failed"}
             status = RuntimeStatus.ERROR
         return IntrospectionResult(status=status, text="Package operation", structured=payload,
                                    llm_text=render_titled_structured_for_llm("Package operation", payload))

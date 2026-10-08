@@ -34,6 +34,7 @@ from pal.execution.session_state import (
     LogicalExecutionStateBackend,
 )
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import exception_report
 
 
 # Error codes
@@ -255,20 +256,24 @@ class FileReadTool:
         # that an LLM can safely reuse text already present in its context.
         try:
             raw = read_utf8_text_exact(resolved)
-        except UnicodeDecodeError:
-            msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING]
+        except UnicodeDecodeError as exc:
+            diagnostic = exception_report(exc)
+            msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING] + "\n" + diagnostic
             return _result(
                 RuntimeStatus.ERROR,
                 msg,
                 error_code=ERR_UNSUPPORTED_TEXT_ENCODING,
                 file_path=str(resolved),
+                diagnostic=diagnostic,
             )
         except OSError as exc:
+            diagnostic = exception_report(exc)
             return _result(
                 RuntimeStatus.ERROR,
-                f"failed to read file: {exc}",
+                f"failed to read file:\n{diagnostic}",
                 error_code="READ_FAILED",
                 file_path=str(resolved),
+                diagnostic=diagnostic,
             )
 
         # Build line-numbered output.

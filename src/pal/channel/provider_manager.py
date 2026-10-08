@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_report
+from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
+
 import asyncio
 import importlib
 import importlib.util
@@ -9,7 +13,7 @@ import sys
 import tomllib
 import types
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -170,7 +174,7 @@ class FactoryChannelProvider:
         endpoint = context.runtime.get_endpoint(endpoint_id)
         record = context.repository.get(endpoint_id)
         if is_recovery_socket_endpoint(record, endpoint, context.runtime_root):
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="recovery socket endpoint cannot be detached",
                 structured={
@@ -256,7 +260,7 @@ class FactoryChannelProvider:
     ) -> IntrospectionResult:
         endpoint = context.runtime.get_endpoint(endpoint_id)
         if endpoint is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint runtime not found",
                 llm_text="channel endpoint runtime not found",
@@ -501,24 +505,25 @@ class ChannelEndpointProviderManager:
         try:
             provider = self._ensure_provider_loaded(provider_id)
         except Exception as exc:
-            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
             try:
                 self._unload_provider_if_idle(provider_id)
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                exc.add_note("Provider cleanup also failed:\n" + exception_report(cleanup_exc))
+            self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return _provider_lifecycle_error("attach", provider_id, endpoint_id, exc)
         self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
         try:
             result = provider.attach_endpoint(endpoint_id, self.context())
             if result.status != RuntimeStatus.OK:
-                raise RuntimeError(result.text or str(result.status))
+                self.runtime.fail_endpoint_transition(endpoint_id, _provider_result_error(result))
+                return result
             if self.runtime.get_endpoint(endpoint_id) is None:
                 raise RuntimeError("provider reported success without registering an endpoint")
             self.runtime.publish_endpoint_when_ready(endpoint_id)
             self.runtime.complete_endpoint_transition(endpoint_id)
             return result
         except Exception as exc:
-            self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+            self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return _provider_lifecycle_error("attach", provider_id, endpoint_id, exc)
 
     def detach_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -550,7 +555,7 @@ class ChannelEndpointProviderManager:
                 self.runtime.rollback_endpoint_transition(endpoint_id, attached=True)
                 self.runtime.publish_endpoint(endpoint_id)
             else:
-                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+                self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return _provider_lifecycle_error("detach", provider_id, endpoint_id, exc)
 
     def restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -564,7 +569,12 @@ class ChannelEndpointProviderManager:
             self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
             result = provider.restart_endpoint(endpoint_id, self.context())
             if result.status != RuntimeStatus.OK:
-                raise RuntimeError(result.text or str(result.status))
+                if previous_endpoint is not None and self.runtime.get_endpoint(endpoint_id) is previous_endpoint:
+                    self.runtime.rollback_endpoint_transition(endpoint_id, attached=True)
+                    self.runtime.publish_endpoint(endpoint_id)
+                else:
+                    self.runtime.fail_endpoint_transition(endpoint_id, _provider_result_error(result))
+                return result
             self.runtime.publish_endpoint_when_ready(endpoint_id)
             self.runtime.complete_endpoint_transition(endpoint_id)
             return result
@@ -576,7 +586,7 @@ class ChannelEndpointProviderManager:
                 self.runtime.rollback_endpoint_transition(endpoint_id, attached=True)
                 self.runtime.publish_endpoint(endpoint_id)
             else:
-                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+                self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return _provider_lifecycle_error("restart", provider_id, endpoint_id, exc)
 
     def inspect_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -625,11 +635,12 @@ class ChannelEndpointProviderManager:
     ) -> IntrospectionResult:
         payload = dict(result.structured or {})
         payload["endpoint_hub"] = self.runtime.inspect_endpoint_hub(endpoint_id)
-        return IntrospectionResult(
-            status=result.status,
-            text=result.text,
+        endpoint = self.runtime.get_endpoint(endpoint_id)
+        if endpoint is not None and endpoint.last_delivery_error:
+            payload["last_delivery_error"] = endpoint.last_delivery_error
+        return replace(result,
             structured=payload,
-            llm_text=render_titled_structured_for_llm(result.text, payload),
+            llm_text=render_titled_structured_for_llm(result.llm_text or result.text, payload),
         )
 
     def load_runtime_providers(self) -> dict[str, Any]:
@@ -711,7 +722,8 @@ class ChannelEndpointProviderManager:
                         eligible_endpoint_ids - set(provider_hydrated)
                     ):
                         errors.append(
-                            f"{endpoint_id}: provider attach did not complete"
+                            f"{endpoint_id}: provider attach did not complete; "
+                            f"{self.runtime.inspect_endpoint_hub(endpoint_id).get('last_error', '')}"
                         )
                 else:
                     for cleanup_error in _dispose_runtime_provider_handle(
@@ -722,7 +734,7 @@ class ChannelEndpointProviderManager:
                 added.append(provider_id)
             except Exception as exc:
                 errors.append(
-                    f"{manifest.filesystem_path}: {exc.__class__.__name__}: {exc}"
+                    f"{manifest.filesystem_path}: {exception_report(exc)}"
                 )
 
         for provider_id in sorted(self.discovered_runtime_providers):
@@ -747,7 +759,7 @@ class ChannelEndpointProviderManager:
                 else:
                     removed.append(provider_id)
             except Exception as exc:
-                errors.append(f"{provider_id}: {exc.__class__.__name__}: {exc}")
+                errors.append(f"{provider_id}: {exception_report(exc)}")
 
         self.runtime_provider_load_errors = errors
         self.scan_errors = list(errors)
@@ -790,7 +802,7 @@ class ChannelEndpointProviderManager:
         normalized = str(provider_id or "").strip()
         discovered = self.discovered_runtime_providers.get(normalized)
         if discovered is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="channel provider does not support runtime reload",
                 structured={"provider_id": normalized, "reason": "provider_not_runtime_owned"},
@@ -840,16 +852,25 @@ class ChannelEndpointProviderManager:
             for endpoint_id in sorted(previously_attached - set(removed_endpoint_ids)):
                 result = self.attach_endpoint(endpoint_id)
                 if result.status != RuntimeStatus.OK:
-                    raise RuntimeError(result.text)
+                    raise RuntimeError(_provider_result_error(result))
                 attached.append(endpoint_id)
         except Exception as exc:
             for endpoint_id in endpoint_ids:
                 self.runtime.withdraw_endpoint(endpoint_id)
-            self._stop_provider_transports(normalized, reason="provider_reload_failed")
-            self._unload_runtime_provider(normalized)
+            cleanup_errors = list(stop_errors)
+            for cleanup in (
+                lambda: self._stop_provider_transports(normalized, reason="provider_reload_failed")[1],
+                lambda: self._unload_runtime_provider(normalized),
+            ):
+                try:
+                    cleanup_errors.extend(cleanup())
+                except Exception as cleanup_exc:
+                    cleanup_errors.append(exception_report(cleanup_exc))
+            for error in cleanup_errors:
+                exc.add_note("Provider cleanup also failed:\n" + error)
             for endpoint_id in endpoint_ids:
                 if self.runtime.get_endpoint_hub(endpoint_id) is not None:
-                    self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
+                    self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
                 text=f"channel provider reload failed: {exc}",
@@ -857,9 +878,10 @@ class ChannelEndpointProviderManager:
                     "provider_id": normalized,
                     "reloaded": False,
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": exception_report(exc),
+                    "error_code": "channel_provider_reload_failed",
                 },
-                llm_text=f"channel provider reload failed: {exc}",
+                llm_text=f"channel provider reload failed:\n{exception_report(exc)}",
             )
         return _ok(
             "Channel provider reloaded",
@@ -895,7 +917,7 @@ class ChannelEndpointProviderManager:
                     else:
                         disabled.add(manifest.provider_id)
                 except Exception as exc:
-                    errors.append(f"{manifest_path}: {exc.__class__.__name__}: {exc}")
+                    errors.append(f"{manifest_path}: {exception_report(exc)}")
         return {
             "enabled": enabled,
             "disabled": disabled,
@@ -954,8 +976,9 @@ class ChannelEndpointProviderManager:
                     raise ValueError(
                         f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'"
                     )
-        except Exception:
-            _run_cleanup_callbacks(build_context.cleanup_callbacks, runtime=self.runtime)
+        except Exception as exc:
+            for error in _run_cleanup_callbacks(build_context.cleanup_callbacks, runtime=self.runtime):
+                exc.add_note("Provider cleanup also failed:\n" + error)
             _remove_provider_modules(
                 tuple(
                     name
@@ -1041,8 +1064,9 @@ class ChannelEndpointProviderManager:
             handle.attached = True
             self.register_provider(handle.provider)
             self.runtime_provider_handles[provider_id] = handle
-        except Exception:
-            _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+        except Exception as exc:
+            for error in _dispose_runtime_provider_handle(handle, runtime=self.runtime):
+                exc.add_note("Provider cleanup also failed:\n" + error)
             raise
 
     def _ensure_provider_loaded(self, provider_id: str) -> ChannelProvider:
@@ -1073,8 +1097,8 @@ class ChannelEndpointProviderManager:
                 self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
             except Exception as exc:
                 self.runtime.discard_endpoint_transport(endpoint_id)
-                self.runtime.fail_endpoint_transition(endpoint_id, str(exc))
-                errors.append(f"{endpoint_id}: {exc}")
+                self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
+                errors.append(f"{endpoint_id}: {exception_report(exc)}")
         return stopped, errors
 
     def _unload_runtime_provider(self, provider_id: str) -> list[str]:
@@ -1130,12 +1154,12 @@ class ChannelEndpointProviderManager:
                 self.runtime.withdraw_endpoint(hub.endpoint_id)
             except Exception as exc:
                 errors.append(
-                    f"withdraw {hub.endpoint_id}: {exc.__class__.__name__}: {exc}"
+                    f"withdraw {hub.endpoint_id}: {exception_report(exc)}"
                 )
         try:
             await self.runtime.stop_async()
         except Exception as exc:
-            errors.append(f"transports: {exc.__class__.__name__}: {exc}")
+            errors.append(f"transports: {exception_report(exc)}")
         for provider_id in sorted(tuple(self.runtime_provider_handles)):
             handle = self.runtime_provider_handles.pop(provider_id)
             self.unregister_provider(provider_id)
@@ -1342,7 +1366,7 @@ def _run_cleanup_callbacks(
         try:
             _resolve_provider_awaitable(callback(), runtime=runtime)
         except Exception as exc:
-            errors.append(f"cleanup: {exc.__class__.__name__}: {exc}")
+            errors.append(f"cleanup: {exception_report(exc)}")
     return errors
 
 
@@ -1368,7 +1392,7 @@ def _dispose_runtime_provider_handle(
                 runtime=runtime,
             )
         except Exception as exc:
-            errors.append(f"detach: {exc.__class__.__name__}: {exc}")
+            errors.append(f"detach: {exception_report(exc)}")
     errors.extend(_run_cleanup_callbacks(handle.cleanup_callbacks, runtime=runtime))
     _remove_provider_modules(handle.module_names)
     handle.attached = False
@@ -1415,13 +1439,13 @@ async def _dispose_runtime_provider_handle_async(
                     hook(context) if accepts_context else hook()
                 )
             except Exception as exc:
-                errors.append(f"detach: {exc.__class__.__name__}: {exc}")
+                errors.append(f"detach: {exception_report(exc)}")
     while handle.cleanup_callbacks:
         callback = handle.cleanup_callbacks.pop()
         try:
             await _resolve_provider_awaitable_bounded(callback())
         except Exception as exc:
-            errors.append(f"cleanup: {exc.__class__.__name__}: {exc}")
+            errors.append(f"cleanup: {exception_report(exc)}")
     _remove_provider_modules(handle.module_names)
     handle.attached = False
     return errors
@@ -1610,7 +1634,7 @@ def _ok(text: str, payload: dict[str, Any]) -> IntrospectionResult:
 
 
 def _not_found(endpoint_id: str) -> IntrospectionResult:
-    return IntrospectionResult(
+    return _precondition_failure(
         status=RuntimeStatus.NOT_FOUND,
         text="channel endpoint not found",
         structured={"endpoint_id": endpoint_id},
@@ -1619,7 +1643,7 @@ def _not_found(endpoint_id: str) -> IntrospectionResult:
 
 
 def _provider_missing(endpoint_id: str, endpoint_type: str) -> IntrospectionResult:
-    return IntrospectionResult(
+    return _precondition_failure(
         status=RuntimeStatus.NOT_FOUND,
         text="channel provider not found",
         structured={"endpoint_id": endpoint_id, "endpoint_type": endpoint_type, "channel_kind": endpoint_type},
@@ -1628,7 +1652,7 @@ def _provider_missing(endpoint_id: str, endpoint_type: str) -> IntrospectionResu
 
 
 def _provider_missing_for_endpoint(endpoint_id: str) -> IntrospectionResult:
-    return IntrospectionResult(
+    return _precondition_failure(
         status=RuntimeStatus.NOT_FOUND,
         text="channel provider not found",
         structured={"endpoint_id": endpoint_id},
@@ -1647,7 +1671,8 @@ def _provider_lifecycle_error(
         "provider_id": provider_id,
         "endpoint_id": endpoint_id,
         "error_type": exc.__class__.__name__,
-        "error": str(exc),
+        "error": exception_report(exc),
+        "error_code": f"channel_endpoint_{action}_failed",
     }
     return IntrospectionResult(
         status=RuntimeStatus.ERROR,
@@ -1658,6 +1683,11 @@ def _provider_lifecycle_error(
             payload,
         ),
     )
+
+
+def _provider_result_error(result: IntrospectionResult) -> str:
+    return render_titled_structured_for_llm(result.llm_text or result.text or str(result.status),
+        {"text": result.text, "details": dict(result.structured or {})})
 
 
 def _sanitize_secret_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1688,3 +1718,15 @@ def _preserve_runtime_endpoint_state(old_endpoint: ChannelEndpointBase | None, n
     control_commands = list(getattr(old_endpoint, "_control_commands_manifest", []) or [])
     if control_commands and hasattr(new_endpoint, "_control_commands_manifest"):
         setattr(new_endpoint, "_control_commands_manifest", control_commands)
+
+
+def _precondition_failure(
+    *, status: str, text: str, llm_text: str, structured: dict | None = None,
+) -> CapabilityResult:
+    return CapabilityResult(
+        status=status,
+        text=text,
+        llm_text=llm_text,
+        structured={**dict(structured or {}), "kind": "rejected", "retry": "correct_input"},
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
+    )

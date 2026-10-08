@@ -120,11 +120,11 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         self.assertIn("result-specific recovery affordances", policy.content)
         self.assertIn("never blindly retry a mutation", policy.content)
         self.assertIn("each tool call as one RPC", policy.content)
-        self.assertIn("point-in-time observations", policy.content)
+        self.assertIn("describe state when the call ran", policy.content)
         self.assertIn("Replaying a stored result does not refresh", policy.content)
         self.assertEqual(routing.title, "Tool Routing")
         self.assertEqual(routing.metadata["prompt_target"], "developer")
-        self.assertIn("returned affordances as its continuation contract", routing.content)
+        self.assertIn("returned affordances to decide the next action", routing.content)
         self.assertIn("suggested next tool only when", routing.content)
 
     def test_bunshin_puts_shared_tool_efficiency_before_every_role_contract(self) -> None:
@@ -140,11 +140,11 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
 
         self.assertEqual(efficiency.title, "Tool Efficiency")
         self.assertLess(efficiency.priority, 20)
-        self.assertIn("do not require separate model rounds for independent reads", efficiency.content)
+        self.assertIn("Sequence only when", efficiency.content)
         self.assertIn("Batch independent tool calls in one response", efficiency.content)
         self.assertIn("do not serialize every file or field", efficiency.content)
         self.assertIn("If read_file reports unchanged content", efficiency.content)
-        self.assertIn("Avoid dumping large files", efficiency.content)
+        self.assertIn("ranges around the hits", efficiency.content)
 
     def test_bunshin_role_timeout_is_forwarded_to_the_host_llm_request(self) -> None:
         pack = BunshinInvocationPack(

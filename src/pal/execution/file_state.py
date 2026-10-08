@@ -33,6 +33,10 @@ class FileContentChangedError(RuntimeError):
     """The path no longer contains the bytes authorized by the caller."""
 
 
+class FileSnapshotReadError(RuntimeError):
+    """The current file could not be read to validate its edit authority."""
+
+
 MUTATION_LOCK_BUCKET_COUNT = 256
 _MUTATION_LOCKS = tuple(
     threading.RLock() for _ in range(MUTATION_LOCK_BUCKET_COUNT)
@@ -420,8 +424,10 @@ class SessionFileStateCache:
         try:
             content = read_utf8_text_exact(resolved)
             mtime_ns = resolved.stat().st_mtime_ns
-        except (OSError, UnicodeError):
+        except FileNotFoundError:
             return None
+        except (OSError, UnicodeError) as exc:
+            raise FileSnapshotReadError(f"Could not validate the current read snapshot for {resolved}") from exc
         digest = content_digest(content)
         grant = self.backend.file_grant(
             execution_lifetime_id=self.context.execution_lifetime_id,

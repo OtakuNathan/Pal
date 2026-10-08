@@ -22,6 +22,9 @@ from pal.bunshin.runner_components.reporter import Reporter
 from pal.bunshin.runner_components.status import Status
 from pal.bunshin.runner_components.text_deliverables import TextDeliverables
 from pal.bunshin.runner_components.tool_session import ToolSession
+from pal.foundation.diagnostics import diagnostic_text
+from pal.shared.json_values import thaw_json
+import json
 
 
 @dataclass
@@ -165,13 +168,18 @@ class LlmRounds:
         if provider_failed:
             from pal.llm.chatgpt import ChatGPTError
             metadata = dict(outcome.response.message.metadata)
+            provider_error = diagnostic_text(
+                str(getattr(outcome, "text", "") or "LLM generation failed")
+                + "\nProvider metadata: " + json.dumps(thaw_json(metadata), ensure_ascii=False, default=str),
+                limit=None,
+            )
             subscription_failure = metadata.get("chatgpt_failure")
             if subscription_failure:
                 failure = ChatGPTError.from_dict(subscription_failure)
                 if not failure.retryable:
                     # Quota and authorization require user action, not another
                     # worker retry of this same logical session.
-                    self.status.block(failure.user_message)
+                    self.status.block(failure.user_message + "\n" + provider_error)
                     return result
             # Provider exhaustion produced no assistant/tool turn.  Keep the
             # durable checkpoint at the same logical round so a later process
@@ -184,6 +192,7 @@ class LlmRounds:
                     or self.completion.artifact_completion_evidence_present()
                 )
             ):
+                self.status.diagnostics.append(provider_error)
                 outcome = _bunshin_generation_result(
                     text=self.completion.completion_evidence_fallback_text(str(getattr(outcome, "text", "") or "")),
                     finish_reason=LLMFinishReason.STOP,
@@ -196,7 +205,7 @@ class LlmRounds:
                 # from its last safe checkpoint; settling L1 here would make
                 # the next worker's first update a late write to a closed turn.
                 raise BunshinLLMRetryableError(
-                    str(getattr(outcome, "text", "") or "LLM generation failed")
+                    provider_error
                 )
         elif truncated and not committed_tool_calls:
             if continuation is not None:

@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.execution.file_state import (
     FileContentChangedError,
+    FileSnapshotReadError,
     FileState,
     FileStateCache,
     atomic_compare_and_swap_utf8,
@@ -22,7 +24,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import diagnostic_text, exception_diagnostic
+from pal.shared.diagnostics import diagnostic_text, exception_report
 
 
 MAX_CONTENT_BYTES = 1_000_000
@@ -39,6 +41,7 @@ ERR_STALE_FILE = "STALE_FILE"
 ERR_BINARY_CONTENT = "BINARY_CONTENT"
 ERR_CONTENT_TOO_LARGE = "CONTENT_TOO_LARGE"
 ERR_WRITE_FAILED = "WRITE_FAILED"
+ERR_READ_FAILED = "READ_FAILED"
 
 _ERROR_LLMS: dict[str, str] = {
     ERR_FILE_NOT_FOUND: "The specified file does not exist.",
@@ -49,10 +52,11 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_PARTIAL_READ: "Only part of the file was read. Read the complete file before overwriting it.",
     ERR_PARENT_DIR_NOT_FOUND: "The parent directory does not exist.",
     ERR_PARENT_NOT_DIRECTORY: "The parent path exists but is not a directory.",
-    ERR_STALE_FILE: "File has been modified since read. Read it again before writing.",
+    ERR_STALE_FILE: "The current file version could not be confirmed against the read snapshot. Read it again before writing.",
     ERR_BINARY_CONTENT: "Content contains binary data (NUL bytes). Only UTF-8 text is supported.",
     ERR_CONTENT_TOO_LARGE: f"Content exceeds the maximum allowed size of {MAX_CONTENT_BYTES} bytes.",
     ERR_WRITE_FAILED: "Failed to write file.",
+    ERR_READ_FAILED: "Could not read the file before writing.",
 }
 
 
@@ -77,7 +81,7 @@ class FileWriteTool:
         try:
             resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
-            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=exception_diagnostic(exc))
+            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=exception_report(exc))
 
         if resolved.exists():
             return self._overwrite(resolved, content)
@@ -91,13 +95,15 @@ class FileWriteTool:
         if resolved.exists():
             return self._overwrite(resolved, content)
         parent = resolved.parent
-        if not parent.exists():
+        parent_creation_attempted = not parent.exists()
+        if parent_creation_attempted:
             try:
                 parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc))
+                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc))
         if not parent.is_dir():
-            return _err(RuntimeStatus.INVALID, ERR_PARENT_NOT_DIRECTORY, file_path=str(resolved))
+            return _err(RuntimeStatus.INVALID, ERR_PARENT_NOT_DIRECTORY, file_path=str(resolved),
+                        effect_receipt=_parent_creation_receipt(parent, parent_creation_attempted))
 
         try:
             atomic_compare_and_swap_utf8(
@@ -106,10 +112,12 @@ class FileWriteTool:
                 new_content=content,
                 create_parents=True,
             )
-        except FileContentChangedError:
-            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved))
+        except FileContentChangedError as exc:
+            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved),
+                        details=exception_report(exc),
+                        effect_receipt=_parent_creation_receipt(parent, parent_creation_attempted))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc), commit_uncertain=True)
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -131,11 +139,11 @@ class FileWriteTool:
                 expected_content=cached.content,
                 new_content=content,
             )
-        except FileContentChangedError:
+        except FileContentChangedError as exc:
             self.cache.invalidate(resolved)
-            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved))
+            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved), details=exception_report(exc))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc), commit_uncertain=True)
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -153,7 +161,10 @@ class FileWriteTool:
             return _err(RuntimeStatus.ERROR, ERR_NOT_A_FILE, file_path=str(resolved))
 
         had_record = resolved in self.cache
-        cached_state = self.cache.get_valid_state(resolved)
+        try:
+            cached_state = self.cache.get_valid_state(resolved)
+        except FileSnapshotReadError as exc:
+            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_report(exc))
         if cached_state is None:
             if not had_record:
                 return _err(RuntimeStatus.FORBIDDEN, ERR_NOT_READ, file_path=str(resolved))
@@ -177,15 +188,20 @@ def _validate_content(content: str) -> CapabilityResult | None:
     return None
 
 
-def _err(status: str, error_code: str, **structured: Any) -> CapabilityResult:
+def _parent_creation_receipt(parent: Path, attempted: bool) -> EffectReceipt | None:
+    return (EffectReceipt(outcome=EffectOutcome.UNKNOWN, receipt={"parent_creation_attempted": str(parent)})
+            if attempted else None)
+
+
+def _err(status: str, error_code: str, *, effect_receipt: EffectReceipt | None = None, **structured: Any) -> CapabilityResult:
     payload: dict[str, Any] = {"error_code": error_code}
     payload.update(structured)
     text = _ERROR_LLMS[error_code]
     if structured.get("details"):
-        text += "\nCause: " + diagnostic_text(structured["details"])
+        text += "\nCause: " + diagnostic_text(structured["details"], limit=None)
     if structured.get("commit_uncertain"):
         text += "\nThe replacement may have committed before persistence failed. Read the current file before retrying."
-    return CapabilityResult(status=status, text=text, llm_text=text, structured=payload)
+    return CapabilityResult(status=status, text=text, llm_text=text, structured=payload, effect_receipt=effect_receipt)
 
 
 def _ok(

@@ -442,6 +442,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem = _stri
         'module_id': (str, Field(...)),
         'tags': (list[str], Field(...)),
         'score': (int, Field(...)),
+        'weak_match': (bool, Field(None, description='Present when only generic action/status words matched; this is not evidence of task suitability.')),
     },
 )
 

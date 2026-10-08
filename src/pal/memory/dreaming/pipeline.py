@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
+
 import asyncio
 import json
 from dataclasses import asdict, replace
@@ -192,9 +194,12 @@ class DreamingPipeline:
         self.usage["output_tokens"] += response.usage.output_tokens
         self.usage["cost"] += response.usage.cost
         if str(response.finish_reason) == "length":
-            raise DreamingOutputLimitError("dreaming LLM output truncated: length")
+            raise DreamingOutputLimitError("dreaming LLM output truncated: length; response: "
+                + diagnostic_text(response.text, limit=None))
         if str(response.finish_reason) not in {"stop", "end_turn"}:
-            raise RuntimeError(f"dreaming LLM failed: {response.finish_reason}")
+            raise RuntimeError(diagnostic_text(
+                f"dreaming LLM failed: {response.finish_reason}\n{response.text}\n"
+                + json.dumps(dict(response.message.metadata), ensure_ascii=False, default=str), limit=None))
         return "".join(part.text for part in response.message.parts if isinstance(part, TextPartIR))
 
     async def _merge_batch(self, batch):
@@ -213,7 +218,7 @@ class DreamingPipeline:
             except ValueError as exc:
                 # Only structural errors cause correction calls. Provider
                 # failures use the shared LLM runtime's bounded retries.
-                error = str(exc)[:600]
+                error = exception_report(exc)
                 if attempt == 2:
                     raise ValueError("dreaming output failed structural validation") from exc
         return by_id
@@ -307,7 +312,7 @@ class DreamingPipeline:
                             except ValueError as exc:
                                 if attempt == 2:
                                     raise ValueError("dreaming review failed structural validation") from exc
-                                correction = str(exc)[:600]
+                                correction = exception_report(exc)
                         if review_record is not None:
                             review_record = review.model_dump()
                             if not review.approved or review.issues:

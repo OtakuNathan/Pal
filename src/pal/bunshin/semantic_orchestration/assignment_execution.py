@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.foundation.diagnostics import exception_report
 from pal.bunshin.semantic_orchestration.assignment_rules import _ROLE_FAILURE_ATTEMPT_LIMIT
 from pal.bunshin.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count
 from pal.bunshin.semantic_orchestration.assignment_rules import _assignment_has_durable_submission
@@ -110,7 +111,7 @@ class AssignmentExecution:
                     assignment = self.assignment_retries.queue_active_assignment_retry(
                         assignment,
                         error_kind="worker_supervisor_failure",
-                        error_text=f"{exc.__class__.__name__}: {exc}",
+                        error_text=exception_report(exc),
                     )
                 attempts = self.repository.role_attempts.list_role_attempts(assignment_id)
                 charged_failures = _charged_role_failure_attempt_count(attempts)

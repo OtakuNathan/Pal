@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.diagnostics import exception_diagnostic
+from pal.foundation.diagnostics import exception_report
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
@@ -23,7 +23,8 @@ from pal.execution.generated_tool_models import (
 )
 from pal.execution.tool_semantics import INDIRECT_EXTERNAL_WRITE
 from pal.execution.channel_attachment import ChannelSendAttachmentTool
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ from pal.channel.models import ChannelEndpointModel
 from pal.channel.contracts import ChannelDeliveryError
 from pal.channel.provider_manager import (
     ChannelEndpointProviderManager,
+    _precondition_failure,
     build_default_channel_provider_manager,
     is_recovery_socket_endpoint,
     recovery_socket_path,
@@ -74,6 +76,7 @@ class ChannelEndpointTarget:
     attached: bool
     model: ChannelEndpointModel | None = None
     runtime_endpoint: ChannelEndpointBase | None = None
+    state_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,10 +168,12 @@ class ChannelIntrospectionProvider:
     def _targets_from_hubs(self, *, published_only: bool) -> list[ChannelEndpointTarget]:
         targets: list[ChannelEndpointTarget] = []
         for hub in self.runtime.list_endpoint_hubs(published_only=published_only):
+            state_error = ""
             try:
                 record = self.repository.get(hub.endpoint_id)
-            except Exception:
+            except Exception as exc:
                 record = None
+                state_error = exception_report(exc)
             runtime_endpoint = self.runtime.get_endpoint(hub.endpoint_id)
             targets.append(
                 ChannelEndpointTarget(
@@ -187,6 +192,7 @@ class ChannelIntrospectionProvider:
                     attached=runtime_endpoint is not None and bool(runtime_endpoint.attached),
                     model=record,
                     runtime_endpoint=runtime_endpoint,
+                    state_error=state_error,
                 )
             )
         return targets
@@ -204,13 +210,14 @@ class ChannelIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="List configured channel endpoints and their usable names.",
             use_when='Need to discover available endpoint names, their channel kind, enabled/attached/paired status. An empty list means no endpoints are configured or discovered; inspect the channel provider configuration.',
-            do_not_use_when="You already know the endpoint name. Diagnosing one endpoint in depth (use inspect_channel_endpoint).",
+            do_not_use_when="You already know the endpoint name. If endpoints exist, use inspect_channel_endpoint for an in-depth diagnosis; endpoint-specific tools are available only while endpoints exist.",
             failure_next_steps="Read-only. If empty, no endpoints are configured — check channel provider configuration.",
         ),
         aliases=("list_channel_endpoints",),
     )
-    def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
+    def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         _ = call
+        targets = self.iter_endpoints()
         payload = [
             ChannelEndpointListItem(
                 name=target.endpoint_id,
@@ -225,8 +232,15 @@ class ChannelIntrospectionProvider:
                     and target.runtime_endpoint.derive_default_reply_target()
                 ),
             ).__dict__
-            for target in self.iter_endpoints()
+            for target in targets
         ]
+        errors = {target.endpoint_id: target.state_error for target in targets if target.state_error}
+        if errors:
+            details = {"items": payload, "state_errors": errors, "error_code": "channel_state_read_failed"}
+            return CapabilityResult(status=RuntimeStatus.ERROR, text="channel endpoint inventory is incomplete",
+                structured=details, llm_text=render_titled_structured_for_llm(
+                    "Channel runtime endpoints found, but durable state could not be read", details),
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="channel endpoints",
@@ -296,28 +310,31 @@ class ChannelIntrospectionProvider:
             },
         ),
     )
-    async def send_message(self, call: IntrospectionCall) -> IntrospectionResult:
+    async def send_message(self, call: IntrospectionCall) -> CapabilityResult:
         channel_id = str(call.args.get("name") or "").strip()
         message = str(call.args.get("message") or "")
         if not channel_id:
-            return IntrospectionResult(
+            return CapabilityResult(
                 status=RuntimeStatus.INVALID,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="name is required",
-                structured={"reason": "channel_name_required"},
+                structured={"reason": "channel_name_required", "error_code": "channel_name_required", "kind": "rejected", "retry": "correct_input"},
                 llm_text="name is required; use list_channel_endpoints to choose an endpoint.",
             )
         if not message.strip():
-            return IntrospectionResult(
+            return CapabilityResult(
                 status=RuntimeStatus.INVALID,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="message is required",
-                structured={"channel_id": channel_id, "reason": "message_required"},
+                structured={"channel_id": channel_id, "reason": "message_required", "error_code": "message_required", "kind": "rejected", "retry": "correct_input"},
                 llm_text="message must contain ordinary non-blank text.",
             )
         if message.lstrip().startswith("/"):
-            return IntrospectionResult(
+            return CapabilityResult(
                 status=RuntimeStatus.INVALID,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="slash commands are not ordinary channel messages",
-                structured={"channel_id": channel_id, "reason": "slash_command_not_allowed"},
+                structured={"channel_id": channel_id, "reason": "slash_command_not_allowed", "error_code": "slash_command_not_allowed", "kind": "rejected", "retry": "correct_input"},
                 llm_text="send_channel_message accepts ordinary text, not slash commands.",
             )
         if self._is_current_peer_reply(
@@ -326,10 +343,11 @@ class ChannelIntrospectionProvider:
         ):
             payload = {
                 "channel_id": channel_id,
-                "reason": "peer_reply_must_use_final",
+                "reason": "peer_reply_must_use_final", "error_code": "peer_reply_must_use_final", "kind": "rejected", "retry": "correct_input",
             }
-            return IntrospectionResult(
+            return CapabilityResult(
                 status=RuntimeStatus.FORBIDDEN,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
                 text="reply to the current peer with this turn's final response",
                 structured=payload,
                 llm_text=(
@@ -353,20 +371,31 @@ class ChannelIntrospectionProvider:
             payload = {
                 "channel_id": channel_id,
                 "reason": reason,
+                "error_code": reason,
+                "error": exception_report(exc),
                 "permanent": bool(exc.permanent),
             }
-            return IntrospectionResult(
+            not_started = reason in {
+                "channel_not_found", "channel_detached", "channel_disabled", "active_send_unsupported",
+            }
+            payload.update(kind="rejected" if not_started else "failed",
+                           retry="correct_input" if not_started else "reconcile_first")
+            return CapabilityResult(
                 status=status,
-                text=str(exc),
+                text=payload["error"],
                 structured=payload,
-                llm_text=render_titled_structured_for_llm("Channel message was not sent", payload),
+                llm_text=render_titled_structured_for_llm(
+                    "Channel message rejected before sending" if not_started else "Channel message delivery failed; acceptance is uncertain", payload),
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED if not_started else EffectOutcome.UNKNOWN),
+                recovery_hint=("Inspect list_channel_endpoints and correct the endpoint state before retrying."
+                    if not_started else "The provider did not confirm whether delivery was accepted. Reconcile before retrying to avoid duplicates."),
             )
         payload = {
             "channel_id": receipt.endpoint_id,
             "message_id": receipt.message_id,
             "status": receipt.status,
         }
-        return IntrospectionResult(
+        return CapabilityResult(
             status=RuntimeStatus.OK,
             text="channel message accepted",
             structured=payload,
@@ -510,7 +539,7 @@ class ChannelIntrospectionProvider:
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
@@ -552,7 +581,7 @@ class ChannelIntrospectionProvider:
     def inspect_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
@@ -574,7 +603,7 @@ class ChannelIntrospectionProvider:
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
@@ -599,14 +628,14 @@ class ChannelIntrospectionProvider:
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
         material = call.args.get("material")
         if not isinstance(material, dict):
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="material must be an object",
                 llm_text="material must be an object",
@@ -628,7 +657,7 @@ class ChannelIntrospectionProvider:
     def backlog(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
@@ -650,7 +679,7 @@ class ChannelIntrospectionProvider:
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
@@ -696,7 +725,7 @@ class ChannelIntrospectionProvider:
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         endpoint_id = str(call.args.get("name") or "").strip()
         if not endpoint_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
@@ -704,7 +733,7 @@ class ChannelIntrospectionProvider:
         endpoint = self.runtime.get_endpoint(endpoint_id)
         record = self.repository.get(endpoint_id)
         if not enabled and is_recovery_socket_endpoint(record, endpoint, self.runtime_root or Path.cwd()):
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="recovery socket endpoint cannot be disabled",
                 structured={
@@ -718,7 +747,7 @@ class ChannelIntrospectionProvider:
                 llm_text="recovery socket endpoint cannot be disabled",
             )
         if endpoint is None and record is None:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.NOT_FOUND,
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
@@ -743,8 +772,9 @@ class ChannelIntrospectionProvider:
                 status=RuntimeStatus.ERROR,
                 text=f"channel endpoint state update failed: {exc}",
                 structured={"endpoint_id": endpoint_id, "enabled": previous_enabled},
-                llm_text=("Channel endpoint state was not changed because its durable state could not be committed. "
-                          f"Runtime enabled state restored to {previous_enabled}. Cause: {exception_diagnostic(exc)}"),
+                llm_text=("Channel endpoint durable state update failed. "
+                          f"Runtime enabled state restored to {previous_enabled}; inspect durable state before retrying. "
+                          f"Cause: {exception_report(exc)}"),
             )
         payload = {"endpoint_id": endpoint_id, "enabled": enabled}
         return IntrospectionResult(
@@ -760,7 +790,7 @@ class ChannelIntrospectionProvider:
 
     def _set_endpoint_attached(self, endpoint_id: str, *, attached: bool) -> IntrospectionResult:
         if not endpoint_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="name is required",
                 llm_text="name is required",
@@ -774,7 +804,7 @@ class ChannelIntrospectionProvider:
 
     def _restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
         if not endpoint_id:
-            return IntrospectionResult(
+            return _precondition_failure(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
                 llm_text="target_id is required",
@@ -808,7 +838,8 @@ class ChannelIntrospectionProvider:
             owner_id=self.owner_id,
             fresh_instance=fresh_instance and result.status == RuntimeStatus.OK,
             reload_modules=normalized_reload_modules,
-            error=result.text if result.status != RuntimeStatus.OK else None,
+            error=(render_titled_structured_for_llm(result.llm_text or result.text,
+                   {"text": result.text, "details": structured}) if result.status != RuntimeStatus.OK else None),
             payload={"endpoint_id": endpoint_id, "channel_result": structured},
         )
 

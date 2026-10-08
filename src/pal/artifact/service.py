@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from pal.foundation.diagnostics import exception_report
 from pal.artifact.contracts import (
     ARTIFACT_KIND_AUDIO,
     ARTIFACT_KIND_IMAGE,
@@ -229,7 +230,7 @@ class ArtifactManager:
                     tombstone,
                     metadata={
                         **tombstone_metadata,
-                        "cleanup_error": exc.__class__.__name__,
+                        "cleanup_error": exception_report(exc),
                     },
                     updated_at="",
                 )
@@ -469,7 +470,7 @@ class ArtifactManager:
             try:
                 record = processor.process(context)
             except Exception as exc:
-                record = replace(record, status=ARTIFACT_STATUS_FAILED, notes=f"{exc.__class__.__name__}: {exc}")
+                record = replace(record, status=ARTIFACT_STATUS_FAILED, notes=exception_report(exc))
             record = self.repository.upsert_record(record)
         self._refresh_hot(record.artifact_id, scope_key)
         return self._ref_from_record(record)
@@ -876,6 +877,7 @@ class ArtifactManager:
                 f"  file_name: {_prompt_scalar(record.file_name)}\n"
                 f"  kind: {record.kind}\n"
                 f"  status: {record.status}\n"
+                f"  notes: {_prompt_scalar(record.notes)}\n"
                 f"  text_file: {_prompt_scalar(text_file)}\n"
                 "  handling: use run_shell with rg to locate text and read_file to read lines; "
                 f"{page_guidance}Use shell for oversized lines. The text is already extracted; no processor discovery "
@@ -893,6 +895,7 @@ class ArtifactManager:
             f"  mime_type: {_prompt_scalar(record.original_mime_type)}",
             f"  size_bytes: {record.original_size_bytes}",
             f"  status: {record.status}",
+            f"  notes: {_prompt_scalar(record.notes)}",
             f"  summary: {_prompt_scalar(record.summary)}",
             "  direct_content: unavailable" if record.kind != ARTIFACT_KIND_PDF else "  extracted_text: unavailable",
             "  handling: inspect current capabilities/tools for a suitable processor using the metadata below",
@@ -990,7 +993,7 @@ class ArtifactManager:
             if record is None or record.scope_key != scope_key:
                 raise KeyError("artifact_not_found")
             if _artifact_handler_retired(record):
-                raise KeyError("artifact_handler_retired")
+                raise KeyError("artifact_handler_retired", _sanitize_metadata_for_llm(record.metadata))
             state = self.repository.get_hot_state(_hot_id(scope_key, record.artifact_id))
             if state is None or _parse_dt(state.expires_at) <= _utc_now_dt():
                 if self.writable:
@@ -998,7 +1001,8 @@ class ArtifactManager:
                         record.artifact_id,
                         reason="handler_missing" if state is None else "hot_ttl_expired",
                     )
-                raise KeyError("artifact_handler_retired")
+                retired = (self.repository.get_record(record.artifact_id) or record) if self.writable else record
+                raise KeyError("artifact_handler_retired", _sanitize_metadata_for_llm(retired.metadata))
             return record
 
     def _refresh_hot(self, artifact_id: str, scope_key: str) -> ArtifactHotState:
@@ -1059,6 +1063,7 @@ class ArtifactManager:
             status=record.status,
             available_actions=tuple(actions),
             text_file=text_file,
+            notes=record.notes,
         )
 
     def _text_file_for_record(self, record: ArtifactRecord) -> dict[str, Any]:
@@ -1083,6 +1088,7 @@ class ArtifactManager:
             "file_name": record.file_name,
             "summary": record.summary,
             "status": record.status,
+            "notes": record.notes,
             "source_channel": record.source_channel,
             "mime_type": record.original_mime_type,
             "size_bytes": record.original_size_bytes,
@@ -1181,12 +1187,19 @@ def _representation_base64_fits(representation: ArtifactRepresentation, policy: 
 
 
 def _retired_handler_manifest(record: ArtifactRecord) -> str:
+    cleanup = str(record.metadata.get("managed_cleanup") or "unconfirmed")
+    content = ("managed bytes and representations deleted" if cleanup == "complete"
+               else "handler unavailable; deletion of managed bytes is not confirmed")
+    diagnostic = record.metadata.get("cleanup_error")
+    diagnostic_line = f"  cleanup_error: {_prompt_scalar(diagnostic)}\n" if diagnostic else ""
     return (
         f"- artifact_id: {record.artifact_id}\n"
         f"  file_name: {_prompt_scalar(record.file_name)}\n"
         f"  kind: {record.kind}\n"
         "  status: retired\n"
-        "  content: managed bytes and representations deleted\n"
+        f"  content: {content}\n"
+        f"  managed_cleanup: {_prompt_scalar(cleanup)}\n"
+        f"{diagnostic_line}"
         "  next_step: ask the user to attach the source again if its content is still required"
     )
 

@@ -6,6 +6,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import Any
 
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, model_validator
 
 from pal.shared.tool_protocol import (
@@ -194,6 +195,7 @@ class ToolExecutionError(RuntimeError):
         affordances: list[ToolAffordance] | None = None,
         details: dict[str, Any] | None = None,
         recovery_hint: str = "",
+        retry: RetryDirective | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = str(error_code or "handler_failed")
@@ -201,6 +203,7 @@ class ToolExecutionError(RuntimeError):
         self.affordances = list(affordances or ())
         self.details = dict(details or {})
         self.recovery_hint = str(recovery_hint or "")
+        self.retry = retry
 
 
 class ToolRejectedError(ValueError):
@@ -271,17 +274,19 @@ def compile_tool_description(
     example: dict[str, Any] | None,
     next_tool_lines: tuple[str, ...] = (),
 ) -> str:
+    execution_description = (
+        "Execution semantics: "
+        f"effect_kind={execution.effect_kind.value}; "
+        f"idempotency={execution.idempotency.value}; "
+        f"retry_policy={execution.retry_policy.value}; "
+    )
+    if alias == "call_tool":
+        execution_description = "Execution semantics: those of the target alias; see its search hit or read_tool."
     sections = [
         f"Purpose: {guidance.purpose.strip()}",
         f"Use when: {guidance.use_when}",
         f"Do not use when: {guidance.do_not_use_when}",
-        (
-            "Execution semantics: "
-            f"effect_kind={execution.effect_kind.value}; "
-            f"idempotency={execution.idempotency.value}; "
-            f"retry_policy={execution.retry_policy.value}; "
-
-        ),
+        execution_description,
     ]
     if example is not None:
         sections.append(f"Valid example: {json.dumps(example, ensure_ascii=False, sort_keys=True)}")
@@ -314,6 +319,47 @@ def validation_error_details(exc: ValidationError) -> dict[str, Any]:
     # Custom validators can carry a ValueError in ctx. Pydantic's JSON encoder
     # serializes that context; errors() leaves the exception object in the wire result.
     return {"validation_errors": json.loads(exc.json(include_url=False, include_input=False))}
+
+
+def render_invalid_arguments(alias: str, exc: Exception, input_schema: dict[str, Any]) -> str:
+    """State what is wrong with the arguments and what the tool accepts."""
+
+    problems: list[str] = []
+    if isinstance(exc, ValidationError):
+        for error in validation_error_details(exc)["validation_errors"]:
+            location = _argument_location(error.get("loc") or ())
+            kind = str(error.get("type") or "")
+            if kind == "missing":
+                message = "missing required field"
+            elif kind == "extra_forbidden":
+                message = "unexpected field; this tool does not accept it"
+            else:
+                message = str(error.get("msg") or kind)
+            problems.append(f"- {location}: {message}" if location else f"- {message}")
+    elif isinstance(exc, JsonSchemaValidationError):
+        location = _argument_location(tuple(exc.absolute_path))
+        problems.append(f"- {location}: {exc.message}" if location else f"- {exc.message}")
+    else:
+        problems.append(f"- {exc}")
+    lines = [f"Invalid arguments for {alias}:", *problems]
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    if isinstance(properties, dict) and properties:
+        accepted = f"Accepted fields: {', '.join(properties)}"
+        required = [name for name in input_schema.get("required") or () if name in properties]
+        if required:
+            accepted += f" (required: {', '.join(required)})"
+        lines.append(accepted + ".")
+    return "\n".join(lines)
+
+
+def _argument_location(location: Any) -> str:
+    rendered = ""
+    for part in location:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        else:
+            rendered += f".{part}" if rendered else str(part)
+    return rendered
 
 
 def _schema_enum_values(schema: Any, path: str = "$") -> list[tuple[str, list[Any]]]:

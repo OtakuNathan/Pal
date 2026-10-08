@@ -146,7 +146,19 @@ class WorkerProcessOwner:
             async with self._stdout_read_lock:
                 if self._closing:
                     return
-                line = await stdout.readline()
+                # JSON diagnostic frames can exceed StreamReader's line limit.
+                # Drain complete chunks without dropping any part of the frame.
+                chunks = []
+                while True:
+                    try:
+                        chunks.append(await stdout.readuntil(b"\n"))
+                        break
+                    except asyncio.LimitOverrunError as exc:
+                        chunks.append(await stdout.readexactly(exc.consumed))
+                    except asyncio.IncompleteReadError as exc:
+                        chunks.append(exc.partial)
+                        break
+                line = b"".join(chunks)
             if not line:
                 return
             yield line

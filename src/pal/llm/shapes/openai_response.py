@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import diagnostic_text
+
 from pal.shared.tool_protocol import ToolCallIR
 
 import json
@@ -210,6 +212,13 @@ class OpenAIResponseDecoder:
             return self._feed_complete_response(payload)
         event_type = str(payload.get("type") or "").strip()
         response = payload.get("response")
+        if event_type in {"response.failed", "error"}:
+            self.builder.metadata["provider_error"] = diagnostic_text(json.dumps(thaw_json(payload), ensure_ascii=False), limit=None)
+        if event_type == "error":
+            self._discard_open_tools()
+            self.builder.discard_tool_calls()
+            self.complete = True
+            return (self.builder.mark_complete("error"),)
         updates: list[LLMResponseUpdate] = []
         if event_type in {"response.output_text.delta", "response.refusal.delta"}:
             text = str(payload.get("delta") or "")
@@ -280,6 +289,8 @@ class OpenAIResponseDecoder:
         output = list(payload.get("output") or [])
         status = str(payload.get("status") or "").strip().lower()
         failed = status in {"failed", "error", "cancelled", "canceled"}
+        if failed:
+            self.builder.metadata["provider_error"] = diagnostic_text(json.dumps(thaw_json(payload), ensure_ascii=False), limit=None)
         incomplete = payload.get("incomplete_details") or status == "incomplete"
         self.replay_items = {
             index: dict(item)

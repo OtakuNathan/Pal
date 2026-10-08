@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_report
+
 from pal.shared.result_snapshot import ResultSnapshotRef
 
 from pal.shared.tool_protocol import (
@@ -457,11 +459,13 @@ class MemoryService:
         if after_commit is not None:
             try:
                 after_commit()
-            except Exception:
+            except Exception as exc:
                 # F13/I07: a committed generation change is never rolled back
                 # because dependent cleanup failed; the outcome already
                 # records the terminal state.
                 self.failed_retirements.append(summary_entry)
+                outcome = replace(outcome, detail="\n".join(filter(None, (
+                    outcome.detail, "Post-commit cleanup failed:\n" + exception_report(exc)))))
         return outcome
 
     def clear_generation_projection(self) -> None:
@@ -708,12 +712,13 @@ class MemoryService:
             )
         try:
             self.l1_store.append(committed_transcript)
-        except Exception:
+        except Exception as exc:
             self.failed_commits.append(request)
             return MemoryCommitResult(
                 status=RuntimeStatus.RETRY,
                 committed_transcript=[],
-                metadata={"turn_id": request.turn_id},
+                metadata={"turn_id": request.turn_id, "error": exception_report(exc),
+                          "effect": "unknown", "retry": "reconcile_first"},
             )
         return MemoryCommitResult(
             status=RuntimeStatus.OK,
@@ -833,7 +838,11 @@ class MemoryService:
         retireable = [entry for entry in entries if _should_retire_entry(entry)]
         if not retireable:
             return 0
-        provider = self._resolve_l3_provider()
+        try:
+            provider = self._resolve_l3_provider()
+        except Exception:
+            self.failed_retirements.extend(retireable)
+            raise
         if provider is None:
             self.failed_retirements.extend(retireable)
             return 0
@@ -850,10 +859,7 @@ class MemoryService:
     def _resolve_l3_provider(self):
         if self.l3_selector is None:
             return None
-        try:
-            return self.l3_selector.resolve()
-        except Exception:
-            return None
+        return self.l3_selector.resolve()
 
 
 def _normalize_l2_entry(entry: L2Entry) -> L2Entry:

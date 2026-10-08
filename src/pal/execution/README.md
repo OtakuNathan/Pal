@@ -39,9 +39,16 @@ Notes:
   unavailable/rediscovery fallback
 - invocation returns a discriminated `complete`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
+- failures must deliver their original cause, exception chain and diagnostic
+  details to the model. Recovery or transport errors add evidence; they must
+  not replace the original result or erase its effect/retry semantics. The
+  shared tool policy explains these fields in normal and failure prompts
 - complete output is validated before budgeting. Large output is saved as an
   immutable UTF-8 file with a bounded head/tail preview and its local path. Use
   `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
+- if a failure's full text cannot be saved, deliver it inline with the storage
+  error and an explicit budget exception. A preview without a complete snapshot
+  must not become the only remaining account of why the tool failed
 - tool-result delivery metadata is stored on the L1 `ToolResultIR`. A delivered
   read result remains verbatim in prompt history and owns its file grant until
   compaction retires that result. Snapshot files are owned by explicit L1 references, pending delivery and

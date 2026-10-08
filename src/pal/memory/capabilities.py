@@ -24,6 +24,7 @@ from pal.control.contracts import ControlAction, InteractionMessageSpec
 from pal.control.interactions import delivery_for_interaction
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
+from pal.foundation.diagnostics import exception_report
 from pal.memory.mutations import mutation_id_from_call
 from pal.memory.review_models import CommitMemoryCandidatesInput
 from pal.memory.dreaming.tool_models import DreamingInput, MemoryHistoryInput
@@ -146,7 +147,8 @@ class MemoryIntrospectionProvider:
                 changes = call.args.get("config") if operation == "configure" else {"enabled": operation == "enable"}
                 result = service.configure(changes)
             except (ValueError, TypeError) as exc:
-                return IntrospectionResult(status="invalid", text=f"Invalid dreaming configuration: {exc}", llm_text=f"Invalid dreaming configuration: {exc}")
+                error = "Invalid dreaming configuration: " + exception_report(exc)
+                return IntrospectionResult(status="invalid", text=error, llm_text=error)
         elif operation == "config":
             result = service.status()["current_configuration"]
         elif operation in {"status", "report"}:
@@ -197,7 +199,8 @@ class MemoryIntrospectionProvider:
             result = self.service.reviews.commit(str(call.args.get("batch_id") or ""),
                 validate_source=getattr(manager, "validate_memory_proposal_source", None))
         except ValueError as exc:
-            return IntrospectionResult(status="invalid", text=str(exc), llm_text=str(exc))
+            error = exception_report(exc)
+            return IntrospectionResult(status="invalid", text=error, llm_text=error)
         return IntrospectionResult(status=result["status"], text="Memory review batch commit", structured=result,
             llm_text=render_titled_structured_for_llm("Memory review batch commit", result))
 
@@ -332,7 +335,7 @@ class MemoryIntrospectionProvider:
         family="recall",
         action_name="recall",
         guidance=ToolGuidance(
-            purpose="Recall durable memory by semantic search or exact mem_ref from the active provider.",
+            purpose="Read durable memory by semantic search or exact mem_ref from the active provider; recalled entries are marked as recently used.",
             use_when=(
                 "The task depends on durable facts or past experience missing from the current context. "
                 "For recurring failures or past repair decisions, use kind='case' with concrete error, symptom or fix terms."

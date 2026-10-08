@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
-import contextlib
-from pal.bunshin.semantic_orchestration.worker_results import _meaningful_stderr_tail
+from pal.bunshin.semantic_orchestration.role_leases import release_attempt_lease
+from pal.foundation.diagnostics import diagnostic_text
 from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
 from pal.bunshin.semantic_orchestration.worker_results import _worker_stderr_failures
 from pal.bunshin.contracts import PermanentEffectError
@@ -38,6 +38,11 @@ class ProcessResult:
         pal_checkpoint_capable = stage_harness_binding.pal_checkpoint_capable
         worker_error = stage_worker_execution.worker_error
         stderr = owner.stderr
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        fallback_events, fallback_worker_error = _worker_stderr_failures(stderr_text)
+        process_details = diagnostic_text(
+            "\n".join(filter(None, (worker_error, fallback_worker_error, stderr_text))), limit=None,
+        )
         assignment_after_process = self.repository.role_assignments.read_role_assignment(
             str(assignment["assignment_id"])
         )
@@ -45,23 +50,18 @@ class ProcessResult:
             dict((assignment_after_process or {}).get("submission_artifact_ref") or {})
         )
         if owner.returncode != 0 and not has_submission_receipt:
-            stderr_text = stderr.decode("utf-8", errors="replace")
-            error_tail = _meaningful_stderr_tail(stderr_text)
-            fallback_events, fallback_worker_error = _worker_stderr_failures(stderr_text)
             failure_events = events
             if not any(item.get("event_kind") == "terminal" for item in events):
                 failure_events = [*events, *fallback_events]
-            worker_error = worker_error or fallback_worker_error
             terminal_error_kind, terminal_error, retry_directive = (
                 _worker_terminal_failure(failure_events)
             )
             details = (
                 terminal_error
-                or worker_error
-                or error_tail
+                or process_details
                 or "worker emitted no structured error"
             )
-            secondary_error = worker_error or error_tail
+            secondary_error = process_details
             if terminal_error and secondary_error and secondary_error not in terminal_error:
                 details = f"{terminal_error}\nWorker process error: {secondary_error}"
             permanent = retry_directive == "do_not_retry"
@@ -72,12 +72,10 @@ class ProcessResult:
                     error_kind=terminal_error_kind or "worker_process_failed",
                     error_text=details,
                 )
-            with contextlib.suppress(Exception):
-                self.repository.leases.release_lease(
-                    assignment_lease_resource,
-                    str(attempt["attempt_id"]),
-                    assignment_lease.fencing_token,
-                )
+            release_attempt_lease(
+                self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+                assignment_lease.fencing_token, result_details=details,
+            )
             checkpoint = self.role_checkpoints.publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
@@ -100,7 +98,6 @@ class ProcessResult:
             raise RuntimeError(f"V2 worker exited {owner.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
         if terminal is None and not has_submission_receipt:
-            fallback_events, _ = _worker_stderr_failures(stderr.decode("utf-8", errors="replace"))
             terminal = next(iter(reversed(fallback_events)), None)
         if terminal is None and has_submission_receipt:
             terminal = self.role_checkpoints.terminal_from_assignment_receipt(
@@ -109,18 +106,19 @@ class ProcessResult:
                 summary="Recovered a durable submission after the role process ended.",
             )
         if terminal is None:
+            details = "worker ended without terminal event or durable submission receipt"
+            if process_details:
+                details += "\n" + process_details
             self.repository.role_retries.queue_role_attempt_retry(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 error_kind="missing_terminal_and_receipt",
-                error_text="worker ended without terminal event or durable submission receipt",
+                error_text=details,
             )
-            with contextlib.suppress(Exception):
-                self.repository.leases.release_lease(
-                    assignment_lease_resource,
-                    str(attempt["attempt_id"]),
-                    assignment_lease.fencing_token,
-                )
+            release_attempt_lease(
+                self.repository, assignment_lease_resource, str(attempt["attempt_id"]),
+                assignment_lease.fencing_token, result_details=details,
+            )
             checkpoint = self.role_checkpoints.publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
@@ -138,6 +136,13 @@ class ProcessResult:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            raise RuntimeError("V2 semantic worker ended without terminal event")
+            raise RuntimeError("V2 semantic worker ended without terminal event: " + details)
         terminal_payload = dict(terminal.get("payload") or {})
+        if owner.returncode != 0 or worker_error or fallback_worker_error:
+            terminal_payload["process_error"] = {
+                "returncode": owner.returncode,
+                "error": process_details or "worker emitted no structured error",
+                "submission_recorded": has_submission_receipt,
+            }
+            terminal = {**terminal, "payload": terminal_payload}
         return CollectedRoleTerminal(terminal=terminal, terminal_payload=terminal_payload)

@@ -34,6 +34,7 @@ from pal.plugins.lifecycle import PluginGeneration, PluginScope, _run_awaitable
 from pal.plugins.repository import PluginBundleRepository
 from pal.plugins.paths import _source_plugins_root
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -168,7 +169,7 @@ class PluginHost:
         try:
             self._topological_order()
         except ValueError as exc:
-            self.scan_errors.append(str(exc))
+            self.scan_errors.append(exception_report(exc))
         self.last_scan_status = RuntimeStatus.OK if not self.scan_errors else RuntimeStatus.ERROR
         return {
             "first_party_discovered": len(first_party),
@@ -273,6 +274,18 @@ class PluginHost:
         """Load an enabled plugin, preserving an already attached generation."""
         return self._activate(plugin_id, reload=False)
 
+    def _operation_result(self, plugin_id: str, status: str, **facts: Any) -> dict[str, Any]:
+        result = {"status": status, "plugin_id": plugin_id, **facts}
+        record = self._record(plugin_id)
+        if record is not None:
+            result.update(attached=bool(record.attached), enabled=bool(record.enabled))
+        if status != RuntimeStatus.OK:
+            failed = self._record(str(facts.get("blocked_by") or plugin_id))
+            result["error"] = str((failed.last_error if failed else "") or facts.get("reason") or f"Plugin operation returned {status} for {plugin_id}")
+            load_status = failed.last_load_status if failed else "not_found"
+            result["error_code"] = "plugin_" + (load_status if load_status in {"load_failed", "cleanup_failed", "not_found"} else "operation_failed")
+        return result
+
     def reattach(self, plugin_id: str) -> dict[str, Any]:
         """Replace the generation and restore dependents suspended by the reload."""
         return self._activate(plugin_id, reload=True)
@@ -294,14 +307,12 @@ class PluginHost:
                 "attached": record.attached,
                 **({"reason": "plugin_cleanup_pending", "error": record.last_error} if not record.attached else {}),
             }
-        status = self._reload_plugin(plugin_id) if reload and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
-        current = self._record(plugin_id) or record
-        return {
-            "status": status,
-            "plugin_id": plugin_id,
-            "enabled": current.enabled,
-            "attached": current.attached,
-        }
+        if reload and plugin_id in self.generations:
+            detached = self.detach(plugin_id)
+            if detached["status"] != RuntimeStatus.OK:
+                return detached
+        status = self._attach_with_dependencies(plugin_id)
+        return self._operation_result(plugin_id, status)
 
     def detach(self, plugin_id: str) -> dict[str, Any]:
         if self._record(plugin_id) is None:
@@ -311,9 +322,9 @@ class PluginHost:
             self._mark_suspended(dependent, plugin_id)
             status = self._detach_generation(dependent)
             if status != RuntimeStatus.OK:
-                return {"status": status, "plugin_id": plugin_id, "blocked_by": dependent}
+                return self._operation_result(plugin_id, status, blocked_by=dependent)
         status = self._detach_generation(plugin_id)
-        return {"status": status, "plugin_id": plugin_id, "attached": False}
+        return self._operation_result(plugin_id, status)
 
     # --- module lifecycle owner ---
 
@@ -362,7 +373,7 @@ class PluginHost:
                     self.first_party_disabled.add(plugin_id)
             if status == RuntimeStatus.OK:
                 self.settings.set("plugin.enabled:" + plugin_id, True)
-            return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
+            return self._operation_result(plugin_id, status)
         original = self.third_party_repository.get(plugin_id)
         if original is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
@@ -373,19 +384,15 @@ class PluginHost:
         status = self._attach_with_dependencies(plugin_id)
         if status != RuntimeStatus.OK:
             self.third_party_repository.set_enabled(plugin_id, previous_enabled)
-        return {
-            "status": status,
-            "plugin_id": plugin_id,
-            "enabled": True if status == RuntimeStatus.OK else previous_enabled,
-        }
+        return self._operation_result(plugin_id, status)
 
     def disable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
             record = self.first_party_records[plugin_id]
             if plugin_id in self.generations:
-                status = self.detach(plugin_id)["status"]
-                if status != RuntimeStatus.OK:
-                    return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
+                result = self.detach(plugin_id)
+                if result["status"] != RuntimeStatus.OK:
+                    return result
             self.settings.set("plugin.enabled:" + plugin_id, False)
             self.first_party_disabled.add(plugin_id)
             record.enabled = False
@@ -395,9 +402,9 @@ class PluginHost:
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         if plugin_id in self.generations:
-            status = self.detach(plugin_id)["status"]
-            if status != RuntimeStatus.OK:
-                return {"status": status, "plugin_id": plugin_id, "enabled": bool(row.enabled)}
+            result = self.detach(plugin_id)
+            if result["status"] != RuntimeStatus.OK:
+                return result
         row = self.third_party_repository.set_enabled(plugin_id, False)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
@@ -414,7 +421,7 @@ class PluginHost:
             try:
                 manifest = self._read_manifest(manifest_path)
             except Exception as exc:
-                self.scan_errors.append(f"{manifest_path}:{exc}")
+                self.scan_errors.append(f"{manifest_path}:\n{exception_report(exc)}")
                 continue
             self.manifests[manifest.plugin_id] = manifest
             record = self.first_party_records.get(manifest.plugin_id)
@@ -463,7 +470,7 @@ class PluginHost:
                         self.manifests.pop(manifest.plugin_id, None)
                     continue
             except Exception as exc:
-                self.scan_errors.append(f"{manifest_path}:{exc}")
+                self.scan_errors.append(f"{manifest_path}:\n{exception_report(exc)}")
                 try:
                     raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
                     plugin_id = str(raw.get("plugin_id") or manifest_path.parent.name)
@@ -477,10 +484,10 @@ class PluginHost:
                     self.third_party_repository.set_load_status(
                         plugin_id,
                         status=PLUGIN_STATUS_UNSUPPORTED,
-                        error_text=str(exc),
+                        error_text=exception_report(exc),
                     )
-                except Exception:
-                    pass
+                except Exception as record_exc:
+                    self.scan_errors.append("Recording the invalid manifest also failed:\n" + exception_report(record_exc))
                 continue
             if manifest.plugin_id in self.first_party_records:
                 self.third_party_repository.upsert_discovered(
@@ -727,10 +734,18 @@ class PluginHost:
                 return RuntimeStatus.ERROR
             status = self._attach_plugin(plugin_id)
             if status == RuntimeStatus.OK:
+                restore_errors = []
                 for dependent in self._dependents_of(plugin_id, transitive=True, attached_only=False):
                     dependent_record = self._record(dependent)
                     if dependent_record and dependent_record.enabled and self._clear_suspended(dependent, plugin_id):
-                        self._attach_with_dependencies(dependent)
+                        restored = self._attach_with_dependencies(dependent)
+                        if restored != RuntimeStatus.OK:
+                            failed = self._record(dependent)
+                            restore_errors.append(f"{dependent}: {failed.last_error if failed else restored}")
+                if restore_errors:
+                    self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED,
+                        error="Dependent restoration failed:\n" + "\n".join(restore_errors))
+                    return RuntimeStatus.ERROR
             return status
         finally:
             self._attaching.discard(plugin_id)
@@ -798,23 +813,27 @@ class PluginHost:
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED)
             return RuntimeStatus.OK
         except Exception as exc:
+            errors = [exception_report(exc)]
             if "scope" in locals():
                 candidate = getattr(scope, "handle", None)
                 if candidate is not None:
-                    scope.absorb_handle_cleanups(candidate)
-                    with contextlib.suppress(Exception):
-                        self._withdraw_generation_surface(candidate)
-                    with contextlib.suppress(Exception):
-                        self.context.unregister_module(candidate)
-                scope.close()
-            self._drop_plugin_import_cache(
-                record.entrypoint,
-                plugin_id=plugin_id,
-                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
-                extra_prefixes=_record_reload_prefixes(record),
-                plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
-            )
-            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"{exc.__class__.__name__}: {exc}")
+                    for cleanup in (scope.absorb_handle_cleanups, self._withdraw_generation_surface, self.context.unregister_module):
+                        try:
+                            cleanup(candidate)
+                        except Exception as cleanup_exc:
+                            errors.append("Rollback failed:\n" + exception_report(cleanup_exc))
+                errors.extend(scope.close())
+            try:
+                self._drop_plugin_import_cache(
+                    record.entrypoint,
+                    plugin_id=plugin_id,
+                    first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
+                    extra_prefixes=_record_reload_prefixes(record),
+                    plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
+                )
+            except Exception as cleanup_exc:
+                errors.append("Import cleanup failed:\n" + exception_report(cleanup_exc))
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error="\n".join(errors))
             return RuntimeStatus.ERROR
 
     def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
@@ -847,21 +866,21 @@ class PluginHost:
         try:
             self.context.execution_runtime.check_detach(handle)
         except Exception as exc:
-            self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=str(exc))
+            self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=exception_report(exc))
             return RuntimeStatus.ERROR
         errors: list[str] = []
         try:
             self._withdraw_generation_surface(handle)
         except Exception as exc:
-            errors.append(f"surface: {exc.__class__.__name__}: {exc}")
+            errors.append("surface:\n" + exception_report(exc))
         try:
             self.context.unregister_module(handle)
         except Exception as exc:
-            errors.append(f"unregister: {exc.__class__.__name__}: {exc}")
+            errors.append("unregister:\n" + exception_report(exc))
         try:
             generation.scope.absorb_handle_cleanups(handle)
         except Exception as exc:
-            errors.append(f"provider: {exc.__class__.__name__}: {exc}")
+            errors.append("provider:\n" + exception_report(exc))
         errors.extend(generation.scope.close())
         if errors:
             generation.cleanup_errors = tuple(errors)
@@ -882,7 +901,7 @@ class PluginHost:
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
             return RuntimeStatus.OK
         except Exception as exc:
-            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error=f"{exc.__class__.__name__}: {exc}")
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error=exception_report(exc))
             return RuntimeStatus.ERROR
 
     def _reload_plugin(self, plugin_id: str) -> str:

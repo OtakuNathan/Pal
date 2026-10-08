@@ -144,7 +144,7 @@ class ProactiveRepository(ProactiveRepositoryPort):
     def complete_run(self, proactive_run_id: str, *, turn_id: str, final_reply: str) -> None:
         row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
         if row is None:
-            return
+            raise LookupError(f"Cannot complete missing proactive run: {proactive_run_id}")
         now = utc_now()
         row.status = "completed"
         row.turn_id = turn_id
@@ -156,7 +156,7 @@ class ProactiveRepository(ProactiveRepositoryPort):
     def fail_run(self, proactive_run_id: str, *, error_text: str) -> None:
         row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
         if row is None:
-            return
+            raise LookupError(f"Cannot fail missing proactive run: {proactive_run_id}")
         now = utc_now()
         row.status = "failed"
         row.error_text = error_text

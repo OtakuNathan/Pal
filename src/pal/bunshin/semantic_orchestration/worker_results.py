@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pal.bunshin.failure_diagnostics import append_failure_diagnostic
+from pal.foundation.diagnostics import diagnostic_text
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,15 +84,34 @@ def _worker_stderr_failures(stderr: str) -> tuple[list[Mapping[str, Any]], str]:
         message = value.get("message")
         if not isinstance(message, dict):
             continue
+        if message.get("delivery_error"):
+            worker_error = "\n".join(filter(None, (
+                worker_error, "Worker event delivery failed: " + str(message["delivery_error"]),
+            )))
         if message.get("kind") == "worker_error":
-            worker_error = append_failure_diagnostic(
+            error = append_failure_diagnostic(
                 str(message.get("error") or ""), message.get("failure_diagnostic"),
             )
+            worker_error = "\n".join(filter(None, (worker_error, error)))
         elif message.get("kind") == "event":
             event = message.get("event")
             if isinstance(event, dict) and event.get("event_kind") == "terminal":
                 events.append(event)
-    return events, worker_error
+    return events, diagnostic_text(worker_error, limit=None)
+
+
+def _terminal_failure_details(payload: Mapping[str, Any]) -> str:
+    parts = []
+    for key in ("details", "summary", "error"):
+        value = str(payload.get(key) or "").strip()
+        if value and not any(value in part for part in parts):
+            parts.append(value)
+    details = append_failure_diagnostic("\n".join(parts), payload.get("failure_diagnostic"))
+    for key in ("cleanup_error", "process_error", "diagnostics"):
+        value = payload.get(key)
+        if value:
+            details += f"\n{key}: " + json.dumps(value, ensure_ascii=False, default=str)
+    return diagnostic_text(details, limit=None)
 
 
 def _worker_terminal_failure(
@@ -118,7 +138,7 @@ def _worker_terminal_failure(
         # terminal-validation path, rather than spending another model attempt.
         return (
             blocker,
-            str(payload.get("summary") or blocker.replace("_", " ")).strip(),
+            _terminal_failure_details(payload) or blocker.replace("_", " "),
             "do_not_retry",
         )
     if status != "failed":
@@ -128,8 +148,7 @@ def _worker_terminal_failure(
         or payload.get("error_type")
         or "worker_terminal_failed"
     ).strip()
-    details = str(payload.get("error") or payload.get("summary") or "").strip()
-    details = append_failure_diagnostic(details, payload.get("failure_diagnostic"))
+    details = _terminal_failure_details(payload)
     retry_directive = str(payload.get("retry_directive") or "").strip()
     return error_kind, details, retry_directive
 

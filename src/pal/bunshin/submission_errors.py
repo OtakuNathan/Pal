@@ -6,6 +6,7 @@ from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.execution.tool_facade import rejection
 from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import EffectOutcome, FailedResult, RetryDirective, ToolCallIR
+from pal.shared.diagnostics import exception_report
 
 
 class SubmissionValidationError(ValueError):
@@ -36,7 +37,7 @@ def submission_error_result(
     invalid = remote_validation or (
         isinstance(exc, SubmissionValidationError) and not filesystem_cause
     )
-    text = f"{type(exc).__name__}: {exc}"
+    text = exception_report(exc)
     if invalid:
         category = "validation"
         advice = correction
@@ -54,9 +55,10 @@ def submission_error_result(
             "Preserve the current artifacts, checklist, and findings. Recover the "
             "service or storage failure before retrying; do not repair content based on this error."
         )
-    details = {"error": str(exc), "error_type": type(exc).__name__, "error_category": category}
+    details = {"error": text, "error_type": type(exc).__name__, "error_category": category}
     if isinstance(exc, BunshinManagerRpcError):
         details["gateway_error_kind"] = exc.kind
+        details["gateway_details"] = dict(exc.payload)
     llm_text = f"{text} {advice}"
     if invalid:
         result = rejection(invalid_code, llm_text, details=details)

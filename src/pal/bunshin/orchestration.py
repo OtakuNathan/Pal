@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.foundation.diagnostics import exception_report
 from pal.bunshin.unit_of_work import BunshinUnitOfWork
 
 import asyncio
@@ -228,14 +229,27 @@ class BunshinOutboxProcessor:
                 )
             )
             if superseded:
-                self.repository.outbox_results.complete_outbox_effect(effect_id, worker_id=self.worker_id)
+                failure_ref = self.service.artifacts.put_json(
+                    {
+                        "effect_id": effect_id,
+                        "effect_type": effect_type,
+                        "status": "superseded_after_failure",
+                        "aggregate_state": snapshot.state,
+                        "error": exception_report(exc),
+                        "summary": "Effect failed and was retired because its aggregate changed state; execution success is not confirmed.",
+                    },
+                    artifact_type="EffectFailureArtifact",
+                )
+                self.repository.outbox_results.complete_outbox_effect(
+                    effect_id, worker_id=self.worker_id, result_artifact_ref=failure_ref.to_dict(),
+                )
                 self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
                 self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
                 self._publish_terminal_workflow_if_any(
                     str(effect.get("workflow_id") or "")
                 )
                 return "completed"
-            error = f"{exc.__class__.__name__}: {exc}"
+            error = exception_report(exc)
             if isinstance(exc, PermanentEffectError):
                 triage_action = self._failed_effect_triage_action(effect, exc)
                 with self.repository.transaction() as connection:
@@ -1986,7 +2000,7 @@ class BunshinOutboxProcessor:
                 "effect_id": effect.get("effect_id"),
                 "effect_type": effect.get("effect_type"),
                 "attempt_count": effect.get("attempt_count"),
-                "error": f"{exc.__class__.__name__}: {exc}",
+                "error": exception_report(exc),
                 "source_aggregate_type": source.aggregate_type.value,
                 "source_aggregate_id": source.aggregate_id,
                 "source_aggregate_state": source.state,

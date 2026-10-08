@@ -82,6 +82,8 @@ class ProactiveRunner(ProactiveRunnerPort):
         return self.repository.begin_run(trigger)
 
     def complete_run(self, proactive_run_id: str | None, *, turn_id: str, final_reply: str) -> None:
+        if proactive_run_id is not None and self.repository is not None:
+            self.repository.complete_run(proactive_run_id, turn_id=turn_id, final_reply=final_reply)
         self.results.append(
             {
                 "proactive_run_id": proactive_run_id,
@@ -89,8 +91,6 @@ class ProactiveRunner(ProactiveRunnerPort):
                 "final_reply": final_reply,
             }
         )
-        if proactive_run_id is not None and self.repository is not None:
-            self.repository.complete_run(proactive_run_id, turn_id=turn_id, final_reply=final_reply)
 
     def fail_run(self, proactive_run_id: str | None, *, error_text: str) -> None:
         self.results.append(
@@ -116,10 +116,11 @@ class ProactiveManager(ProactiveManagerPort):
         self.trigger_mailbox.on_put = self._notify_ready
 
     def register(self, definition: ProactiveDefinition) -> None:
-        self.registered[definition.proactive_id] = definition
-        next_due = self.schedule_engine.register(definition)
+        next_due = self.schedule_engine._compute_next_due(definition)
         if self.repository is not None:
             self.repository.upsert_definition(definition, next_due_at_utc=next_due)
+        self.registered[definition.proactive_id] = definition
+        self.schedule_engine.next_due_by_proactive_id[definition.proactive_id] = next_due
         self._notify_change()
         self._notify_ready()
 
@@ -200,9 +201,9 @@ class ProactiveManager(ProactiveManagerPort):
         return definition
 
     def destroy_task(self, proactive_id: str) -> bool:
+        deleted = self.repository.delete_definition(proactive_id) if self.repository is not None else False
         removed = self.registered.pop(proactive_id, None)
         self.schedule_engine.unregister(proactive_id)
-        deleted = self.repository.delete_definition(proactive_id) if self.repository is not None else removed is not None
         if removed is not None or deleted:
             self._notify_change()
         return removed is not None or deleted
@@ -222,10 +223,6 @@ class ProactiveManager(ProactiveManagerPort):
             enabled=enabled,
         )
         self.register(updated)
-        if not enabled:
-            self.schedule_engine.next_due_by_proactive_id[proactive_id] = None
-            if self.repository is not None:
-                self.repository.upsert_definition(updated, next_due_at_utc=None)
         return updated
 
     def set_output_channel(self, proactive_id: str, out_channel_id: str | None) -> ProactiveDefinition | None:

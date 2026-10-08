@@ -669,7 +669,8 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 ),
                 turn_id="turn-1",
             )
-            self.assertEqual(before_delivery.kind, "failed")
+            self.assertEqual(before_delivery.kind, "rejected")
+            self.assertEqual(before_delivery.effect.value, "not_started")
 
             runtime.commit_tool_delivery(
                 turn_id="turn-1",
@@ -737,7 +738,8 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-partial-edit",
             )
 
-            self.assertEqual(unseen.kind, "failed")
+            self.assertEqual(unseen.kind, "rejected")
+            self.assertEqual(unseen.effect.value, "not_started")
             self.assertEqual(unseen.error_code, "PARTIAL_READ")
             self.assertEqual(visible.kind, "complete", visible.llm_text)
             self.assertEqual(
@@ -889,6 +891,13 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertEqual(result.payload.call_id, call.call_id)
         self.assertIn("timed out", result.text)
         self.assertIn("Inspect the current state", result.text)
+        from tests.test_tool_failure_affordances import metadata
+        info = metadata(result.payload)
+        self.assertEqual(info["kind"], "failed")
+        self.assertEqual(info["error_code"], "tool_timeout")
+        self.assertEqual(info["effect"], "unknown")
+        self.assertEqual(info["retry"], "reconcile_first")
+        self.assertIn("test deadline", result.payload.llm_text)
         self.assertFalse(memory.active_l1_turn(turn_id).pending_call_ids)
         self.assertEqual(continuation.pending_tool_call_batch, [])
 

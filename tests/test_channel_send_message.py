@@ -280,7 +280,8 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertFalse(result.ok)
-        self.assertEqual(result.status, "invalid")
+        self.assertEqual(result.status, "slash_command_not_allowed")
+        self.assertEqual(result.structured["effect"], "not_started")
         self.assertEqual(endpoint.sent, [])
 
     async def test_current_websocket_peer_reply_must_use_normal_final(self) -> None:
@@ -312,7 +313,8 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.status, "forbidden")
+        self.assertEqual(result.status, "peer_reply_must_use_final")
+        self.assertEqual(result.structured["effect"], "not_started")
         self.assertEqual(
             result.structured["details"]["reason"],
             "peer_reply_must_use_final",

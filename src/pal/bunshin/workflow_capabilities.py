@@ -64,14 +64,8 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "discovery results, and the user's existing approval for this workflow. Use search_skills only when relevant "
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
         "manuals without approval, ask whether to provide them and wait; pass only explicitly approved names in "
-        "skill_refs. Supply the canonical profile, short goal, narrow workspace, and complete task specification. "
-        "For requirements in a local UTF-8 file, pass task_spec_file; the harness snapshots its exact text into "
-        "task_spec.authoritative_text and records its source digest, without requiring a foreground read or copy. "
-        "For requirements in conversation, supply the exact text in task_spec.authoritative_text, including every "
-        "final newline. Do not summarize, paraphrase, normalize, reinterpret, or omit examples. The short goal and "
-        "title are routing metadata only and cannot substitute for the full task specification. "
-        "Use review_then_execute with an external architecture artifact, execute_trusted only for a Manager-trusted "
-        "artifact, standalone_review for review-only work, and review_and_repair for bounded repair."
+        "skill_refs. Supply the profile, goal, workspace, and complete task specification as described by their fields. "
+        "The short goal and title are routing metadata only and cannot substitute for the full task specification."
     ),
     do_not_use_when=(
         "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "

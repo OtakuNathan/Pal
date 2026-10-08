@@ -326,7 +326,9 @@ def compile_registry_generation(
             "purpose": record.guidance.purpose,
             "use_when": record.guidance.use_when,
             "do_not_use_when": record.guidance.do_not_use_when,
-            "execution": record.execution.model_dump(mode="json", exclude={"invocation_mode"}),
+            "execution": ({"inherits": "target_alias", "guidance": "Use the target alias's execution semantics from its search hit or read_tool."}
+                          if alias == "call_tool" else
+                          record.execution.model_dump(mode="json", exclude={"invocation_mode"})),
             "namespace": record.namespace,
             "family": record.family,
             "module_id": record.module_id,

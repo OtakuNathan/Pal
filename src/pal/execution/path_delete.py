@@ -12,7 +12,7 @@ from typing import Any
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import resolve_file_path
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import diagnostic_text, exception_diagnostic
+from pal.shared.diagnostics import diagnostic_text, exception_report
 
 
 ERR_DELETE_FAILED = "DELETE_FAILED"
@@ -31,7 +31,7 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _ERROR_LLMS: dict[str, str] = {
     ERR_DELETE_FAILED: "Failed to delete path.",
     ERR_DIRECTORY_SHA256: "expected_sha256 is supported only for regular files; omit it for directories.",
-    ERR_DIRECTORY_REQUIRES_RECURSIVE: "The path is a directory. Set recursive=true to delete a directory.",
+    ERR_DIRECTORY_REQUIRES_RECURSIVE: "The path is a directory. Set recursive=true only if deleting the directory and all of its contents is intended.",
     ERR_INVALID_SHA256: "expected_sha256 must be a 64-character hexadecimal SHA-256 digest.",
     ERR_MISSING_PATH: "file_path is required.",
     ERR_PATH_NOT_FOUND: "The specified path does not exist.",
@@ -58,7 +58,7 @@ class PathDeleteTool:
         try:
             resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
-            return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=exception_diagnostic(exc))
+            return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=exception_report(exc))
 
         if _is_unsafe_delete_target(resolved):
             return _err(RuntimeStatus.FORBIDDEN, ERR_UNSAFE_PATH, file_path=str(resolved))
@@ -78,7 +78,7 @@ class PathDeleteTool:
         try:
             content = resolved.read_bytes()
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_diagnostic(exc))
+            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_report(exc))
 
         digest = hashlib.sha256(content).hexdigest()
         if expected_sha256 and digest != expected_sha256:
@@ -103,7 +103,7 @@ class PathDeleteTool:
             else:
                 resolved.unlink()
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=exception_diagnostic(exc))
+            return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=exception_report(exc))
 
         structured: dict[str, Any] = {
             "file_path": str(resolved),
@@ -128,10 +128,10 @@ def _is_unsafe_delete_target(path: Path) -> bool:
 def _err(status: str, error_code: str, **structured: Any) -> CapabilityResult:
     text = _ERROR_LLMS.get(error_code, error_code)
     if structured.get("details"):
-        text += "\nCause: " + diagnostic_text(structured["details"])
+        text += "\nCause: " + diagnostic_text(structured["details"], limit=None)
     if error_code == ERR_SHA256_MISMATCH:
         text += f"\nObserved SHA-256: {structured['sha256']}. Verify the file's identity and content before deciding to delete."
-    if error_code == ERR_DELETE_FAILED:
+    if error_code == ERR_DELETE_FAILED and status == RuntimeStatus.ERROR:
         text += "\nDeletion may be partial; inspect the remaining path before retrying."
     payload = {"error_code": error_code, **structured}
     return CapabilityResult(status=status, text=text, llm_text=text, structured=payload)

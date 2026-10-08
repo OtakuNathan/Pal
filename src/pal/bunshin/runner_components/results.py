@@ -8,6 +8,7 @@ from pal.bunshin.user_interaction import ask_user_question_summary as _ask_user_
 from pal.bunshin.runner_components.artifacts import Artifacts
 from pal.bunshin.runner_components.memory_results import MemoryResults
 from pal.bunshin.runner_components.status import Status
+from pal.foundation.diagnostics import diagnostic_text
 
 
 @dataclass
@@ -21,7 +22,8 @@ class Results:
         summary_text = str(summary or "").strip()
         ask_user_question = _extract_ask_user_question_payload(summary_text)
         lesson_payload = _extract_lessons_and_clean_summary(summary_text)
-        summary_text = self.short_summary(str(lesson_payload.get("summary") or summary_text).strip())
+        full_summary = str(lesson_payload.get("summary") or summary_text).strip()
+        summary_text = self.short_summary(full_summary)
         experience_payload = {
             "task_lessons": list(lesson_payload.get("task_lessons") or []),
             "system_lessons": list(lesson_payload.get("system_lessons") or []),
@@ -38,6 +40,10 @@ class Results:
             **experience_payload,
             **self.artifacts.artifact_payload(),
         }
+        if full_summary != summary_text:
+            payload["details"] = diagnostic_text(full_summary, limit=None)
+        if self.status.diagnostics:
+            payload["diagnostics"] = list(self.status.diagnostics)
         if self.status.blocked_kind:
             payload["blocker_kind"] = self.status.blocked_kind
         if ask_user_question:

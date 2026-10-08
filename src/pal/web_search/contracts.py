@@ -33,6 +33,7 @@ class WebSearchQueryResult:
     configured_provider_id: str | None = None
     effective_provider_id: str | None = None
     fallback_used: bool = False
+    provider_errors: list[dict[str, str]] = field(default_factory=list)
 
 
 class WebSearchProviderPort(Protocol):

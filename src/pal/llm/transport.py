@@ -227,7 +227,9 @@ class DirectSDKTransport:
             if failure is not None:
                 if failure.code == QUOTA_CODE:
                     self._subscription_state(endpoint, paused=True)
-                raise failure from None
+                if failure is exc:
+                    raise
+                raise failure from exc
             raise
         finally:
             if isinstance(iterator, CloseableFrameIterator):

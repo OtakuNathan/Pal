@@ -5,12 +5,34 @@ from dataclasses import dataclass
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
+from pal.foundation.diagnostics import exception_report
 from pal.shared import RuntimeStatus
 from pal.shared.text_search import jieba_search_terms
 from pal.shared.prompt_rendering import render_xml_block
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.shared.tool_protocol import ToolContextMessageIR
-from pal.skill.service import SkillService
+from pal.skill.service import SkillInputError, SkillService
+
+
+def _skill_failure(service: SkillService, action: str, exc: Exception) -> CapabilityResult:
+    rejected = isinstance(exc, SkillInputError)
+    structured = {"reason": "invalid_request" if rejected else f"{action}_failed",
+                  "error_code": "invalid_request" if rejected else f"skill_{action}_failed",
+                  "error": exception_report(exc)}
+    if rejected:
+        structured.update(kind="rejected", retry="correct_input")
+    elif action in {"commit", "update"}:
+        structured["retry"] = "reconcile_first"
+    return CapabilityResult(
+        status=RuntimeStatus.INVALID if rejected else RuntimeStatus.ERROR,
+        text=f"skill {action} failed",
+        structured=structured,
+        llm_text=_render_skill_tool_payload(service, f"Skill {action} failed", structured),
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED) if rejected else None,
+        recovery_hint=("Inspect the skill record and its stored file before retrying; either may already have changed."
+                       if not rejected and action in {"commit", "update"} else ""),
+    )
 
 
 def skill_summary_dict(skill) -> dict[str, Any]:
@@ -67,14 +89,8 @@ class SkillAssimilateTool:
         _ = kwargs
         try:
             candidate = await self.service.assimilate_async(args)
-        except ValueError as exc:
-            structured = {"reason": "invalid_request", "error": str(exc)}
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="skill assimilation failed",
-                structured=structured,
-                llm_text=_render_skill_tool_payload(self.service, "Skill assimilation failed", structured),
-            )
+        except Exception as exc:
+            return _skill_failure(self.service, "assimilation", exc)
         structured = candidate.to_dict()
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -91,22 +107,8 @@ class SkillCommitTool:
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         try:
             structured = self.service.commit_candidate(args)
-        except ValueError as exc:
-            structured = {"reason": "invalid_request", "error": str(exc)}
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="skill commit failed",
-                structured=structured,
-                llm_text=_render_skill_tool_payload(self.service, "Skill commit failed", structured),
-            )
         except Exception as exc:
-            structured = {"reason": "commit_failed", "error": f"{exc.__class__.__name__}: {exc}"}
-            return CapabilityResult(
-                status=RuntimeStatus.ERROR,
-                text="skill commit failed",
-                structured=structured,
-                llm_text=_render_skill_tool_payload(self.service, "Skill commit failed", structured),
-            )
+            return _skill_failure(self.service, "commit", exc)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill committed",
@@ -123,14 +125,8 @@ class SkillUpdateTool:
         try:
             previous = self.service.repository.get_skill(str(args.get("skill_id") or ""))
             skill = self.service.update_skill(args)
-        except ValueError as exc:
-            structured = {"reason": "invalid_request", "error": str(exc)}
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="skill update failed",
-                structured=structured,
-                llm_text=_render_skill_tool_payload(self.service, "Skill update failed", structured),
-            )
+        except Exception as exc:
+            return _skill_failure(self.service, "update", exc)
         changed = previous is None or skill.version != previous.version
         structured = {"skill": skill.to_dict(), "changed": changed}
         return CapabilityResult(

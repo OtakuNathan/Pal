@@ -41,7 +41,10 @@ class FailureEventHandler(EventHandler):
                     "reply_id": str(payload.get("reply_id") or ""),
                     "endpoint_id": str(payload.get("endpoint_id") or ""),
                 },
-                safe_to_retry=True,
+                # A send can fail after the remote side accepted it. Only an
+                # explicit pre-effect receipt justifies claiming retry safety.
+                safe_to_retry=(payload.get("effect") in {"none", "not_started", "not_applied"}
+                               and not bool(payload.get("permanent"))),
                 repair_domain="channel:endpoint",
             ),
             origin="channel.reply_failed",

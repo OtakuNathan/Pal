@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Generic, TypeVar, overload
 
 from pal.shared.ports import PortKey
+from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -392,7 +393,7 @@ class PluginScope:
                 if inspect.isawaitable(result):
                     _run_awaitable(result)
             except Exception as exc:  # cleanup is best-effort but fully reported
-                errors.append(f"{exc.__class__.__name__}: {exc}")
+                errors.append(exception_report(exc))
                 retry.append(cleanup)
         self.cleanups[:] = reversed(retry)
         return errors

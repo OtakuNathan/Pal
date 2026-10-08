@@ -15,6 +15,7 @@ from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
 from pal.foundation import AttachmentSpec
+from pal.foundation.diagnostics import exception_report
 from pal.channel.endpoints.socket_protocol import (
     DEFAULT_SOCKET_FILENAME,
     pack_socket_message,
@@ -479,7 +480,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             self.last_delivery_error = (
                 "socket delivery timed out waiting for drain/ACK"
                 if isinstance(exc, TimeoutError) else f"socket delivery failed: {exc}"
-            )
+            ) + "\n" + exception_report(exc)
             logger.warning("%s (session %s)", self.last_delivery_error, session.session_id)
             # Retain outbox ownership across a single-client replacement, just
             # as stop_async does. Otherwise closing a stalled peer would turn
@@ -761,7 +762,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         except ChannelDeliveryError as exc:
             if exc.permanent or exc.reason != "transport_backpressure":
                 raise
-            self.last_delivery_error = str(exc)
+            self.last_delivery_error = exception_report(exc)
             logger.warning("socket abort notification deferred by backpressure (endpoint %s)", self.endpoint.endpoint_id)
             # Abort releases cancelled deltas immediately. Only the two new
             # terminal notifications enter the existing ordered retry path.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.foundation.diagnostics import exception_report
 from pal.bunshin.unit_of_work import BunshinUnitOfWork
 from pal.bunshin.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count
 from dataclasses import dataclass
@@ -36,7 +37,7 @@ class AssignmentFailures:
 
         route = SEMANTIC_EFFECT_ROUTES.get(str(effect.get("effect_type") or ""))
         role = route.role.value if route is not None and route.role is not None else ""
-        error_text = f"{error.__class__.__name__}: {error}"
+        error_text = exception_report(error)
         failure_payload = {
             "kind": "role_startup_failed",
             "role": role,
@@ -115,7 +116,7 @@ class AssignmentFailures:
         assignment_id = str(assignment["assignment_id"])
         attempts = self.repository.role_attempts.list_role_attempts(assignment_id)
         charged_failures = max(1, _charged_role_failure_attempt_count(attempts))
-        error_text = f"{error.__class__.__name__}: {error}"
+        error_text = exception_report(error)
         failure_payload = {
             "kind": "role_assignment_failed",
             "role": str(assignment.get("role") or ""),

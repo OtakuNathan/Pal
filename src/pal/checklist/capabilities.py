@@ -8,7 +8,7 @@ from pydantic import Field
 from pal.checklist.service import ChecklistService
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.execution.tool_facade import NextToolHint, StrictToolModel, ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, NextToolHint, StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_WRITE,
     INDIRECT_LOCAL_READ,
@@ -189,16 +189,20 @@ class ChecklistIntrospectionProvider:
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="no active checklist",
-                structured={"changed": False, "step": step, "error": "no_active_checklist"},
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_APPLIED),
+                recovery_hint="The checklist may already have completed and closed. Use upsert_checklist only if work remains.",
+                structured={"changed": False, "step": step, "error": "no_active_checklist", "error_code": "no_active_checklist"},
                 llm_text="No active checklist; it may already have completed and closed. Use upsert_checklist only if work remains.",
             )
         if not outcome.found:
-            payload = {"changed": False, "step": step, "error": "step_not_found",
+            payload = {"changed": False, "step": step, "error": "step_not_found", "error_code": "step_not_found",
                        "plan": [dict(item) for item in outcome.snapshot.plan],
                        "next_step": "Copy the exact step text from this current plan."}
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="checklist step not found",
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_APPLIED),
+                recovery_hint="Copy the exact step text from the returned current plan before retrying.",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Checklist step not found", payload),
             )

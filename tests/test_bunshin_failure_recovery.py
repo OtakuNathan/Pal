@@ -251,7 +251,8 @@ def test_worker_wire_preserves_primary_terminal_when_cleanup_fails(tmp_path, fai
         terminal = next(event["payload"] for event in events if event["event_kind"] == "terminal")
         assert terminal["status"] == {"cancel": "killed", "restart": "suspended"}.get(failure, "failed")
         assert terminal["cleanup_error"]["error_type"] == "OSError"
-        assert terminal["cleanup_error"]["error"] == "cleanup failed"
+        assert terminal["cleanup_error"]["error"].endswith("OSError: cleanup failed")
+        assert "Traceback" in terminal["cleanup_error"]["error"]
         assert wire[-1]["kind"] == "worker_error"
         assert "cleanup failed" in wire[-1]["error"]
         if failure in {"checkpoint", "runner"}:

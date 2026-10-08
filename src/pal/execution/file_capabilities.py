@@ -30,14 +30,15 @@ from pal.execution.file_state import (
 )
 from pal.execution.file_write import FileWriteTool
 from pal.execution.path_delete import PathDeleteTool
-from pal.execution.tool_facade import ToolRejectedError
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolRejectedError
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_READ,
     DIRECT_LOCAL_WRITE,
+    DIRECT_UNSAFE_LOCAL_WRITE,
     INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, capability_action
+from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
 FILE_READ_GUIDANCE = ToolGuidance(
@@ -62,9 +63,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
         "use the earlier result unless the file changed or another range is needed."
     ),
     failure_next_steps=(
-        "For FILE_NOT_FOUND or NOT_A_FILE, correct the path and use run_shell with rg --files or a bounded listing if "
-        "discovery is needed. For INVALID_ARGUMENT, fix offset/limit (and every ranges entry) to be positive integers. "
-        "For UNSUPPORTED_TEXT_ENCODING, do not retry as text; use the appropriate artifact or binary workflow."
+        "For READ_FAILED, check the path's permissions or existence with run_shell before retrying."
     ),
     next_tool_hints=(
         NextToolHint(
@@ -84,18 +83,16 @@ FILE_EDIT_GUIDANCE = ToolGuidance(
         "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
         "context. Supply edits=[{old_string, new_string, replace_all?}]. All items match the original read snapshot; "
         "Overlapping items fail together; other valid items are applied. Each match must be unique unless that item requests replace_all=true. "
+        "Every affected range must have been delivered and remain valid; reading the entire file is not required. "
         "Results identify applied indices and failed items; only failed items need further attention. "
         "Use separate calls for separate files."
     ),
     do_not_use_when=(
-        "Creating a file or replacing its complete contents (use write_file). Every affected range must have been "
-        "delivered and remain valid; reading the entire file is not required."
+        "Creating a file or replacing its complete contents (use write_file)."
     ),
     failure_next_steps=(
-        "For NOT_READ or PARTIAL_READ, read the missing affected ranges. For STALE_FILE, read the current affected "
-        "ranges and reassess the edits against the changed content. Do not resubmit applied items. "
-        "For NOT_FOUND_MATCH, copy old_string from the current read. For MULTIPLE_MATCHES, add "
-        "enough surrounding context to make the match unique; use replace_all only when every match should change."
+        "For WRITE_FAILED the commit outcome is uncertain: read the current file before deciding whether to retry. "
+        "Do not resubmit applied items."
     ),
 )
 
@@ -103,19 +100,95 @@ FILE_WRITE_GUIDANCE = ToolGuidance(
     purpose="Write complete UTF-8 text content to a local file on the Pal host, creating it or replacing all of its contents.",
     use_when=(
         "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
-        "current version has been read. Missing parent directories are created. Paths are local to the Pal host; "
-        "run_shell(target=...) does not change this tool's target."
+        "current version has been read. Missing parent directories are created. Paths are local to the Pal host."
     ),
     do_not_use_when=(
         "Focused changes to an existing file (use edit_file). Do not overwrite an existing file from a partial, "
-        "retired, or stale read snapshot. Remote files: use run_shell on the required target."
+        "retired, or stale read snapshot."
     ),
     failure_next_steps=(
-        "For NOT_READ, PARTIAL_READ, or STALE_FILE, read the complete current file with read_file before retrying. "
-        "For PARENT_NOT_DIRECTORY, correct the path. For BINARY_CONTENT or CONTENT_TOO_LARGE, do not retry with the "
-        "same content; use an appropriate binary or large-file workflow."
+        "For WRITE_FAILED the commit outcome is uncertain: read the current file before deciding whether to retry."
     ),
 )
+
+# OS failures may follow a partial commit. Explicit receipts take precedence
+# for paths that already attempted another effect, such as parent creation.
+_EFFECT_UNCERTAIN_CODES = frozenset({"WRITE_FAILED", "DELETE_FAILED"})
+
+_READ_RECOVERY_HINTS = {
+    "FILE_NOT_FOUND": "Correct the path; use run_shell with rg --files or a bounded listing to locate the file.",
+    "NOT_A_FILE": "The path is not a regular file; correct the path or list the directory with run_shell.",
+    "INVALID_ARGUMENT": "offset and limit (including every ranges entry) must be positive integers.",
+    "UNSUPPORTED_TEXT_ENCODING": "The file is not UTF-8 text; do not retry read_file. Use a supplied text_file path or a binary-aware workflow.",
+}
+_EDIT_RECOVERY_HINTS = {
+    "READ_FAILED": "Inspect the path and permissions described in the error before retrying; no edits were applied.",
+    "NOT_READ": "Read the affected lines with read_file, then retry the edits.",
+    "PARTIAL_READ": "Read the line ranges listed in required_line_ranges, then retry the failed edits.",
+    "STALE_FILE": "The read snapshot could not be confirmed. Resolve any reported read error, then read the current affected ranges and re-plan the edits; do not resend them unchanged.",
+    "NOT_FOUND_MATCH": "Copy old_string exactly from the current read_file output, including whitespace and indentation.",
+    "MULTIPLE_MATCHES": "Add surrounding lines to old_string until it is unique; use replace_all=true only if every occurrence should change.",
+    "OVERLAPPING_EDITS": "Merge the overlapping items into one edit.",
+    "NO_CHANGE": "Make new_string differ from old_string, or drop the item.",
+    "EMPTY_OLD_STRING": "old_string must contain the exact text to replace; use write_file to create a file.",
+}
+_WRITE_RECOVERY_HINTS = {
+    "FILE_NOT_FOUND": "The file disappeared before validation. Check the intended path before deciding whether to create it.",
+    "NOT_A_FILE": "The path is not a regular file; choose the intended file path.",
+    "READ_FAILED": "Inspect the path and permissions described in the error before retrying; no file replacement was attempted.",
+    "WRITE_FAILED": "Path validation failed before writing; correct the path using the reported cause.",
+    "NOT_READ": "Read the complete current file with read_file before replacing it, or use edit_file for a focused change.",
+    "PARTIAL_READ": "Only part of the file was read. Read the complete file before replacing it, or use edit_file for a focused change.",
+    "STALE_FILE": "The read snapshot could not be confirmed. Resolve any reported read error, then read the complete current file and reassess before replacing it.",
+    "PARENT_NOT_DIRECTORY": "A parent path component is not a directory; choose a different path.",
+    "BINARY_CONTENT": "write_file accepts UTF-8 text only; do not resend the same content.",
+    "CONTENT_TOO_LARGE": "The content exceeds the write limit; do not resend it unchanged.",
+}
+_DELETE_RECOVERY_HINTS = {
+    "DELETE_FAILED": "Path validation failed before deletion; correct the path using the reported cause.",
+    "READ_FAILED": "The file could not be read before deletion; inspect its permissions before deciding whether to retry.",
+    "PATH_NOT_FOUND": "Nothing exists at this path. Verify the path only if you expected it to exist.",
+    "DIRECTORY_REQUIRES_RECURSIVE": "Set recursive=true only if deleting the directory and all of its contents is intended.",
+    "SHA256_NOT_SUPPORTED_FOR_DIRECTORY": "expected_sha256 checks files only; omit it only if deleting the whole directory is intended.",
+    "INVALID_SHA256": "Supply a 64-character hexadecimal SHA-256 digest from the intended file.",
+    "UNSUPPORTED_PATH": "The path is not a regular file or directory; inspect its type before choosing an appropriate operation.",
+    "SHA256_MISMATCH": "The file's content differs from expected_sha256. Inspect the file before deciding whether to delete it.",
+    "UNSAFE_PATH": "This path is protected from deletion; do not delete it by other means.",
+}
+
+
+def _reject_pre_effect_failure(result: IntrospectionResult, hints: dict[str, str]) -> IntrospectionResult:
+    """Report a refusal that happened before any effect as a rejected call."""
+
+    if result.status == RuntimeStatus.OK:
+        failed = (result.structured or {}).get("failed_edits") or ()
+        recovery = " ".join(dict.fromkeys(hints[item["error_code"]] for item in failed
+            if isinstance(item, dict) and item.get("error_code") in hints))
+        if recovery:
+            return replace(result, recovery_hint=" ".join(filter(None, (result.recovery_hint, recovery))))
+        return result
+    structured = dict(result.structured or {})
+    error_code = str(structured.get("error_code") or structured.get("reason") or "invalid_request")
+    if hints is _READ_RECOVERY_HINTS:
+        return replace(result, effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
+                       recovery_hint=hints.get(error_code, FILE_READ_GUIDANCE.failure_next_steps))
+    receipt = result.effect_receipt
+    if receipt is not None and receipt.outcome in {EffectOutcome.APPLIED, EffectOutcome.UNKNOWN}:
+        return replace(result, recovery_hint=result.recovery_hint or hints.get(error_code, ""))
+    if error_code in _EFFECT_UNCERTAIN_CODES and result.status == RuntimeStatus.ERROR:
+        return result
+    failed_codes = [
+        str(item.get("error_code") or "")
+        for item in structured.get("failed_edits") or ()
+        if isinstance(item, dict)
+    ] or [error_code]
+    recovery = " ".join(dict.fromkeys(hints[code] for code in failed_codes if code in hints))
+    raise ToolRejectedError(
+        str(result.llm_text or result.text),
+        error_code=error_code,
+        details=structured,
+        recovery_hint=recovery,
+    )
 
 
 def get_file_state_cache() -> FileStateCache:
@@ -134,6 +207,7 @@ def _file_tool_result(
     *,
     defer_delivery: bool,
     context: object,
+    hints: dict[str, str],
 ) -> IntrospectionResult:
     runtime = call.meta.get("execution_runtime")
     snapshots = getattr(runtime, "result_snapshots", None)
@@ -141,12 +215,13 @@ def _file_tool_result(
     ref = snapshots.lookup_path(path) if snapshots is not None and path else None
     if (snapshots is not None and path and snapshots.manages_path(path)
             and isinstance(tool, (FileEditTool, FileWriteTool))):
-        raise ToolRejectedError("Output snapshots are immutable copies, not editable source files.", error_code="immutable_result_snapshot")
+        raise ToolRejectedError("Output snapshots are immutable copies, not editable source files.", error_code="immutable_result_snapshot",
+            recovery_hint="Read the original source file before editing it; output snapshots are retained evidence copies.")
     delivery_id = getattr(call.meta.get("tool_call"), "call_id", "") or uuid4().hex
     if ref is not None:
         snapshots.retain_delivery((ref,), lifetime=context.execution_lifetime_id, call_id=delivery_id)
     try:
-        result = _tool_capability_result(tool, call.args)
+        result = _reject_pre_effect_failure(_tool_capability_result(tool, call.args), hints)
     except BaseException:
         if ref is not None:
             snapshots.finish_delivery(lifetime=context.execution_lifetime_id, call_id=delivery_id)
@@ -238,6 +313,7 @@ class FileCapabilityMixin:
             call,
             defer_delivery=defer_delivery,
             context=context,
+            hints=_READ_RECOVERY_HINTS,
         )
 
     @capability_action(
@@ -249,7 +325,7 @@ class FileCapabilityMixin:
         aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
-        execution=DIRECT_LOCAL_WRITE,
+        execution=DIRECT_UNSAFE_LOCAL_WRITE,
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -259,6 +335,7 @@ class FileCapabilityMixin:
             call,
             defer_delivery=defer_delivery,
             context=context,
+            hints=_EDIT_RECOVERY_HINTS,
         )
 
     @capability_action(
@@ -280,6 +357,7 @@ class FileCapabilityMixin:
             call,
             defer_delivery=defer_delivery,
             context=context,
+            hints=_WRITE_RECOVERY_HINTS,
         )
 
     @capability_action(
@@ -291,7 +369,7 @@ class FileCapabilityMixin:
             purpose="Delete a file or directory at the given path.",
             use_when="Removing unwanted files or directories from the filesystem.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",
-            failure_next_steps="If SHA256_MISMATCH, inspect the file and retry with its current digest. If DIRECTORY_REQUIRES_RECURSIVE, set recursive=true.",
+            failure_next_steps="For DELETE_FAILED, deletion may be partial: inspect the remaining path before deciding whether to retry.",
         ),
         aliases=("delete_path",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
@@ -303,8 +381,9 @@ class FileCapabilityMixin:
         snapshots = getattr(call.meta.get("execution_runtime"), "result_snapshots", None)
         path = str(call.args.get("file_path") or "")
         if snapshots is not None and path and snapshots.manages_path(path, include_parents=True):
-            raise ToolRejectedError("Output snapshots are retired with their context references.", error_code="immutable_result_snapshot")
-        return _tool_capability_result(PathDeleteTool(), call.args)
+            raise ToolRejectedError("Output snapshots are retired with their context references.", error_code="immutable_result_snapshot",
+                recovery_hint="Let snapshot retention retire these files; verify the intended source path if the task requires deleting a source.")
+        return _reject_pre_effect_failure(_tool_capability_result(PathDeleteTool(), call.args), _DELETE_RECOVERY_HINTS)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

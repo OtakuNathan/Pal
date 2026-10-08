@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from pal.packages.process import PackageError, run_command
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.web_fetch.runtime_paths import (
     BrowserRuntimePaths, NODE_MINIMUM_MAJOR, PLAYWRIGHT_CLI_PACKAGE, PLAYWRIGHT_CLI_VERSION,
     _chromium_installed, _installed_cli_version,
@@ -38,21 +39,35 @@ def node_major(env: dict[str, str]) -> int | None:
         return None
     try:
         result = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=5, env=env)
-        return int(result.stdout.strip().lstrip("v").split(".")[0]) if result.returncode == 0 else None
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
+        if result.returncode != 0:
+            raise PackageError(diagnostic_text(
+                f"Node version probe exited {result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}", limit=None))
+        try:
+            return int(result.stdout.strip().lstrip("v").split(".")[0])
+        except ValueError as exc:
+            raise PackageError(diagnostic_text(f"Invalid Node version output: {result.stdout}\n{result.stderr}", limit=None)) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PackageError(diagnostic_text(f"Node version probe timed out.\nstdout: {exc.stdout}\nstderr: {exc.stderr}", limit=None)) from exc
 
 
 def inspect(runtime_root: Path) -> dict:
     paths = BrowserRuntimePaths(runtime_root)
     env = child_env(paths)
-    major = node_major(env)
-    cli = _installed_cli_version(paths)
-    browser = _chromium_installed(paths)
+    diagnostics = []
+    def probe(name, operation, fallback):
+        try:
+            return operation()
+        except Exception as exc:
+            diagnostics.append({"probe": name, "error": exception_report(exc)})
+            return fallback
+    major = probe("node", lambda: node_major(env), None)
+    cli = probe("cli", lambda: _installed_cli_version(paths), "")
+    browser = probe("chromium", lambda: _chromium_installed(paths), False)
     npm = bool(shutil.which("npm", path=env.get("PATH")))
     return {"ok": bool(major and major >= NODE_MINIMUM_MAJOR and npm and cli == PLAYWRIGHT_CLI_VERSION and browser),
             "node_major": major, "required_node_major": NODE_MINIMUM_MAJOR, "npm": npm,
-            "cli_version": cli, "required_cli_version": PLAYWRIGHT_CLI_VERSION, "browser_installed": browser}
+            "cli_version": cli, "required_cli_version": PLAYWRIGHT_CLI_VERSION, "browser_installed": browser,
+            "diagnostics": diagnostics}
 
 
 def _download(url: str, target: Path) -> None:
@@ -114,9 +129,12 @@ def _ensure_cli(paths: BrowserRuntimePaths) -> None:
             os.replace(paths.tooling_current, old)
         try:
             os.replace(candidate, paths.tooling_current)
-        except Exception:
+        except Exception as exc:
             if old.exists():
-                os.replace(old, paths.tooling_current)
+                try:
+                    os.replace(old, paths.tooling_current)
+                except Exception as rollback:
+                    exc.add_note("Restoring the previous browser CLI also failed:\n" + exception_report(rollback))
             raise
 
 
@@ -157,6 +175,7 @@ def verify(runtime_root: Path) -> dict:
     channel: 'chromium', headless: true,
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]
   });
+  let primaryError;
   try {
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', {timeout: 15000});
     const result = await worker.evaluate(() => chrome.runtime.getManifest().name);
@@ -164,7 +183,14 @@ def verify(runtime_root: Path) -> dict:
     const page = context.pages()[0] || await context.newPage();
     await page.setContent('<title>Pal browser ready</title>');
     if (await page.title() !== 'Pal browser ready') throw Error('Page verification failed');
-  } finally { await context.close(); }
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    try { await context.close(); }
+    catch (cleanup) {
+      if (primaryError) throw new AggregateError([primaryError, cleanup], 'Browser verification and cleanup failed');
+      throw cleanup;
+    }
+  }
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """)
         env = child_env(paths)
@@ -188,4 +214,6 @@ def prepare(runtime_root: Path) -> dict:
         if not any(marker in detail for marker in ("missing dependencies", "error while loading shared libraries", "host system is missing")):
             raise
         _install_system_libraries(paths)
-        return verify(runtime_root)
+        result = verify(runtime_root)
+        result.setdefault("preparation_diagnostics", []).append(exception_report(exc))
+        return result

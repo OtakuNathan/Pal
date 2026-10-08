@@ -15,6 +15,7 @@ from typing import Any
 
 from pal.foundation import utc_now
 from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_client
+from pal.shared.diagnostics import diagnostic_text, exception_report
 from pal.lsp.config import LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
 from pal.lsp.contracts import LspConnectorPort
 from pal.lsp.connector import AsyncLspConnector, LspProtocolError
@@ -219,7 +220,7 @@ class LspManager:
                     for config in load_lsp_server_file(path):
                         discovered[config.config.server_id] = (config, path)
                 except Exception as exc:
-                    errors.append(f"{path}:{exc}")
+                    errors.append(f"{path}:\n{exception_report(exc)}")
                     self.logger.exception("failed to read LSP config: %s", path)
             for server_id in sorted(set(self.states) - set(discovered)):
                 await self._detach_state(self.states[server_id])
@@ -306,7 +307,7 @@ class LspManager:
                 checks.append({"name": "initialize", "status": "ok", "server_info": connector.server_info if connector else {}})
                 return {"status": "ok", "server": self._server_summary(state), "checks": checks}
             except Exception as exc:
-                checks.append({"name": "initialize", "status": "error", "error": state.last_error or f"{exc.__class__.__name__}: {exc}"})
+                checks.append({"name": "initialize", "status": "error", "error": exception_report(exc), "server_error": state.last_error})
                 return {"status": "error", "server": self._server_summary(state), "checks": checks}
 
     async def prepare_workspace(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -644,6 +645,7 @@ class LspManager:
         workspace_root = self._workspace_root(params, file_path=file_path)
         params = self._with_prepared_environment(params, workspace_root)
         state = self._select_state(params)
+        attempt_errors: list[dict[str, Any]] = []
         unavailable = self._unavailable_reason(state, workspace_root, params)
         if unavailable:
             return self._unavailable_payload(operation, unavailable, state, workspace_root)
@@ -660,6 +662,7 @@ class LspManager:
                         await self._ensure_attached(state, workspace_root)
                 except Exception as exc:
                     detail = state.last_error or f"{exc.__class__.__name__}: {exc}"
+                    attempt_errors.append({"attempt": attempt + 1, "stage": "attach", "error": exception_report(exc), "server_error": state.last_error})
                     if attempt == 0:
                         await self._discard_workspace_session_locked(state, workspace_root)
                         state.attach_failures.pop(_workspace_session_key(workspace_root), None)
@@ -669,10 +672,12 @@ class LspManager:
                         f"attach_failed_after_retry:{detail}",
                         state,
                         workspace_root,
+                        attempt_errors=attempt_errors,
                     )
                 connector = self._connector_for_workspace(state, workspace_root)
                 if connector is None:
                     detail = "LspProtocolError: no connector for prepared workspace"
+                    attempt_errors.append({"attempt": attempt + 1, "stage": "request", "error": detail})
                     await self._discard_workspace_session_locked(state, workspace_root)
                     if attempt == 0:
                         continue
@@ -681,9 +686,10 @@ class LspManager:
                         f"request_failed_after_restart:{detail}",
                         state,
                         workspace_root,
+                        attempt_errors=attempt_errors,
                     )
                 try:
-                    return await self._run_lsp_operation_with_connector(
+                    result = await self._run_lsp_operation_with_connector(
                         operation,
                         params,
                         state=state,
@@ -691,9 +697,11 @@ class LspManager:
                         workspace_root=workspace_root,
                         file_path=file_path,
                     )
+                    return {**result, "attempt_errors": attempt_errors} if attempt_errors else result
                 except (LspProtocolError, asyncio.TimeoutError, BrokenPipeError, ConnectionError) as exc:
                     detail = f"{exc.__class__.__name__}: {exc}"
-                    state.last_error = detail
+                    state.last_error = exception_report(exc)
+                    attempt_errors.append({"attempt": attempt + 1, "stage": "request", "error": state.last_error})
                     await self._discard_workspace_session_locked(state, workspace_root)
                     if attempt == 0:
                         continue
@@ -702,12 +710,14 @@ class LspManager:
                         f"request_failed_after_restart:{detail}",
                         state,
                         workspace_root,
+                        attempt_errors=attempt_errors,
                     )
         return self._unavailable_payload(
             operation,
             "lsp_operation_exhausted",
             state,
             workspace_root,
+            attempt_errors=attempt_errors,
         )
 
     async def _run_lsp_operation_with_connector(
@@ -1114,6 +1124,8 @@ class LspManager:
         reason: str,
         state: LspServerState,
         workspace_root: Path,
+        *,
+        attempt_errors: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return {
             "status": "unavailable",
@@ -1121,6 +1133,7 @@ class LspManager:
             "reason": reason,
             "workspace_root": str(workspace_root),
             "server": self._server_summary(state),
+            **({"attempt_errors": attempt_errors} if attempt_errors else {}),
         }
 
     def _language_id(self, state: LspServerState, file_path: Path, params: dict[str, Any] | None = None) -> str:
@@ -1603,12 +1616,10 @@ def _state_supports_language(state: LspServerState, language: str) -> bool:
 
 
 def _attach_error_detail(exc: Exception, connector: LspConnectorPort) -> str:
-    detail = f"{exc.__class__.__name__}: {exc}"
+    detail = diagnostic_text(f"{exc.__class__.__name__}: {exc}", limit=None) + "\n" + exception_report(exc)
     stderr_tail = connector.stderr_tail_text()
     if stderr_tail:
-        if len(stderr_tail) > 1200:
-            stderr_tail = "..." + stderr_tail[-1200:]
-        detail = f"{detail}; stderr_tail={stderr_tail}"
+        detail += "\nRetained stderr (tail):\n" + diagnostic_text(stderr_tail, limit=None)
     return detail
 
 

@@ -83,9 +83,11 @@ def _installed_cli_version(paths: BrowserRuntimePaths) -> str:
     package_json = paths.tooling_current / "node_modules" / "@playwright" / "cli" / "package.json"
     try:
         payload = json.loads(package_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return ""
-    return str(payload.get("version") or "") if isinstance(payload, dict) else ""
+    if not isinstance(payload, dict) or not isinstance(payload.get("version"), str):
+        raise ValueError(f"Invalid Playwright CLI package metadata: {package_json}")
+    return payload["version"]
 
 
 def _chromium_installed(paths: BrowserRuntimePaths) -> bool:
@@ -93,7 +95,7 @@ def _chromium_installed(paths: BrowserRuntimePaths) -> bool:
     try:
         entries = json.loads(package.read_text())["browsers"]
         revision = next(item["revision"] for item in entries if item["name"] == "chromium")
-    except (OSError, ValueError, KeyError, StopIteration):
+    except FileNotFoundError:
         return False
     for browser_root in paths.browser_cache.glob(f"chromium-{revision}"):
         for name in ("chrome", "chrome.exe", "Chromium", "Google Chrome for Testing"):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
+
 from pal.llm.contracts import LLMRuntimePort, LLMGenerationResult, LLMPreflightAdvice
 
 import asyncio
@@ -194,10 +196,19 @@ class CompactionRunResult:
     clock_kind: CompactionClockKind = CompactionClockKind.USER_TURN
     clock_value: int = 0
     usage: dict[str, Any] | None = None
+    failure_details: tuple[str, ...] = ()
 
     @property
     def success(self) -> bool:
         return self.status == "compacted"
+
+    @property
+    def diagnostic_details(self) -> str:
+        details = [*self.failures, *self.failure_details]
+        metadata = getattr(self.memory_result, "metadata", None) or {}
+        if metadata.get("post_commit_detail"):
+            details.append("Compaction committed; follow-up failed: " + str(metadata["post_commit_detail"]))
+        return diagnostic_text("\n".join(details), limit=None)
 
 
 def _scope_safe_snapshot(snapshot: CompactionSnapshot) -> CompactionSnapshot:
@@ -241,6 +252,7 @@ class CompactionEngine:
         retained = list(units)
         source_sizes: list[int] = []
         failures: list[str] = []
+        failure_details: list[str] = []
         attempts = 0
         validation_error = ""
         repair_output = ""
@@ -279,7 +291,7 @@ class CompactionEngine:
             )
 
         def finish(snapshot: CompactionSnapshot, **kwargs: Any) -> CompactionRunResult:
-            result = self._result(snapshot, **kwargs)
+            result = replace(self._result(snapshot, **kwargs), failure_details=tuple(failure_details))
             _LOGGER.log(
                 logging.INFO if result.success else logging.WARNING,
                 "compact finished run=%s policy=%s status=%s attempts=%s "
@@ -413,6 +425,7 @@ class CompactionEngine:
             try:
                 outcome = await self._generate(llm_runtime, request)
             except Exception as exc:
+                failure_details.append(exception_report(exc))
                 log_failure(f"endpoint:{type(exc).__name__}")
                 continue
 
@@ -461,6 +474,11 @@ class CompactionEngine:
                 output_target = max(1, (output_target or compaction_visible_token_limit(snapshot)) // 2)
                 continue
             if finish_reason == LLMFinishReason.ERROR:
+                response = getattr(outcome, "response", None)
+                details = getattr(getattr(response, "message", None), "metadata", {}) or {}
+                failure_details.append(diagnostic_text(
+                    str(getattr(outcome, "text", "") or "") + "\n"
+                    + json.dumps(dict(details), ensure_ascii=False, default=str), limit=None))
                 log_failure("endpoint:error")
                 continue
             # C2 (review c9cb2d2): this is the single generation-result
@@ -498,6 +516,7 @@ class CompactionEngine:
                         f"visible output limit (estimated {rendered_visible_tokens})"
                     )
             except Exception as exc:
+                failure_details.append(exception_report(exc))
                 validation_error = _validation_error(exc)
                 log_failure(f"schema:{validation_error}")
                 repair_output = raw_text
@@ -547,6 +566,7 @@ class CompactionEngine:
                 after_commit=after_commit,
             )
             if isinstance(committed, Exception):
+                failure_details.append(exception_report(committed))
                 log_failure(f"commit:{type(committed).__name__}")
                 return finish(
                     snapshot,
@@ -806,6 +826,7 @@ class CompactionEngine:
                     "status": getattr(outcome, "status", ""),
                     "left_revision": getattr(outcome, "left_revision", 0),
                     "replayed": bool(getattr(outcome, "replayed", False)),
+                    **({"post_commit_detail": outcome.detail} if getattr(outcome, "detail", "") else {}),
                 },
             )
         # capture_left is the only producer of snapshots; a missing
@@ -1249,10 +1270,7 @@ def _log_failure_reason(reason: str) -> str:
 
 
 def _validation_error(exc: Exception) -> str:
-    text = " ".join(str(exc or "").split())
-    if not text:
-        text = type(exc).__name__
-    return text[:240]
+    return exception_report(exc)
 
 
 __all__ = [
