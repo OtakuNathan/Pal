@@ -1303,6 +1303,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "llm_text": result.llm_text + "\nRecovery suggestions could not be validated; "
                     "operation status is unchanged:\n" + exception_report(exc),
             })
+        if isinstance(result, (FailedResult, RejectedResult)):
+            # Redact the final failure projection, including provider output
+            # rejected by validation, before any full diagnostic is retained
+            # in a snapshot. Keep host evidence, executable arguments, and
+            # successful business output unchanged.
+            result = result.model_copy(update={
+                "error": diagnostic_text(result.error, limit=None),
+                "llm_text": diagnostic_text(result.llm_text, limit=None),
+                "recovery_hint": diagnostic_text(result.recovery_hint, limit=None),
+                "affordances": [action.model_copy(update={
+                    "reason": diagnostic_text(action.reason, limit=None),
+                }) for action in result.affordances],
+            })
         if len(result.recovery_hint) > _MAX_RECOVERY_HINT_CHARS:
             # Keep the full instruction inside the snapshottable body. The
             # shortened metadata is explicit and makes nested finalization

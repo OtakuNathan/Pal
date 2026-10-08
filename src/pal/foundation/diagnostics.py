@@ -10,7 +10,7 @@ def diagnostic_text(value: object, *, limit: int | None = 2000, tail: bool = Fal
     text = str(value)
     text = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[redacted]", text)
     text = re.sub(
-        r'''(?i)(["']?(?:password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret)["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)''',
+        r'''(?i)(["']?(?:password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret)["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|\[redacted\]|[^\s,;}\]]+)''',
         r"\1[redacted]", text,
     )
     text = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+:[^/@\s]+@", r"\1[redacted]@", text)
