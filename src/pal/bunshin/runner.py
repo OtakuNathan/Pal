@@ -10,6 +10,7 @@ from pal.bunshin.runner_components.llm_settings import _prompt_observation_tag_f
 import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from pal.bunshin.checkpoint import AgentSessionCheckpointError
 from pal.bunshin.prompt_adapter import prompt_scaffold_summary as _prompt_scaffold_summary
 from pal.shared import BunshinInvocationPack
@@ -68,41 +69,52 @@ class BunshinRunner:
             )
             return await self.components.invocation.run_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
         except _BunshinCooperativeCancel as cancel:
-            await self.components.invocation.close_execution_work(bundle)
-            with contextlib.suppress(Exception):
-                await self.components.reporter.emit("terminal", self.components.results.cancel_terminal_payload(cancel.payload))
+            await self._report_terminal_after_cleanup(bundle, self.components.results.cancel_terminal_payload(cancel.payload))
             return 0
         except _BunshinCooperativeRestart as restart:
-            await self.components.invocation.close_execution_work(bundle)
-            with contextlib.suppress(Exception):
-                await self.components.reporter.emit("terminal", self.components.results.restart_terminal_payload(restart.payload))
+            await self._report_terminal_after_cleanup(bundle, self.components.results.restart_terminal_payload(restart.payload))
             return 0
         except Exception as exc:
-            await self.components.invocation.close_execution_work(bundle)
             checkpoint_error = isinstance(exc, AgentSessionCheckpointError)
-            with contextlib.suppress(Exception):
-                await self.components.reporter.emit(
-                    "terminal",
-                    {
-                        "status": "failed",
-                        "summary": f"bunshin runner failed: {exc.__class__.__name__}",
-                        "error": str(exc),
-                        "failure_diagnostic": exception_diagnostic(exc),
-                        "error_type": exc.__class__.__name__,
-                        "error_kind": (
-                            "invalid_agent_session_checkpoint"
-                            if checkpoint_error
-                            else "runner_failure"
-                        ),
-                        "retry_directive": (
-                            "do_not_retry" if checkpoint_error else "reconcile_first"
-                        ),
-                        "task_lessons": [],
-                        "system_lessons": [],
-                    },
-                )
+            await self._report_terminal_after_cleanup(
+                bundle,
+                {
+                    "status": "failed",
+                    "summary": f"bunshin runner failed: {exc.__class__.__name__}",
+                    "error": str(exc),
+                    "failure_diagnostic": exception_diagnostic(exc),
+                    "error_type": exc.__class__.__name__,
+                    "error_kind": (
+                        "invalid_agent_session_checkpoint"
+                        if checkpoint_error
+                        else "runner_failure"
+                    ),
+                    "retry_directive": (
+                        "do_not_retry" if checkpoint_error else "reconcile_first"
+                    ),
+                    "task_lessons": [],
+                    "system_lessons": [],
+                },
+            )
             return 1
         finally:
             if bundle is not None:
                 await bundle.close()
             self.components.reporter.append_debug_log("runner_stopped", {"blocked_summary": self.components.status.blocked_summary})
+
+    async def _report_terminal_after_cleanup(
+        self, bundle: BunshinRuntimeBundle | None, payload: dict[str, Any],
+    ) -> None:
+        try:
+            await self.components.invocation.close_execution_work(bundle)
+        except Exception as exc:
+            # Preserve the primary failure's classification and retry policy.
+            # Cleanup still fails the process, but cannot suppress its terminal.
+            payload["cleanup_error"] = {
+                "error": str(exc), "error_type": type(exc).__name__,
+                "failure_diagnostic": exception_diagnostic(exc),
+            }
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                await self.components.reporter.emit("terminal", payload)

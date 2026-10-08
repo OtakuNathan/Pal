@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ class WorkspaceProcessHolder:
             "write_paths": list(self.write_paths),
             "unknown_paths": list(self.unknown_paths),
         }
+
+
+class WorkspaceProcessObservationError(RuntimeError):
+    """Workspace quiescence could not be observed; ownership must stay fenced."""
 
 
 @dataclass
@@ -98,7 +103,7 @@ def workspace_process_holders(worktree: Path) -> tuple[WorkspaceProcessHolder, .
     """Describe processes whose cwd or open files still touch a worktree."""
     proc_root = Path("/proc")
     if not proc_root.is_dir():
-        return ()
+        return _lsof_workspace_process_holders(worktree)
     resolved_path = worktree.resolve()
     resolved = str(resolved_path)
     prefix = resolved + os.sep
@@ -150,6 +155,111 @@ def workspace_process_holders(worktree: Path) -> tuple[WorkspaceProcessHolder, .
             )
         )
     return tuple(sorted(holders, key=lambda item: item.pid))
+
+
+def _lsof_workspace_process_holders(worktree: Path) -> tuple[WorkspaceProcessHolder, ...]:
+    # Scan open files directly instead of selecting a directory's current
+    # inodes with +D: deleted files and newly created files still count.
+    try:
+        result = subprocess.run(
+            ["lsof", "-n", "-P", "-F0pcfan"],
+            capture_output=True, text=True, errors="surrogateescape", check=False, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkspaceProcessObservationError(
+            f"cannot inspect workspace holders with lsof: {type(exc).__name__}: {exc}"
+        ) from exc
+    # lsof also uses status 1 when there are no matching files. Warnings or
+    # other errors cannot establish quiescence, even with partial output.
+    if result.returncode not in {0, 1} or result.stderr.strip():
+        raise WorkspaceProcessObservationError(
+            f"lsof workspace observation failed ({result.returncode}): {result.stderr.strip()}"
+        )
+    resolved_path = worktree.resolve()
+    resolved = str(resolved_path)
+    records: dict[int, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    fd = access = ""
+    try:
+        for raw_field in result.stdout.split("\0"):
+            field = raw_field.lstrip("\n")
+            if not field:
+                continue
+            tag, value = field[0], field[1:]
+            if tag == "p":
+                pid = int(value)
+                if pid <= 0:
+                    raise ValueError("invalid process id")
+                current = records.setdefault(pid, {
+                    "pid": pid, "command": "", "holds_cwd": False,
+                    "read_paths": [], "write_paths": [], "unknown_paths": [],
+                })
+                fd = access = ""
+            elif current is None:
+                raise ValueError("file record has no process identity")
+            elif tag == "c":
+                current["command"] = value
+            elif tag == "f":
+                fd, access = value, ""
+            elif tag == "a":
+                access = value
+            elif tag == "n":
+                if not fd:
+                    raise ValueError("path record has no file descriptor")
+                target = _lsof_workspace_target(value, resolved)
+                if target is None:
+                    continue
+                if fd == "cwd":
+                    current["holds_cwd"] = True
+                else:
+                    kind = "read" if access == "r" else "write" if access in {"w", "u"} else "unknown"
+                    current[f"{kind}_paths"].append(_workspace_relative_process_path(target, resolved_path))
+            else:
+                raise ValueError(f"unexpected lsof field: {tag!r}")
+    except ValueError as exc:
+        raise WorkspaceProcessObservationError(f"invalid lsof workspace observation: {exc}") from exc
+    holders = []
+    for pid, record in sorted(records.items()):
+        if not any(record[key] for key in ("holds_cwd", "read_paths", "write_paths", "unknown_paths")):
+            continue
+        try:
+            process_group = os.getpgid(pid)
+        except OSError:
+            process_group = 0
+        holders.append(WorkspaceProcessHolder(
+            pid=pid, process_group=process_group, command=record["command"],
+            holds_cwd=record["holds_cwd"],
+            read_paths=tuple(sorted(set(record["read_paths"]))),
+            write_paths=tuple(sorted(set(record["write_paths"]))),
+            unknown_paths=tuple(sorted(set(record["unknown_paths"]))),
+        ))
+    return tuple(holders)
+
+
+def _lsof_workspace_target(value: str, workspace: str) -> str | None:
+    # Even -F0 quotes non-printable filename bytes. Backslashes are escaped,
+    # but a literal ^A and a control-A both appear as ^A: retain both possible
+    # spellings of the workspace so ambiguity can only fence extra work,
+    # never hide a holder, including mixed literal and control characters.
+    escapes = {b"b": b"\b", b"f": b"\f", b"r": b"\r", b"n": b"\n", b"t": b"\t", b"\\": b"\\"}
+
+    def unescape(match: re.Match[bytes]) -> bytes:
+        token = match.group()[1:]
+        return bytes([int(token[1:], 16)]) if token.startswith(b"x") else escapes[token]
+
+    decoded = os.fsdecode(re.sub(
+        rb"\\(?:[bfrnt\\]|x[0-9a-fA-F]{2})", unescape, os.fsencode(value),
+    ))
+    quoted = "".join(
+        "^" + chr(ord(character) ^ 64)
+        if (ord(character) < 32 and character not in "\b\f\r\n\t") or ord(character) == 127
+        else character for character in workspace
+    )
+    for path in (decoded.removesuffix(" (deleted)"), decoded):
+        for prefix in (workspace, quoted):
+            if path == prefix or path.startswith(prefix + os.sep):
+                return workspace + path[len(prefix):]
+    return None
 
 
 def format_workspace_process_holders(

@@ -4,6 +4,7 @@ from pal.bunshin.runner_components.models import EventWriter
 from pal.bunshin.runner_components.llm_settings import _prompt_observation_tag_from_pack
 from pal.bunshin.runner_components.progress_text import _progress_summary
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,18 @@ class Reporter:
                 **payload,
             },
         )
+
+    async def emit_progress_best_effort(self, phase: str, **payload: Any) -> None:
+        """Optional progress must not replace a tool result or cancel its work."""
+        try:
+            await self.emit_progress(phase, **payload)
+        except Exception as exc:
+            self.append_debug_log("progress_delivery_failed", {
+                "phase": phase, "error_type": type(exc).__name__, "error": str(exc),
+            })
+            logging.getLogger(__name__).warning(
+                "Bunshin progress delivery failed for %s: %s", phase, type(exc).__name__,
+            )
 
     def append_debug_log(self, section: str, payload: dict[str, Any]) -> None:
         config = dict((self.pack.metadata or {}).get("debug_log") or {})

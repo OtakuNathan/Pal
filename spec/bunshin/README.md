@@ -74,10 +74,17 @@ not a second DAG scheduler or semantic lifecycle owner.
   private socket, and observes group quiescence before releasing resources.
   Closing also drains unread stdout under the same reader lock as event
   consumption, so pipe backpressure cannot prevent the reap boundary.
+  Workspace quiescence uses procfs where available and `lsof` otherwise.
+  Missing tools, timeouts, warnings, and malformed fallback observations
+  reject the safety check; they cannot authorize a snapshot or lease release.
+  The fallback observes open deleted files as well as cwd and ordinary files.
 - `ContinuationLifecycle.tla` models v29 resume-checkpoint format admission. Only a v8
   encrypted logical-coroutine payload may restore a worker; v7 and malformed checkpoints are
   rejected with visible deterministic errors, while only transient worker
   failures may consume retry budget.
+  Failure terminals retain their original classification and retry policy if
+  execution cleanup fails, with the cleanup error reported separately. Optional
+  tool progress and heartbeat delivery cannot replace tool results or errors.
 - `StartupRecoveryLifecycle.tla` distinguishes a never-created coroutine from
   an initialized coroutine whose required checkpoint is missing. It separates
   file publication, durable session initialization, and worker acknowledgment;

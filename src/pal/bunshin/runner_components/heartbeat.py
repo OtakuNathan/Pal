@@ -24,7 +24,7 @@ class Heartbeat:
                 if task in done:
                     return await task
                 heartbeat_count += 1
-                await self.reporter.emit_progress(phase, heartbeat_count=heartbeat_count, **payload)
+                await self.reporter.emit_progress_best_effort(phase, heartbeat_count=heartbeat_count, **payload)
         except BaseException:
             if not task.done():
                 task.cancel()

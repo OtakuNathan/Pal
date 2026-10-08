@@ -45,7 +45,7 @@ class ToolObservation:
         await self.emit_verifier_diagnostic(state, call, index, "started")
         await self.emit_producer_diagnostic(state, call, index, "started")
         target_name = _effective_capability_name(call)
-        await self.reporter.emit_progress(
+        await self.reporter.emit_progress_best_effort(
             "tool_call_started",
             round=state.llm_round_count,
             tool_call_index=index,
@@ -105,7 +105,7 @@ class ToolObservation:
                         "error": str(exc),
                     },
                 )
-                await self.reporter.emit_progress(
+                await self.reporter.emit_progress_best_effort(
                     "tool_call_failed",
                     round=state.llm_round_count,
                     tool_call_index=index,
@@ -135,7 +135,7 @@ class ToolObservation:
                 "structured": dict(result.structured or {}),
             },
         )
-        await self.reporter.emit_progress(
+        await self.reporter.emit_progress_best_effort(
             "tool_call_completed",
             round=state.llm_round_count,
             tool_call_index=index,

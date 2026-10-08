@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from unittest.mock import Mock, patch
+import json
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from pal.bunshin.runner import BunshinRunner
+from pal.bunshin import worker_main
+from pal.bunshin.checkpoint import AgentSessionCheckpointError
+from pal.bunshin.runner_components.models import _BunshinCooperativeCancel, _BunshinCooperativeRestart
+from pal.bunshin.runner_components.reporter import Reporter
+from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
 from pal.execution.runtime import ExecutionRuntime
 from pal.llm import generation_result_from_values
 from pal.shared.tool_protocol import ToolResultIR, new_tool_call
@@ -132,3 +138,128 @@ def test_receipt_query_distinguishes_absence_and_caches_confirmed_receipt(tmp_pa
         assert completion.manager_submission_receipt_present()
         assert completion.manager_submission_receipt_present()
     assert client.request_sync.call_count == 2
+
+
+class SingleToolModel(CorrectingModel):
+    def generate(self, request, **options):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return generation_result_from_values(tool_calls=[new_tool_call(
+                name="read_file", args={"file_path": str(self.path)}, call_id="call-1",
+            )], finish_reason="tool_calls")
+        return generation_result_from_values(text="done", finish_reason="stop")
+
+
+@pytest.mark.parametrize("phase,tool_fails", [
+    ("tool_call_started", False), ("tool_call_started", True),
+    ("tool_call_completed", False), ("tool_call_failed", True),
+    ("tool_call_waiting", False), ("tool_call_waiting", True),
+])
+def test_progress_failure_preserves_real_tool_result_in_next_model_request(tmp_path, phase, tool_fails, caplog):
+    async def scenario():
+        path = tmp_path / "input.txt"
+        path.write_text("real tool content")
+        bundle = make_bundle()
+        bundle.execution_runtime.mount_subtree(bundle.module_registry.require("execution"))
+        bundle.llm_runtime = SingleToolModel("read_file", path)
+        template = make_runner(tmp_path, output=tmp_path / "checkpoint.json")
+        pack = replace(template.pack, allowed_capabilities=["op_file_read"],
+            workspace={"run_dir": str(tmp_path)}, metadata={
+                **template.pack.metadata, "heartbeat_interval_seconds": .01,
+            })
+        progress_attempts = []
+        ready = asyncio.Event()
+
+        async def write(event):
+            if event.get("payload", {}).get("phase") == phase:
+                progress_attempts.append(event)
+                ready.set()
+                raise OSError("progress-transport-down")
+
+        runner = BunshinRunner(runtime_root=tmp_path, pack=pack, bunshin_id=pack.invocation_id,
+            run_id="progress-recovery", write_event=write, read_decision=noop)
+        executed = []
+        execute = ExecutionRuntime.execute_tool_async
+
+        async def record_execution(runtime, call, **kwargs):
+            executed.append(call.name)
+            if phase == "tool_call_waiting":
+                await asyncio.wait_for(ready.wait(), 5)
+            if tool_fails:
+                raise ValueError("original tool error")
+            return await execute(runtime, call, **kwargs)
+
+        try:
+            with patch.object(ExecutionRuntime, "execute_tool_async", record_execution):
+                await runner.components.agent_session.run_agent_loop(bundle)
+            assert progress_attempts
+            assert executed == ["read_file"]
+            assert len(bundle.llm_runtime.requests) == 2
+            result = next(item for item in tool_results(bundle.llm_runtime.requests[1]) if item.call_id == "call-1")
+            assert result.ok is not tool_fails
+            assert ("original tool error" if tool_fails else "real tool content") in result.content
+            assert "progress-transport-down" not in result.content
+            assert "Bunshin progress delivery failed" in caplog.text
+        finally:
+            bundle.execution_runtime.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_progress_delivery_preserves_task_cancellation(tmp_path):
+    async def scenario():
+        pack = make_runner(tmp_path, output=tmp_path / "checkpoint.json").pack
+        reporter = Reporter("session", pack, "run", AsyncMock(side_effect=asyncio.CancelledError))
+        with pytest.raises(asyncio.CancelledError):
+            await reporter.emit_progress_best_effort("tool_call_waiting")
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["checkpoint", "runner", "cancel", "restart"])
+def test_worker_wire_preserves_primary_terminal_when_cleanup_fails(tmp_path, failure, monkeypatch, capsys):
+    bundle = make_bundle()
+    template = make_runner(tmp_path, output=tmp_path / "checkpoint.json")
+    errors = {
+        "checkpoint": AgentSessionCheckpointError("original checkpoint error"),
+        "runner": ValueError("original runner error"),
+        "cancel": _BunshinCooperativeCancel({"summary": "original cancellation"}),
+        "restart": _BunshinCooperativeRestart({"summary": "original restart"}),
+    }
+    original = errors[failure]
+
+    async def write(event):
+        print(json.dumps({"kind": "event", "event": event}))
+
+    runner = BunshinRunner(runtime_root=tmp_path, pack=template.pack,
+        bunshin_id=template.pack.invocation_id, run_id="cleanup-recovery",
+        write_event=write, read_decision=noop, runtime_bundle=bundle)
+    monkeypatch.setattr(runner.components.invocation, "run_invocation", AsyncMock(side_effect=original))
+    monkeypatch.setattr(ExecutionRuntime, "close_role_work", AsyncMock(side_effect=OSError("cleanup failed")))
+    bundle.close_async = AsyncMock()
+
+    async def run(*args):
+        return await runner.run()
+
+    monkeypatch.setattr(worker_main, "_run", run)
+    try:
+        assert worker_main.main(["--runtime-root", str(tmp_path), "--pack-json", "unused",
+            "--bunshin-id", "session", "--run-id", "run"]) == 1
+        wire = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        events = [item["event"] for item in wire if item["kind"] == "event"]
+        terminal = next(event["payload"] for event in events if event["event_kind"] == "terminal")
+        assert terminal["status"] == {"cancel": "killed", "restart": "suspended"}.get(failure, "failed")
+        assert terminal["cleanup_error"]["error_type"] == "OSError"
+        assert terminal["cleanup_error"]["error"] == "cleanup failed"
+        assert wire[-1]["kind"] == "worker_error"
+        assert "cleanup failed" in wire[-1]["error"]
+        if failure in {"checkpoint", "runner"}:
+            kind, error, retry = _worker_terminal_failure(events)
+            assert str(original) in error
+            assert terminal["error_type"] == type(original).__name__
+            assert kind == ("invalid_agent_session_checkpoint" if failure == "checkpoint" else "runner_failure")
+            assert retry == ("do_not_retry" if failure == "checkpoint" else "reconcile_first")
+        else:
+            assert str(original) in terminal["summary"]
+        bundle.close_async.assert_awaited_once()
+    finally:
+        bundle.execution_runtime.shutdown()
