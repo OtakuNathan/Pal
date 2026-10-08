@@ -7,6 +7,11 @@ pins one Architect, Reviewer, Implementation, and Verifier binding. The graph
 shape is shared across families; the module definition schema and role
 participants are data.
 
+Workflow archival hides that terminal Workflow from default Task Ledger search,
+while its reusable Task stays active. `include_archived=true` returns archived
+Workflow history. Status and archive receipts expose `archived`, and an archived
+Workflow no longer suggests archiving again. Task archival is a separate operation.
+
 The implementation has one canonical package, `pal.bunshin`, with `storage`,
 `semantic_orchestration`, and `runner_components` as its ownership boundaries.
 See the [package layout](../src/pal/bunshin/README.md) for module responsibilities.

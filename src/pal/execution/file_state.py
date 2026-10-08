@@ -48,6 +48,14 @@ def resolve_file_path(file_path: str | Path) -> Path:
     return Path(file_path).expanduser().resolve()
 
 
+def resolve_path_entry(file_path: str | Path) -> Path:
+    """Resolve parents while preserving the final symbolic link, if any."""
+    path = Path(file_path).expanduser()
+    if path.name in {"", ".", ".."}:
+        return path.resolve()
+    return path.parent.resolve() / path.name
+
+
 def read_utf8_text_exact(file_path: str | Path) -> str:
     """Read UTF-8 text without universal-newline normalization."""
 

@@ -338,9 +338,9 @@ ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput = _strict_model(
 ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput',
     {
-        'file_path': (str, Field(..., description='Path to delete.')),
-        'expected_sha256': (str, Field(None, description='Optional expected SHA-256 digest for a regular file. Deletion is rejected if the current bytes differ. Regular files only; omit for directories.')),
-        'recursive': (bool, Field(False, description='Required for directory deletion. Regular file deletion does not require this.')),
+        'file_path': (str, Field(..., description='Path to delete. A symbolic link is removed itself; its target is preserved.')),
+        'expected_sha256': (str, Field(None, description='Optional expected SHA-256 digest for a regular file. Deletion is rejected if the current bytes differ. Regular files only; omit for directories and symbolic links.')),
+        'recursive': (bool, Field(False, description='Required for real directory deletion. Files and symbolic links do not require this.')),
     },
 )
 
@@ -844,7 +844,7 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput = _strict_model(
     {
         'query': (str, Field('')),
         'family': (str, Field(None, description='Optional semantic Family name.')),
-        'include_archived': (bool, Field(False)),
+        'include_archived': (bool, Field(False, description='Include archived Tasks and archived Workflows in the ledger results. Defaults to hiding archived Workflows while keeping their reusable Tasks.')),
         'limit': (int, Field(10, ge=1, le=50)),
     },
 )

@@ -279,8 +279,8 @@ def compile_registry_generation(
         target[alias] = record
     # Descriptors are compiled before the generation-wide alias table exists.
     # Once it is complete, render next-tool routing against the exact surface,
-    # derive the search document, and remove canonical paths from LLM-facing
-    # prose and schemas in one deterministic projection pass.
+    # derive the search document, and translate Pal-owned routing prose.
+    # Schema literals, examples, and external MCP prose are opaque data.
     for table in (direct_aliases, indirect_aliases):
         for alias, record in tuple(table.items()):
             translations = _unambiguous_alias_translations(
@@ -288,6 +288,12 @@ def compile_registry_generation(
                 preferred=(record.alias, record.canonical_path),
             )
             unknown = "preserve" if record.is_mcp else "raise"
+            guidance = record.guidance if record.is_mcp else record.guidance.model_copy(update={
+                key: _project_llm_text(value, translations, unknown=unknown)
+                for key, value in record.guidance.model_dump(include={
+                    "purpose", "use_when", "do_not_use_when", "failure_next_steps"
+                }).items()
+            })
             next_tool_lines = _compile_next_tool_lines(
                 record,
                 direct_aliases=direct_aliases,
@@ -295,7 +301,7 @@ def compile_registry_generation(
             )
             compiled_description = compile_tool_description(
                 alias=record.alias,
-                guidance=record.guidance,
+                guidance=guidance,
                 execution=record.execution,
                 input_schema=record.input_schema,
                 output_schema=record.output_schema,
@@ -304,14 +310,17 @@ def compile_registry_generation(
             )
             table[alias] = replace(
                 record,
-                compiled_description=_project_llm_text(compiled_description, translations, unknown=unknown),
-                search_document=_project_llm_text(
+                guidance=guidance,
+                compiled_description=compiled_description,
+                search_document=(_compile_search_document(record) if record.is_mcp else _project_llm_text(
                     _compile_search_document(record),
                     translations,
                     unknown=unknown,
-                ),
-                input_schema=_deep_freeze(_project_llm_value(record.input_schema, translations, unknown=unknown)),
-                output_schema=_deep_freeze(_project_llm_value(record.output_schema, translations, unknown=unknown)),
+                )),
+                input_schema=_deep_freeze(record.input_schema if record.is_mcp else
+                    _project_llm_schema(record.input_schema, translations)),
+                output_schema=_deep_freeze(record.output_schema if record.is_mcp else
+                    _project_llm_schema(record.output_schema, translations)),
             )
     search_records.clear()
     provider_specs.clear()
@@ -869,6 +878,31 @@ def _unambiguous_alias_translations(
         translations = [item for item in translations if item[1] != preferred[1]]
         translations.append(preferred)
     return sorted(translations, key=lambda item: len(item[1]), reverse=True)
+
+
+def _project_llm_schema(value: Any, translations: list[tuple[str, str]]) -> Any:
+    """Translate internal schema annotations, never validation rules or data."""
+    if not isinstance(value, dict):
+        return value
+    maps = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+    singles = {"items", "additionalItems", "additionalProperties", "unevaluatedProperties",
+               "unevaluatedItems", "contains", "propertyNames", "not", "if", "then", "else", "contentSchema"}
+    arrays = {"allOf", "anyOf", "oneOf", "prefixItems"}
+    result = {}
+    for key, item in value.items():
+        if key in {"description", "title"} and isinstance(item, str):
+            item = _project_llm_text(item, translations)
+        elif key in maps and isinstance(item, dict):
+            item = {name: _project_llm_schema(child, translations) for name, child in item.items()}
+        elif key in singles:
+            item = ([_project_llm_schema(child, translations) for child in item]
+                    if isinstance(item, list) else _project_llm_schema(item, translations))
+        elif key in arrays and isinstance(item, list):
+            item = [_project_llm_schema(child, translations) for child in item]
+        elif key == "dependencies" and isinstance(item, dict):
+            item = {name: _project_llm_schema(child, translations) for name, child in item.items()}
+        result[key] = item
+    return result
 
 
 def _project_llm_value(

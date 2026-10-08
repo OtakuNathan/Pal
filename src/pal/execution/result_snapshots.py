@@ -10,6 +10,7 @@ import tempfile
 import threading
 from uuid import uuid4
 
+from pal.execution.file_state import resolve_path_entry
 from pal.shared.result_snapshot import ResultSnapshotRef, turn_snapshot_refs
 
 LOG = logging.getLogger(__name__)
@@ -61,9 +62,11 @@ class ResultSnapshotStore:
         with self._lock:
             return next((r for r in self._refs.values() if r.path == resolved), None)
 
-    def manages_path(self, path, *, include_parents=False) -> bool:
-        candidate, root = Path(path).expanduser().resolve(), self.root.resolve()
-        return candidate.is_relative_to(root) or (include_parents and root.is_relative_to(candidate))
+    def manages_path(self, path, *, include_parents=False, follow_final_symlink=True) -> bool:
+        candidate = Path(path).expanduser().resolve() if follow_final_symlink else resolve_path_entry(path)
+        roots = (self.root.resolve(), resolve_path_entry(self.root))
+        return any(candidate.is_relative_to(root) or (include_parents and root.is_relative_to(candidate))
+                   for root in roots)
 
     def pin_history_request(self, history, turn_id: str) -> None:
         self.bind_history(history)

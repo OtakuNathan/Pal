@@ -407,6 +407,12 @@ class FileReadTool:
                     )
 
         bom_notice = f"{UTF8_BOM_NOTICE}\n" if utf8_bom and normalized[0][0] == 1 else ""
+        if "\r" in raw:
+            bom_notice += (
+                "(Line endings are preserved between displayed lines. For edit_file, "
+                "encode CRLF as \\r\\n and bare CR as \\r in JSON strings; "
+                "omit line numbers and notices from old_string.)\n"
+            )
         rendered_blocks: list[str] = []
         spans: list[FileDeliverySpan] = []
         blocks_summary: list[dict[str, Any]] = []
@@ -442,10 +448,11 @@ class FileReadTool:
                 display_line = line
                 if i == 1 and display_line.startswith(UTF8_BOM):
                     display_line = display_line[len(UTF8_BOM) :]
-                rendered_line = (
-                    f"{i:>6}\t{display_line.rstrip(chr(10)).rstrip(chr(13))}"
+                ending = "\r\n" if display_line.endswith("\r\n") else (
+                    display_line[-1:] if display_line.endswith(("\r", "\n")) else ""
                 )
-                numbered.append(rendered_line)
+                rendered_line = f"{i:>6}\t{display_line.removesuffix(ending) if ending else display_line}"
+                numbered.append(rendered_line + (ending if i < end else ""))
                 spans.append(
                     FileDeliverySpan(
                         start_offset=cursor,
@@ -457,8 +464,8 @@ class FileReadTool:
                         line_length=len(rendered_line),
                     )
                 )
-                cursor += len(rendered_line) + 1
-            block_text = "\n".join(numbered)
+                cursor += len(rendered_line) + len(ending)
+            block_text = "".join(numbered)
             remaining = total_lines - end
             block_truncated = end < total_lines
             if header:

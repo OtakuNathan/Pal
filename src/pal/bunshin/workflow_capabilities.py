@@ -5,7 +5,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from pal.execution.generated_tool_models import (
     BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput,
@@ -25,7 +25,7 @@ from pal.execution.generated_tool_models import (
     BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
 )
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -887,7 +887,7 @@ class BunshinPublicProvider:
         action_name="archive_workflow",
         guidance=ToolGuidance(
             purpose="Archive a terminal V2 workflow.",
-            use_when="Cleaning up a completed or cancelled workflow from the active task list.",
+            use_when="Hide a completed, rejected, or cancelled Workflow from default search results. Its reusable Task remains active; include_archived=true includes archived Workflow history. read_bunshin_task_status reports the archive flag.",
             do_not_use_when="Active workflows must be cancelled first (use control_bunshin_workflow).",
             failure_next_steps="If task not found or not terminal, verify status with read_bunshin_task_status.",
         ),
@@ -910,7 +910,10 @@ class BunshinPublicProvider:
                 actor=actor,
                 reason=str(call.args.get("reason") or ""),
             )
-            return _public_result("bunshin workflow archived", payload)
+            result = _public_result("bunshin workflow archived", payload)
+            if payload.get("already_archived"):
+                result = replace(result, effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE, receipt={"already_archived": True}))
+            return result
         except ValueError as exc:
             return _invalid("bunshin V2 workflow archive invalid", exc)
         except Exception as exc:

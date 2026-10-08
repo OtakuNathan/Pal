@@ -52,6 +52,16 @@ Notes:
 - MCP `tools/call` and `prompts/get` use separate result envelopes. Prompt
   retrieval preserves messages and supplies a read receipt instead of applying
   a tool's `structuredContent` output contract
+- Alias translation applies to Pal routing prose and internal schema annotations.
+  Schema literals, defaults, examples, references and external MCP descriptions
+  retain their original values for discovery, validation and invocation
+- `delete_path` removes the final filesystem entry. Symbolic links are unlinked
+  without following their targets, including dangling links and directory links.
+  SHA-256 checks apply only to regular files; snapshot guards check the entry
+  being removed and continue to protect snapshot storage
+- `read_file` preserves CRLF and CR between numbered lines and tells the model
+  their JSON escapes. `edit_file` continues to match exact authorized bytes;
+  callers remove display labels and preserve the delivered line endings
 - if a failure's full text cannot be saved, deliver it inline with the storage
   error and an explicit budget exception. A preview without a complete snapshot
   must not become the only remaining account of why the tool failed

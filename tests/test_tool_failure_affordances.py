@@ -364,7 +364,7 @@ def test_edit_write_failure_retains_exception_chain(runtime, tmp_path, monkeypat
 def test_delete_path_validation_does_not_claim_partial_deletion(runtime, monkeypatch):
     def fail(_):
         raise ValueError("invalid path")
-    monkeypatch.setattr("pal.execution.path_delete.resolve_file_path", fail)
+    monkeypatch.setattr("pal.execution.path_delete.resolve_path_entry", fail)
     result = invoke(runtime, "delete_path", {"file_path": "invalid"})
     assert metadata(result)["effect"] == "not_started"
     assert "invalid path" in result.llm_text

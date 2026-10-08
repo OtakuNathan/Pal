@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import resolve_file_path
+from pal.execution.file_state import resolve_path_entry
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_report
 
@@ -19,6 +19,7 @@ ERR_DELETE_FAILED = "DELETE_FAILED"
 ERR_DIRECTORY_REQUIRES_RECURSIVE = "DIRECTORY_REQUIRES_RECURSIVE"
 ERR_INVALID_SHA256 = "INVALID_SHA256"
 ERR_DIRECTORY_SHA256 = "SHA256_NOT_SUPPORTED_FOR_DIRECTORY"
+ERR_SYMLINK_SHA256 = "SHA256_NOT_SUPPORTED_FOR_SYMLINK"
 ERR_MISSING_PATH = "MISSING_PATH"
 ERR_PATH_NOT_FOUND = "PATH_NOT_FOUND"
 ERR_READ_FAILED = "READ_FAILED"
@@ -31,6 +32,7 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _ERROR_LLMS: dict[str, str] = {
     ERR_DELETE_FAILED: "Failed to delete path.",
     ERR_DIRECTORY_SHA256: "expected_sha256 is supported only for regular files; omit it for directories.",
+    ERR_SYMLINK_SHA256: "expected_sha256 checks regular file bytes, not symbolic links. Omit it only if deleting the link itself is intended; its target will be preserved.",
     ERR_DIRECTORY_REQUIRES_RECURSIVE: "The path is a directory. Set recursive=true only if deleting the directory and all of its contents is intended.",
     ERR_INVALID_SHA256: "expected_sha256 must be a 64-character hexadecimal SHA-256 digest.",
     ERR_MISSING_PATH: "file_path is required.",
@@ -56,12 +58,18 @@ class PathDeleteTool:
             return _err(RuntimeStatus.INVALID, ERR_INVALID_SHA256, file_path=file_path)
 
         try:
-            resolved = resolve_file_path(file_path)
+            # Resolve parents, but keep the final directory entry: unlinking a
+            # symbolic link must never delete the object it points to.
+            resolved = resolve_path_entry(file_path)
         except (OSError, ValueError) as exc:
             return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=exception_report(exc))
 
         if _is_unsafe_delete_target(resolved):
             return _err(RuntimeStatus.FORBIDDEN, ERR_UNSAFE_PATH, file_path=str(resolved))
+        if resolved.is_symlink():
+            if expected_sha256:
+                return _err(RuntimeStatus.INVALID, ERR_SYMLINK_SHA256, file_path=str(resolved))
+            return self._delete_path(resolved, recursive=False, path_kind="symlink")
         if not resolved.exists():
             return _err(RuntimeStatus.ERROR, ERR_PATH_NOT_FOUND, file_path=str(resolved))
 

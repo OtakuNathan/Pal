@@ -126,7 +126,7 @@ _EDIT_RECOVERY_HINTS = {
     "NOT_READ": "Read the affected lines with read_file, then retry the edits.",
     "PARTIAL_READ": "Read the line ranges listed in required_line_ranges, then retry the failed edits.",
     "STALE_FILE": "The read snapshot could not be confirmed. Resolve any reported read error, then read the current affected ranges and re-plan the edits; do not resend them unchanged.",
-    "NOT_FOUND_MATCH": "Copy old_string exactly from the current read_file output, including whitespace and indentation.",
+    "NOT_FOUND_MATCH": "Copy old_string exactly from the current read_file output without line numbers or notices. Preserve whitespace and line endings; encode CRLF as \\r\\n in JSON strings.",
     "MULTIPLE_MATCHES": "Add surrounding lines to old_string until it is unique; use replace_all=true only if every occurrence should change.",
     "OVERLAPPING_EDITS": "Merge the overlapping items into one edit.",
     "NO_CHANGE": "Make new_string differ from old_string, or drop the item.",
@@ -150,6 +150,7 @@ _DELETE_RECOVERY_HINTS = {
     "PATH_NOT_FOUND": "Nothing exists at this path. Verify the path only if you expected it to exist.",
     "DIRECTORY_REQUIRES_RECURSIVE": "Set recursive=true only if deleting the directory and all of its contents is intended.",
     "SHA256_NOT_SUPPORTED_FOR_DIRECTORY": "expected_sha256 checks files only; omit it only if deleting the whole directory is intended.",
+    "SHA256_NOT_SUPPORTED_FOR_SYMLINK": "expected_sha256 checks regular files only; omit it only if deleting the symbolic link itself is intended. The target will be preserved.",
     "INVALID_SHA256": "Supply a 64-character hexadecimal SHA-256 digest from the intended file.",
     "UNSUPPORTED_PATH": "The path is not a regular file or directory; inspect its type before choosing an appropriate operation.",
     "SHA256_MISMATCH": "The file's content differs from expected_sha256. Inspect the file before deciding whether to delete it.",
@@ -366,8 +367,8 @@ class FileCapabilityMixin:
         family="path",
         action_name="delete",
         guidance=ToolGuidance(
-            purpose="Delete a file or directory at the given path.",
-            use_when="Removing unwanted files or directories from the filesystem.",
+            purpose="Delete the file, directory, or symbolic link at the given path; deleting a link preserves its target.",
+            use_when="Removing unwanted filesystem entries. Symbolic links, including links to directories and dangling links, are unlinked without following their targets; recursive=true is required only for real directories.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",
             failure_next_steps="For DELETE_FAILED, deletion may be partial: inspect the remaining path before deciding whether to retry.",
         ),
@@ -380,7 +381,7 @@ class FileCapabilityMixin:
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
         snapshots = getattr(call.meta.get("execution_runtime"), "result_snapshots", None)
         path = str(call.args.get("file_path") or "")
-        if snapshots is not None and path and snapshots.manages_path(path, include_parents=True):
+        if snapshots is not None and path and snapshots.manages_path(path, include_parents=True, follow_final_symlink=False):
             raise ToolRejectedError("Output snapshots are retired with their context references.", error_code="immutable_result_snapshot",
                 recovery_hint="Let snapshot retention retire these files; verify the intended source path if the task requires deleting a source.")
         return _reject_pre_effect_failure(_tool_capability_result(PathDeleteTool(), call.args), _DELETE_RECOVERY_HINTS)

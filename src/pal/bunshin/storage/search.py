@@ -18,6 +18,7 @@ class SearchStore:
         task_id: str = "",
         query: str = "",
         include_terminal: bool = False,
+        include_archived: bool = False,
         limit: int = 20,
     ) -> tuple[dict[str, Any], ...]:
         self.database.ensure_schema()
@@ -28,6 +29,8 @@ class SearchStore:
             parameters.append(str(task_id).strip())
         if not include_terminal:
             clauses.append("s.state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')")
+        if not include_archived:
+            clauses.append("coalesce(json_extract(s.payload_json, '$.archived'), 0) = 0")
         text = str(query or "").strip().lower()
         if text:
             clauses.append(
@@ -41,7 +44,8 @@ class SearchStore:
             rows = connection.execute(
                 """
                 SELECT s.aggregate_id AS workflow_id, s.state AS workflow_state,
-                       s.updated_at, coalesce(t.title, '') AS task_title,
+                       s.updated_at, coalesce(json_extract(s.payload_json, '$.archived'), 0) AS archived,
+                       coalesce(t.title, '') AS task_title,
                        coalesce(json_extract(s.payload_json, '$.workflow_name'), t.title, '') AS workflow_name,
                        coalesce(t.objective, '') AS task_objective
                 FROM bunshin_v2_aggregate_snapshots AS s
@@ -52,7 +56,7 @@ class SearchStore:
                 + " ORDER BY s.updated_at DESC, s.aggregate_id LIMIT ?",
                 tuple(parameters),
             ).fetchall()
-        return tuple(dict(row) for row in rows)
+        return tuple({**dict(row), "archived": bool(row["archived"])} for row in rows)
 
     def search_tasks(
         self,

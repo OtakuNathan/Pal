@@ -209,6 +209,7 @@ class BunshinWorkflowService:
                 actor_id=actor,
                 task_id=str(task["task_id"]),
                 include_terminal=True,
+                include_archived=bool(data.get("include_archived")),
                 limit=20,
             )
             workflow_items: list[dict[str, Any]] = []
@@ -218,6 +219,7 @@ class BunshinWorkflowService:
                     {
                         "name": str(workflow.get("workflow_name") or workflow.get("task_title") or ""),
                         "state": str(workflow.get("workflow_state") or ""),
+                        "archived": bool(workflow.get("archived")),
                         "phase": str(projection.get("current_phase") or ""),
                         "liveness": str(projection.get("liveness") or ""),
                         "waiting_for_user": bool(projection.get("waiting_for_user")),
@@ -772,6 +774,7 @@ class BunshinWorkflowService:
             actor_id=actor,
             task_id=task_id,
             include_terminal=True,
+            include_archived=include_terminal,
             limit=20,
         )
         active = tuple(
@@ -845,6 +848,7 @@ class BunshinWorkflowService:
             "workflow_id": workflow_id,
             "current_phase": projection["current_phase"],
             "workflow_state": projection["workflow_state"],
+            "archived": bool(workflow is not None and workflow.payload.get("archived")),
             "active_aggregate_type": projection["active_aggregate_type"],
             "active_aggregate_id": active_id,
             "active_node_state": active_state,
@@ -875,6 +879,7 @@ class BunshinWorkflowService:
                 active_state,
                 has_triage=bool(triage),
                 liveness=str(projection["liveness"] or ""),
+                archived=bool(workflow is not None and workflow.payload.get("archived")),
             ),
             "triage": triage,
             "waiting_for_user": waiting_for_user,
@@ -1667,19 +1672,24 @@ class BunshinWorkflowService:
         workflow = self._workflow_snapshot(workflow_id)
         if workflow.state not in {"COMPLETED", "REJECTED", "CANCELLED"}:
             raise ValueError("only terminal V2 workflows can be archived")
-        result = self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="ARCHIVE",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor=actor,
-                expected_version=workflow.version,
-                idempotency_key=f"archive:{workflow_id}",
-                payload={"archived": True, "archive_reason": reason},
-            )
-        )
-        return {"status": "archived", "workflow_id": workflow_id, "state": result.snapshot.state}
+        already_archived = bool(workflow.payload.get("archived"))
+        if not already_archived:
+            workflow = self.repository.transitions.dispatch(
+                ActionEnvelope(
+                    action_type="ARCHIVE",
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow_id,
+                    actor=actor,
+                    expected_version=workflow.version,
+                    idempotency_key=f"archive:{workflow_id}",
+                    payload={"archived": True, "archive_reason": reason},
+                )
+            ).snapshot
+        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, str(workflow.payload.get("task_id") or ""))
+        return {"status": "archived", "workflow_id": workflow_id, "state": workflow.state,
+                "archived": True, "already_archived": already_archived, "archive_scope": "workflow",
+                "task_state": task.state if task is not None else "unknown"}
 
     def _workflow_snapshot(self, workflow_id: str) -> AggregateSnapshot:
         workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
@@ -1947,7 +1957,10 @@ def _public_next_actions(
     *,
     has_triage: bool = False,
     liveness: str = "",
+    archived: bool = False,
 ) -> list[str]:
+    if archived:
+        return []
     if workflow_state in {"COMPLETED", "REJECTED", "CANCELLED"}:
         return ["archive_workflow"]
     if workflow_state == "RESTARTING":
