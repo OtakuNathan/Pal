@@ -227,7 +227,10 @@ async def close_role_runtime(
 ) -> None:
     failures: list[Exception] = []
     if memory_repository_args:
-        l3_plugin.repository.close()
+        try:
+            l3_plugin.repository.close()
+        except Exception as exc:
+            failures.append(exc)
     close_llm = getattr(llm_runtime, "close", None)
     if callable(close_llm):
         try:
