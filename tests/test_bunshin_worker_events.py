@@ -23,6 +23,7 @@ from pal.bunshin.semantic_orchestration.attempt_process_result import ProcessRes
 from pal.bunshin.semantic_orchestration.attempt_models import ExitedRoleProcess
 from pal.bunshin.worker_events import JsonLinePipe, WorkerEventDeliveryError, WorkerEventWriter
 from pal.execution.runtime import ExecutionRuntime
+from pal.shared import BunshinInvocationPack
 from tests.test_bunshin_completion_resume import make_bundle, make_runner, noop
 from tests.test_bunshin_failure_recovery import SingleToolModel, tool_results
 
@@ -455,6 +456,38 @@ def test_stdout_terminal_policy_takes_precedence_over_stderr_fallback():
             SimpleNamespace(pal_checkpoint_capable=False), SimpleNamespace(assignment={"assignment_id": "a"}), exited,
         ))
     assert repository.role_retries.queue_role_attempt_retry.call_args.kwargs["error_kind"] == "runner_failure"
+
+
+@pytest.mark.parametrize("has_receipt", [False, True])
+@pytest.mark.parametrize("payload", [
+    {"status": "suspended", "manager_restart": True, "summary": "restart safe point"},
+    {"status": "killed", "summary": "cancelled by user"},
+])
+def test_zero_exit_control_terminal_is_recovered_without_overriding_submission_receipt(payload, has_receipt):
+    fallback = {"kind": "worker_event_fallback", "message": {"kind": "event", "event": {
+        "event_kind": "terminal", "payload": payload,
+    }}}
+    repository = MagicMock()
+    repository.role_assignments.read_role_assignment.return_value = {
+        "submission_artifact_ref": {"sha256": "receipt"} if has_receipt else {},
+    }
+    checkpoints = MagicMock()
+    receipt_terminal = {"event_kind": "terminal", "payload": {"status": "completed", "summary": "durable receipt"}}
+    checkpoints.terminal_from_assignment_receipt.return_value = receipt_terminal
+    admission = SimpleNamespace(assignment_lease=SimpleNamespace(fencing_token=1),
+        assignment_lease_resource="lease", attempt={"attempt_id": "attempt"})
+    exited = ExitedRoleProcess(events=[], worker_error="",
+        owner=SimpleNamespace(returncode=0, stderr=json.dumps(fallback).encode()))
+    result = asyncio.run(ProcessResult(repository, checkpoints).execute(
+        SimpleNamespace(fencing_token=1, invocation_id="session"), admission,
+        SimpleNamespace(continuation_output_path=None), SimpleNamespace(pack=BunshinInvocationPack(
+            invocation_id="session", workspace={"output_policy": {"primary_artifact": "result.json"}},
+        )),
+        SimpleNamespace(pal_checkpoint_capable=True), SimpleNamespace(assignment={"assignment_id": "a"}), exited,
+    ))
+    assert result.terminal_payload == (receipt_terminal["payload"] if has_receipt else payload)
+    assert checkpoints.terminal_from_assignment_receipt.call_count == int(has_receipt)
+    repository.role_retries.queue_role_attempt_retry.assert_not_called()
 
 
 @pytest.mark.parametrize("harness", ["pal", "codex"])

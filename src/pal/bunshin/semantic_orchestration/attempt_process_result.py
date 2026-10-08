@@ -99,6 +99,9 @@ class ProcessResult:
                 raise PermanentEffectError(details)
             raise RuntimeError(f"V2 worker exited {owner.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
+        if terminal is None and not has_submission_receipt:
+            fallback_events, _ = _worker_stderr_failures(stderr.decode("utf-8", errors="replace"))
+            terminal = next(iter(reversed(fallback_events)), None)
         if terminal is None and has_submission_receipt:
             terminal = self.role_checkpoints.terminal_from_assignment_receipt(
                 dict(assignment_after_process or {}),
