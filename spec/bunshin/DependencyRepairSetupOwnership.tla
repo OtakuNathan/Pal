@@ -18,31 +18,31 @@ This bounded abstraction does not operate a process, filesystem, or live runtime
 EXTENDS Naturals
 VARIABLES stage, frozen, starting, oldProcess, lease, closed, stale, replacement, newProcess
 vars == <<stage,frozen,starting,oldProcess,lease,closed,stale,replacement,newProcess>>
-Init == /\ stage = "Admitted" /\ ~frozen /\ ~starting /\ ~oldProcess
-        /\ ~lease /\ ~closed /\ ~stale /\ ~replacement /\ ~newProcess
-AcquireLease == /\ stage = "Admitted" /\ ~frozen /\ stage' = "Leased" /\ lease'
+Init == /\ stage = "Admitted" /\ frozen = FALSE /\ starting = FALSE /\ oldProcess = FALSE
+        /\ lease = FALSE /\ closed = FALSE /\ stale = FALSE /\ replacement = FALSE /\ newProcess = FALSE
+AcquireLease == /\ stage = "Admitted" /\ ~frozen /\ stage' = "Leased" /\ lease' = TRUE
     /\ UNCHANGED <<frozen,starting,oldProcess,closed,stale,replacement,newProcess>>
 CreateAssignment == /\ stage = "Leased" /\ ~frozen /\ stage' = "Assigned"
     /\ UNCHANGED <<frozen,starting,oldProcess,lease,closed,stale,replacement,newProcess>>
-ReserveSpawn == /\ stage = "Assigned" /\ ~frozen /\ stage' = "Starting" /\ starting'
+ReserveSpawn == /\ stage = "Assigned" /\ ~frozen /\ stage' = "Starting" /\ starting' = TRUE
     /\ UNCHANGED <<frozen,oldProcess,lease,closed,stale,replacement,newProcess>>
 \* A pre-freeze owned asynchronous spawn may finish after freeze. Its starting
 \* token remains owned until abort or registration, so cleanup cannot ACK early.
-FinishSpawn == /\ starting /\ stage' = "Running" /\ ~starting' /\ oldProcess'
+FinishSpawn == /\ starting /\ stage' = "Running" /\ starting' = FALSE /\ oldProcess' = TRUE
     /\ UNCHANGED <<frozen,lease,closed,stale,replacement,newProcess>>
-AbortSpawn == /\ frozen /\ starting /\ stage' = "Cancelled" /\ ~starting'
+AbortSpawn == /\ frozen /\ starting /\ stage' = "Cancelled" /\ starting' = FALSE
     /\ UNCHANGED <<frozen,oldProcess,lease,closed,stale,replacement,newProcess>>
-Freeze == /\ ~frozen /\ frozen'
+Freeze == /\ ~frozen /\ frozen' = TRUE
     /\ UNCHANGED <<stage,starting,oldProcess,lease,closed,stale,replacement,newProcess>>
-ReapExactOwner == /\ frozen /\ oldProcess /\ ~oldProcess'
+ReapExactOwner == /\ frozen /\ oldProcess /\ oldProcess' = FALSE
     /\ UNCHANGED <<stage,frozen,starting,lease,closed,stale,replacement,newProcess>>
-CloseSetupAndAssignment == /\ frozen /\ ~starting /\ ~oldProcess /\ ~closed /\ closed'
+CloseSetupAndAssignment == /\ frozen /\ ~starting /\ ~oldProcess /\ ~closed /\ closed' = TRUE
     /\ UNCHANGED <<stage,frozen,starting,oldProcess,lease,stale,replacement,newProcess>>
-ReleaseExactLease == /\ closed /\ lease /\ ~lease'
+ReleaseExactLease == /\ closed /\ lease /\ lease' = FALSE
     /\ UNCHANGED <<stage,frozen,starting,oldProcess,closed,stale,replacement,newProcess>>
-MarkStale == /\ closed /\ frozen /\ ~starting /\ ~oldProcess /\ ~lease /\ ~stale /\ stale'
+MarkStale == /\ closed /\ frozen /\ ~starting /\ ~oldProcess /\ ~lease /\ ~stale /\ stale' = TRUE
     /\ UNCHANGED <<stage,frozen,starting,oldProcess,lease,closed,replacement,newProcess>>
-StartReplacement == /\ stale /\ ~replacement /\ replacement' /\ newProcess'
+StartReplacement == /\ stale /\ ~replacement /\ replacement' = TRUE /\ newProcess' = TRUE
     /\ UNCHANGED <<stage,frozen,starting,oldProcess,lease,closed,stale>>
 ReplayOldCleanup == UNCHANGED vars
 Next == AcquireLease \/ CreateAssignment \/ ReserveSpawn \/ FinishSpawn \/ AbortSpawn

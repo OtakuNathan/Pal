@@ -29,20 +29,20 @@ InvalidReceipts == {"invalid_scope", "contract_only"}
 VARIABLES captured, obligations, resolved, targets, nextCandidate, passed, reinvalidated
 vars == <<captured,obligations,resolved,targets,nextCandidate,passed,reinvalidated>>
 Init == /\ captured = {} /\ obligations = {} /\ resolved = {} /\ targets = {}
-        /\ ~nextCandidate /\ ~passed /\ ~reinvalidated
+        /\ nextCandidate = FALSE /\ passed = FALSE /\ reinvalidated = FALSE
 Capture(r) == /\ r \in Receipts \ captured /\ ~nextCandidate
     /\ captured' = captured \cup {r}
     /\ obligations' = obligations \cup ReceiptCases[r]
     /\ targets' = targets \cup ValidProviderTargets[r]
     /\ UNCHANGED <<resolved,nextCandidate,passed,reinvalidated>>
-ReplaceCandidate == /\ captured = Receipts /\ ~nextCandidate /\ nextCandidate'
+ReplaceCandidate == /\ captured = Receipts /\ ~nextCandidate /\ nextCandidate' = TRUE
     /\ UNCHANGED <<captured,obligations,resolved,targets,passed,reinvalidated>>
 ResolveCase(c) == /\ nextCandidate /\ c \in obligations \ resolved
     /\ resolved' = resolved \cup {c}
     /\ UNCHANGED <<captured,obligations,targets,nextCandidate,passed,reinvalidated>>
-InvalidateAgain == /\ nextCandidate /\ ~reinvalidated /\ reinvalidated' /\ resolved' = {}
+InvalidateAgain == /\ nextCandidate /\ ~reinvalidated /\ reinvalidated' = TRUE /\ resolved' = {}
     /\ UNCHANGED <<captured,obligations,targets,nextCandidate,passed>>
-PassNextChecker == /\ nextCandidate /\ reinvalidated /\ obligations \subseteq resolved /\ ~passed /\ passed'
+PassNextChecker == /\ nextCandidate /\ reinvalidated /\ obligations \subseteq resolved /\ ~passed /\ passed' = TRUE
     /\ UNCHANGED <<captured,obligations,resolved,targets,nextCandidate,reinvalidated>>
 ReplayReceipt == UNCHANGED vars
 Next == (\E r \in Receipts : Capture(r)) \/ ReplaceCandidate \/ InvalidateAgain

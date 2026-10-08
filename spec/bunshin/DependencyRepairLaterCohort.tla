@@ -23,43 +23,43 @@ VARIABLES p, live, lease, fence, closed, registered, applied, q, qVersion,
           binding, required, resolved, oldCheck, aReceipt, bReceipt, candidate, resolutionCandidate
 vars == <<p,live,lease,fence,closed,registered,applied,q,qVersion,
           binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
-Init == /\ p = "RepairReady" /\ ~live /\ ~lease /\ ~fence /\ ~closed
-        /\ ~registered /\ ~applied /\ q = "Accepted" /\ qVersion = 0
+Init == /\ p = "RepairReady" /\ live = FALSE /\ lease = FALSE /\ fence = FALSE /\ closed = FALSE
+        /\ registered = FALSE /\ applied = FALSE /\ q = "Accepted" /\ qVersion = 0
         /\ binding = 0 /\ required = {"old-P-case"} /\ resolved = {}
-        /\ ~oldCheck /\ aReceipt = 1 /\ bReceipt = 0
+        /\ oldCheck = FALSE /\ aReceipt = 1 /\ bReceipt = 0
         /\ candidate = 0 /\ resolutionCandidate = -1
-StartProducer == /\ p = "RepairReady" /\ ~fence /\ p' = "Producing" /\ live' /\ lease'
+StartProducer == /\ p = "RepairReady" /\ ~fence /\ p' = "Producing" /\ live' = TRUE /\ lease' = TRUE
     /\ UNCHANGED <<fence,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
-FinishProducer == /\ p = "Producing" /\ p' = "CheckerReady" /\ ~live' /\ ~lease'
+FinishProducer == /\ p = "Producing" /\ p' = "CheckerReady" /\ live' = FALSE /\ lease' = FALSE
     /\ UNCHANGED <<fence,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
 StartChecker == /\ p = "CheckerReady" /\ ~fence /\ q = "Accepted"
-    /\ p' = "Checking" /\ live' /\ lease' /\ binding' = qVersion
+    /\ p' = "Checking" /\ live' = TRUE /\ lease' = TRUE /\ binding' = qVersion
     /\ UNCHANGED <<fence,closed,registered,applied,q,qVersion,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
 ResolveCurrentCase == /\ p = "Checking" /\ ~fence /\ resolved' = required
     /\ resolutionCandidate' = candidate
     /\ UNCHANGED <<p,live,lease,fence,closed,registered,applied,q,qVersion,binding,required,oldCheck,aReceipt,bReceipt,candidate>>
 Pass == /\ p = "Checking" /\ ~fence /\ q = "Accepted"
     /\ binding = qVersion /\ required \subseteq resolved
-    /\ p' = "Accepted" /\ ~live' /\ ~lease'
+    /\ p' = "Accepted" /\ live' = FALSE /\ lease' = FALSE
     /\ UNCHANGED <<fence,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
-RegisterLaterQ == /\ ~registered /\ registered' /\ fence'
+RegisterLaterQ == /\ ~registered /\ registered' = TRUE /\ fence' = TRUE
     /\ oldCheck' = (p = "Checking") /\ p' = "CancelRequested"
     /\ UNCHANGED <<live,lease,closed,applied,q,qVersion,binding,required,resolved,aReceipt,bReceipt,candidate,resolutionCandidate>>
-ReapExactP == /\ fence /\ live /\ ~live'
+ReapExactP == /\ fence /\ live /\ live' = FALSE
     /\ UNCHANGED <<p,lease,fence,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
-ReleaseExactP == /\ fence /\ ~live /\ lease /\ ~lease'
+ReleaseExactP == /\ fence /\ ~live /\ lease /\ lease' = FALSE
     /\ UNCHANGED <<p,live,fence,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
-CloseExactOldP == /\ fence /\ ~live /\ ~lease /\ ~closed /\ closed'
+CloseExactOldP == /\ fence /\ ~live /\ ~lease /\ ~closed /\ closed' = TRUE
     /\ UNCHANGED <<p,live,lease,fence,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
 ApplyLaterQ == /\ registered /\ ~applied /\ closed /\ ~live /\ ~lease
-    /\ applied' /\ q' = "RepairReady" /\ p' = "Stale"
+    /\ applied' = TRUE /\ q' = "RepairReady" /\ p' = "Stale"
     /\ resolved' = {} /\ bReceipt' = 1
     /\ candidate' = 1 /\ resolutionCandidate' = -1
     /\ UNCHANGED <<live,lease,fence,closed,registered,qVersion,binding,required,oldCheck,aReceipt>>
 RepairQ == /\ q = "RepairReady" /\ q' = "Accepted" /\ qVersion' = 1
     /\ UNCHANGED <<p,live,lease,fence,closed,registered,applied,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
 ReleaseBarrier == /\ applied /\ q = "Accepted" /\ p = "Stale"
-    /\ ~fence' /\ p' = "RepairReady"
+    /\ fence' = FALSE /\ p' = "RepairReady"
     /\ UNCHANGED <<live,lease,closed,registered,applied,q,qVersion,binding,required,resolved,oldCheck,aReceipt,bReceipt,candidate,resolutionCandidate>>
 \* Original packet replay and old-bound PASS receipt capture are evidence-only.
 ReplayOldPacketOrPass == UNCHANGED vars

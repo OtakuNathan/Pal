@@ -38,7 +38,7 @@ AdmitFresh ==
     /\ session = "Uninitialized" \/ AllowMissingResumeAsFresh
     /\ phase' = "Prepared"
     /\ admission' = "Fresh"
-    /\ freshAfterInitialization' = freshAfterInitialization \/ initializedEver
+    /\ freshAfterInitialization' = (freshAfterInitialization \/ initializedEver)
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence,
                     failures, error, errorVisible, initializedEver, semanticWork, initializationFence>>
 

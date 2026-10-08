@@ -255,8 +255,8 @@ RepairCheckersAwaitAcceptedInputs == \A n \in Nodes :
         \A p \in CheckerProviders(n) : state[p] = "Accepted"
 SupersessionDominates == mode = "Superseded" => applied = {} /\ \A n \in Nodes : reopens[n] = 0
 NoInvalidatedPublication == ~published
-CapturedEvidenceNeverLost == [](captured \subseteq captured')
-SubmittedEvidenceNeverLost == [](submitted \subseteq submitted')
+CapturedEvidenceNeverLost == [][captured \subseteq captured']_vars
+SubmittedEvidenceNeverLost == [][submitted \subseteq submitted']_vars
 Completed == mode = "Superseded" \/
     (applied # {} /\ \A n \in Nodes : state[n] \in {"Accepted","ProducerReady"})
 

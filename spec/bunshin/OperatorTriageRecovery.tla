@@ -14,7 +14,7 @@ EXTENDS Naturals, FiniteSets
 \* node.fence abstracts verifier-invocation fences, not Manager snapshot-rebind
 \* lease tokens. Reacquiring a quiesce/snapshot lease creates no verifier
 \* invocation and is abstracted away from this counter.
-CONSTANTS MaxGeneration, MaxFence, AllowOldGenerationReuse
+CONSTANTS MaxGeneration, MaxFence, AllowOldGenerationReuse, NoReceipt
 
 States == {"ReviewQueued", "Verifying", "Quiescing", "Snapshotting", "Triage", "Accepted"}
 SnapshotBoundaries == {"Quiescing", "Snapshotting"}
@@ -22,7 +22,7 @@ CheckerStates == {"CheckerReady", "Checking", "TriageRequired", "Accepted"}
 \* INVALID abstracts an already exhausted invalid-submission correction budget.
 \* GraphExecutionLifecycle models the individual bounded correction attempts.
 Verdicts == {"PASS", "UNKNOWN", "INVALID"}
-NoReceipt == "NoReceipt"
+\* Configure NoReceipt as an untyped model value, comparable with receipt records.
 ReceiptType == [generation : 0..MaxGeneration, fence : 1..MaxFence,
                 verdict : Verdicts, candidate : {"candidate"},
                 session : {"verifier-session"}, policy : {"policy"}]

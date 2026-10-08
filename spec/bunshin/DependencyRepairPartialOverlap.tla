@@ -38,7 +38,7 @@ Component(k, universe) == CHOOSE ks \in SUBSET universe :
     /\ k \in ks /\ Closed(ks, universe)
     /\ \A other \in SUBSET universe : k \in other /\ Closed(other, universe) => ks \subseteq other
 Init == /\ registered = {} /\ applied = {} /\ frozen = {}
-        /\ revision = 0 /\ cached = {} /\ cachedRevision = 0 /\ ~badJoin
+        /\ revision = 0 /\ cached = {} /\ cachedRevision = 0 /\ badJoin = FALSE
         /\ reopens = [n \in Nodes |-> 0]
         /\ packetApplies = [k \in Packets |-> 0]
 Register(k) == /\ k \in Packets \ registered
@@ -49,10 +49,11 @@ Prepare(k) == /\ k \in registered \ applied
     /\ cached' = Component(k, registered \ applied) /\ cachedRevision' = revision
     /\ UNCHANGED <<registered,applied,frozen,revision,reopens,badJoin,packetApplies>>
 Apply == /\ cached # {} /\ cachedRevision = revision /\ cached \cap applied = {}
-    /\ \A k \in cached : Component(k, registered \ applied) = cached
+    /\ (\A k \in cached : Component(k, registered \ applied) = cached)
     /\ applied' = applied \cup cached
     /\ packetApplies' = [k \in Packets |-> IF k \in cached THEN packetApplies[k] + 1 ELSE packetApplies[k]]
-    /\ badJoin' = badJoin \/ cachedRevision # revision \/ \E k \in cached : Component(k, registered \ applied) # cached
+    /\ badJoin' = (badJoin \/ cachedRevision # revision \/
+                   (\E k \in cached : Component(k, registered \ applied) # cached))
     /\ reopens' = [n \in Nodes |-> IF n \in UNION {Targets[k] : k \in cached}
                       THEN reopens[n] + 1 ELSE reopens[n]]
     /\ UNCHANGED <<registered,frozen,revision,cached,cachedRevision>>
