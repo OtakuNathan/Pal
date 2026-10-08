@@ -1233,9 +1233,48 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if binding.async_callable is not None:
             result = binding.async_callable(capability_call)
             return await result if inspect.isawaitable(result) else result
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(self.sync_executor, lambda: binding.callable(capability_call))
+        result = await self._call_sync_handler_async(binding, capability_call)
         return await result if inspect.isawaitable(result) else result
+
+    async def _call_sync_handler_async(
+        self, binding: BoundCapabilityAction, call: CapabilityCall,
+    ) -> Any:
+        """Keep the caller's lifecycle fence until its worker actually exits."""
+        cancelled = threading.Event()
+
+        def invoke() -> Any:
+            # Cancellation must still prevent a queued call from starting.
+            if not cancelled.is_set():
+                return binding.callable(call)
+            return None
+
+        worker = asyncio.get_running_loop().run_in_executor(self.sync_executor, invoke)
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled.set()
+            # Cancelling the waiter cannot stop an already-running thread.
+            # Drain it under the outer lifecycle fence, including subsequent
+            # cancellation requests, then propagate the original cancellation.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if not worker.cancelled():
+                try:
+                    result = worker.result()
+                except BaseException as exc:
+                    _LOGGER.warning(
+                        "Synchronous capability %s failed while cancellation was pending:\n%s",
+                        call.name, exception_report(exc),
+                    )
+                else:
+                    if inspect.iscoroutine(result):
+                        result.close()
+            raise
 
     def _normalize_invocation_result(self, record, call, raw, *, budget, turn_id):
         # Normalization only: guidance resolution and the final model-text
@@ -1553,7 +1592,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     context_messages=context_messages,
                 )
             candidate = raw_structured if raw_structured is not None else {"text": raw_text}
-            if record.is_mcp and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict):
+            # Only tools/call uses structuredContent. A prompts/get result
+            # already has its normalized messages and read effect receipt.
+            if (record.is_mcp and record.binding.descriptor.metadata["mcp"]["kind"] == "tool"
+                    and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict)):
                 mcp_raw = dict(candidate["raw_result"])
                 candidate = mcp_raw.get("structuredContent") if record.output_schema != McpToolOutput.model_json_schema(mode="validation") else {
                     "content": list(mcp_raw.get("content") or []),
@@ -1891,8 +1933,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if bound.async_callable is not None:
             result = bound.async_callable(call)
             return await result if inspect.isawaitable(result) else result
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(self.sync_executor, lambda: bound.callable(call))
+        result = await self._call_sync_handler_async(bound, call)
         return await result if inspect.isawaitable(result) else result
 
     def _resolve_binding(

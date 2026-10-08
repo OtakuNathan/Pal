@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpRejectedItem, McpToolSpec
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_report
@@ -176,6 +177,7 @@ def normalize_prompt_result(result: dict[str, Any], *, server_id: str, prompt_na
         llm_text=render_titled_structured_for_llm("Rendered MCP prompt", {
             key: value for key, value in structured.items() if key not in {"messages", "description"}
         }),
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE, receipt={"mcp_prompt_response": True}),
     )
 
 

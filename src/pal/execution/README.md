@@ -26,6 +26,9 @@ Notes:
 - each attach or detach compiles forest, bindings, aliases, search records, and
   provider contracts into one `ToolRegistryGeneration`, then atomically swaps
   one pointer
+- lifecycle protection lasts until a synchronous handler's worker exits.
+  Cancellation waits for that exit before propagating; repeated cancellation
+  cannot release the fence early, and cancelled queued handlers do not start
 - every LLM-facing tool has one generation-wide unique alias; direct tools are
   provider tools, while indirect tools are discovered with `search_tools` and
   `read_tool` and invoked only through `call_tool`
@@ -46,6 +49,9 @@ Notes:
 - complete output is validated before budgeting. Large output is saved as an
   immutable UTF-8 file with a bounded head/tail preview and its local path. Use
   `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
+- MCP `tools/call` and `prompts/get` use separate result envelopes. Prompt
+  retrieval preserves messages and supplies a read receipt instead of applying
+  a tool's `structuredContent` output contract
 - if a failure's full text cannot be saved, deliver it inline with the storage
   error and an explicit budget exception. A preview without a complete snapshot
   must not become the only remaining account of why the tool failed
