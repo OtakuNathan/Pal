@@ -34,7 +34,8 @@ not a second DAG scheduler or semantic lifecycle owner.
 - `ProcessCapacityLifecycle.tla` proves that capacity and concrete-attempt
   leases count only materialized OS-process incarnations. Durable logical
   sessions consume neither, and both remain owned through process-group reap
-  and checkpoint closure.
+  and checkpoint closure. Reap/checkpoint facts reset for each incarnation; a
+  negative control proves that reusing an older checkpoint violates release.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
 - `ArchitectureLifecycle.tla` models Architect/Reviewer sessions that survive
@@ -68,6 +69,11 @@ not a second DAG scheduler or semantic lifecycle owner.
   process group, Manager run registration, and exclusive worktree ownership.
   A terminal IPC receipt or leader exit cannot release ownership; replacement
   starts only after the complete process group is reaped and accounting closes.
+  The implementation keeps a private supervisor alive after worker exit to
+  anchor the group ID for one-shot termination, reports exit status over a
+  private socket, and observes group quiescence before releasing resources.
+  Closing also drains unread stdout under the same reader lock as event
+  consumption, so pipe backpressure cannot prevent the reap boundary.
 - `ContinuationLifecycle.tla` models v29 resume-checkpoint format admission. Only a v8
   encrypted logical-coroutine payload may restore a worker; v7 and malformed checkpoints are
   rejected with visible deterministic errors, while only transient worker

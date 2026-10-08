@@ -58,6 +58,23 @@ for model in "${models[@]}"; do
         "spec/bunshin/${model}.tla"
 done
 
+# A previous incarnation's checkpoint must never authorize the next release.
+echo "==> TLC ProcessCapacityLifecycleReuseCheckpoint (expected counterexample)"
+set +e
+capacity_output="$({
+    java -XX:+UseParallelGC -jar "${tla_jar}" \
+        -workers "${workers}" -cleanup \
+        -config spec/bunshin/ProcessCapacityLifecycleReuseCheckpoint.cfg \
+        spec/bunshin/ProcessCapacityLifecycle.tla
+} 2>&1)"
+capacity_status=$?
+set -e
+if [[ ${capacity_status} -eq 0 ]] || [[ "${capacity_output}" != *"Invariant ReleaseRequiresReapAndCheckpoint is violated"* ]]; then
+    echo "ProcessCapacityLifecycleReuseCheckpoint did not reproduce ReleaseRequiresReapAndCheckpoint" >&2
+    echo "${capacity_output}" >&2
+    exit 1
+fi
+
 # Negative controls exercise draft freeze, concurrency, authority, evidence,
 # ownership and replay. The final expected counterexample proves that deleting
 # a current draft finding can lead to PASS while immutable history is retained.

@@ -118,15 +118,14 @@ class Completion:
     def manager_submission_receipt_present(self) -> bool:
         if self.manager_submission_receipt_observed:
             return True
-        try:
-            from pal.bunshin.role_gateway_client import role_gateway_client_from_env
+        from pal.bunshin.role_gateway_client import role_gateway_client_from_env
 
-            client = role_gateway_client_from_env(self.runtime_root)
-            if client is None:
-                return False
-            status = client.request_sync("submission_status", {})
-        except Exception:
-            return False
+        client = role_gateway_client_from_env(self.runtime_root)
+        if client is None:
+            raise RuntimeError("submission receipt required but role gateway is unavailable")
+        # An unavailable receipt is not an absent receipt. Let the runner
+        # preserve the infrastructure error and request Manager reconciliation.
+        status = client.request_sync("submission_status", {})
         self.manager_submission_receipt_observed = bool(status.get("recorded"))
         return self.manager_submission_receipt_observed
 

@@ -29,6 +29,8 @@ def test_bunshin_tla_checker_covers_every_model():
     assert all((SPEC_ROOT / f"{name}.cfg").is_file() for name in models)
     assert "StartupRecoveryLifecycleUnsafe.cfg" in script
     assert "Invariant FreshStartNeverForgetsInitialization is violated" in script
+    assert "ProcessCapacityLifecycleReuseCheckpoint.cfg" in script
+    assert "Invariant ReleaseRequiresReapAndCheckpoint is violated" in script
 
 
 def test_startup_recovery_config_checks_the_admission_contract():
@@ -74,6 +76,33 @@ def test_startup_recovery_tlc(tmp_path, unsafe):
     if unsafe:
         assert result.returncode != 0, output
         assert "Invariant FreshStartNeverForgetsInitialization is violated" in output
+    else:
+        assert result.returncode == 0, output
+        assert "Model checking completed. No error has been found." in output
+
+
+@pytest.mark.parametrize("unsafe", [False, True], ids=["fresh-checkpoint", "reused-checkpoint-mutant"])
+def test_process_capacity_tlc(tmp_path, unsafe):
+    jar_value = os.environ.get("TLA2TOOLS_JAR")
+    if not jar_value:
+        pytest.skip("TLC not run: set TLA2TOOLS_JAR to a pinned tla2tools.jar")
+    jar = Path(jar_value).expanduser().resolve()
+    assert jar.is_file(), f"TLA2TOOLS_JAR does not exist: {jar}"
+    java = shutil.which("java")
+    assert java is not None, "TLA2TOOLS_JAR is set but Java is unavailable"
+    module = "ProcessCapacityLifecycle"
+    config = module + ("ReuseCheckpoint" if unsafe else "") + ".cfg"
+    shutil.copyfile(SPEC_ROOT / f"{module}.tla", tmp_path / f"{module}.tla")
+    shutil.copyfile(SPEC_ROOT / config, tmp_path / config)
+    result = subprocess.run(
+        [java, "-XX:+UseParallelGC", "-jar", str(jar), "-workers", "1",
+         "-cleanup", "-config", config, f"{module}.tla"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False,
+    )
+    output = result.stdout + result.stderr
+    if unsafe:
+        assert result.returncode != 0, output
+        assert "Invariant ReleaseRequiresReapAndCheckpoint is violated" in output
     else:
         assert result.returncode == 0, output
         assert "Model checking completed. No error has been found." in output

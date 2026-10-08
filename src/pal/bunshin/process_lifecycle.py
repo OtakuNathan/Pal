@@ -4,6 +4,9 @@ import asyncio
 import contextlib
 import os
 import signal
+import socket
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Mapping
@@ -16,7 +19,34 @@ from pal.bunshin.coroutine_runtime import (
 
 
 class WorkerProcessReapError(RuntimeError):
-    """The worker owner could not terminate and reap its direct child."""
+    """The worker owner could not terminate and reap its process group."""
+
+
+def _process_group_live(pgid: int) -> bool:
+    """Observe live group members; zombies have closed their file descriptors."""
+    proc = Path("/proc")
+    if sys.platform.startswith("linux"):
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                # comm may contain spaces and parentheses; split after its
+                # closing delimiter to locate state, ppid, and pgrp reliably.
+                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+                return True
+        return False
+    listing = subprocess.run(
+        ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True,
+        check=True, timeout=2,
+    )
+    return any(
+        int(fields[0]) == pgid and not fields[1].startswith(("Z", "X"))
+        for line in listing.stdout.splitlines()
+        if len(fields := line.split()) == 2
+    )
 
 
 WorkerOwnerCallback = Callable[["WorkerProcessOwner"], None]
@@ -27,9 +57,9 @@ WorkerHeartbeatFactory = Callable[[], Awaitable[None]]
 class WorkerProcessOwner:
     """Owner for one currently reachable worker and its worktree occupancy.
 
-    The private process reference is the only destructive authority.  A PID is
-    derived from that object only for the synchronous group-kill handoff and is
-    never persisted or retried after the reference is withdrawn.
+    The private process reference owns a live group supervisor. It survives
+    worker exit, so its PID remains safe for the one-shot group-kill handoff.
+    After withdrawing this authority, group IDs are used only for observation.
     """
 
     argv: tuple[str, ...]
@@ -66,8 +96,13 @@ class WorkerProcessOwner:
     _stdout: asyncio.StreamReader | None = field(default=None, init=False, repr=False)
     _heartbeat_tasks: list[asyncio.Task[None]] = field(default_factory=list, init=False)
     _stderr_task: asyncio.Task[bytes] | None = field(default=None, init=False)
+    _stdout_drain_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _leader_exit_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _status_reader: asyncio.StreamReader | None = field(default=None, init=False, repr=False)
+    _status_writer: asyncio.StreamWriter | None = field(default=None, init=False, repr=False)
+    _group_id: int = field(default=0, init=False, repr=False)
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _stdout_read_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     @property
     def lock_key(self) -> str:
@@ -93,19 +128,14 @@ class WorkerProcessOwner:
 
     @property
     def returncode(self) -> int | None:
-        process = self._process
-        if process is not None and process.returncode is not None:
-            self._record_exit(process, int(process.returncode))
         return self._returncode
 
     async def wait(self) -> int:
-        process = self._process
-        if process is not None:
-            self._record_exit(process, int(await process.wait()))
-        elif self._leader_exit_task is not None:
+        if self._leader_exit_task is not None:
             await asyncio.shield(self._leader_exit_task)
         if self._returncode is None:
             raise WorkerProcessReapError("worker exited without a return code")
+        await self._confirm_group_reaped()
         return self._returncode
 
     async def stdout_lines(self) -> AsyncIterator[bytes]:
@@ -113,7 +143,10 @@ class WorkerProcessOwner:
         if stdout is None:
             raise WorkerProcessReapError("worker process has no stdout pipe")
         while True:
-            line = await stdout.readline()
+            async with self._stdout_read_lock:
+                if self._closing:
+                    return
+                line = await stdout.readline()
             if not line:
                 return
             yield line
@@ -137,14 +170,7 @@ class WorkerProcessOwner:
             # Keep the spawn future owned even when cancellation arrives before
             # asyncio returns the child object. Cleanup joins it and adopts/reaps
             # the child before releasing workspace or process capacity.
-            self._spawn_task = asyncio.create_task(asyncio.create_subprocess_exec(
-                *self.argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE,
-                env=dict(self.env),
-                start_new_session=True,
-            ))
+            self._spawn_task = asyncio.create_task(self._spawn_worker())
             process = await asyncio.shield(self._spawn_task)
             self._adopt_spawned_process(process)
             if self._closing:
@@ -166,11 +192,34 @@ class WorkerProcessOwner:
     async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
         await self._close_shielded()
 
+    async def _spawn_worker(self) -> asyncio.subprocess.Process:
+        options = dict(
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE, env=dict(self.env), start_new_session=True,
+        )
+        if os.name == "nt":
+            return await asyncio.create_subprocess_exec(*self.argv, **options)
+        parent, child = socket.socketpair()
+        try:
+            parent.setblocking(False)
+            self._status_reader, self._status_writer = await asyncio.open_connection(sock=parent)
+            supervisor = Path(__file__).with_name("process_group_supervisor.py")
+            return await asyncio.create_subprocess_exec(
+                sys.executable, str(supervisor), str(child.fileno()), *self.argv,
+                pass_fds=(child.fileno(),), **options,
+            )
+        except BaseException:
+            parent.close()
+            raise
+        finally:
+            child.close()
+
     def _adopt_spawned_process(self, process: asyncio.subprocess.Process) -> None:
         if self._spawn_adopted:
             return
         self._spawn_adopted = True
         self._process = process
+        self._group_id = int(process.pid)
         self._stdin = process.stdin
         self._stdout = process.stdout
         self._leader_exit_task = asyncio.create_task(
@@ -198,22 +247,59 @@ class WorkerProcessOwner:
         self,
         process: asyncio.subprocess.Process,
     ) -> None:
-        self._record_exit(process, int(await process.wait()))
-
-    def _record_exit(
-        self,
-        process: asyncio.subprocess.Process,
-        returncode: int,
-    ) -> None:
-        self._returncode = int(returncode)
+        if self._status_reader is not None:
+            status = await self._status_reader.readline()
+            if status:
+                self._returncode = int(status)
+                self._terminate_group(process)
+        returncode = int(await process.wait())
+        if self._returncode is None:
+            self._returncode = returncode
         if self._process is process:
             self._process = None
+
+    async def _confirm_group_reaped(self) -> None:
+        if self.process_group_reaped:
+            return
+        if self._group_id and os.name != "nt":
+            deadline = asyncio.get_running_loop().time() + self.reap_timeout_seconds
+            while await asyncio.to_thread(_process_group_live, self._group_id):
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise WorkerProcessReapError(
+                        "worker process group remains live; registration and worktree ownership remain fenced"
+                    )
+                await asyncio.sleep(.01)
         self.process_group_reaped = True
+
+    def _terminate_group(self, process: asyncio.subprocess.Process) -> None:
+        if self._termination_sent:
+            return
+        # The supervisor stays alive after reporting the worker's exit. Never
+        # signal a numeric group ID after that supervisor has already exited.
+        self._process = None
+        if process.returncode is not None:
+            return
+        self._termination_sent = True
+        with contextlib.suppress(ProcessLookupError):
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+
+    async def _drain_stdout(self) -> None:
+        # A paused StreamReader can keep Process.wait() pending even after
+        # SIGKILL. Serialize with the event consumer and discard in bounded
+        # chunks once this incarnation is closing.
+        async with self._stdout_read_lock:
+            if self._stdout is not None:
+                while await self._stdout.read(65536):
+                    pass
 
     async def close(self) -> None:
         async with self._close_lock:
             if self._closed:
                 return
+            first_close = not self._closing
             self._closing = True
             if self._spawn_task is not None and not self._spawn_adopted:
                 try:
@@ -226,36 +312,37 @@ class WorkerProcessOwner:
                 else:
                     self._adopt_spawned_process(spawned)
             process = self._process
-            # Withdraw the only published authority before signalling.  The
-            # local reference below exists solely to issue one terminal signal
-            # and reap the direct child.
-            self._process = None
-            if process is not None and process.returncode is None and not self._termination_sent:
-                self._termination_sent = True
-                with contextlib.suppress(ProcessLookupError):
-                    if os.name == "nt":
-                        process.kill()
-                    else:
-                        os.killpg(process.pid, signal.SIGKILL)
             if process is not None:
+                self._terminate_group(process)
+            if self._stdout is not None and self._stdout_drain_task is None:
+                self._stdout_drain_task = asyncio.create_task(self._drain_stdout())
+            if self._leader_exit_task is not None and (process is not None or first_close):
                 try:
-                    returncode = await asyncio.wait_for(
-                        asyncio.shield(process.wait()),
+                    await asyncio.wait_for(
+                        asyncio.shield(self._leader_exit_task),
                         timeout=self.reap_timeout_seconds,
                     )
                 except asyncio.TimeoutError as exc:
                     raise WorkerProcessReapError(
-                        "worker leader did not exit after its one-shot termination; "
+                        "worker group supervisor or pipes did not close after its one-shot termination; "
                         "registration and worktree ownership remain fenced"
                     ) from exc
-                self._record_exit(process, int(returncode))
             elif self._leader_exit_task is None:
                 self.process_group_reaped = True
 
             if self._leader_exit_task is not None:
                 await asyncio.shield(self._leader_exit_task)
+            await self._confirm_group_reaped()
+            if self._status_writer is not None:
+                self._status_writer.close()
+                with contextlib.suppress(ConnectionError):
+                    await self._status_writer.wait_closed()
+                self._status_writer = None
+                self._status_reader = None
             if self._stderr_task is not None:
                 self.stderr = await self._stderr_task
+            if self._stdout_drain_task is not None:
+                await asyncio.shield(self._stdout_drain_task)
             stdin = self._stdin
             if stdin is not None and not stdin.is_closing():
                 stdin.close()
@@ -265,7 +352,7 @@ class WorkerProcessOwner:
             self._stdout = None
 
             # Manager accounting and workspace ownership remain live until the
-            # direct child and its parent-owned pipes are finished.
+            # complete process group and its parent-owned pipes are finished.
             for task in self._heartbeat_tasks:
                 task.cancel()
             if self._heartbeat_tasks:
@@ -314,7 +401,7 @@ class RoleProcessShell:
     """Bind one materialized worker to exactly one coroutine-run permit.
 
     The permit is deliberately outside ``WorkerProcessOwner``: process
-    ownership proves direct-child cleanup, while the semaphore accounts
+    ownership proves process-group cleanup, while the semaphore accounts
     logical worker incarnations. Release is legal only after the owner closes
     its process reference, broker registration, heartbeats, and workspace
     lock.

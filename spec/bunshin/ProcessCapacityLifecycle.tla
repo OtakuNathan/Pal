@@ -1,27 +1,31 @@
 -------------------- MODULE ProcessCapacityLifecycle -------------------
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Workers, Capacity
+CONSTANTS Workers, Capacity, Fault
 
 ProcessStates == {"None", "Running", "Reaped"}
 
-VARIABLES logical, processState, permits, attemptLeases, reapedEver, checkpointed, released
+VARIABLES logical, processState, permits, attemptLeases, reaped, checkpointed, released,
+    checkpointPending
 
-vars == <<logical, processState, permits, attemptLeases, reapedEver, checkpointed, released>>
+vars == <<logical, processState, permits, attemptLeases, reaped, checkpointed, released,
+    checkpointPending>>
 
 Init ==
     /\ logical = {}
     /\ processState = [w \in Workers |-> "None"]
     /\ permits = {}
     /\ attemptLeases = {}
-    /\ reapedEver = {}
+    /\ reaped = {}
     /\ checkpointed = {}
     /\ released = {}
+    /\ checkpointPending = {}
 
 CreateLogical(w) ==
     /\ w \in Workers \ logical
     /\ logical' = logical \union {w}
-    /\ UNCHANGED <<processState, permits, attemptLeases, reapedEver, checkpointed, released>>
+    /\ UNCHANGED <<processState, permits, attemptLeases, reaped, checkpointed, released,
+        checkpointPending>>
 
 Spawn(w) ==
     /\ w \in logical
@@ -31,20 +35,27 @@ Spawn(w) ==
     /\ processState' = [processState EXCEPT ![w] = "Running"]
     /\ permits' = permits \union {w}
     /\ attemptLeases' = attemptLeases \union {w}
-    /\ UNCHANGED <<logical, reapedEver, checkpointed, released>>
+    \* These facts belong to the current incarnation, not its logical session.
+    /\ reaped' = reaped \ {w}
+    /\ checkpointed' = IF Fault = "reuse-checkpoint" THEN checkpointed ELSE checkpointed \ {w}
+    /\ released' = released \ {w}
+    \* Independent monitor: the release guard must discharge a fresh checkpoint.
+    /\ checkpointPending' = checkpointPending \union {w}
+    /\ UNCHANGED logical
 
 ReapGroup(w) ==
     /\ processState[w] = "Running"
     /\ w \in permits
     /\ processState' = [processState EXCEPT ![w] = "Reaped"]
-    /\ reapedEver' = reapedEver \union {w}
-    /\ UNCHANGED <<logical, permits, attemptLeases, checkpointed, released>>
+    /\ reaped' = reaped \union {w}
+    /\ UNCHANGED <<logical, permits, attemptLeases, checkpointed, released, checkpointPending>>
 
 Checkpoint(w) ==
     /\ processState[w] = "Reaped"
     /\ w \in permits
     /\ checkpointed' = checkpointed \union {w}
-    /\ UNCHANGED <<logical, processState, permits, attemptLeases, reapedEver, released>>
+    /\ checkpointPending' = checkpointPending \ {w}
+    /\ UNCHANGED <<logical, processState, permits, attemptLeases, reaped, released>>
 
 Release(w) ==
     /\ processState[w] = "Reaped"
@@ -54,14 +65,15 @@ Release(w) ==
     /\ permits' = permits \ {w}
     /\ attemptLeases' = attemptLeases \ {w}
     /\ released' = released \union {w}
-    /\ UNCHANGED <<logical, reapedEver, checkpointed>>
+    /\ UNCHANGED <<logical, reaped, checkpointed, checkpointPending>>
 
 RetireLogical(w) ==
     /\ w \in logical
     /\ processState[w] = "None"
     /\ w \notin permits
     /\ logical' = logical \ {w}
-    /\ UNCHANGED <<processState, permits, attemptLeases, reapedEver, checkpointed, released>>
+    /\ UNCHANGED <<processState, permits, attemptLeases, reaped, checkpointed, released,
+        checkpointPending>>
 
 Next ==
     \/ \E w \in Workers : CreateLogical(w)
@@ -78,9 +90,10 @@ TypeOK ==
     /\ processState \in [Workers -> ProcessStates]
     /\ permits \subseteq Workers
     /\ attemptLeases \subseteq Workers
-    /\ reapedEver \subseteq Workers
+    /\ reaped \subseteq Workers
     /\ checkpointed \subseteq Workers
     /\ released \subseteq Workers
+    /\ checkpointPending \subseteq Workers
 
 CapacityBound == Cardinality(permits) <= Capacity
 
@@ -90,7 +103,8 @@ PermitExactlyMaterialized ==
 AttemptLeaseExactlyMaterialized == attemptLeases = permits
 
 ReleaseRequiresReapAndCheckpoint ==
-    released \subseteq (reapedEver \intersect checkpointed)
+    /\ released \subseteq (reaped \intersect checkpointed)
+    /\ released \intersect checkpointPending = {}
 
 LogicalExistenceConsumesNoSlot == permits \subseteq logical
 

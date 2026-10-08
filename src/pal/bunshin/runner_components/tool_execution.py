@@ -55,7 +55,8 @@ class ToolExecution:
         tool_call = _provider_call_with_effective_args(provider_call, policy_call)
         target_name = admission.target_name
         if not admission.ok:
-            self.status.block(f"{admission.message}: {target_name}")
+            # Return the rejection to the next model round so it can correct
+            # the call. Admission still prevents the rejected tool executing.
             return admission.to_result()
         delegate = execution_runtime
         evidence_workspace = dict(execution_runtime.workspace or {})

@@ -4,6 +4,7 @@ import asyncio
 from contextlib import contextmanager
 import os
 import signal
+import socket
 import shutil
 import subprocess
 import sys
@@ -80,6 +81,230 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, ["started", "registered", "unregistered"])
         self.assertFalse(self.locks.is_held(owner.lock_key))
+
+    async def test_worker_exit_terminates_descendants_before_capacity_release(self) -> None:
+        for inherit_pipes in (False, True):
+            with self.subTest(inherit_pipes=inherit_pipes):
+                pid_path = self.root / "descendant.pid"
+                pipe_options = "" if inherit_pipes else (
+                    ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+                )
+                script = (
+                    "import subprocess, sys; from pathlib import Path; "
+                    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']"
+                    f"{pipe_options}); Path({str(pid_path)!r}).write_text(str(p.pid)); "
+                    "print('worker-output', flush=True); sys.exit(7)"
+                )
+                owner = self.owner(invocation_id="descendant", script=script, events=[])
+                semaphore = CoroutineRunSemaphore(1)
+                async with RoleProcessShell(owner, semaphore, owner.run_id):
+                    try:
+                        # Status is independent of stdout/stderr EOF. An orphan
+                        # retaining those pipes must not stall natural exit.
+                        self.assertEqual(await asyncio.wait_for(owner.wait(), 5), 7)
+                        self.assertTrue(owner.process_group_reaped)
+                        descendant = int(pid_path.read_text())
+                        state = subprocess.run(
+                            ["ps", "-p", str(descendant), "-o", "stat="],
+                            capture_output=True, text=True, check=False,
+                        ).stdout.strip()
+                        self.assertTrue(not state or state.startswith("Z"), state)
+                        self.assertEqual([line async for line in owner.stdout_lines()], [b"worker-output\n"])
+                        self.assertEqual(semaphore.active_count, 1)
+                        self.assertTrue(self.locks.is_held(owner.lock_key))
+                    finally:
+                        # Ensure even a regressed implementation cannot leak
+                        # this test's child or hang context-manager cleanup.
+                        if pid_path.exists():
+                            try:
+                                os.kill(int(pid_path.read_text()), signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                self.assertEqual(semaphore.active_count, 0)
+                self.assertTrue(owner.resources_released)
+                self.assertFalse(self.locks.is_held(owner.lock_key))
+
+    async def test_group_observation_failure_retains_ownership_and_can_retry(self) -> None:
+        owner = self.owner(invocation_id="group-fenced", script="pass", events=[])
+        semaphore = CoroutineRunSemaphore(1)
+        shell = RoleProcessShell(owner, semaphore, owner.run_id)
+        await shell.__aenter__()
+        # Isolate the group-observation fault from native spawn/exit timing.
+        # Under load, a 10 ms deadline cannot also cover supervisor startup.
+        await asyncio.wait_for(asyncio.shield(owner._leader_exit_task), 5)
+        owner.reap_timeout_seconds = .01
+        with patch("pal.bunshin.process_lifecycle._process_group_live", return_value=True):
+            with self.assertRaisesRegex(WorkerProcessReapError, "group remains live"):
+                await shell.close()
+        self.assertFalse(owner.process_group_reaped)
+        self.assertTrue(self.locks.is_held(owner.lock_key))
+        self.assertEqual(semaphore.active_count, 1)
+        await shell.close()
+        self.assertTrue(owner.resources_released)
+        self.assertEqual(semaphore.active_count, 0)
+
+    async def test_supervisor_owner_disconnect_terminates_running_worker(self) -> None:
+        from pal.bunshin import process_group_supervisor
+
+        parent, child = socket.socketpair()
+        process = None
+        worker_pid = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, process_group_supervisor.__file__, str(child.fileno()),
+                sys.executable, "-c",
+                "import os, time; print(os.getpid(), flush=True); time.sleep(60)",
+                pass_fds=(child.fileno(),), start_new_session=True,
+                stdout=asyncio.subprocess.PIPE,
+            )
+            child.close()
+            worker_pid = int(await asyncio.wait_for(process.stdout.readline(), 5))
+            parent.close()
+            self.assertEqual(await asyncio.wait_for(process.wait(), 5), -signal.SIGKILL)
+            state = subprocess.run(
+                ["ps", "-p", str(worker_pid), "-o", "stat="],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            self.assertTrue(not state or state.startswith("Z"), state)
+        finally:
+            parent.close()
+            child.close()
+            if process is not None and process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            if worker_pid is not None:
+                try:
+                    os.kill(worker_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process is not None:
+                await process.wait()
+
+    async def test_supervised_worker_spawn_error_keeps_original_stderr(self) -> None:
+        owner = self.owner(invocation_id="bad-executable", script="pass", events=[])
+        owner.argv = (str(self.root / "missing-worker"),)
+        async with owner:
+            self.assertEqual(await asyncio.wait_for(owner.wait(), 5), 125)
+        self.assertIn(b"FileNotFoundError", owner.stderr)
+        self.assertIn(b"missing-worker", owner.stderr)
+        self.assertTrue(owner.resources_released)
+
+    async def test_supervisor_status_write_failure_terminates_descendants(self) -> None:
+        from pal.bunshin import process_group_supervisor
+
+        parent, child = socket.socketpair()
+        process = None
+        descendant = None
+        supervisor = str(process_group_supervisor.__file__)
+        wrapper = (
+            "import runpy, socket, sys\n"
+            "def failed_sendall(self, data):\n"
+            "    raise BrokenPipeError('lost exit status')\n"
+            "socket.socket.sendall = failed_sendall\n"
+            "sys.argv = sys.argv[1:]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+        )
+        worker = (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+            "print(p.pid, flush=True)"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", wrapper, supervisor, str(child.fileno()),
+                sys.executable, "-c", worker,
+                pass_fds=(child.fileno(),), start_new_session=True,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            child.close()
+            descendant = int(await asyncio.wait_for(process.stdout.readline(), 5))
+            self.assertEqual(await asyncio.wait_for(process.wait(), 5), -signal.SIGKILL)
+            self.assertIn(b"BrokenPipeError: lost exit status", await process.stderr.read())
+            state = subprocess.run(
+                ["ps", "-p", str(descendant), "-o", "stat="],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            self.assertTrue(not state or state.startswith("Z"), state)
+        finally:
+            parent.close()
+            child.close()
+            if process is not None and process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            if descendant is not None:
+                try:
+                    os.kill(descendant, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process is not None:
+                await process.wait()
+
+    async def test_supervised_worker_preserves_control_and_output_pipes(self) -> None:
+        owner = self.owner(
+            invocation_id="supervised-control",
+            script=(
+                "import sys; message = sys.stdin.readline(); "
+                "print(message.strip(), flush=True); "
+                "print('worker-stderr', file=sys.stderr, flush=True)"
+            ),
+            events=[],
+        )
+        async with owner:
+            self.assertTrue(await owner.write_control(b'{"kind":"cancel"}\n'))
+            self.assertEqual(
+                await asyncio.wait_for(anext(owner.stdout_lines()), 5),
+                b'{"kind":"cancel"}\n',
+            )
+            self.assertEqual(await asyncio.wait_for(owner.wait(), 5), 0)
+            self.assertFalse(await owner.write_control(b"late control\n"))
+        self.assertEqual(owner.stderr, b"worker-stderr\n")
+
+    async def test_close_drains_paused_stdout_before_releasing_capacity(self) -> None:
+        owner = self.owner(
+            invocation_id="stdout-full",
+            script=(
+                "import sys, time; sys.stdout.write('x' * 1000000); "
+                "sys.stdout.flush(); time.sleep(60)"
+            ),
+            events=[],
+        )
+        semaphore = CoroutineRunSemaphore(1)
+        shell = RoleProcessShell(owner, semaphore, owner.run_id)
+        await shell.__aenter__()
+        try:
+            # Observe actual asyncio backpressure instead of relying on how
+            # long subprocess startup takes on this platform.
+            async def backpressure():
+                while not owner._stdout._paused:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(backpressure(), 5)
+            await asyncio.wait_for(shell.close(), 5)
+            self.assertTrue(owner.resources_released)
+            self.assertTrue(owner._stdout_drain_task.done())
+            self.assertEqual(semaphore.active_count, 0)
+        finally:
+            if not owner.resources_released and owner._stdout is not None:
+                await owner._stdout.read()
+            await shell.close()
+
+    async def test_close_coordinates_with_active_stdout_consumer(self) -> None:
+        owner = self.owner(
+            invocation_id="stdout-consumer",
+            script="import time; print('ready', flush=True); time.sleep(60)",
+            events=[],
+        )
+        await owner.__aenter__()
+        lines = owner.stdout_lines()
+        self.assertEqual(await asyncio.wait_for(anext(lines), 5), b"ready\n")
+        pending_read = asyncio.create_task(anext(lines))
+        await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(owner.close(), 5)
+            with self.assertRaises(StopAsyncIteration):
+                await pending_read
+            self.assertTrue(owner.resources_released)
+        finally:
+            await owner.close()
+            await lines.aclose()
 
     async def test_worktree_cannot_be_reassigned_until_owner_closes(self) -> None:
         first_events: list[str] = []

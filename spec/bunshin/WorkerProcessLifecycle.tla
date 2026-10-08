@@ -6,6 +6,9 @@ CONSTANT MaxStarts
 OwnerStates == {"Idle", "Running", "ExitRequested", "Reaping", "Recovering"}
 ManagerStates == {"Up", "Down"}
 
+\* leaderLive is the worker command. The implementation's private supervisor
+\* remains the OS group leader after that command exits, preserving safe
+\* one-shot termination authority until ReapProcessGroup completes.
 VARIABLES
     managerState,
     ownerState,
