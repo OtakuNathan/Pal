@@ -6,6 +6,7 @@ from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 import contextlib
 from pal.bunshin.semantic_orchestration.worker_results import _meaningful_stderr_tail
 from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
+from pal.bunshin.semantic_orchestration.worker_results import _worker_stderr_failures
 from pal.bunshin.contracts import PermanentEffectError
 from pal.bunshin.semantic_orchestration.attempt_models import (
     BoundRoleHarness, ClaimedRoleAttempt, CollectedRoleTerminal, ExitedRoleProcess, MaterializedRolePack,
@@ -44,9 +45,15 @@ class ProcessResult:
             dict((assignment_after_process or {}).get("submission_artifact_ref") or {})
         )
         if owner.returncode != 0 and not has_submission_receipt:
-            error_tail = _meaningful_stderr_tail(stderr.decode("utf-8", errors="replace"))
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            error_tail = _meaningful_stderr_tail(stderr_text)
+            fallback_events, fallback_worker_error = _worker_stderr_failures(stderr_text)
+            failure_events = events
+            if not any(item.get("event_kind") == "terminal" for item in events):
+                failure_events = [*events, *fallback_events]
+            worker_error = worker_error or fallback_worker_error
             terminal_error_kind, terminal_error, retry_directive = (
-                _worker_terminal_failure(events)
+                _worker_terminal_failure(failure_events)
             )
             details = (
                 terminal_error

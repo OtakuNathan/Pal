@@ -67,6 +67,33 @@ def _terminal_nonretryable_blocker(payload: Mapping[str, Any]) -> str:
     } else ""
 
 
+def _worker_stderr_failures(stderr: str) -> tuple[list[Mapping[str, Any]], str]:
+    """Recover required messages whose stdout write failed in the worker."""
+    events: list[Mapping[str, Any]] = []
+    worker_error = ""
+    for line in stderr.splitlines():
+        if not line.startswith('{"kind": "worker_event_fallback",'):
+            continue
+        try:
+            value = json.loads(line)
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if not isinstance(value, dict) or value.get("kind") != "worker_event_fallback":
+            continue
+        message = value.get("message")
+        if not isinstance(message, dict):
+            continue
+        if message.get("kind") == "worker_error":
+            worker_error = append_failure_diagnostic(
+                str(message.get("error") or ""), message.get("failure_diagnostic"),
+            )
+        elif message.get("kind") == "event":
+            event = message.get("event")
+            if isinstance(event, dict) and event.get("event_kind") == "terminal":
+                events.append(event)
+    return events, worker_error
+
+
 def _worker_terminal_failure(
     events: list[Mapping[str, Any]],
 ) -> tuple[str, str, str]:

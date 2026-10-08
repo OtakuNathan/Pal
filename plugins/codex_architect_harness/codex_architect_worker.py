@@ -20,6 +20,7 @@ from pal.bunshin.harness_request import (
 )
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, BunshinRoleGatewayClient
 from pal.bunshin.contract_submission import contract_submit_tool_result
+from pal.bunshin.worker_events import EventWriter, run_worker_with_events
 from pal.bunshin.work_items import (
     read_work_items,
     update_checklist_tool_result,
@@ -232,11 +233,13 @@ class CodexArchitectWorker:
         pack: BunshinInvocationPack,
         bunshin_id: str,
         run_id: str,
+        write_event: EventWriter,
     ) -> None:
         self.runtime_root = Path(runtime_root)
         self.pack = pack
         self.bunshin_id = str(bunshin_id)
         self.run_id = str(run_id)
+        self.write_event = write_event
         self.request = compile_architect_harness_request(pack)
         self.assignment_fingerprint = (
             architect_harness_assignment_fingerprint(pack)
@@ -743,16 +746,10 @@ class CodexArchitectWorker:
             "payload": dict(payload),
             "created_at": utc_now(),
         }
-        print(
-            json.dumps(
-                {"kind": "event", "event": event},
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
+        await self.write_event(event)
 
 
-async def _run(args: argparse.Namespace) -> int:
+async def _run(args: argparse.Namespace, write_event: EventWriter) -> int:
     payload = json.loads(
         Path(args.pack_json).read_text(encoding="utf-8")
     )
@@ -761,6 +758,7 @@ async def _run(args: argparse.Namespace) -> int:
         pack=BunshinInvocationPack.from_dict(dict(payload)),
         bunshin_id=str(args.bunshin_id),
         run_id=str(args.run_id),
+        write_event=write_event,
     )
     return await worker.run()
 
@@ -772,20 +770,7 @@ def main() -> int:
     parser.add_argument("--bunshin-id", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    try:
-        return asyncio.run(_run(args))
-    except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "kind": "worker_error",
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        return 1
+    return asyncio.run(run_worker_with_events(lambda write_event: _run(args, write_event)))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,17 @@ Package layout:
 - the default worker entrypoint is `python -m pal.bunshin.worker_main`; formal
   models live in `spec/bunshin/`
 
+Pal and Codex harnesses enqueue worker events into a bounded FIFO. One sender
+task owns nonblocking JSON-line writes to stdout; model and tool execution do
+not await progress delivery. A full queue applies asynchronous backpressure.
+Approvals, clarifications, terminal events, and worker errors await pipe-write
+confirmation (not a Manager persistence acknowledgement). Shutdown flushes
+the queue with a bounded deadline and reaps the sender. Interrupted partial
+frames cannot be followed by another frame on the same pipe; required delivery
+failures fail the worker, and an unavailable stdout falls back to reporting the
+original required message on stderr. Manager recovers structured failure and
+retry metadata from these fallback records when stdout has no terminal event.
+
 Stored format and protocol identities are independent of Python package names.
 Existing `bunshin_v2_*` SQL names, `bunshin_v2` metadata and port keys, role
 profile IDs, capability-group IDs, RPC/control names, artifact formats, and

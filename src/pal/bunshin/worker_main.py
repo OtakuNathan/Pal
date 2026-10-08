@@ -1,5 +1,4 @@
 from __future__ import annotations
-from pal.bunshin.failure_diagnostics import exception_diagnostic
 
 import argparse
 import asyncio
@@ -9,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.bunshin.runner import BunshinRunner
+from pal.bunshin.worker_events import EventWriter, run_worker_with_events
 from pal.shared import BunshinInvocationPack
 
 
@@ -30,14 +30,14 @@ async def _read_control_message(
         return None
 
 
-async def _run(runtime_root: Path, pack_path: Path, bunshin_id: str, run_id: str) -> int:
+async def _run(
+    runtime_root: Path, pack_path: Path, bunshin_id: str, run_id: str,
+    write_event: EventWriter,
+) -> int:
     payload = json.loads(pack_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("worker pack must be a JSON object")
     pack = BunshinInvocationPack.from_dict(payload)
-
-    async def write_event(event: dict[str, Any]) -> None:
-        print(json.dumps({"kind": "event", "event": event}, ensure_ascii=False), flush=True)
 
     decisions: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -87,27 +87,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bunshin-id", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args(argv)
-    try:
-        return asyncio.run(
-            _run(
+    return asyncio.run(
+        run_worker_with_events(
+            lambda write_event: _run(
                 Path(args.runtime_root),
                 Path(args.pack_json),
                 str(args.bunshin_id),
                 str(args.run_id),
+                write_event,
             )
         )
-    except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "kind": "worker_error",
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                    "failure_diagnostic": exception_diagnostic(exc),
-                }
-            ),
-            flush=True,
-        )
-        return 1
+    )
 
 
 if __name__ == "__main__":
