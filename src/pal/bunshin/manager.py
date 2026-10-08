@@ -61,7 +61,7 @@ from pal.shared.json_values import thaw_json
 _DEFAULT_MAX_PARALLEL_NODES = 5
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600.0
 _TERMINAL_RUN_STATUSES = frozenset(
-    {"completed", "failed", "cancelled", "killed", "timeout", "suspended", "interrupted"}
+    {"completed", "failed", "cancelled", "killed", "timeout", "suspended", "interrupted", "blocked"}
 )
 _LLM_TRANSPORT_REQUEST_TTL_SECONDS = 30.0 * 60.0
 _LLM_TRANSPORT_REQUEST_MAX_ENTRIES = 2048
@@ -1259,8 +1259,15 @@ class BunshinManager:
             {"type": "decision", "decision": decision.to_dict()},
         ):
             raise RuntimeError("V2 worker is no longer available for approval")
-        state.pending_approval = {}
-        state.status = "running"
+        # The control write can overlap terminal cleanup or the next request.
+        if str(state.pending_approval.get("approval_id") or "") == decision.approval_id:
+            state.pending_approval = {}
+            if (
+                state.status == "approval_pending"
+                and not state.process_group_reaped
+                and not state.pending_terminal_status
+            ):
+                state.status = "running"
         return {"ok": True, "run": state.summary(), "decision": decision.to_dict()}
 
     async def send_clarification(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1292,8 +1299,15 @@ class BunshinManager:
             {"type": "clarification", "clarification": clarification},
         ):
             raise RuntimeError("V2 worker is no longer available for clarification")
-        state.pending_clarification = {}
-        state.status = "running"
+        # Only acknowledge this question; preserve concurrent lifecycle updates.
+        if str(state.pending_clarification.get("clarification_id") or "") == clarification_id:
+            state.pending_clarification = {}
+            if (
+                state.status == "clarification_pending"
+                and not state.process_group_reaped
+                and not state.pending_terminal_status
+            ):
+                state.status = "running"
         return {"ok": True, "run": state.summary(), "clarification": clarification}
 
     def _append_architect_clarification(

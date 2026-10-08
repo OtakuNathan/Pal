@@ -345,6 +345,135 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def process_shell(self) -> RoleProcessShell:
+        orchestrator = self.manager.semantic_orchestrator
+        pack = BunshinInvocationPack(invocation_id="inv-accounting")
+        run_id = "run-accounting"
+        owner = WorkerProcessOwner(
+            argv=(sys.executable, "-c", "pass"),
+            env=os.environ,
+            invocation_id=pack.invocation_id,
+            run_id=run_id,
+            workspace=None,
+            workspace_locks=orchestrator.workspace_locks,
+            on_reserved=orchestrator.processes.register,
+            on_started=lambda _owner: None,
+            on_registered=lambda owned: self.manager._register_broker_run(
+                run_id, pack.invocation_id, pack, owned
+            ),
+            on_unregistered=lambda owned: orchestrator.processes.unregister(
+                owned, before_remove=self.manager._unregister_broker_run
+            ),
+        )
+        self.manager.workflow_service.repository.role_events.record_worker_event = lambda _event: None
+        self.manager._queue_task_delivery_event = lambda *args, **kwargs: None
+        self.manager.events.queue_event = lambda _event: None
+        return orchestrator.supervisor.process_shell(owner, run_id=run_id)
+
+    async def reply_to_pending_control(self, state: BunshinRunState, kind: str) -> dict:
+        if kind == "approval":
+            return await self.manager.send_decision(
+                {"approval_id": "request", "decision": "accept"}
+            )
+        return await self.manager.send_clarification(
+            {"run_id": state.run_id, "clarification_id": "request", "answers": []}
+        )
+
+    async def test_blocked_terminal_releases_manager_accounting_after_cleanup(self) -> None:
+        for late_terminal in (False, True):
+            with self.subTest(late_terminal=late_terminal):
+                shell = self.process_shell()
+                async with shell:
+                    state = self.manager.runs["run-accounting"]
+                    if late_terminal:
+                        await shell.owner.wait()
+                        await shell.close()
+                    await self.manager._publish_worker_event(
+                        {
+                            "event_kind": "terminal",
+                            "run_id": state.run_id,
+                            "payload": {"status": "blocked"},
+                        }
+                    )
+                    if not late_terminal:
+                        self.assertEqual(state.status, "exiting")
+                        self.assertTrue(state.summary()["run_active"])
+                        self.assertEqual(self.manager.health()["active_count"], 1)
+                        self.assertEqual(self.manager.semantic_orchestrator.active_process_count, 1)
+                        await shell.owner.wait()
+
+                self.assertTrue(shell.owner.resources_released)
+                self.assertEqual(state.status, "blocked")
+                self.assertFalse(state.summary()["run_active"])
+                self.assertEqual(self.manager.health()["active_count"], 0)
+                self.assertEqual(self.manager.semantic_orchestrator.active_process_count, 0)
+                self.assertFalse(self.manager.semantic_orchestrator.processes.contains(state.bunshin_id))
+                await self.manager.close_all()
+
+    async def test_control_reply_does_not_reactivate_finishing_worker(self) -> None:
+        for kind in ("approval", "clarification"):
+            for phase in ("exiting", "completed", "failed"):
+                with self.subTest(kind=kind, phase=phase):
+                    shell = self.process_shell()
+                    async with shell:
+                        state = self.manager.runs["run-accounting"]
+                        state.status = f"{kind}_pending"
+                        setattr(state, f"pending_{kind}", {f"{kind}_id": "request"})
+
+                        async def finish_during_control_write(_run_id, _message):
+                            if phase != "failed":
+                                await self.manager._publish_worker_event(
+                                    {
+                                        "event_kind": "terminal",
+                                        "run_id": state.run_id,
+                                        "payload": {"status": "completed"},
+                                    }
+                                )
+                            if phase != "exiting":
+                                await shell.owner.wait()
+                                await shell.close()
+                            self.assertEqual(state.status, phase)
+                            return True
+
+                        self.manager.semantic_orchestrator.send_worker_control = finish_during_control_write
+                        reply = await self.reply_to_pending_control(state, kind)
+                        self.assertEqual(state.status, phase)
+                        self.assertEqual(reply["run"]["run_active"], phase == "exiting")
+                        self.assertEqual(getattr(state, f"pending_{kind}"), {})
+                        await shell.owner.wait()
+
+                    self.assertTrue(shell.owner.resources_released)
+                    self.assertEqual(self.manager.health()["active_count"], 0)
+                    self.assertEqual(self.manager.semantic_orchestrator.active_process_count, 0)
+                    await self.manager.close_all()
+
+    async def test_control_reply_only_resolves_the_matching_pending_request(self) -> None:
+        for kind in ("approval", "clarification"):
+            for replacement in (False, True):
+                with self.subTest(kind=kind, replacement=replacement):
+                    state = BunshinRunState(
+                        bunshin_id="inv-control",
+                        run_id="run-control",
+                        pack=BunshinInvocationPack(invocation_id="inv-control"),
+                        status=f"{kind}_pending",
+                    )
+                    self.manager.runs[state.run_id] = state
+                    setattr(state, f"pending_{kind}", {f"{kind}_id": "request"})
+
+                    async def accept_control(_run_id, _message):
+                        if replacement:
+                            setattr(state, f"pending_{kind}", {f"{kind}_id": "next-request"})
+                        return True
+
+                    self.manager.semantic_orchestrator.send_worker_control = accept_control
+                    reply = await self.reply_to_pending_control(state, kind)
+                    self.assertTrue(reply["ok"])
+                    self.assertEqual(state.status, f"{kind}_pending" if replacement else "running")
+                    self.assertEqual(
+                        getattr(state, f"pending_{kind}"),
+                        {f"{kind}_id": "next-request"} if replacement else {},
+                    )
+
     async def test_terminal_event_stays_active_until_process_owner_cleanup(self) -> None:
         process = SimpleNamespace(pid=123, returncode=0)
         state = BunshinRunState(
